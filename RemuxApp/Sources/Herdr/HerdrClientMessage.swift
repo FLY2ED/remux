@@ -229,7 +229,8 @@ enum HerdrInputEvent: Equatable, Sendable {
 enum HerdrKeyCode: Equatable, Sendable {
     case backspace, enter, left, right, up, down, home, end, pageUp, pageDown
     case tab, backTab, delete, insert, escape
-    case character(Character)
+    /// serde `char`: exactly one Unicode scalar. A multi-scalar grapheme goes as `.text`.
+    case character(Unicode.Scalar)
     case function(UInt8)
     case null
 }
