@@ -46,8 +46,9 @@ struct HerdrColor: Equatable, Sendable, Decodable {
 }
 
 struct HerdrCell: Equatable, Sendable, Decodable {
-    /// One grapheme cluster. A wide grapheme sits in its first cell; the cell it covers is
-    /// `" "` in a full surface and `""` in a patch.
+    /// One grapheme cluster. A wide grapheme sits in its first cell. The cell it covers is `""` in
+    /// a patch; in a full surface it is usually `" "`, but `""` after a VS16 emoji or a voiced
+    /// halfwidth kana (contract §4, "Grapheme cells").
     let symbol: String
     let fg: HerdrColor
     let bg: HerdrColor
