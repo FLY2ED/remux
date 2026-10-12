@@ -163,29 +163,6 @@ struct HerdrWireReader {
         return value
     }
 
-    /// serde `char`: its UTF-8 bytes, with no length prefix.
-    mutating func character() throws -> Character {
-        let lead = try u8()
-        let width: Int
-        switch lead {
-        case 0x00..<0x80: width = 1
-        case 0xC0..<0xE0: width = 2
-        case 0xE0..<0xF0: width = 3
-        case 0xF0..<0xF8: width = 4
-        default: throw HerdrWireError.invalidUTF8
-        }
-        guard remaining >= width - 1 else { throw HerdrWireError.truncated }
-        let start = offset - 1
-        offset += width - 1
-        guard let value = String(validating: bytes[start..<offset], as: UTF8.self),
-              value.unicodeScalars.count == 1,
-              let character = value.first
-        else {
-            throw HerdrWireError.invalidUTF8
-        }
-        return character
-    }
-
     mutating func optional<T>(_ read: (inout HerdrWireReader) throws -> T) throws -> T? {
         let tag = try u8()
         switch tag {
@@ -264,8 +241,8 @@ struct HerdrWireWriter {
         bytes.append(contentsOf: value)
     }
 
-    /// serde `char`: its UTF-8 bytes, with no length prefix.
-    mutating func character(_ value: Character) {
+    /// serde `char`: one Unicode scalar's UTF-8 bytes, with no length prefix.
+    mutating func character(_ value: Unicode.Scalar) {
         bytes.append(contentsOf: Array(String(value).utf8))
     }
 
