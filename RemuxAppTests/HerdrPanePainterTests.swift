@@ -7,9 +7,9 @@ final class HerdrPanePainterTests: XCTestCase {
     // MARK: - Recorded streams
 
     /// Every pane of every recorded surface, and the rows each applied patch changed, paint to the bytes
-    /// of the reference painter (`Fixtures/HerdrWire`, `painted`). On 9 October that painter's output,
-    /// written into a real Ghostty, reproduced Herdr's grid as Herdr's own encoder does (remux-docs
-    /// `evidence/herdr-stage4-traces-20261009/frames/`, Question 2).
+    /// of the reference painter (`Fixtures/HerdrWire`, `painted`). On 9 October the same row painting,
+    /// without links, written into a real Ghostty reproduced Herdr's grid as Herdr's own encoder does
+    /// (remux-docs `evidence/herdr-stage4-traces-20261009/frames/`, Question 2).
     func testPaintsEveryRecordedPaneAsTheReferencePainter() throws {
         var surfacePanes = 0
         var patchPanes = 0
