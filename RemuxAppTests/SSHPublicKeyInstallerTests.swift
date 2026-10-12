@@ -583,9 +583,11 @@ final class SSHPublicKeyLiveTestServer: @unchecked Sendable {
         self.rootRecorder = rootRecorder
     }
 
+    /// With `execOutput`, each accepted exec sends those bytes on stdout right away.
     static func start(
         username: String,
-        suspendAuthentication: Bool = false
+        suspendAuthentication: Bool = false,
+        execOutput: Data? = nil
     ) async throws -> SSHPublicKeyLiveTestServer {
         let hostKey = NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey())
         let authenticationDelegate = SSHPublicKeyLiveAuthenticationDelegate(
@@ -617,7 +619,7 @@ final class SSHPublicKeyLiveTestServer: @unchecked Sendable {
                             .setOption(ChannelOptions.allowRemoteHalfClosure, value: true)
                             .flatMap {
                                 childChannel.pipeline.addHandler(
-                                    SSHPublicKeyLiveExecHandler(rootRecorder: rootRecorder)
+                                    SSHPublicKeyLiveExecHandler(rootRecorder: rootRecorder, execOutput: execOutput)
                                 )
                             }
                     }
@@ -736,10 +738,12 @@ private final class SSHPublicKeyLiveExecHandler: ChannelInboundHandler, @uncheck
     typealias InboundIn = SSHChannelData
 
     private let rootRecorder: SSHPublicKeyLiveRootRecorder
+    private let execOutput: Data?
     private var didAcceptExec = false
 
-    init(rootRecorder: SSHPublicKeyLiveRootRecorder) {
+    init(rootRecorder: SSHPublicKeyLiveRootRecorder, execOutput: Data? = nil) {
         self.rootRecorder = rootRecorder
+        self.execOutput = execOutput
     }
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
@@ -749,6 +753,14 @@ private final class SSHPublicKeyLiveExecHandler: ChannelInboundHandler, @uncheck
             rootRecorder.recordExecRequest()
             if request.wantReply {
                 context.channel.triggerUserOutboundEvent(ChannelSuccessEvent(), promise: nil)
+            }
+            if let execOutput {
+                var buffer = context.channel.allocator.buffer(capacity: execOutput.count)
+                buffer.writeBytes(execOutput)
+                context.channel.writeAndFlush(
+                    SSHChannelData(type: .channel, data: .byteBuffer(buffer)),
+                    promise: nil
+                )
             }
         case ChannelEvent.inputClosed:
             guard didAcceptExec else {

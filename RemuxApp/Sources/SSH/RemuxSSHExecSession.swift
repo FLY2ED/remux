@@ -58,6 +58,12 @@ final class RemuxSSHExecConnection: @unchecked Sendable {
         )
     }
 
+    /// Asks for the next inbound data on a channel opened with `readsOnDemand`. The channel window
+    /// refills only as data is delivered, so the server waits while no read is pending.
+    func requestRead() {
+        sessionChannel.read()
+    }
+
     func finishInput() async throws {
         do {
             try await sessionChannel.close(mode: .output)
@@ -216,11 +222,14 @@ enum RemuxSSHExecSession {
 
     /// Opens a long-lived exec channel. With `pseudoTerminal`, the command
     /// runs on `rawPseudoTerminalRequest`; a server that refuses the pty runs
-    /// it on a plain channel, where stderr stays a separate stream.
+    /// it on a plain channel, where stderr stays a separate stream. With
+    /// `readsOnDemand`, data arrives only after `requestRead()`, which gives
+    /// the reader SSH flow control.
     static func open(
         using claimedRoot: RemuxSSHClaimedRoot,
         command: String,
         pseudoTerminal: Bool,
+        readsOnDemand: Bool = false,
         trace: RemuxTransportStartupTrace,
         onData: @escaping @Sendable (SSHChannelData.DataType, Data) -> Void,
         onFinish: @escaping @Sendable (Int?, Error?) -> Void
@@ -234,6 +243,7 @@ enum RemuxSSHExecSession {
                 lifetime: lifetime,
                 closeOnRemoteEOFAndExitStatus: false,
                 pseudoTerminal: pseudoTerminal,
+                readsOnDemand: readsOnDemand,
                 onData: onData,
                 onFinish: onFinish
             )
@@ -265,11 +275,17 @@ enum RemuxSSHExecSession {
         lifetime: RemuxSSHExecLifetimeOwner,
         closeOnRemoteEOFAndExitStatus: Bool,
         pseudoTerminal: Bool = false,
+        readsOnDemand: Bool = false,
         onData: @escaping @Sendable (SSHChannelData.DataType, Data) -> Void,
         onFinish: @escaping @Sendable (Int?, Error?) -> Void
     ) async throws -> RemuxSSHExecConnection {
         do {
-            let sessionChannel = try await claimedRoot.sshRoot.openSessionChannel(trace: trace)
+            // With reads on demand, channel requests, replies and the exit status still arrive at
+            // once; only data and EOF wait for a read (NIOSSH `SSHChildChannel.swift:596-660`).
+            let sessionChannel = try await claimedRoot.sshRoot.openSessionChannel(
+                trace: trace,
+                readsOnDemand: readsOnDemand
+            )
             let openedConnection = lifetime.makeConnection(
                 sessionChannel: sessionChannel,
                 isRootActive: {
