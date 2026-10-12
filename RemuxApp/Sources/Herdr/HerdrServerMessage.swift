@@ -18,20 +18,25 @@ enum HerdrServerMessage: Equatable, Sendable {
     case responseChunk(HerdrResponseChunk)
     case paneSurfacePatch(HerdrPaneSurfacePatch)
     case control(kind: String, data: String)
+    /// A type Herdr sends only to other kinds of client: 0 `Welcome` (the binary handshake reply,
+    /// also an old server's answer to an endpoint hello), 1 `Terminal`, 2 `Graphics`, 10
+    /// `GraphicsFile`, 11 `GraphicsTransmissionRetired` and 16 `DirectTerminalKeyboardProtocol`
+    /// (send sites `server/client_transport.rs:727, 794, 807, 842`, `server/render_stream.rs:142`,
+    /// `server/headless.rs:885-892`, `server/headless/render.rs:159-165`). Herdr's client ignores
+    /// or applies them in its other modes (`client/mod.rs:1532-1557, 1707, 1975, 2141-2143`); an
+    /// endpoint connection has no use for them, so the body is skipped.
+    case unused(tag: UInt32)
 
     /// Decodes one payload (without its length prefix) and requires it to be consumed exactly.
-    ///
-    /// Tags 0 (`Welcome`), 1 (`Terminal`), 2 (`Graphics`), 10 (`GraphicsFile`),
-    /// 11 (`GraphicsTransmissionRetired`), 12 (`ClientShellSnapshot`) and 16
-    /// (`DirectTerminalKeyboardProtocol`) never reach a connection with Remux's hello; receiving
-    /// one ends the attachment without decoding its body.
     static func decode(_ payload: [UInt8]) throws -> HerdrServerMessage {
         var reader = HerdrWireReader(payload)
         let tag = try reader.variant()
         let message: HerdrServerMessage
         switch tag {
-        case 0, 1, 2, 10, 11, 12, 16:
-            throw HerdrWireError.unexpectedMessage(tag: tag)
+        case 0, 1, 2, 10, 11, 16:
+            return .unused(tag: tag)
+        case 12:
+            throw HerdrWireError.unnegotiatedSnapshot
         case 3:
             message = .serverShutdown(reason: try reader.optional { try $0.string() })
         case 4:
@@ -161,14 +166,13 @@ struct HerdrResponseChunk: Equatable, Sendable {
     }
 }
 
-// MARK: - Named controls (`protocol/endpoint.rs:15-33`)
+// MARK: - Named controls (`protocol/endpoint.rs:16-33`, `surface_reuse.rs:7`, `surface_delta.rs:11`,
+// `surface_scroll.rs:16`)
 
 enum HerdrControlKind {
     static let hello = "endpoint.hello.v1"
     static let welcome = "endpoint.welcome.v1"
     static let snapshot = "shell.snapshot.v1"
-    static let agentCompletions = "endpoint.agent-completions.v1"
-    static let agentView = "endpoint.agent-view.v1"
     static let surfaceReuse = "endpoint.surface-reuse.v1"
     static let surfaceDelta = "endpoint.surface-delta.v1"
     static let surfaceScroll = "endpoint.surface-scroll.v1"
@@ -188,8 +192,10 @@ enum HerdrEndpointControl: Equatable, Sendable {
     case ignored(kind: String)
 
     /// Parses a control. Invalid data in a kind Remux relies on, or any `shell.snapshot.*` kind other
-    /// than v1 (an unnegotiated codec), is an error, as in Herdr's client
-    /// (`client/endpoint/control.rs:17-67`).
+    /// than v1 (an unnegotiated codec), is an error, as in Herdr's client: snapshots and unknown
+    /// kinds in `client/endpoint/control.rs:56-66`; reuse, delta and scroll in its decoder
+    /// (`protocol/surface_reuse.rs:100-143`), whose errors fail the connection
+    /// (`client/transport.rs:61-68, 92-98`).
     static func parse(kind: String, data: String) throws -> HerdrEndpointControl {
         do {
             switch kind {
@@ -217,7 +223,8 @@ enum HerdrEndpointControl: Equatable, Sendable {
 }
 
 /// `endpoint.welcome.v1` (`endpoint.rs:93-107`). A rejection carries `error` and empty lists, then the
-/// server closes the connection.
+/// server closes the connection. `methods` and `capabilities` default to empty, as Herdr declares them
+/// (`endpoint.rs:101-104`).
 struct HerdrWelcome: Equatable, Sendable, Decodable {
     struct Rejection: Equatable, Sendable, Decodable {
         /// `unsupported_generation`, `no_common_core`, `invalid_surface` or `invalid_hello`.
@@ -243,6 +250,19 @@ struct HerdrWelcome: Equatable, Sendable, Decodable {
         case inputCodec = "input_codec"
         case blobCodec = "blob_codec"
         case methods, capabilities, error
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        generation = try container.decode(UInt32.self, forKey: .generation)
+        serverVersion = try container.decode(String.self, forKey: .serverVersion)
+        snapshotCodec = try container.decode(String.self, forKey: .snapshotCodec)
+        surfaceCodec = try container.decode(String.self, forKey: .surfaceCodec)
+        inputCodec = try container.decode(String.self, forKey: .inputCodec)
+        blobCodec = try container.decode(String.self, forKey: .blobCodec)
+        methods = try container.decodeIfPresent([String].self, forKey: .methods) ?? []
+        capabilities = try container.decodeIfPresent([String].self, forKey: .capabilities) ?? []
+        error = try container.decodeIfPresent(Rejection.self, forKey: .error)
     }
 }
 
