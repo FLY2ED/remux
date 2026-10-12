@@ -40,12 +40,6 @@ final class HerdrWireTests: XCTestCase {
                 case .hello(let hello):
                     let recorded = try Self.controlData(fromHex: entry.hex, kind: HerdrControlKind.hello)
                     try Self.assertSameJSON(hello.json, recorded, context)
-                    // The recorded hello decodes into HerdrHello and encodes back to the same JSON.
-                    try Self.assertSameJSON(
-                        try JSONDecoder().decode(HerdrHello.self, from: Data(recorded.utf8)).json,
-                        recorded,
-                        context
-                    )
                 case .request(let bootID, let request):
                     let message = HerdrClientMessage.endpointRequest(bootID: bootID, request: request)
                     var reader = HerdrWireReader(Array(message.payload))
@@ -63,10 +57,11 @@ final class HerdrWireTests: XCTestCase {
                 checked += 1
             }
         }
-        XCTAssertEqual(checked, 63)
-        // The invalid hello of a rejection fixture, the presentation fence, an unknown control, and
-        // Detach (a closed stream ends the client the same way; `HerdrConnection.close()`).
-        XCTAssertEqual(notSentByRemux, 4)
+        XCTAssertEqual(checked, 58)
+        // Six hellos with options Remux doesn't use (no or only some encodings, generation 2, a missing
+        // codec, zero columns, invalid JSON), the presentation fence, an unknown control, and Detach (a
+        // closed stream ends the client the same way; `HerdrConnection.close()`).
+        XCTAssertEqual(notSentByRemux, 9)
     }
 
     func testDecodesTheRecordedWelcomeAndSnapshot() throws {
@@ -118,20 +113,21 @@ final class HerdrWireTests: XCTestCase {
         )
     }
 
-    // MARK: - Message types Remux never receives
+    // MARK: - Message types for other kinds of client
 
-    func testUnexpectedMessageTypesEndTheAttachmentNamingTheTag() {
-        for tag: UInt8 in [0, 1, 2, 10, 11, 12, 16] {
-            XCTAssertThrowsError(try HerdrServerMessage.decode([tag])) { error in
-                XCTAssertEqual(error as? HerdrWireError, .unexpectedMessage(tag: UInt32(tag)))
-                XCTAssertTrue(error.localizedDescription.contains("\(tag)"))
-            }
+    /// As Herdr's client: a binary snapshot and a tag outside generation 1 are errors; the types Herdr
+    /// sends only to other kinds of client are skipped, whatever their body.
+    func testMessageTypesForOtherClientsAreSkippedAndABinarySnapshotFails() throws {
+        for tag: UInt8 in [0, 1, 2, 10, 11, 16] {
+            XCTAssertEqual(try HerdrServerMessage.decode([tag, 7, 7]), .unused(tag: UInt32(tag)))
+        }
+        XCTAssertThrowsError(try HerdrServerMessage.decode([12])) { error in
+            XCTAssertEqual(error as? HerdrWireError, .unnegotiatedSnapshot)
         }
         XCTAssertThrowsError(try HerdrServerMessage.decode([21])) { error in
             XCTAssertEqual(error as? HerdrWireError, .unknownMessage(tag: 21))
         }
     }
-
     // MARK: - Strict decoding
 
     func testRejectsTrailingAndCorruptBytes() {
@@ -183,6 +179,8 @@ final class HerdrWireTests: XCTestCase {
         oversized.append([UInt8(length & 0xFF), UInt8(length >> 8 & 0xFF), UInt8(length >> 16 & 0xFF), UInt8(length >> 24)])
         XCTAssertThrowsError(try oversized.nextPayload()) { error in
             XCTAssertEqual(error as? HerdrWireError, .payloadTooLarge(HerdrWire.maxPayloadSize + 1))
+            // The cap is Herdr's own largest frame, so only corrupt data exceeds it.
+            XCTAssertTrue(error.localizedDescription.contains("corrupted"))
         }
     }
 
@@ -191,8 +189,8 @@ final class HerdrWireTests: XCTestCase {
     func testControlKindsRemuxDoesNotUseAreIgnored() throws {
         XCTAssertEqual(try HerdrEndpointControl.parse(kind: "endpoint.future.v9", data: "{"), .ignored(kind: "endpoint.future.v9"))
         XCTAssertEqual(
-            try HerdrEndpointControl.parse(kind: HerdrControlKind.agentCompletions, data: "not json"),
-            .ignored(kind: HerdrControlKind.agentCompletions)
+            try HerdrEndpointControl.parse(kind: "endpoint.agent-completions.v1", data: "not json"),
+            .ignored(kind: "endpoint.agent-completions.v1")
         )
         XCTAssertEqual(
             try HerdrEndpointControl.parse(kind: "endpoint.presentation.ready.v1", data: "token"),
@@ -257,9 +255,23 @@ final class HerdrWireTests: XCTestCase {
             [17, 0, 1, 1, 2, 3]
         )
         XCTAssertEqual(
-            HerdrClientMessage.hostTheme(.paletteColors([(index: UInt8(4), color: HerdrRGB(red: 5, green: 6, blue: 7))])).payload,
-            [17, 1, 1, 4, 5, 6, 7]
+            HerdrClientMessage.hostTheme(.paletteColors([
+                4: HerdrRGB(red: 5, green: 6, blue: 7),
+                1: HerdrRGB(red: 2, green: 3, blue: 4),
+            ])).payload,
+            [17, 1, 2, 1, 2, 3, 4, 4, 5, 6, 7]
         )
+    }
+
+    /// Herdr declares `methods` and `capabilities` with serde defaults (`endpoint.rs:101-104`).
+    func testAWelcomeWithoutMethodsOrCapabilitiesDecodes() throws {
+        let json = #"{"generation":1,"server_version":"0.9.3","snapshot_codec":"shell.snapshot.v1","surface_codec":"shell.surface.v1","input_codec":"shell.input.semantic.v1","blob_codec":"shell.blob.v1"}"#
+        guard case .welcome(let welcome) = try HerdrEndpointControl.parse(kind: HerdrControlKind.welcome, data: json) else {
+            return XCTFail("not a welcome")
+        }
+        XCTAssertEqual(welcome.methods, [])
+        XCTAssertEqual(welcome.capabilities, [])
+        XCTAssertNil(welcome.error)
     }
 
     func testRemuxHelloRequestsEveryEncodingAndNoHostFeatures() throws {
@@ -455,14 +467,16 @@ extension HerdrWireTests {
             let fields = try container.nestedContainer(keyedBy: MessageKeys.self, forKey: .message)
             switch try fields.decode(UInt32.self, forKey: .tag) {
             case 12:
-                let size = try fields.decode(HerdrHello.SurfaceSize.self, forKey: .surfaceSize)
-                message = .binary(.shellResize(HerdrSurfaceGeometry(
-                    cellWidthPx: try fields.decode(UInt32.self, forKey: .cellWidthPx),
-                    cellHeightPx: try fields.decode(UInt32.self, forKey: .cellHeightPx),
-                    cols: size.cols,
-                    rows: size.rows,
-                    pixelMouse: try fields.decode(Bool.self, forKey: .pixelMouse)
-                )))
+                let size = try fields.decode(GoldenSize.self, forKey: .surfaceSize)
+                // Remux never turns pixel mouse on.
+                message = try fields.decode(Bool.self, forKey: .pixelMouse)
+                    ? .notSentByRemux
+                    : .binary(.shellResize(HerdrSurfaceGeometry(
+                        cellWidthPx: try fields.decode(UInt32.self, forKey: .cellWidthPx),
+                        cellHeightPx: try fields.decode(UInt32.self, forKey: .cellHeightPx),
+                        cols: size.cols,
+                        rows: size.rows
+                    )))
             case 13:
                 message = .binary(.paneInput(
                     paneID: try fields.decode(String.self, forKey: .target),
@@ -484,8 +498,10 @@ extension HerdrWireTests {
             case 20:
                 switch try fields.decode(String.self, forKey: .kind) {
                 case HerdrControlKind.hello:
-                    // The rejection fixtures include a hello that is deliberately not JSON.
-                    message = (try? fields.decode(HerdrHello.self, forKey: .data)).map { .hello($0) } ?? .notSentByRemux
+                    // Remux's hello for the recorded size, when the recording used Remux's options. The
+                    // rejection fixtures include one that is deliberately not JSON.
+                    message = (try? fields.decode(GoldenHello.self, forKey: .data))?.remuxHello.map { .hello($0) }
+                        ?? .notSentByRemux
                 case HerdrControlKind.healthPing:
                     message = (try? fields.decode(String.self, forKey: .data))
                         .map { .binary(.healthPing(data: $0)) } ?? .notSentByRemux
@@ -495,6 +511,48 @@ extension HerdrWireTests {
             default:
                 message = .notSentByRemux
             }
+        }
+    }
+
+    struct GoldenSize: Decodable {
+        let cols: UInt16
+        let rows: UInt16
+    }
+
+    /// A recorded hello; Remux sends it only with every encoding, the v1 codecs and no host features.
+    struct GoldenHello: Decodable {
+        let generation: UInt32
+        let cell_width_px: UInt32
+        let cell_height_px: UInt32
+        let surface_size: GoldenSize
+        let pixel_mouse: Bool
+        let direct_graphics: Bool
+        let endpoint_keybindings: Bool
+        let mouse_capture: Bool
+        let surface_active: Bool
+        let surface_reuse: Bool?
+        let surface_delta: Bool?
+        let surface_scroll: Bool?
+        let snapshot_codecs: [String]?
+        let surface_codecs: [String]?
+        let input_codecs: [String]?
+        let blob_codecs: [String]?
+
+        var remuxHello: HerdrHello? {
+            guard generation == 1, !pixel_mouse, !direct_graphics, !endpoint_keybindings, !mouse_capture,
+                  surface_reuse == true, surface_delta == true, surface_scroll == true,
+                  snapshot_codecs == ["shell.snapshot.v1"], surface_codecs == ["shell.surface.v1"],
+                  input_codecs == ["shell.input.semantic.v1"], blob_codecs == ["shell.blob.v1"]
+            else {
+                return nil
+            }
+            return HerdrHello(
+                cellWidthPx: cell_width_px,
+                cellHeightPx: cell_height_px,
+                cols: surface_size.cols,
+                rows: surface_size.rows,
+                surfaceActive: surface_active
+            )
         }
     }
 
@@ -622,7 +680,8 @@ extension HerdrWireTests {
                 let mouse = try container.decode(Mouse.self, forKey: .mouse)
                 event = .mouse(HerdrMouseEvent(
                     kind: mouse.kind.kind,
-                    position: mouse.position.position,
+                    column: mouse.position.Cell.column,
+                    row: mouse.position.Cell.row,
                     modifiers: HerdrKeyModifiers(rawValue: mouse.modifiers),
                     lines: mouse.lines
                 ))
@@ -654,35 +713,14 @@ extension HerdrWireTests {
         }
     }
 
+    /// A recorded `MousePosition`; every recording uses cells, as Remux does.
     struct GoldenMousePosition: Decodable {
-        let position: HerdrMouseEvent.Position
-
-        private struct Cell: Decodable {
+        struct CellPosition: Decodable {
             let column: UInt16
             let row: UInt16
         }
 
-        private struct Pixels: Decodable {
-            let x: UInt32
-            let y: UInt32
-            let column: UInt16
-            let row: UInt16
-        }
-
-        private enum Keys: String, CodingKey {
-            case cell = "Cell"
-            case pixels = "Pixels"
-        }
-
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: Keys.self)
-            if let cell = try container.decodeIfPresent(Cell.self, forKey: .cell) {
-                position = .cell(column: cell.column, row: cell.row)
-            } else {
-                let pixels = try container.decode(Pixels.self, forKey: .pixels)
-                position = .pixels(x: pixels.x, y: pixels.y, column: pixels.column, row: pixels.row)
-            }
-        }
+        let Cell: CellPosition
     }
 
     static func goldenFixtures() throws -> [GoldenFixture] {

@@ -90,6 +90,7 @@
 		452A533BD9FA3A594F9C3F28 /* TmuxSessionControllerClientSizeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63BEFB87916C69E34AD0D481 /* TmuxSessionControllerClientSizeTests.swift */; };
 		45490159CE92B33F95A59CBC /* TerminalRuntimeStateIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB8E224CBCEC9520C101DFC0 /* TerminalRuntimeStateIndicator.swift */; };
 		45962B9E22A36413BD4452CB /* herdr-17-agent-view-A.s2c.bin in Resources */ = {isa = PBXBuildFile; fileRef = 81DD648A6227ADC0855CF6C7 /* herdr-17-agent-view-A.s2c.bin */; };
+		45B672D0D8646D1F44359DAB /* HerdrRemoteCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A85C883B8CF7980E6D40932 /* HerdrRemoteCommand.swift */; };
 		4664BA5BF9C8D90E67CC459F /* SSHTmuxControlChannelRequestTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = C278E39F3479557BA84AEF81 /* SSHTmuxControlChannelRequestTracker.swift */; };
 		4809C175892171E7B13557EF /* TmuxControlTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00BF7405360DC035455D7ACE /* TmuxControlTransport.swift */; };
 		48124543E4A60E49F2B1051B /* GhosttyTerminalResponderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB7372853BCE26F35945D24A /* GhosttyTerminalResponderView.swift */; };
@@ -417,6 +418,7 @@
 		4887DEBA659B475B61235285 /* herdr-08-connect-inactive-A.expected.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "herdr-08-connect-inactive-A.expected.json"; sourceTree = "<group>"; };
 		48AC2CE228C16D7E9DCD09BE /* ConnectionProfileRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionProfileRepository.swift; sourceTree = "<group>"; };
 		49261496FE7B949CF84D913B /* GhosttyComposeBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttyComposeBar.swift; sourceTree = "<group>"; };
+		4A85C883B8CF7980E6D40932 /* HerdrRemoteCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HerdrRemoteCommand.swift; sourceTree = "<group>"; };
 		4AB9BF55D587ABEE0AFB5B5F /* TailscaleSSHCheckChallenge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TailscaleSSHCheckChallenge.swift; sourceTree = "<group>"; };
 		4AD48AB84F508C3391380701 /* SSHAuthenticationMethodFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHAuthenticationMethodFactory.swift; sourceTree = "<group>"; };
 		4B2DE576BED4561CF82FE0A5 /* herdr-12-notification-A.c2s.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = "herdr-12-notification-A.c2s.bin"; sourceTree = "<group>"; };
@@ -831,6 +833,7 @@
 				7D2048A517191904B72E85A6 /* HerdrConnection.swift */,
 				174F4C5FA9FB311E807DD163 /* HerdrPanePainter.swift */,
 				D2384307307FD685E621C2BB /* HerdrPresentation.swift */,
+				4A85C883B8CF7980E6D40932 /* HerdrRemoteCommand.swift */,
 				1C213354AFF78BDFCF71F3A2 /* HerdrServerMessage.swift */,
 				D95E5F4B35D19F850609F30D /* HerdrSessionDiscovery.swift */,
 				638437CCB737CA27735A2221 /* HerdrSnapshot.swift */,
@@ -1387,6 +1390,7 @@
 				F52652A8764984E176CC9548 /* HerdrConnection.swift in Sources */,
 				659293520728E04920748852 /* HerdrPanePainter.swift in Sources */,
 				F7E75FDD1B4981DC2A7BB2A0 /* HerdrPresentation.swift in Sources */,
+				45B672D0D8646D1F44359DAB /* HerdrRemoteCommand.swift in Sources */,
 				0BC3FDF536E0CD1762864DDD /* HerdrServerMessage.swift in Sources */,
 				78E6899A493FA89A88221F08 /* HerdrSessionDiscovery.swift in Sources */,
 				BCB602C1B41133043AF0A7CC /* HerdrSnapshot.swift in Sources */,

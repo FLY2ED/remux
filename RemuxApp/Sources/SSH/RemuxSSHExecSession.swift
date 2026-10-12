@@ -30,6 +30,7 @@ final class RemuxSSHExecConnection: @unchecked Sendable {
     private let sessionChannel: Channel
     private let isRootActive: @Sendable () -> Bool
     private let releaseRoot: @Sendable (RemuxSSHRootLeaseDisposition) async -> Void
+    private let invalidateRoot: @Sendable () async -> Void
     private let allocator = ByteBufferAllocator()
     private let closeLock = NIOLock()
     private var closeTask: Task<Void, Never>?
@@ -37,11 +38,13 @@ final class RemuxSSHExecConnection: @unchecked Sendable {
     init(
         sessionChannel: Channel,
         isRootActive: @escaping @Sendable () -> Bool = { true },
-        releaseRoot: @escaping @Sendable (RemuxSSHRootLeaseDisposition) async -> Void
+        releaseRoot: @escaping @Sendable (RemuxSSHRootLeaseDisposition) async -> Void,
+        invalidateRoot: @escaping @Sendable () async -> Void = {}
     ) {
         self.sessionChannel = sessionChannel
         self.isRootActive = isRootActive
         self.releaseRoot = releaseRoot
+        self.invalidateRoot = invalidateRoot
     }
 
     var isActive: Bool {
@@ -59,9 +62,16 @@ final class RemuxSSHExecConnection: @unchecked Sendable {
     }
 
     /// Asks for the next inbound data on a channel opened with `readsOnDemand`. The channel window
-    /// refills only as data is delivered, so the server waits while no read is pending.
+    /// refills only as data is delivered, so with no read pending the server stops once the current
+    /// window is used.
     func requestRead() {
         sessionChannel.read()
+    }
+
+    /// Stops the SSH connection underneath from being handed out again, without waiting for this
+    /// channel to close: for a path that went silent, where the channel close may never be answered.
+    func invalidateRootForReuse() async {
+        await invalidateRoot()
     }
 
     func finishInput() async throws {
@@ -125,14 +135,17 @@ private final class RemuxSSHExecCleanupOwner: @unchecked Sendable {
 
 final class RemuxSSHExecLifetimeOwner: @unchecked Sendable {
     private let rootCleanupOwner: RemuxSSHExecCleanupOwner
+    private let invalidateRoot: @Sendable () async -> Void
     private let lock = NIOLock()
     private var connectionCleanupOwner: RemuxSSHExecCleanupOwner?
     private var isCancelled = false
 
     init(
-        releaseRoot: @escaping @Sendable (RemuxSSHRootLeaseDisposition) async -> Void
+        releaseRoot: @escaping @Sendable (RemuxSSHRootLeaseDisposition) async -> Void,
+        invalidateRoot: @escaping @Sendable () async -> Void = {}
     ) {
         rootCleanupOwner = RemuxSSHExecCleanupOwner(cleanup: releaseRoot)
+        self.invalidateRoot = invalidateRoot
     }
 
     func makeConnection(
@@ -144,7 +157,8 @@ final class RemuxSSHExecLifetimeOwner: @unchecked Sendable {
             isRootActive: isRootActive,
             releaseRoot: { [rootCleanupOwner] disposition in
                 await rootCleanupOwner.run(disposition)
-            }
+            },
+            invalidateRoot: invalidateRoot
         )
         installConnectionCleanup { disposition in
             await connection.close(disposition: disposition)
@@ -281,7 +295,8 @@ enum RemuxSSHExecSession {
     ) async throws -> RemuxSSHExecConnection {
         do {
             // With reads on demand, channel requests, replies and the exit status still arrive at
-            // once; only data and EOF wait for a read (NIOSSH `SSHChildChannel.swift:596-660`).
+            // once (NIOSSH `SSHChildChannel.swift:823-844`); data, stderr and EOF are queued
+            // (`:767-781, 806-821`) and delivered only for a read (`:599-662`).
             let sessionChannel = try await claimedRoot.sshRoot.openSessionChannel(
                 trace: trace,
                 readsOnDemand: readsOnDemand
@@ -375,9 +390,10 @@ enum RemuxSSHExecSession {
     private static func makeLifetime(
         for claimedRoot: RemuxSSHClaimedRoot
     ) -> RemuxSSHExecLifetimeOwner {
-        RemuxSSHExecLifetimeOwner { disposition in
-            await claimedRoot.release(disposition)
-        }
+        RemuxSSHExecLifetimeOwner(
+            releaseRoot: { disposition in await claimedRoot.release(disposition) },
+            invalidateRoot: { await claimedRoot.invalidateForReuse() }
+        )
     }
 }
 
