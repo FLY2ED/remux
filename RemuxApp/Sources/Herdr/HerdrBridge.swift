@@ -18,7 +18,7 @@ enum HerdrBridgeError: Error, Equatable, LocalizedError {
             let detail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             return detail.isEmpty ? "herdr exited with status \(status)." : detail
         case .channel(let detail):
-            return detail
+            return "The SSH channel to Herdr failed: \(detail)."
         }
     }
 }
@@ -26,12 +26,13 @@ enum HerdrBridgeError: Error, Equatable, LocalizedError {
 /// `herdr remote-client-bridge` on an SSH exec channel: the bridge copies its stdin to the session's
 /// client socket and the socket to its stdout, so the channel carries the endpoint protocol unchanged.
 ///
-/// The channel has no pty, so stderr stays out of the protocol stream. Reads are on demand: the SSH
-/// window refills only as the connection reads, so a phone that stops reading holds the server back,
-/// and `--idle-timeout-v1` (where the host supports it) bounds how long the server keeps it.
+/// The channel has no pty, so stderr stays out of the protocol stream, and stdout up to Herdr's ready
+/// marker (`HerdrRemoteCommand`) is skipped, so text from the server's startup files never reaches the
+/// protocol. Reads are on demand: the SSH window refills only as the connection reads, so a phone that
+/// stops reading holds the server back once the current window (128 KiB) is used, and
+/// `--idle-timeout-v1` (where the host supports it) bounds how long the server keeps it.
 final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
-    static let herdrNotFoundMarker = "remux: herdr executable not found"
-    static let herdrNotExecutableMarker = "remux: herdr executable cannot be executed"
+    /// The tail is kept: the markers and the bridge's own error come last, after any startup noise.
     private static let stderrLimit = 8 * 1024
 
     private enum State {
@@ -45,6 +46,7 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
     private var waiter: CheckedContinuation<[UInt8]?, Error>?
     private var state = State.running
     private var stderr = Data()
+    private var readyLine = HerdrRemoteCommand.ReadyLine()
     private var connection: RemuxSSHExecConnection?
 
     private init() {}
@@ -70,28 +72,16 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
     }
 
     /// Runs the bridge for `session`, with `--idle-timeout-v1` when `herdr status client --json` reports
-    /// `remote_bridge_idle_timeout: true` (Linux and macOS hosts; plan §8.1, Suspended phone). The
-    /// executable and session name stay out of the login shell, as in the discovery command. No locale
-    /// is forced, since the bridge may start the server, whose panes inherit the environment.
+    /// `remote_bridge_idle_timeout: true` (Linux and macOS hosts; plan §8.1, Suspended phone), as
+    /// Herdr's own client does for its background bridges (`remote/attach.rs:1367-1376, 2742-2752`). No
+    /// locale is forced, since the bridge may start the server, whose panes inherit the environment.
     static func command(herdrExecutable: String, session: String) -> String {
-        [
-            "exec /bin/sh -c '\(script)' remux",
-            RemoteShellArgument.octalEncoded(herdrExecutable),
-            RemoteShellArgument.octalEncoded(session),
-        ].joined(separator: " ")
+        HerdrRemoteCommand.command(herdrExecutable: herdrExecutable, arguments: [session], body: [
+            #"session=$(printf %b "$2")"#,
+            #"if "$resolved" status client --json 2> /dev/null | grep -Eq "\"remote_bridge_idle_timeout\": *true"; then exec "$resolved" --session "$session" remote-client-bridge --idle-timeout-v1; fi"#,
+            #"exec "$resolved" --session "$session" remote-client-bridge"#,
+        ])
     }
-
-    private static let script = [
-        #"PATH="${PATH:+$PATH:}$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin""#,
-        "export PATH",
-        #"herdr=$(printf %b "$1")"#,
-        #"session=$(printf %b "$2")"#,
-        #"resolved=$(command -v "$herdr" 2> /dev/null)"#,
-        #"if [ ! -x "$resolved" ]; then if [ -e "$herdr" ]; then echo "\#(herdrNotExecutableMarker): $herdr" >&2; exit 126; fi; echo "\#(herdrNotFoundMarker): $herdr" >&2; exit 127; fi"#,
-        // The whole script sits inside single quotes, so it uses no single quote itself.
-        #"if "$resolved" status client --json 2> /dev/null | grep -Eq "\"remote_bridge_idle_timeout\": *true"; then exec "$resolved" --session "$session" remote-client-bridge --idle-timeout-v1; fi"#,
-        #"exec "$resolved" --session "$session" remote-client-bridge"#,
-    ].joined(separator: "; ")
 
     // MARK: - HerdrBridgeTransport
 
@@ -121,47 +111,69 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
         }
     }
 
+    /// After the stream ended, a write reports why it ended.
     func write(_ bytes: [UInt8]) async throws {
-        guard let connection = lock.withLock({ self.connection }) else {
-            throw HerdrBridgeError.channel("The Herdr bridge isn't open.")
+        let connection = try lock.withLock { () -> RemuxSSHExecConnection? in
+            if case .ended(let error) = state {
+                throw error ?? HerdrBridgeError.channel("the bridge has ended")
+            }
+            return self.connection
         }
-        try await connection.write(Data(bytes))
+        try await connection?.write(Data(bytes))
     }
 
-    /// Closes the channel. The SSH connection stays reusable unless the channel itself failed.
-    func close() async {
+    /// Ends the stream here at once and closes the channel without waiting for the server's answer,
+    /// which never comes on a dead path. A failed channel, or a caller that saw the path go silent,
+    /// takes the SSH connection out of reuse before returning.
+    func close(reusable: Bool) async {
         let (connection, disposition) = lock.withLock { () -> (RemuxSSHExecConnection?, RemuxSSHRootLeaseDisposition) in
+            let channelFailed: Bool
             if case .ended(let error?) = state, case .channel(_)? = error as? HerdrBridgeError {
-                return (self.connection, .invalidated)
+                channelFailed = true
+            } else {
+                channelFailed = false
             }
-            return (self.connection, .reusable)
+            let connection = self.connection
+            self.connection = nil
+            return (connection, reusable && !channelFailed ? .reusable : .invalidated)
         }
-        await connection?.close(disposition: disposition)
         finish(status: nil, error: nil)
+        lock.withLock { chunks.removeAll() }
+        guard let connection else { return }
+        if disposition == .invalidated {
+            await connection.invalidateRootForReuse()
+        }
+        Task { await connection.close(disposition: disposition) }
     }
 
     // MARK: - Channel callbacks (NIO event loop)
 
+    /// A delivery can hold only stderr or startup output, which the connection never sees; then the
+    /// waiting read is still owed data, so another read is requested. NIOSSH allows that from here: it
+    /// delivers the rest of the batch in order or reads from the connection (`SSHChildChannel.swift:299-317,
+    /// 642-647`).
     private func receive(_ type: SSHChannelData.DataType, _ data: Data) {
-        guard type == .channel else {
-            lock.withLock {
+        let (waiter, bytes, rearm) = lock.withLock { () -> (CheckedContinuation<[UInt8]?, Error>?, [UInt8], RemuxSSHExecConnection?) in
+            guard type == .channel else {
                 stderr.append(data)
                 if stderr.count > Self.stderrLimit {
                     stderr.removeFirst(stderr.count - Self.stderrLimit)
                 }
+                return (nil, [], self.waiter == nil ? nil : connection)
             }
-            return
-        }
-        let bytes = Array(data)
-        let waiter = lock.withLock { () -> CheckedContinuation<[UInt8]?, Error>? in
+            // Closed here: nothing reads any more.
+            if connection == nil, case .ended = state { return (nil, [], nil) }
+            let bytes = readyLine.output(from: data)
+            guard !bytes.isEmpty else { return (nil, [], self.waiter == nil ? nil : connection) }
             if let waiter = self.waiter {
                 self.waiter = nil
-                return waiter
+                return (waiter, bytes, nil)
             }
             chunks.append(bytes)
-            return nil
+            return (nil, [], nil)
         }
         waiter?.resume(returning: bytes)
+        rearm?.requestRead()
     }
 
     private func finish(status: Int?, error: Error?) {
@@ -184,12 +196,12 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
 
     private static func ending(status: Int?, error: Error?, stderr: String) -> Error? {
         if let error {
-            return HerdrBridgeError.channel(error.localizedDescription)
+            return HerdrBridgeError.channel(String(describing: error))
         }
         switch status {
-        case 127? where stderr.contains(herdrNotFoundMarker):
+        case 127? where stderr.contains(HerdrRemoteCommand.notFoundMarker):
             return HerdrBridgeError.herdrNotFound
-        case 126? where stderr.contains(herdrNotExecutableMarker):
+        case 126? where stderr.contains(HerdrRemoteCommand.notExecutableMarker):
             return HerdrBridgeError.herdrNotExecutable
         case let status? where status != 0:
             return HerdrBridgeError.remoteExit(status: status, stderr: stderr)

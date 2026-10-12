@@ -458,60 +458,6 @@ final class RemuxSSHExecSessionTests: XCTestCase {
         return recorder.stdout
     }
 
-    private func claimedLoopbackRoot(
-        server: SSHPublicKeyLiveTestServer,
-        trace: RemuxTransportStartupTrace
-    ) async throws -> RemuxSSHClaimedRoot {
-        let generatedKey = SSHPrivateKeyInspector.generateEd25519(comment: "loopback-exec-test")
-        let serverID = UUID()
-        let trustedHostRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("RemuxSSHExecSessionLoopback-\(UUID().uuidString)")
-        addTeardownBlock { try? FileManager.default.removeItem(at: trustedHostRoot) }
-        let trustedHostStore = TrustedHostStore(rootURL: trustedHostRoot)
-        try trustedHostStore.trustHostKey(
-            SSHHostKeyTrustChallenge(
-                kind: .unknown,
-                serverID: serverID,
-                host: "127.0.0.1",
-                trustedKeyType: nil,
-                trustedOpenSSHPublicKey: nil,
-                receivedKeyType: server.hostKeyType,
-                receivedOpenSSHPublicKey: server.openSSHPublicKey
-            )
-        )
-        let savedServer = SavedServer(
-            id: serverID,
-            displayName: "loopback",
-            host: "127.0.0.1",
-            port: server.port,
-            username: "remux",
-            identityID: serverID
-        )
-        let privateKey = SSHPrivateKeyCredential(privateKeyPEM: generatedKey.privateKeyPEM)
-        let prepared = RemuxSSHPreparedRoot.dedicated(
-            configuration: RemuxSSHRootConfiguration(
-                host: "127.0.0.1",
-                port: server.port,
-                authenticationMethod: {
-                    try SSHAuthenticationMethodFactory.make(
-                        username: "remux",
-                        credential: .privateKey(privateKey)
-                    )
-                },
-                hostKeyValidator: trustedHostStore.validator(for: savedServer),
-                connectTimeout: .seconds(10)
-            ),
-            trace: trace
-        )
-        do {
-            let root = try await prepared.sshRoot()
-            return try await prepared.claim(root, trace: trace)
-        } catch {
-            await prepared.cancelAndCleanup()
-            throw error
-        }
-    }
-
     private func sshData(
         type: SSHChannelData.DataType,
         string: String
@@ -722,5 +668,62 @@ private final class RemuxSSHExecOutboundRecorder: ChannelOutboundHandler, @unche
             recordedEvents.append(event)
         }
         context.close(mode: mode, promise: promise)
+    }
+}
+
+extension XCTestCase {
+    /// A dedicated SSH root to the in-process test server, trusted for this test only.
+    func claimedLoopbackRoot(
+        server: SSHPublicKeyLiveTestServer,
+        trace: RemuxTransportStartupTrace
+    ) async throws -> RemuxSSHClaimedRoot {
+        let generatedKey = SSHPrivateKeyInspector.generateEd25519(comment: "loopback-exec-test")
+        let serverID = UUID()
+        let trustedHostRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RemuxSSHExecSessionLoopback-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: trustedHostRoot) }
+        let trustedHostStore = TrustedHostStore(rootURL: trustedHostRoot)
+        try trustedHostStore.trustHostKey(
+            SSHHostKeyTrustChallenge(
+                kind: .unknown,
+                serverID: serverID,
+                host: "127.0.0.1",
+                trustedKeyType: nil,
+                trustedOpenSSHPublicKey: nil,
+                receivedKeyType: server.hostKeyType,
+                receivedOpenSSHPublicKey: server.openSSHPublicKey
+            )
+        )
+        let savedServer = SavedServer(
+            id: serverID,
+            displayName: "loopback",
+            host: "127.0.0.1",
+            port: server.port,
+            username: "remux",
+            identityID: serverID
+        )
+        let privateKey = SSHPrivateKeyCredential(privateKeyPEM: generatedKey.privateKeyPEM)
+        let prepared = RemuxSSHPreparedRoot.dedicated(
+            configuration: RemuxSSHRootConfiguration(
+                host: "127.0.0.1",
+                port: server.port,
+                authenticationMethod: {
+                    try SSHAuthenticationMethodFactory.make(
+                        username: "remux",
+                        credential: .privateKey(privateKey)
+                    )
+                },
+                hostKeyValidator: trustedHostStore.validator(for: savedServer),
+                connectTimeout: .seconds(10)
+            ),
+            trace: trace
+        )
+        do {
+            let root = try await prepared.sshRoot()
+            return try await prepared.claim(root, trace: trace)
+        } catch {
+            await prepared.cancelAndCleanup()
+            throw error
+        }
     }
 }
