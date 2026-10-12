@@ -35,9 +35,13 @@ enum HerdrWireError: Error, Equatable, LocalizedError {
     /// A tag outside generation 1's frozen message set.
     case unknownMessage(tag: UInt32)
     case invalidControl(kind: String)
+    /// A screen update that doesn't fit the decoder's baseline (`surface_reuse.rs` reasons).
+    case invalidSurfaceUpdate(String)
 
     var errorDescription: String? {
         switch self {
+        case .invalidSurfaceUpdate(let reason):
+            return "Herdr sent a screen update Remux couldn't apply (\(reason))."
         case .unexpectedMessage(let tag):
             return "Herdr sent message type \(tag), which this connection never receives."
         case .unknownMessage(let tag):
