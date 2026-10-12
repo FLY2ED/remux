@@ -1,11 +1,17 @@
 import Foundation
 
 /// What Remux draws from one Herdr connection: the newest snapshot, and the surface rendered against
-/// exactly that snapshot (Herdr v0.9.3 `client/shell/state.rs:1287-1303, 1540-1645`,
-/// `client/shell/surface_patch.rs:108-249`, `client/shell/composition.rs:173-186`).
+/// exactly that snapshot, with the rules of Herdr's client (v0.9.3 `client/shell/state.rs:1287-1303,
+/// 1343-1361, 1563-1579, 1588-1633`, `client/shell/surface_patch.rs:13-55, 96-169`,
+/// `client/shell/composition.rs:173-186`).
 ///
 /// It is fed the surface decoder's output, in wire order. Revisions restart with each connection, so
-/// each connection gets a new presentation.
+/// each connection gets a new presentation in place of Herdr's connection-generation checks.
+///
+/// One deliberate difference: a patch applies to the stored surface even while that surface is ahead
+/// of the snapshot. Herdr sends the patched copy back through its pending slot
+/// (`surface_patch.rs:248-254`, `state.rs:1604-1609`) and then rejects every later patch until a full
+/// surface; Remux keeps that frame current instead.
 struct HerdrPresentation {
     enum PatchOutcome: Equatable, Sendable {
         case applied
@@ -27,7 +33,6 @@ struct HerdrPresentation {
         guard pending == nil,
               let snapshot,
               let surface,
-              surface.bootID == snapshot.bootID,
               surface.projectionRevision == snapshot.revision
         else {
             return nil
@@ -38,6 +43,13 @@ struct HerdrPresentation {
     mutating func receive(_ snapshot: HerdrSnapshot) {
         if let current = self.snapshot, current.bootID == snapshot.bootID, snapshot.revision < current.revision {
             return
+        }
+        // A new server boot clears both surfaces, as Herdr's client does (`state.rs:1213-1217`). A boot
+        // doesn't change within one connection today: Herdr disconnects every client before a handoff
+        // (`server/headless.rs:1668`).
+        if let current = self.snapshot, current.bootID != snapshot.bootID {
+            surface = nil
+            pending = nil
         }
         self.snapshot = snapshot
         guard let held = pending else { return }
@@ -50,7 +62,7 @@ struct HerdrPresentation {
         }
     }
 
-    /// Throws for a grid whose sizes disagree, which ends the attachment.
+    /// Throws for a grid Remux can't index (see `validate`), which ends the attachment.
     mutating func receive(_ surface: HerdrPaneSurfaceFrame) throws {
         try Self.validate(surface)
         guard let snapshot,
@@ -68,9 +80,8 @@ struct HerdrPresentation {
         install(surface, retainingFuture: true)
     }
 
-    /// Applies a patch to the current surface with Herdr's checks, and rejects one whose cells link
-    /// outside the frame's links, which a patch can't add to, so every accepted surface's links resolve.
-    /// Pane metadata the patch doesn't list stays as it was.
+    /// Applies a patch to the current surface with Herdr's checks. Pane metadata the patch doesn't
+    /// list stays as it was.
     mutating func receive(_ patch: HerdrPaneSurfacePatch) -> PatchOutcome {
         guard var next = surface,
               patch.bootID == next.bootID,
@@ -95,10 +106,8 @@ struct HerdrPresentation {
             }
         }
         let width = Int(next.frame.width)
-        let linkCount = next.frame.hyperlinks.count
         for row in patch.rows {
             guard !row.cells.isEmpty,
-                  !row.cells.contains(where: { cell in cell.hyperlink.map { Int($0) >= linkCount } ?? false }),
                   row.y < next.frame.height,
                   Int(row.x) + row.cells.count <= width,
                   patch.panes.contains(where: { Self.covers($0, row, existing: next.panes) })
@@ -166,24 +175,21 @@ struct HerdrPresentation {
             && row.cells.count == Int(scrollbar.width)
     }
 
-    /// Cell counts match the sizes, links resolve, and pane rectangles lie inside the frame.
+    /// Cell counts match the sizes, and each pane's text area lies inside the frame: the patch apply
+    /// above and the pane painter index cells by both. Herdr's client checks neither for a full
+    /// surface (its decoder does for deltas); Herdr builds them this way, so these only catch a corrupt
+    /// stream. Link indexes aren't checked: a link that doesn't resolve paints as plain text, as in
+    /// Herdr's renderer (`protocol/render_ansi.rs:899-902`).
     private static func validate(_ surface: HerdrPaneSurfaceFrame) throws {
         let frames = [surface.frame] + (surface.popup.map { [$0.frame] } ?? [])
-        for frame in frames {
-            guard frame.cells.count == Int(frame.width) * Int(frame.height) else {
-                throw HerdrWireError.invalidSurfaceUpdate("surface cells do not match its size")
-            }
-            let linkCount = frame.hyperlinks.count
-            if frame.cells.contains(where: { cell in cell.hyperlink.map { Int($0) >= linkCount } ?? false }) {
-                throw HerdrWireError.invalidSurfaceUpdate("surface has an invalid hyperlink index")
-            }
-        }
-        func inside(_ rect: HerdrSurfaceRect) -> Bool {
-            Int(rect.x) + Int(rect.width) <= Int(surface.frame.width)
-                && Int(rect.y) + Int(rect.height) <= Int(surface.frame.height)
+        for frame in frames where frame.cells.count != Int(frame.width) * Int(frame.height) {
+            throw HerdrWireError.invalidSurfaceUpdate("surface cells do not match its size")
         }
         for pane in surface.panes {
-            guard inside(pane.rect), inside(pane.innerRect), pane.scrollbarRect.map(inside) ?? true else {
+            let area = pane.innerRect
+            guard Int(area.x) + Int(area.width) <= Int(surface.frame.width),
+                  Int(area.y) + Int(area.height) <= Int(surface.frame.height)
+            else {
                 throw HerdrWireError.invalidSurfaceUpdate("surface pane lies outside the frame")
             }
         }
