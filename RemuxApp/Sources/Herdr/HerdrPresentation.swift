@@ -68,8 +68,9 @@ struct HerdrPresentation {
         install(surface, retainingFuture: true)
     }
 
-    /// Applies a patch to the current surface with Herdr's checks. Pane metadata the patch doesn't
-    /// list stays as it was.
+    /// Applies a patch to the current surface with Herdr's checks, and rejects one whose cells link
+    /// outside the frame's links, which a patch can't add to, so every accepted surface's links resolve.
+    /// Pane metadata the patch doesn't list stays as it was.
     mutating func receive(_ patch: HerdrPaneSurfacePatch) -> PatchOutcome {
         guard var next = surface,
               patch.bootID == next.bootID,
@@ -94,8 +95,10 @@ struct HerdrPresentation {
             }
         }
         let width = Int(next.frame.width)
+        let linkCount = next.frame.hyperlinks.count
         for row in patch.rows {
             guard !row.cells.isEmpty,
+                  !row.cells.contains(where: { cell in cell.hyperlink.map { Int($0) >= linkCount } ?? false }),
                   row.y < next.frame.height,
                   Int(row.x) + row.cells.count <= width,
                   patch.panes.contains(where: { Self.covers($0, row, existing: next.panes) })
