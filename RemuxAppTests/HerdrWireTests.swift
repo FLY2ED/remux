@@ -8,7 +8,7 @@ final class HerdrWireTests: XCTestCase {
 
     func testDecodesEveryRecordedServerMessage() throws {
         let fixtures = try Self.goldenFixtures()
-        XCTAssertEqual(fixtures.count, 23)
+        XCTAssertEqual(fixtures.count, 24)
         var checked = 0
         for fixture in fixtures {
             var splitter = HerdrFrameSplitter()
@@ -25,7 +25,7 @@ final class HerdrWireTests: XCTestCase {
             }
             XCTAssertNil(try splitter.nextPayload(), fixture.name)
         }
-        XCTAssertEqual(checked, 259)
+        XCTAssertEqual(checked, 303)
     }
 
     func testEncodesEveryRecordedClientMessage() throws {
@@ -63,7 +63,7 @@ final class HerdrWireTests: XCTestCase {
                 checked += 1
             }
         }
-        XCTAssertEqual(checked, 53)
+        XCTAssertEqual(checked, 64)
         // The invalid hello of a rejection fixture, the presentation fence, and an unknown control.
         XCTAssertEqual(notSentByRemux, 3)
     }
@@ -332,6 +332,13 @@ extension HerdrWireTests {
         let rows: String?
     }
 
+    /// One pane painted by the reference painter: which pane rows (all for a full surface) and the
+    /// SHA-256 of the bytes.
+    struct GoldenPainted: Decodable {
+        let rows: [Int]?
+        let digest: String
+    }
+
     enum GoldenScalar: Decodable, Equatable {
         case string(String)
         case integer(Int64)
@@ -389,9 +396,11 @@ extension HerdrWireTests {
         let scroll: GoldenScroll?
         let reuse: HerdrSurfaceReuse?
         let decoded: GoldenDecoded?
+        /// The reference painter's output for each pane, by pane id.
+        let painted: [String: GoldenPainted]?
 
         private enum CodingKeys: String, CodingKey {
-            case offset, length, tag, message, delta, scroll, reuse, decoded
+            case offset, length, tag, message, delta, scroll, reuse, decoded, painted
         }
 
         init(from decoder: Decoder) throws {
@@ -408,6 +417,7 @@ extension HerdrWireTests {
             scroll = try container.decodeIfPresent(GoldenScroll.self, forKey: .scroll)
             reuse = try container.decodeIfPresent(HerdrSurfaceReuse.self, forKey: .reuse)
             decoded = try container.decodeIfPresent(GoldenDecoded.self, forKey: .decoded)
+            painted = try container.decodeIfPresent([String: GoldenPainted].self, forKey: .painted)
         }
     }
 
