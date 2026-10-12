@@ -112,6 +112,7 @@ final class HerdrPresentationTests: XCTestCase {
     func testRejectedPatchesKeepTheFrame() throws {
         let surface = try Self.surface(projection: 1, revision: 1, panes: [Self.pane("w1:p1", x: 0, width: 2, scrollbarX: 2)])
         let x = HerdrSurfaceDecoderTests.cells("x")
+        let linked = HerdrCell(symbol: "x", fg: HerdrColor(raw: 0), bg: HerdrColor(raw: 0), modifier: 0, skip: false, hyperlink: 0)
         let pane = Self.pane("w1:p1", x: 0, width: 2, scrollbarX: 2)
         let rejected: [(String, HerdrPaneSurfacePatch)] = [
             ("wrong base", try Self.patch(base: 3, rows: [HerdrPatchRow(x: 0, y: 0, cells: x)], panes: [pane])),
@@ -120,6 +121,7 @@ final class HerdrPresentationTests: XCTestCase {
             ("row outside the listed pane", try Self.patch(base: 1, rows: [HerdrPatchRow(x: 3, y: 0, cells: x)], panes: [pane])),
             ("row and no pane listed", try Self.patch(base: 1, rows: [HerdrPatchRow(x: 0, y: 0, cells: x)], panes: [])),
             ("empty row", try Self.patch(base: 1, rows: [HerdrPatchRow(x: 0, y: 0, cells: [])], panes: [pane])),
+            ("unresolved link", try Self.patch(base: 1, rows: [HerdrPatchRow(x: 0, y: 0, cells: [linked])], panes: [pane])),
         ]
         for (name, patch) in rejected {
             var presentation = try Self.presenting(surface)
