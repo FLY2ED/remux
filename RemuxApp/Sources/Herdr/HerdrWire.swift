@@ -6,8 +6,9 @@ import Foundation
 /// is bincode 2 with `config::standard()`: little endian, variable-length integers, enums as a varint
 /// variant index followed by their fields, structs as their fields in order.
 enum HerdrWire {
-    /// Largest payload Remux reads. Herdr caps server frames at 2 MiB, or 32 MiB when a surface
-    /// carries images (`wire.rs:24, 29`), and Remux keeps images.
+    /// Largest payload Remux reads: Herdr's cap for a frame that carries images (`wire.rs:24, 29`,
+    /// applied in `server/headless/render.rs:798-802`; ordinary frames stay under 2 MiB). Herdr's own
+    /// remote client reads with the same cap (`client/mod.rs:1321-1325`).
     static let maxPayloadSize = 32 * 1024 * 1024
 
     static func frame(_ payload: [UInt8]) -> [UInt8] {
@@ -30,8 +31,9 @@ enum HerdrWireError: Error, Equatable, LocalizedError {
     case invalidVariant(type: String, index: UInt32)
     case lengthOutOfRange(UInt64)
     case payloadTooLarge(Int)
-    /// A generation-1 message type that Remux's endpoint connection never receives.
-    case unexpectedMessage(tag: UInt32)
+    /// Message type 12, a binary snapshot, which only a connection without the JSON snapshot codec
+    /// gets. Herdr's client fails on it the same way (`client/mod.rs:1428-1452`).
+    case unnegotiatedSnapshot
     /// A tag outside generation 1's frozen message set.
     case unknownMessage(tag: UInt32)
     case invalidControl(kind: String)
@@ -42,14 +44,14 @@ enum HerdrWireError: Error, Equatable, LocalizedError {
         switch self {
         case .invalidSurfaceUpdate(let reason):
             return "Herdr sent a screen update Remux couldn't apply (\(reason))."
-        case .unexpectedMessage(let tag):
-            return "Herdr sent message type \(tag), which this connection never receives."
+        case .unnegotiatedSnapshot:
+            return "Herdr sent a binary snapshot this connection didn't ask for."
         case .unknownMessage(let tag):
             return "Herdr sent unknown message type \(tag)."
         case .invalidControl(let kind):
             return "Herdr sent an invalid \(kind) message."
         case .payloadTooLarge(let size):
-            return "Herdr sent a \(size)-byte message, over Remux's limit."
+            return "Herdr's data was corrupted: a message claimed \(size) bytes, more than Herdr ever sends."
         default:
             return "Herdr sent a message Remux couldn't decode."
         }
@@ -174,11 +176,11 @@ struct HerdrWireReader {
 
     mutating func array<T>(_ read: (inout HerdrWireReader) throws -> T) throws -> [T] {
         let count = try u64()
-        // Every element takes at least one byte, so a count beyond the remaining bytes is corrupt;
-        // checking first keeps a forged count from reserving memory.
+        // Every element takes at least one byte, so a count beyond the remaining bytes is corrupt.
+        // Elements take more memory than wire bytes, so the reservation is capped as well.
         guard count <= UInt64(remaining) else { throw HerdrWireError.lengthOutOfRange(count) }
         var values = [T]()
-        values.reserveCapacity(Int(count))
+        values.reserveCapacity(Int(min(count, 4096)))
         for _ in 0..<count {
             values.append(try read(&self))
         }
