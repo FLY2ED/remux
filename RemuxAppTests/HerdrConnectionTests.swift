@@ -93,6 +93,29 @@ final class HerdrConnectionTests: XCTestCase {
         XCTAssertTrue(closed)
     }
 
+    /// A read doesn't end when its task is cancelled, so cancelling the open closes the transport.
+    func testCancellingTheOpenClosesTheTransportAndOpensNothing() async throws {
+        let transport = FakeBridgeTransport()
+        let (sentHello, slowTiming) = (hello, relaxed)
+        let opening = Task {
+            try await HerdrConnection.open(transport: transport, hello: sentHello, timing: slowTiming, onEvent: { _ in })
+        }
+        _ = try await transport.written(0)
+        opening.cancel()
+        let returned = expectation(description: "open returned")
+        Task {
+            if case .failure(let error) = await opening.result {
+                XCTAssertTrue(error is CancellationError, "\(error)")
+            } else {
+                XCTFail("opened")
+            }
+            returned.fulfill()
+        }
+        await fulfillment(of: [returned], timeout: 2)
+        let closed = await transport.isClosed
+        XCTAssertTrue(closed)
+    }
+
     // MARK: - Showing, hiding and input
 
     /// Show sends resize, `surface.set(true)` and focus in Herdr's client order; hide sends focus first.
@@ -202,6 +225,50 @@ final class HerdrConnectionTests: XCTestCase {
         _ = try? await next
     }
 
+    /// A command cancelled while it waits for the lane is never sent.
+    func testACommandCancelledInLineIsNeverSent() async throws {
+        let (connection, transport, _) = try await openedSession(surfaceActive: true)
+        async let first = connection.command("worktree.list", params: [String: String]())
+        let firstRequest = try Self.request(try await transport.written(1))
+        let queued = Task { try await connection.command("tab.focus", params: ["tab_id": "w1:t1"]) }
+        try await Task.sleep(for: .milliseconds(30))
+        queued.cancel()
+        do {
+            _ = try await queued.value
+            XCTFail("answered")
+        } catch is CancellationError {}
+
+        await transport.serve(Self.reply(id: firstRequest.id, json: #"{"type":"ok"}"#))
+        _ = try await first
+        async let next = connection.command("pane.focus", params: ["pane_id": "w1:p1"])
+        let nextRequest = try Self.request(try await transport.written(2))
+        XCTAssertEqual(nextRequest.method, "pane.focus")
+        await transport.serve(Self.reply(id: nextRequest.id, json: #"{"type":"ok"}"#))
+        _ = try await next
+    }
+
+    /// A command cancelled after it was sent returns at once; its late reply still frees the lane.
+    func testACancelledSentCommandReturnsAtOnceAndItsReplyFreesTheLane() async throws {
+        let (connection, transport, _) = try await openedSession(surfaceActive: true)
+        let slow = Task { try await connection.command("worktree.list", params: [String: String]()) }
+        let slowRequest = try Self.request(try await transport.written(1))
+        slow.cancel()
+        do {
+            _ = try await slow.value
+            XCTFail("answered")
+        } catch is CancellationError {}
+
+        async let next = connection.command("pane.focus", params: ["pane_id": "w1:p1"])
+        try await Task.sleep(for: .milliseconds(30))
+        let count = await transport.writtenCount
+        XCTAssertEqual(count, 2)
+        await transport.serve(Self.reply(id: slowRequest.id, json: #"{"type":"ok"}"#))
+        let nextRequest = try Self.request(try await transport.written(2))
+        XCTAssertEqual(nextRequest.method, "pane.focus")
+        await transport.serve(Self.reply(id: nextRequest.id, json: #"{"type":"ok"}"#))
+        _ = try await next
+    }
+
     func testAMethodTheServerDoesNotAdvertiseFailsAlone() async throws {
         let (connection, _, events) = try await openedSession(surfaceActive: true)
         do {
@@ -229,8 +296,8 @@ final class HerdrConnectionTests: XCTestCase {
     }
 
     /// Any bytes after a ping answer it, so a long message still arriving is not a dead connection.
-    /// The proof: a second ping goes out after the next silence, which happens only once the first
-    /// has been answered.
+    /// The proof: part of a message arrives, and a second ping goes out after the next silence, which
+    /// happens only once the first has been answered; the message is delivered once it's complete.
     func testBytesAfterAPingAnswerIt() async throws {
         let (connection, transport, events) = try await openedSession(
             surfaceActive: true,
@@ -238,27 +305,89 @@ final class HerdrConnectionTests: XCTestCase {
         )
         await connection.setAppActive(true)
         let first = try Self.control(try await transport.written(1))
-        await transport.serve(HerdrWire.frame([9, 1]))
+        let bell = HerdrWire.frame([9, 1])
+        await transport.serve(Array(bell.prefix(3)))
         let second = try Self.control(try await transport.written(2))
         XCTAssertEqual(second.kind, HerdrControlKind.healthPing)
         XCTAssertNotEqual(second.data, first.data)
+        let delivered = await events.events.count
+        XCTAssertEqual(delivered, 1, "only the snapshot")
+        await transport.serve(Array(bell.dropFirst(3)))
+        await events.waitForCount(2)
         let ended = await events.hasEnded
         XCTAssertFalse(ended)
         await connection.setAppActive(false)
     }
 
-    func testConfirmAliveNeedsItsOwnPong() async throws {
+    /// While the screen holds a message nothing is read, so no answer can arrive: that pause isn't
+    /// server silence. Once the screen takes the message, the health check carries on.
+    func testAScreenHoldingAMessageIsNotServerSilence() async throws {
+        let (connection, transport, events) = try await openedSession(
+            surfaceActive: true,
+            timing: timing(pingAfterSilence: .milliseconds(50), unansweredPing: .milliseconds(100))
+        )
+        await events.hold()
+        await transport.serve(HerdrWire.frame([9, 1]))
+        await events.waitForCount(2)
+        await connection.setAppActive(true)
+        try await Task.sleep(for: .milliseconds(500))
+        let endedWhileHeld = await events.hasEnded
+        XCTAssertFalse(endedWhileHeld)
+        let written = await transport.writtenCount
+        XCTAssertEqual(written, 1, "no ping while the screen holds a message")
+
+        await events.release()
+        let ping = try Self.control(try await transport.written(1))
+        XCTAssertEqual(ping.kind, HerdrControlKind.healthPing)
+        await transport.serve(Self.pong(ping.data))
+        await connection.setAppActive(false)
+        let ended = await events.hasEnded
+        XCTAssertFalse(ended)
+    }
+
+    func testConfirmAliveIsAnsweredByItsOwnPong() async throws {
         let (connection, transport, _) = try await openedSession(surfaceActive: true)
         async let alive = connection.confirmAlive()
         let ping = try Self.control(try await transport.written(1))
-        await transport.serve(Self.pong("not-this-one"))
         await transport.serve(Self.pong(ping.data))
         let answered = await alive
         XCTAssertTrue(answered)
+    }
 
-        let (quiet, _, _) = try await openedSession(surfaceActive: true, timing: timing(unansweredPing: .milliseconds(100)))
-        let unanswered = await quiet.confirmAlive()
-        XCTAssertFalse(unanswered)
+    func testAnotherPongDoesNotConfirmAlive() async throws {
+        let (connection, transport, _) = try await openedSession(surfaceActive: true, timing: timing(unansweredPing: .milliseconds(200)))
+        async let alive = connection.confirmAlive()
+        _ = try await transport.written(1)
+        await transport.serve(Self.pong("not-this-one"))
+        let answered = await alive
+        XCTAssertFalse(answered)
+    }
+
+    // MARK: - Closing
+
+    /// Closing takes over before anything can wait: a write stuck in the transport, a command waiting
+    /// for its reply and the stream ending meanwhile bring no `ended` event, and nothing more is written.
+    func testCloseDoesNotWaitOnTheTransportOrReportAnEnd() async throws {
+        let (connection, transport, events) = try await openedSession(surfaceActive: true)
+        await transport.stallWrites()
+        try await connection.send([.text("a")], toPane: "w1:p1")
+        await transport.waitForStalledWrites(1)
+        let command = Task { try await connection.command("pane.focus", params: ["pane_id": "w1:p1"]) }
+
+        await connection.close()
+        do {
+            _ = try await command.value
+            XCTFail("answered")
+        } catch let error as HerdrCommandError {
+            XCTAssertEqual(error, .connectionEnded)
+        }
+        let closed = await transport.isClosed
+        XCTAssertTrue(closed)
+        let written = await transport.writtenCount
+        XCTAssertEqual(written, 1, "only the hello")
+        try await Task.sleep(for: .milliseconds(30))
+        let ended = await events.hasEnded
+        XCTAssertFalse(ended)
     }
 
     // MARK: - Reading
@@ -308,6 +437,10 @@ final class HerdrConnectionTests: XCTestCase {
             timing: timing ?? relaxed,
             onEvent: events.record
         )
+        addTeardownBlock {
+            await events.release()
+            await connection.close()
+        }
         await events.waitForCount(1)
         return (connection, transport, events)
     }
@@ -391,6 +524,8 @@ actor FakeBridgeTransport: HerdrBridgeTransport {
     private var writes: [[UInt8]] = []
     private var writeWaiters: [(Int, CheckedContinuation<[UInt8], Error>)] = []
     private var ended = false
+    private var stallsWrites = false
+    private var stalledWrites: [CheckedContinuation<Void, Error>] = []
     private(set) var reads = 0
     private(set) var isClosed = false
 
@@ -439,6 +574,18 @@ actor FakeBridgeTransport: HerdrBridgeTransport {
         return reads
     }
 
+    /// Writes from now on wait until the transport closes and then fail, as on a stalled network.
+    func stallWrites() {
+        stallsWrites = true
+    }
+
+    /// Returns once `count` writes are stalled, or after two seconds.
+    func waitForStalledWrites(_ count: Int) async {
+        for _ in 0..<200 where stalledWrites.count < count {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
     func read() async throws -> [UInt8]? {
         reads += 1
         if !chunks.isEmpty { return chunks.removeFirst() }
@@ -447,6 +594,10 @@ actor FakeBridgeTransport: HerdrBridgeTransport {
     }
 
     func write(_ bytes: [UInt8]) async throws {
+        if stallsWrites {
+            guard !isClosed else { throw CancellationError() }
+            try await withCheckedThrowingContinuation { stalledWrites.append($0) }
+        }
         writes.append(bytes)
         let ready = writeWaiters.filter { $0.0 < writes.count }
         writeWaiters.removeAll { $0.0 < writes.count }
@@ -455,6 +606,8 @@ actor FakeBridgeTransport: HerdrBridgeTransport {
 
     func close() async {
         isClosed = true
+        stalledWrites.forEach { $0.resume(throwing: CancellationError()) }
+        stalledWrites.removeAll()
         finishServing()
     }
 }
