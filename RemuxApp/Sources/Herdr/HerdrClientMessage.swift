@@ -43,7 +43,9 @@ enum HerdrClientMessage: Equatable, Sendable {
             writer.u32(geometry.cellHeightPx)
             writer.u16(geometry.cols)
             writer.u16(geometry.rows)
-            writer.bool(geometry.pixelMouse)
+            // pixel_mouse: off, as in Remux's hello. A resize with it on would switch the server to
+            // pixel mouse reports for this client (`server/headless.rs:2203`).
+            writer.bool(false)
         case .paneInput(let paneID, let events):
             writer.variant(13)
             writer.string(paneID)
@@ -71,88 +73,15 @@ enum HerdrClientMessage: Equatable, Sendable {
     }
 }
 
-/// `endpoint.hello.v1` (`protocol/endpoint.rs:47-75`).
-struct HerdrHello: Equatable, Sendable, Codable {
-    struct SurfaceSize: Equatable, Sendable, Codable {
-        let cols: UInt16
-        let rows: UInt16
-    }
-
-    let generation: UInt32
+/// Remux's `endpoint.hello.v1` (`protocol/endpoint.rs:47-75`): every surface encoding, the four v1
+/// codecs, and no pixel mouse, direct graphics, endpoint keybindings or client mouse capture. Cell
+/// size 0 means unknown.
+struct HerdrHello: Equatable, Sendable, Encodable {
     let cellWidthPx: UInt32
     let cellHeightPx: UInt32
-    let surfaceSize: SurfaceSize
-    let pixelMouse: Bool
-    let directGraphics: Bool
-    let endpointKeybindings: Bool
-    let mouseCapture: Bool
+    let cols: UInt16
+    let rows: UInt16
     let surfaceActive: Bool
-    let surfaceReuse: Bool?
-    let surfaceDelta: Bool?
-    let surfaceScroll: Bool?
-    let snapshotCodecs: [String]?
-    let surfaceCodecs: [String]?
-    let inputCodecs: [String]?
-    let blobCodecs: [String]?
-
-    /// Remux's hello: every surface encoding, the four v1 codecs, and no pixel mouse, direct
-    /// graphics, endpoint keybindings or client mouse capture. Cell size 0 means unknown.
-    init(cellWidthPx: UInt32, cellHeightPx: UInt32, cols: UInt16, rows: UInt16, surfaceActive: Bool) {
-        self.init(
-            generation: 1,
-            cellWidthPx: cellWidthPx,
-            cellHeightPx: cellHeightPx,
-            surfaceSize: SurfaceSize(cols: cols, rows: rows),
-            pixelMouse: false,
-            directGraphics: false,
-            endpointKeybindings: false,
-            mouseCapture: false,
-            surfaceActive: surfaceActive,
-            surfaceReuse: true,
-            surfaceDelta: true,
-            surfaceScroll: true,
-            snapshotCodecs: [HerdrControlKind.snapshot],
-            surfaceCodecs: ["shell.surface.v1"],
-            inputCodecs: ["shell.input.semantic.v1"],
-            blobCodecs: ["shell.blob.v1"]
-        )
-    }
-
-    init(
-        generation: UInt32,
-        cellWidthPx: UInt32,
-        cellHeightPx: UInt32,
-        surfaceSize: SurfaceSize,
-        pixelMouse: Bool,
-        directGraphics: Bool,
-        endpointKeybindings: Bool,
-        mouseCapture: Bool,
-        surfaceActive: Bool,
-        surfaceReuse: Bool?,
-        surfaceDelta: Bool?,
-        surfaceScroll: Bool?,
-        snapshotCodecs: [String]?,
-        surfaceCodecs: [String]?,
-        inputCodecs: [String]?,
-        blobCodecs: [String]?
-    ) {
-        self.generation = generation
-        self.cellWidthPx = cellWidthPx
-        self.cellHeightPx = cellHeightPx
-        self.surfaceSize = surfaceSize
-        self.pixelMouse = pixelMouse
-        self.directGraphics = directGraphics
-        self.endpointKeybindings = endpointKeybindings
-        self.mouseCapture = mouseCapture
-        self.surfaceActive = surfaceActive
-        self.surfaceReuse = surfaceReuse
-        self.surfaceDelta = surfaceDelta
-        self.surfaceScroll = surfaceScroll
-        self.snapshotCodecs = snapshotCodecs
-        self.surfaceCodecs = surfaceCodecs
-        self.inputCodecs = inputCodecs
-        self.blobCodecs = blobCodecs
-    }
 
     var json: String {
         let encoder = JSONEncoder()
@@ -179,6 +108,32 @@ struct HerdrHello: Equatable, Sendable, Codable {
         case inputCodecs = "input_codecs"
         case blobCodecs = "blob_codecs"
     }
+
+    private enum SizeKeys: String, CodingKey {
+        case cols, rows
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(1 as UInt32, forKey: .generation)
+        try container.encode(cellWidthPx, forKey: .cellWidthPx)
+        try container.encode(cellHeightPx, forKey: .cellHeightPx)
+        var size = container.nestedContainer(keyedBy: SizeKeys.self, forKey: .surfaceSize)
+        try size.encode(cols, forKey: .cols)
+        try size.encode(rows, forKey: .rows)
+        try container.encode(false, forKey: .pixelMouse)
+        try container.encode(false, forKey: .directGraphics)
+        try container.encode(false, forKey: .endpointKeybindings)
+        try container.encode(false, forKey: .mouseCapture)
+        try container.encode(surfaceActive, forKey: .surfaceActive)
+        try container.encode(true, forKey: .surfaceReuse)
+        try container.encode(true, forKey: .surfaceDelta)
+        try container.encode(true, forKey: .surfaceScroll)
+        try container.encode([HerdrControlKind.snapshot], forKey: .snapshotCodecs)
+        try container.encode(["shell.surface.v1"], forKey: .surfaceCodecs)
+        try container.encode(["shell.input.semantic.v1"], forKey: .inputCodecs)
+        try container.encode(["shell.blob.v1"], forKey: .blobCodecs)
+    }
 }
 
 struct HerdrSurfaceGeometry: Equatable, Sendable {
@@ -186,7 +141,6 @@ struct HerdrSurfaceGeometry: Equatable, Sendable {
     let cellHeightPx: UInt32
     let cols: UInt16
     let rows: UInt16
-    let pixelMouse: Bool
 }
 
 private struct HerdrEndpointRequest<Params: Encodable>: Encodable {
@@ -254,7 +208,10 @@ struct HerdrKeyEvent: Equatable, Sendable {
     let kind: Kind
     let repeatCount: UInt16
     let shiftedCodepoint: UInt32?
-    /// The text the key produces. With `tracksRelease` false it is written as plain text.
+    /// The exact bytes the key produces. Herdr writes them in place of the key's own encoding, with
+    /// its modifiers ignored, except for a release, a legacy Super or Ctrl+Shift+letter chord, or a
+    /// key with `tracksRelease` going to a pane that reports every key (`input/encode.rs:26-45`).
+    /// So it is the text only for keys that type it; control chords leave it nil.
     let generatedText: String?
     /// Herdr holds the press until its release and releases it itself if the surface deactivates.
     let tracksRelease: Bool
@@ -331,22 +288,11 @@ struct HerdrMouseEvent: Equatable, Sendable {
         case moved, scrollUp, scrollDown, scrollLeft, scrollRight
     }
 
-    /// Relative to the pane's text area.
-    enum Position: Equatable, Sendable {
-        case cell(column: UInt16, row: UInt16)
-        case pixels(x: UInt32, y: UInt32, column: UInt16, row: UInt16)
-    }
-
-    struct Geometry: Equatable, Sendable {
-        let cols: UInt16
-        let rows: UInt16
-        let widthPx: UInt32
-        let heightPx: UInt32
-    }
-
     let kind: Kind
-    let position: Position
-    let geometry: Geometry?
+    /// The cell, relative to the pane's text area. Remux's hello turns pixel mouse off, so positions
+    /// are always cells and no pixel geometry is sent (`server/pane_input.rs:13-38`).
+    let column: UInt16
+    let row: UInt16
     let modifiers: HerdrKeyModifiers
     /// Wheel lines; Herdr uses it only to scroll host history. Program wheel routes send one report
     /// or arrow key per event.
@@ -354,14 +300,14 @@ struct HerdrMouseEvent: Equatable, Sendable {
 
     init(
         kind: Kind,
-        position: Position,
-        geometry: Geometry? = nil,
+        column: UInt16,
+        row: UInt16,
         modifiers: HerdrKeyModifiers = [],
         lines: UInt16 = 1
     ) {
         self.kind = kind
-        self.position = position
-        self.geometry = geometry
+        self.column = column
+        self.row = row
         self.modifiers = modifiers
         self.lines = lines
     }
@@ -383,24 +329,11 @@ struct HerdrMouseEvent: Equatable, Sendable {
         case .scrollLeft: writer.variant(6)
         case .scrollRight: writer.variant(7)
         }
-        switch position {
-        case .cell(let column, let row):
-            writer.variant(0)
-            writer.u16(column)
-            writer.u16(row)
-        case .pixels(let x, let y, let column, let row):
-            writer.variant(1)
-            writer.u32(x)
-            writer.u32(y)
-            writer.u16(column)
-            writer.u16(row)
-        }
-        writer.optional(geometry) { writer, geometry in
-            writer.u16(geometry.cols)
-            writer.u16(geometry.rows)
-            writer.u32(geometry.widthPx)
-            writer.u32(geometry.heightPx)
-        }
+        // MousePosition::Cell, then no pixel geometry.
+        writer.variant(0)
+        writer.u16(column)
+        writer.u16(row)
+        writer.optional(nil as UInt8?) { $0.u8($1) }
         writer.u8(modifiers.rawValue)
         writer.u16(lines)
     }
@@ -426,22 +359,10 @@ enum HerdrHostThemeUpdate: Equatable, Sendable {
     }
 
     case defaultColor(DefaultColorKind, HerdrRGB)
-    /// Palette index and colour; at most 256 entries.
-    case paletteColors([(index: UInt8, color: HerdrRGB)])
+    /// Colours by palette index. One entry per index keeps the update within the 256 entries Herdr
+    /// accepts; more closes the connection (`server/client_transport.rs:1177-1189`).
+    case paletteColors([UInt8: HerdrRGB])
     case appearance(Appearance)
-
-    static func == (lhs: HerdrHostThemeUpdate, rhs: HerdrHostThemeUpdate) -> Bool {
-        switch (lhs, rhs) {
-        case let (.defaultColor(lhsKind, lhsColor), .defaultColor(rhsKind, rhsColor)):
-            return lhsKind == rhsKind && lhsColor == rhsColor
-        case let (.paletteColors(lhsColors), .paletteColors(rhsColors)):
-            return lhsColors.elementsEqual(rhsColors) { $0.index == $1.index && $0.color == $1.color }
-        case let (.appearance(lhsAppearance), .appearance(rhsAppearance)):
-            return lhsAppearance == rhsAppearance
-        default:
-            return false
-        }
-    }
 
     func write(to writer: inout HerdrWireWriter) {
         func rgb(_ color: HerdrRGB) {
@@ -457,9 +378,9 @@ enum HerdrHostThemeUpdate: Equatable, Sendable {
         case .paletteColors(let colors):
             writer.variant(1)
             writer.u64(UInt64(colors.count))
-            for entry in colors {
-                writer.u8(entry.index)
-                rgb(entry.color)
+            for (index, color) in colors.sorted(by: { $0.key < $1.key }) {
+                writer.u8(index)
+                rgb(color)
             }
         case .appearance(let appearance):
             writer.variant(2)
