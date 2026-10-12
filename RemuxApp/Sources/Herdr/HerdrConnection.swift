@@ -65,7 +65,8 @@ enum HerdrCommandError: Error, Equatable, LocalizedError {
     /// The server doesn't advertise the method; only this action is unavailable.
     case unsupported(method: String)
     case noSnapshot
-    /// No reply in time. The command keeps the lane until its reply arrives, as in Herdr's client.
+    /// No reply in time. The command keeps the lane until its reply arrives, because Herdr answers any
+    /// other command with `endpoint_busy` until then.
     case timedOut(method: String)
     case failed(code: String, message: String)
     case connectionEnded
@@ -143,7 +144,10 @@ actor HerdrConnection {
     private var isActive = false
     private var ended = false
     private var appActive = false
-    private var lastReceived = ContinuousClock.now
+    /// When bytes last arrived, or reading resumed after the screen took the previous ones.
+    private var lastProgress = ContinuousClock.now
+    /// The screen is taking messages, so nothing is read; that time isn't server silence.
+    private var delivering = false
     private var outstandingPing: (data: String, sentAt: ContinuousClock.Instant)?
     private var pongWaiters: [String: CheckedContinuation<Bool, Never>] = [:]
     private var nextID: UInt64 = 0
@@ -160,7 +164,8 @@ actor HerdrConnection {
 
     private var pending: [String: Pending] = [:]
     private var laneBusy = false
-    private var laneWaiters: [CheckedContinuation<Void, Never>] = []
+    private var nextTicket: UInt64 = 0
+    private var laneWaiters: [(ticket: UInt64, continuation: CheckedContinuation<Void, Error>)] = []
     private var healthTask: Task<Void, Never>?
 
     // MARK: - Opening
@@ -184,10 +189,17 @@ actor HerdrConnection {
             (welcome, splitter) = try await withThrowingTaskGroup(
                 of: (HerdrWelcome, HerdrFrameSplitter)?.self
             ) { group in
-                group.addTask { try await readWelcome(from: transport) }
+                // A read doesn't end when its task is cancelled, so cancelling the wait (a timeout or the
+                // caller giving up) closes the transport, which ends the read.
+                group.addTask {
+                    try await withTaskCancellationHandler {
+                        try await readWelcome(from: transport)
+                    } onCancel: {
+                        Task { await transport.close() }
+                    }
+                }
                 group.addTask {
                     try await Task.sleep(for: timing.welcome)
-                    await transport.close()
                     return nil
                 }
                 defer { group.cancelAll() }
@@ -197,9 +209,10 @@ actor HerdrConnection {
                 return result
             }
             try validate(welcome)
+            try Task.checkCancellation()
         } catch {
             await transport.close()
-            throw Self.connectionError(error)
+            throw Task.isCancelled ? CancellationError() : Self.connectionError(error)
         }
         let connection = HerdrConnection(
             transport: transport,
@@ -292,7 +305,7 @@ actor HerdrConnection {
                     throw HerdrConnectionError.closed
                 }
                 guard !ended else { return }
-                lastReceived = .now
+                lastProgress = .now
                 splitter.append(chunk)
                 try await deliverBuffered()
             }
@@ -303,6 +316,11 @@ actor HerdrConnection {
 
     /// Hands every complete message to the screen before the next read.
     private func deliverBuffered() async throws {
+        delivering = true
+        defer {
+            delivering = false
+            lastProgress = .now
+        }
         while !ended, let payload = try splitter.nextPayload() {
             try await route(try HerdrServerMessage.decode(payload))
         }
@@ -476,21 +494,17 @@ actor HerdrConnection {
     // MARK: - Commands
 
     /// Runs one endpoint command and returns its reply JSON (`{"id", "result"}`). Commands run one at a
-    /// time; a later one waits for the lane.
+    /// time; a later one waits for the lane. A command cancelled while it waits is never sent; one
+    /// cancelled after it was sent stops waiting for its reply, which still holds the lane.
     func command(_ method: String, params: some Encodable & Sendable) async throws -> Data {
         guard negotiated.methods.contains(method) else { throw HerdrCommandError.unsupported(method: method) }
-        await acquireLane()
-        guard !ended else {
-            releaseLane()
-            throw HerdrCommandError.connectionEnded
-        }
-        guard let bootID else {
-            releaseLane()
-            throw HerdrCommandError.noSnapshot
-        }
+        try await acquireLane()
         let id = makeID("c")
         let message: HerdrClientMessage
         do {
+            try Task.checkCancellation()
+            guard !ended else { throw HerdrCommandError.connectionEnded }
+            guard let bootID else { throw HerdrCommandError.noSnapshot }
             message = try HerdrClientMessage.endpointRequest(bootID: bootID, id: id, method: method, params: params)
         } catch {
             releaseLane()
@@ -509,21 +523,27 @@ actor HerdrConnection {
     ) async throws -> Data {
         guard !ended else { throw HerdrCommandError.connectionEnded }
         let timeout = timing.command
-        return try await withCheckedThrowingContinuation { continuation in
-            pending[id] = Pending(method: method, continuation: continuation, holdsLane: holdsLane)
-            messages.forEach(enqueue)
-            Task {
-                try? await Task.sleep(for: timeout)
-                await self.timeOut(id)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pending[id] = Pending(method: method, continuation: continuation, holdsLane: holdsLane)
+                messages.forEach(enqueue)
+                Task {
+                    try? await Task.sleep(for: timeout)
+                    await self.stopWaiting(for: id, throwing: HerdrCommandError.timedOut(method: method))
+                }
             }
+        } onCancel: {
+            Task { await self.stopWaiting(for: id, throwing: CancellationError()) }
         }
     }
 
-    private func timeOut(_ id: String) {
+    /// The caller stops waiting; the request stays registered until its final chunk, so a late reply is
+    /// recognised and releases the lane it holds.
+    private func stopWaiting(for id: String, throwing error: Error) {
         guard var request = pending[id], let continuation = request.continuation else { return }
         request.continuation = nil
         pending[id] = request
-        continuation.resume(throwing: HerdrCommandError.timedOut(method: request.method))
+        continuation.resume(throwing: error)
     }
 
     private func receive(_ chunk: HerdrResponseChunk) {
@@ -552,12 +572,27 @@ actor HerdrConnection {
         }
     }
 
-    private func acquireLane() async {
+    /// Takes the lane, waiting in line while it's busy. A waiter whose task is cancelled leaves the
+    /// line without the lane.
+    private func acquireLane() async throws {
         guard laneBusy else {
             laneBusy = true
             return
         }
-        await withCheckedContinuation { laneWaiters.append($0) }
+        nextTicket += 1
+        let ticket = nextTicket
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                laneWaiters.append((ticket, continuation))
+            }
+        } onCancel: {
+            Task { await self.leaveLine(ticket) }
+        }
+    }
+
+    private func leaveLine(_ ticket: UInt64) {
+        guard let index = laneWaiters.firstIndex(where: { $0.ticket == ticket }) else { return }
+        laneWaiters.remove(at: index).continuation.resume(throwing: CancellationError())
     }
 
     /// Passes the lane straight to the next waiter.
@@ -565,7 +600,7 @@ actor HerdrConnection {
         if laneWaiters.isEmpty {
             laneBusy = false
         } else {
-            laneWaiters.removeFirst().resume()
+            laneWaiters.removeFirst().continuation.resume()
         }
     }
 
@@ -578,7 +613,8 @@ actor HerdrConnection {
 
     /// While the app is open, a ping goes out after a silence and the connection fails if nothing
     /// arrives after it; any bytes count, so a large message still arriving is not a dead connection.
-    /// In the background nothing is sent.
+    /// Time the screen spends taking messages doesn't count, since nothing is read then. In the
+    /// background nothing is sent.
     func setAppActive(_ active: Bool) {
         guard active != appActive else { return }
         appActive = active
@@ -613,15 +649,16 @@ actor HerdrConnection {
         while appActive, !ended, !Task.isCancelled {
             try? await Task.sleep(for: timing.healthTick)
             guard appActive, !ended, !Task.isCancelled else { return }
+            if delivering { continue }
             let now = ContinuousClock.now
             if let ping = outstandingPing {
-                if lastReceived > ping.sentAt {
+                if lastProgress > ping.sentAt {
                     outstandingPing = nil
                 } else if now - ping.sentAt >= timing.unansweredPing {
                     await end(.unresponsive)
                     return
                 }
-            } else if now - lastReceived >= timing.pingAfterSilence {
+            } else if now - lastProgress >= timing.pingAfterSilence {
                 let data = makeID("ping")
                 outstandingPing = (data, now)
                 enqueue(.healthPing(data: data))
@@ -631,10 +668,12 @@ actor HerdrConnection {
 
     // MARK: - Ending
 
-    /// Detaches and closes. No `ended` event follows a close Remux asked for.
+    /// Ends the connection; no `ended` event follows. Nothing is written first: Herdr removes an
+    /// endpoint client whose stream ends just as one that sends `Detach` (`server/headless.rs:2570-2579`,
+    /// `server/client_transport.rs:1019-1023`), and the bridge passes the end of its input on
+    /// (`platform/unix_common.rs:170-176`).
     func close() async {
         guard !ended else { return }
-        try? await transport.write(HerdrClientMessage.detach.frame)
         finish()
         await transport.close()
     }
@@ -663,6 +702,6 @@ actor HerdrConnection {
         let waiters = laneWaiters
         laneWaiters.removeAll()
         laneBusy = false
-        waiters.forEach { $0.resume() }
+        waiters.forEach { $0.continuation.resume(throwing: HerdrCommandError.connectionEnded) }
     }
 }
