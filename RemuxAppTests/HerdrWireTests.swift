@@ -587,7 +587,10 @@ extension HerdrWireTests {
                 ]
                 let code: HerdrKeyCode
                 switch key.code {
-                case "Char": code = .character(try XCTUnwrap(key.char?.first))
+                case "Char":
+                    let scalars = try XCTUnwrap(key.char).unicodeScalars
+                    XCTAssertEqual(scalars.count, 1)
+                    code = .character(try XCTUnwrap(scalars.first))
                 case "F": code = .function(try XCTUnwrap(key.f))
                 default: code = try XCTUnwrap(codes[key.code], key.code)
                 }
