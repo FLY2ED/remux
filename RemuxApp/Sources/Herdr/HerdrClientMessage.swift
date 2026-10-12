@@ -13,7 +13,6 @@ enum HerdrClientMessage: Equatable, Sendable {
     case hostTheme(HerdrHostThemeUpdate)
     case focus(Bool)
     case healthPing(data: String)
-    case detach
 
     /// An endpoint command; `bootID` must be the current snapshot's.
     static func endpointRequest<Params: Encodable>(
@@ -67,8 +66,6 @@ enum HerdrClientMessage: Equatable, Sendable {
             writer.variant(20)
             writer.string(HerdrControlKind.healthPing)
             writer.string(data)
-        case .detach:
-            writer.variant(4)
         }
         return writer.bytes
     }

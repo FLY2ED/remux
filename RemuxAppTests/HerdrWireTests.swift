@@ -63,9 +63,10 @@ final class HerdrWireTests: XCTestCase {
                 checked += 1
             }
         }
-        XCTAssertEqual(checked, 64)
-        // The invalid hello of a rejection fixture, the presentation fence, and an unknown control.
-        XCTAssertEqual(notSentByRemux, 3)
+        XCTAssertEqual(checked, 63)
+        // The invalid hello of a rejection fixture, the presentation fence, an unknown control, and
+        // Detach (a closed stream ends the client the same way; `HerdrConnection.close()`).
+        XCTAssertEqual(notSentByRemux, 4)
     }
 
     func testDecodesTheRecordedWelcomeAndSnapshot() throws {
@@ -453,8 +454,6 @@ extension HerdrWireTests {
             hex = try container.decode(String.self, forKey: .hex)
             let fields = try container.nestedContainer(keyedBy: MessageKeys.self, forKey: .message)
             switch try fields.decode(UInt32.self, forKey: .tag) {
-            case 4:
-                message = .binary(.detach)
             case 12:
                 let size = try fields.decode(HerdrHello.SurfaceSize.self, forKey: .surfaceSize)
                 message = .binary(.shellResize(HerdrSurfaceGeometry(
