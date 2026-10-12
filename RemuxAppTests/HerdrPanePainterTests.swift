@@ -6,19 +6,47 @@ import XCTest
 final class HerdrPanePainterTests: XCTestCase {
     // MARK: - Recorded streams
 
-    /// Every pane of every recorded surface, and the rows each applied patch changed, paint to the bytes
-    /// of the reference painter (`Fixtures/HerdrWire`, `painted`). On 9 October the same row painting,
-    /// without links, written into a real Ghostty reproduced Herdr's grid as Herdr's own encoder does
-    /// (remux-docs `evidence/herdr-stage4-traces-20261009/frames/`, Question 2).
+    /// Every pane of every recorded surface and applied patch paints as the reference painter does
+    /// (`Fixtures/HerdrWire`, `painted`): whole on its first paint, then only the rows that changed since
+    /// the pane's last paint, byte for byte. The reference is a Python port by the same author; on
+    /// 9 October the same row painting, without links, written into Herdr's own libghostty-vt build,
+    /// reproduced Herdr's grid as Herdr's own encoder did (remux-docs
+    /// `evidence/herdr-stage4-traces-20261009/frames/`, Question 2).
     func testPaintsEveryRecordedPaneAsTheReferencePainter() throws {
-        var surfacePanes = 0
-        var patchPanes = 0
+        var full = 0
+        var partial = 0
+        var unchanged = 0
         for fixture in try HerdrWireTests.goldenFixtures() {
             guard let negotiated = fixture.golden.negotiated else { continue }
             var decoder = HerdrSurfaceDecoder(deltaNegotiated: negotiated.delta, scrollNegotiated: negotiated.scroll)
             var presentation = HerdrPresentation()
+            var lastPainted: [String: HerdrPanePainter.Painted] = [:]
             var splitter = HerdrFrameSplitter()
             splitter.append(fixture.serverStream)
+
+            func check(_ surface: HerdrPaneSurfaceFrame, against expected: [String: HerdrWireTests.GoldenPainted], _ context: String) {
+                XCTAssertEqual(Set(expected.keys), Set(surface.panes.map(\.paneID)), context)
+                for pane in surface.panes {
+                    let next = HerdrPanePainter.Painted(
+                        frame: surface.frame,
+                        area: pane.innerRect,
+                        cursor: HerdrPanePainter.paneCursor(of: surface)
+                    )
+                    let rows = lastPainted[pane.paneID].flatMap { HerdrPanePainter.changedRows(from: $0, to: next) }
+                    lastPainted[pane.paneID] = next
+                    let paneContext = "\(context) \(pane.paneID)"
+                    XCTAssertEqual(rows, expected[pane.paneID]?.rows, paneContext)
+                    if rows == [] {
+                        XCTAssertNil(expected[pane.paneID]?.digest, paneContext)
+                        unchanged += 1
+                        continue
+                    }
+                    let bytes = HerdrPanePainter.rows(rows ?? Array(0..<Int(pane.innerRect.height)), of: surface.frame, area: pane.innerRect)
+                    XCTAssertEqual(Self.digest(bytes), expected[pane.paneID]?.digest, paneContext)
+                    if rows == nil { full += 1 } else { partial += 1 }
+                }
+            }
+
             for entry in fixture.golden.server {
                 let context = "\(fixture.name) @\(entry.offset)"
                 let message = try HerdrServerMessage.decode(try XCTUnwrap(try splitter.nextPayload(), context))
@@ -30,39 +58,19 @@ final class HerdrPanePainterTests: XCTestCase {
                 switch try decoder.decode(surfaceMessage) {
                 case .surface(let surface):
                     try presentation.receive(surface)
-                    let expected = try XCTUnwrap(entry.painted, context)
-                    XCTAssertEqual(Set(expected.keys), Set(surface.panes.map(\.paneID)), context)
-                    for pane in surface.panes {
-                        let area = pane.innerRect
-                        let bytes = HerdrPanePainter.rows(0..<Int(area.height), of: surface.frame, area: area)
-                        XCTAssertNil(expected[pane.paneID]?.rows, context)
-                        XCTAssertEqual(Self.digest(bytes), expected[pane.paneID]?.digest, "\(context) \(pane.paneID)")
-                        surfacePanes += 1
-                    }
+                    check(surface, against: try XCTUnwrap(entry.painted, context), context)
                 case .patch(let patch):
                     guard presentation.receive(patch) == .applied else {
                         XCTAssertNil(entry.painted, context)
                         continue
                     }
-                    let current = try XCTUnwrap(presentation.surface, context)
-                    let expected = try XCTUnwrap(entry.painted, context)
-                    var painted = Set<String>()
-                    for listed in patch.panes {
-                        let pane = try XCTUnwrap(current.panes.first { $0.paneID == listed.paneID }, context)
-                        let rows = HerdrPanePainter.changedRows(patch, area: pane.innerRect)
-                        guard !rows.isEmpty else { continue }
-                        let bytes = HerdrPanePainter.rows(rows, of: current.frame, area: pane.innerRect)
-                        XCTAssertEqual(rows, expected[pane.paneID]?.rows, "\(context) \(pane.paneID)")
-                        XCTAssertEqual(Self.digest(bytes), expected[pane.paneID]?.digest, "\(context) \(pane.paneID)")
-                        painted.insert(pane.paneID)
-                        patchPanes += 1
-                    }
-                    XCTAssertEqual(painted, Set(expected.keys), context)
+                    check(try XCTUnwrap(presentation.surface, context), against: try XCTUnwrap(entry.painted, context), context)
                 }
             }
         }
-        XCTAssertEqual(surfacePanes, 60)
-        XCTAssertEqual(patchPanes, 55)
+        XCTAssertEqual(full, 22)
+        XCTAssertEqual(partial, 66)
+        XCTAssertEqual(unchanged, 55)
     }
 
     // MARK: - Cells
@@ -95,7 +103,9 @@ final class HerdrPanePainterTests: XCTestCase {
         XCTAssertEqual(sgr(fg: 0xFF00_0000, bg: 17, modifier: 8 | 7 << 12), "\u{1B}[0;4;39;49m")
     }
 
-    func testLinksAreWrappedPerCellWithoutControlCharacters() {
+    /// Control characters are dropped from a link and an empty result is no link, as in Herdr's
+    /// client; every cell of a link opens it with the same id (the reference's FNV-1a of the URI).
+    func testLinksCarryAnIDFromTheirURIWithoutControlCharacters() {
         var frame = Self.frame(width: 3, rows: [["a", "b", "c"]], hyperlinks: ["https://e.com/\u{1B}x\u{07}y\u{85}", "\u{1B}\u{07}"])
         frame.cells[0] = Self.cell("a", hyperlink: 0)
         frame.cells[1] = Self.cell("b", hyperlink: 1)
@@ -105,7 +115,7 @@ final class HerdrPanePainterTests: XCTestCase {
             Self.text(HerdrPanePainter.rows([0], of: frame, area: HerdrSurfaceRect(x: 0, y: 0, width: 3, height: 1))),
             "\u{1B}[1;3H\u{1B}[0;39;49mc"
                 + "\u{1B}[1;2H\u{1B}[0;39;49mb"
-                + "\u{1B}[1;1H\u{1B}[0;39;49m\u{1B}]8;;https://e.com/xy\u{1B}\\a\u{1B}]8;;\u{1B}\\"
+                + "\u{1B}[1;1H\u{1B}[0;39;49m\u{1B}]8;id=d718a06433e710f0;https://e.com/xy\u{1B}\\a\u{1B}]8;;\u{1B}\\"
                 + "\u{1B}[0m"
         )
     }
@@ -123,70 +133,81 @@ final class HerdrPanePainterTests: XCTestCase {
 
     // MARK: - Cursor
 
-    func testTheCursorIsShownOnlyInTheAreaThatHoldsIt() {
-        let cursor = HerdrCursor(x: 5, y: 2, visible: true, shape: 6)
+    /// The area holding the cursor places it, then shows or hides it, as Herdr's client writes it
+    /// (`render_ansi.rs:827-844`); another area just hides its own.
+    func testTheCursorIsPlacedOnlyInTheAreaThatHoldsIt() {
         let holding = HerdrSurfaceRect(x: 4, y: 1, width: 3, height: 2)
         let beside = HerdrSurfaceRect(x: 0, y: 1, width: 4, height: 2)
+        let shown = HerdrCursor(x: 5, y: 2, visible: true, shape: 6)
+        let hidden = HerdrCursor(x: 5, y: 2, visible: false, shape: 6)
 
-        XCTAssertEqual(HerdrPanePainter.cursor(cursor, in: holding), HerdrCursor(x: 1, y: 1, visible: true, shape: 6))
-        XCTAssertNil(HerdrPanePainter.cursor(cursor, in: beside))
-        XCTAssertNil(HerdrPanePainter.cursor(HerdrCursor(x: 5, y: 2, visible: false, shape: 6), in: holding))
+        XCTAssertEqual(HerdrPanePainter.cursor(shown, in: holding), HerdrCursor(x: 1, y: 1, visible: true, shape: 6))
+        XCTAssertNil(HerdrPanePainter.cursor(shown, in: beside))
         XCTAssertNil(HerdrPanePainter.cursor(nil, in: holding))
-        // Placed, shaped, then shown, as Herdr's client writes it (`render_ansi.rs:1469, 1532`).
-        XCTAssertEqual(Self.text(HerdrPanePainter.cursorBytes(HerdrCursor(x: 2, y: 1, visible: true, shape: 6))), "\u{1B}[2;3H\u{1B}[6 q\u{1B}[?25h")
+        XCTAssertEqual(Self.text(HerdrPanePainter.cursorBytes(HerdrPanePainter.cursor(shown, in: holding))), "\u{1B}[2;2H\u{1B}[6 q\u{1B}[?25h")
+        XCTAssertEqual(Self.text(HerdrPanePainter.cursorBytes(HerdrPanePainter.cursor(hidden, in: holding))), "\u{1B}[2;2H\u{1B}[?25l")
         XCTAssertEqual(Self.text(HerdrPanePainter.cursorBytes(nil)), "\u{1B}[?25l")
+    }
+
+    /// With a popup open the popup has the only cursor, as Herdr's client composes them
+    /// (`client/shell.rs:270-279`).
+    func testPanesShowNoCursorWhileAPopupIsOpen() throws {
+        let popup = #""popup":{"terminal_id":"t","title":"p","width":null,"height":null,"frame":{"cells":[],"width":0,"height":0,"cursor":{"x":0,"y":0,"visible":true,"shape":0},"hyperlinks":[],"graphics":[]},"mouse_reporting":false,"sgr_pixel_mouse":false,"pixel_width":0,"pixel_height":0}"#
+        var withPopup = try HerdrPresentationTests.surface(projection: 1, revision: 1, extra: popup)
+        var without = try HerdrPresentationTests.surface(projection: 1, revision: 1)
+        withPopup.frame.cursor = HerdrCursor(x: 1, y: 0, visible: true, shape: 0)
+        without.frame.cursor = HerdrCursor(x: 1, y: 0, visible: true, shape: 0)
+        XCTAssertNil(HerdrPanePainter.paneCursor(of: withPopup))
+        XCTAssertEqual(HerdrPanePainter.paneCursor(of: without), HerdrCursor(x: 1, y: 0, visible: true, shape: 0))
     }
 
     // MARK: - Repaint and update
 
     func testARepaintSetsTheModesPaintsEveryRowAndEndsWithTheCursor() {
-        var frame = Self.frame(width: 4, rows: [["a", "b", "c", "d"], ["e", "f", "g", "h"]])
-        frame.cursor = HerdrCursor(x: 2, y: 1, visible: true, shape: 2)
+        let frame = Self.frame(width: 4, rows: [["a", "b", "c", "d"], ["e", "f", "g", "h"]])
         let area = HerdrSurfaceRect(x: 2, y: 0, width: 2, height: 2)
+        let painted = HerdrPanePainter.Painted(frame: frame, area: area, cursor: HerdrCursor(x: 2, y: 1, visible: true, shape: 2))
 
         XCTAssertEqual(
-            Self.text(HerdrPanePainter.repaint(frame, area: area)),
+            Self.text(HerdrPanePainter.repaint(painted)),
             "\u{1B}[?2027h\u{1B}[?7l"
                 + Self.text(HerdrPanePainter.rows([0, 1], of: frame, area: area))
                 + "\u{1B}[2;1H\u{1B}[2 q\u{1B}[?25h"
         )
     }
 
-    func testAnUpdatePaintsTheChangedRowsAndOnlyCursorChangesElsewhere() throws {
-        var frame = Self.frame(width: 5, rows: [["a", "b", "|", "c", "d"], ["e", "f", "|", "g", "h"]])
-        let left = HerdrSurfaceRect(x: 0, y: 0, width: 2, height: 2)
-        let right = HerdrSurfaceRect(x: 3, y: 0, width: 2, height: 2)
-        let previous = HerdrCursor(x: 1, y: 0, visible: true, shape: 0)
-        frame.cursor = previous
-        let patch = try Self.patch(rows: [HerdrPatchRow(x: 0, y: 1, cells: [Self.cell("x")])], cursor: previous)
+    /// An update paints the rows that look different, then the cursor; only the cursor when that alone
+    /// moved; nothing when nothing changed.
+    func testAnUpdatePaintsOnlyWhatChanged() {
+        let area = HerdrSurfaceRect(x: 0, y: 0, width: 2, height: 2)
+        let cursor = HerdrCursor(x: 1, y: 0, visible: true, shape: 0)
+        let before = HerdrPanePainter.Painted(frame: Self.frame(width: 2, rows: [["a", "b"], ["c", "d"]]), area: area, cursor: cursor)
+        let typed = HerdrPanePainter.Painted(frame: Self.frame(width: 2, rows: [["a", "b"], ["c", "x"]]), area: area, cursor: cursor)
+        let moved = HerdrPanePainter.Painted(frame: before.frame, area: area, cursor: HerdrCursor(x: 0, y: 1, visible: true, shape: 0))
 
-        XCTAssertEqual(HerdrPanePainter.changedRows(patch, area: left), [1])
-        XCTAssertEqual(HerdrPanePainter.changedRows(patch, area: right), [])
+        XCTAssertEqual(HerdrPanePainter.changedRows(from: before, to: typed), [1])
         XCTAssertEqual(
-            HerdrPanePainter.update(after: patch, previousCursor: previous, frame: frame, area: left),
-            HerdrPanePainter.rows([1], of: frame, area: left) + HerdrPanePainter.cursorBytes(HerdrCursor(x: 1, y: 0, visible: true, shape: 0))
+            HerdrPanePainter.update(from: before, to: typed),
+            HerdrPanePainter.rows([1], of: typed.frame, area: area) + HerdrPanePainter.cursorBytes(HerdrCursor(x: 1, y: 0, visible: true, shape: 0))
         )
-        XCTAssertEqual(HerdrPanePainter.update(after: patch, previousCursor: previous, frame: frame, area: right), [])
-
-        // The cursor moves to the right area with no change to its rows: the left area hides its cursor,
-        // the right one shows it.
-        frame.cursor = HerdrCursor(x: 4, y: 1, visible: true, shape: 0)
-        let moved = try Self.patch(rows: [], cursor: frame.cursor)
-        XCTAssertEqual(Self.text(HerdrPanePainter.update(after: moved, previousCursor: previous, frame: frame, area: left)), "\u{1B}[?25l")
-        XCTAssertEqual(Self.text(HerdrPanePainter.update(after: moved, previousCursor: previous, frame: frame, area: right)), "\u{1B}[2;2H\u{1B}[0 q\u{1B}[?25h")
+        XCTAssertEqual(Self.text(HerdrPanePainter.update(from: before, to: moved)), "\u{1B}[2;1H\u{1B}[0 q\u{1B}[?25h")
+        XCTAssertEqual(HerdrPanePainter.update(from: before, to: before), [])
     }
 
-    func testASpanBesideTheAreaChangesNoRow() throws {
-        let area = HerdrSurfaceRect(x: 2, y: 1, width: 2, height: 2)
-        let rows = [
-            HerdrPatchRow(x: 0, y: 1, cells: [Self.cell("a"), Self.cell("b")]),
-            HerdrPatchRow(x: 4, y: 2, cells: [Self.cell("c")]),
-            HerdrPatchRow(x: 2, y: 0, cells: [Self.cell("d")]),
-            HerdrPatchRow(x: 2, y: 3, cells: [Self.cell("e")]),
-        ]
-        XCTAssertEqual(HerdrPanePainter.changedRows(try Self.patch(rows: rows, cursor: nil), area: area), [])
-        let touching = [HerdrPatchRow(x: 1, y: 2, cells: [Self.cell("a"), Self.cell("b")]), HerdrPatchRow(x: 3, y: 1, cells: [Self.cell("c")])]
-        XCTAssertEqual(HerdrPanePainter.changedRows(try Self.patch(rows: touching, cursor: nil), area: area), [0, 1])
+    /// Rows are compared as Herdr's client compares cells: a different link counts, `skip` doesn't; and
+    /// the areas are compared at their own origins.
+    func testRowsAreComparedAsHerdrComparesCells() {
+        let area = HerdrSurfaceRect(x: 0, y: 0, width: 1, height: 1)
+        let plain = HerdrPanePainter.Painted(frame: Self.frame(width: 1, rows: [["a"]], hyperlinks: ["https://a"]), area: area, cursor: nil)
+        var linked = plain.frame
+        linked.cells[0] = Self.cell("a", hyperlink: 0)
+        var skipped = plain.frame
+        skipped.cells[0] = HerdrCell(symbol: "a", fg: HerdrColor(raw: 0), bg: HerdrColor(raw: 0), modifier: 0, skip: true, hyperlink: nil)
+        let moved = HerdrPanePainter.Painted(frame: Self.frame(width: 2, rows: [["z", "a"]]), area: HerdrSurfaceRect(x: 1, y: 0, width: 1, height: 1), cursor: nil)
+
+        XCTAssertEqual(HerdrPanePainter.changedRows(from: plain, to: HerdrPanePainter.Painted(frame: linked, area: area, cursor: nil)), [0])
+        XCTAssertEqual(HerdrPanePainter.changedRows(from: plain, to: HerdrPanePainter.Painted(frame: skipped, area: area, cursor: nil)), [])
+        XCTAssertEqual(HerdrPanePainter.changedRows(from: plain, to: moved), [])
     }
 }
 
@@ -214,16 +235,5 @@ extension HerdrPanePainterTests {
             hyperlinks: hyperlinks,
             graphics: []
         )
-    }
-
-    static func patch(rows: [HerdrPatchRow], cursor: HerdrCursor?) throws -> HerdrPaneSurfacePatch {
-        let cursorJSON = cursor.map { #"{"x":\#($0.x),"y":\#($0.y),"visible":\#($0.visible),"shape":\#($0.shape)}"# } ?? "null"
-        let json = """
-        {"boot_id":"boot","projection_revision":1,"base_surface_revision":1,
-         "surface_revision":2,"rows":[],"panes":[],"cursor":\(cursorJSON)}
-        """
-        var patch = try JSONDecoder().decode(HerdrPaneSurfacePatch.self, from: Data(json.utf8))
-        patch.rows = rows
-        return patch
     }
 }

@@ -345,11 +345,13 @@ extension HerdrWireTests {
         let rows: String?
     }
 
-    /// One pane painted by the reference painter: which pane rows (all for a full surface) and the
-    /// SHA-256 of the bytes.
+    /// One pane painted by the reference painter against what was last painted for it: which pane rows
+    /// and the SHA-256 of the bytes.
     struct GoldenPainted: Decodable {
+        /// nil: every row (a first paint, or a new size); empty: nothing changed.
         let rows: [Int]?
-        let digest: String
+        /// nil when nothing is painted.
+        let digest: String?
     }
 
     enum GoldenScalar: Decodable, Equatable {
