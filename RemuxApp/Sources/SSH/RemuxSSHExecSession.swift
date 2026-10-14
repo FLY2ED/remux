@@ -294,9 +294,9 @@ enum RemuxSSHExecSession {
         onFinish: @escaping @Sendable (Int?, Error?) -> Void
     ) async throws -> RemuxSSHExecConnection {
         do {
-            // With reads on demand, channel requests, replies and the exit status still arrive at
-            // once (NIOSSH `SSHChildChannel.swift:860-881`); data, stderr and EOF are queued
-            // (`:804-818, 843-859`) and delivered only for a read (`:627-695`).
+            // With reads on demand, NIOSSH still delivers channel requests, their replies and the exit
+            // status at once; data, stderr and EOF are queued in arrival order and delivered only for a
+            // read.
             let sessionChannel = try await claimedRoot.sshRoot.openSessionChannel(
                 trace: trace,
                 readsOnDemand: readsOnDemand

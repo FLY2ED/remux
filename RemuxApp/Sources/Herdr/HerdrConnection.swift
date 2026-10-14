@@ -70,8 +70,7 @@ enum HerdrCommandError: Error, Equatable, LocalizedError {
     case unsupported(method: String)
     case noSnapshot
     /// No reply in time. As in Herdr's client, the lane frees and the late reply is dropped when it
-    /// comes (`client/endpoint_commands.rs:171-218`); until the server finishes, another command may
-    /// get `endpoint_busy`.
+    /// comes; until the server finishes, another command may get `endpoint_busy`.
     case timedOut(method: String)
     /// `client_shell.surface.set` answered with the other state.
     case notAcknowledged
@@ -96,10 +95,10 @@ enum HerdrCommandError: Error, Equatable, LocalizedError {
     }
 }
 
-/// Input Remux doesn't send. Over either of Herdr's per-message limits (`server/client_transport.rs:47-48,
-/// 118, 572-637`), Herdr refuses a pure paste or closes the connection (`:1196-1282`).
+/// Input Remux doesn't send. Over either of Herdr's per-message limits, Herdr refuses a pure paste or
+/// closes the connection.
 enum HerdrInputError: Error, Equatable, LocalizedError {
-    /// Herdr drops input from a client that isn't showing the session (`server/headless.rs:2317-2324`).
+    /// Herdr drops input from a client that isn't showing the session.
     case inactive
     case connectionEnded
     case tooManyEvents(Int)
@@ -129,21 +128,20 @@ enum HerdrInputError: Error, Equatable, LocalizedError {
 actor HerdrConnection {
     struct Timing: Sendable {
         /// Remux's SSH channel is open before this starts. Herdr allows 60 s because its window also
-        /// covers the SSH connect (`client/handshake.rs:25-33`); what remains here is bounded by the
-        /// bridge, which gives up after 5 s if the server won't start (`remote/host.rs:61-62`) and reads
-        /// a running server's status within 0.5 s (`:43-46`).
+        /// covers the SSH connect; what remains here is bounded by the bridge, which gives up after 5 s
+        /// if the server won't start and reads a running server's status within 0.5 s.
         var welcome: Duration = .seconds(10)
-        /// Herdr's health rule (`client/endpoint/health.rs:3-4, 39-54`): a ping after this long with
-        /// nothing received, and the connection fails when nothing arrives this long after it, or when
-        /// no snapshot has come this long after connecting.
+        /// Herdr's health rule: a ping after this long with nothing received, and the connection fails
+        /// when nothing arrives this long after it, or when no snapshot has come this long after
+        /// connecting.
         var pingAfterSilence: Duration = .seconds(5)
         var unansweredPing: Duration = .seconds(10)
         var firstSnapshot: Duration = .seconds(10)
         /// How often health is checked; adds at most this much to the rules above.
         var healthTick: Duration = .seconds(1)
-        /// Herdr's command timeout (`client/endpoint_commands.rs:12`).
+        /// Herdr's command timeout.
         var command: Duration = .seconds(60)
-        /// Herdr's activation timeout (`client/endpoint/activation.rs:14`), for `surface.set`.
+        /// Herdr's activation timeout, for `surface.set`.
         var activation: Duration = .seconds(5)
     }
 
@@ -275,7 +273,7 @@ actor HerdrConnection {
             if let payload = try splitter.nextPayload() {
                 let message = try HerdrServerMessage.decode(payload)
                 // A server older than the endpoint protocol answers with the binary welcome; Herdr's
-                // client says to update it (`client/handshake.rs:246-253`).
+                // client says to update it.
                 if case .unused(tag: 0) = message {
                     throw HerdrConnectionError.incompatible("its Herdr needs an update")
                 }
@@ -292,10 +290,9 @@ actor HerdrConnection {
         }
     }
 
-    /// Herdr's client checks the same fields (`client/handshake.rs:245-291`), then refuses a remote
-    /// server without surface activation or health checks (`client/endpoint/supervisor.rs:319-326`).
-    /// Herdr also requires the presentation fence there; Remux doesn't use it (plan §8.1,
-    /// Presentation effects), so it isn't required.
+    /// Herdr's client checks the same fields, then refuses a remote server without surface activation
+    /// or health checks. Herdr's surface activation also requires the presentation fence; Remux doesn't
+    /// use the fence, so it doesn't require it.
     private static func validate(_ welcome: HerdrWelcome) throws {
         if let error = welcome.error {
             throw HerdrConnectionError.rejected(code: error.code, message: error.message)
@@ -373,7 +370,7 @@ actor HerdrConnection {
     }
 
     /// While the session is hidden, bells, clipboard writes and input refusals are dropped, as in
-    /// Herdr's client (`client/endpoint/message_policy.rs:19-45`); surfaces still go to the decoder.
+    /// Herdr's client; surfaces still go to the decoder.
     private func route(_ message: HerdrServerMessage) async throws {
         switch message {
         case .control(let kind, let data):
@@ -411,7 +408,7 @@ actor HerdrConnection {
             throw HerdrConnectionError.serverShutdown(reason: reason)
         case .mouseCapture, .keyboardReportAll, .windowTitle, .reloadSoundConfig, .notify, .unused:
             // Remux reads mouse state from each pane's surface flags, encodes no keys itself, shows no
-            // outer title and plays no terminal sounds (plan §8.1, Presentation effects).
+            // outer title and plays no terminal sounds.
             break
         }
     }
@@ -441,11 +438,9 @@ actor HerdrConnection {
     // MARK: - Showing and hiding
 
     /// Shows the session as Herdr's own client does: the tab takes this size (at least one cell each
-    /// way, `client/shell/state.rs:1206-1212`), the surface activates, then the phone takes focus
-    /// (`client/endpoint/activation/protocol.rs:116-141`). Returns the projection floor from
+    /// way), the surface activates, then the phone takes focus. Returns the projection floor from
     /// `surface.set`; the next full surface is at least that revision. If Herdr doesn't acknowledge it
-    /// within the activation timeout, the show is rolled back as Herdr's client rolls it back
-    /// (`client/endpoint/activation.rs:16-35`).
+    /// within the activation timeout, the show is rolled back as Herdr's client rolls it back.
     func show(_ geometry: HerdrSurfaceGeometry) async throws -> UInt64 {
         let size = HerdrSurfaceGeometry(
             cellWidthPx: geometry.cellWidthPx,
@@ -504,7 +499,7 @@ actor HerdrConnection {
         return (id, message)
     }
 
-    /// The reply must confirm the requested state (`client/endpoint/activation/protocol.rs:150-161`).
+    /// As in Herdr's client, the reply must confirm the requested state.
     private static func acknowledgedRevision(from data: Data, active: Bool) throws -> UInt64 {
         struct Reply: Decodable {
             struct Result: Decodable {
@@ -541,7 +536,7 @@ actor HerdrConnection {
     }
 
     /// Herdr stores the update and applies it when this client is in front, so it is sent even while
-    /// hidden (`server/headless.rs:784-810, 2212-2224`).
+    /// hidden.
     func reportHostTheme(_ update: HerdrHostThemeUpdate) {
         enqueue(.hostTheme(update))
     }
@@ -552,9 +547,8 @@ actor HerdrConnection {
         try Self.checkLimits(events)
     }
 
-    /// Herdr's counting (`server/client_transport.rs:572-637`): a key counts its repeats, a vertical
-    /// wheel event its lines, anything else one; paste text, typed text and key text count toward the
-    /// byte limit.
+    /// Herdr's counting: a key counts its repeats, a vertical wheel event its lines, anything else one;
+    /// paste text, typed text and key text count toward the byte limit.
     static func checkLimits(_ events: [HerdrInputEvent]) throws {
         var expanded = 0
         var bytes = 0
@@ -626,7 +620,7 @@ actor HerdrConnection {
     }
 
     /// Herdr's client retires a request that didn't answer in time: the caller fails, the lane frees,
-    /// and the late reply is dropped (`client/endpoint_commands.rs:171-218`).
+    /// and the late reply is dropped.
     private func expire(_ id: String, method: String) {
         guard var request = pending[id] else { return }
         request.continuation?.resume(throwing: HerdrCommandError.timedOut(method: method))
@@ -715,8 +709,8 @@ actor HerdrConnection {
     /// While the app is open, Herdr's health rule runs (`Timing`). Two differences, each with a Remux
     /// reason: any bytes count, not only whole messages, because a picture can be a 32 MiB message
     /// still arriving over cellular; and time the screen spends taking messages doesn't count, since
-    /// nothing is read then. In the background nothing is sent: pings from a suspended phone would
-    /// keep a bridge that isn't reading alive (plan §8.1, Suspended phone).
+    /// nothing is read then. In the background nothing is sent: pings from a suspended phone would keep
+    /// a bridge that isn't reading alive.
     func setAppActive(_ active: Bool) {
         guard active != appActive else { return }
         appActive = active
@@ -780,9 +774,8 @@ actor HerdrConnection {
     // MARK: - Ending
 
     /// Ends the connection; no `ended` event follows. Nothing is written first: Herdr removes an
-    /// endpoint client whose stream ends just as one that sends `Detach` (`server/headless.rs:2570-2579`,
-    /// `server/client_transport.rs:1019-1023`), and the bridge passes the end of its input on
-    /// (`platform/unix_common.rs:170-176`).
+    /// endpoint client whose stream ends just as one that sends `Detach`, and the bridge passes the end
+    /// of its input on.
     func close() async {
         guard !ended else { return }
         finish()

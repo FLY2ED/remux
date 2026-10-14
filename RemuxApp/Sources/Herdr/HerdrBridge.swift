@@ -71,10 +71,10 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
         return bridge
     }
 
-    /// Runs the bridge for `session`, with `--idle-timeout-v1` when `herdr status client --json` reports
-    /// `remote_bridge_idle_timeout: true` (Linux and macOS hosts; plan §8.1, Suspended phone), as
-    /// Herdr's own client does for its background bridges (`remote/attach.rs:1367-1376, 2742-2752`). No
-    /// locale is forced, since the bridge may start the server, whose panes inherit the environment.
+    /// Runs the bridge for `session`, with `--idle-timeout-v1` when `herdr status client --json`
+    /// reports `remote_bridge_idle_timeout: true` (Linux and macOS hosts), as Herdr's own client does
+    /// for its background bridges. No locale is forced, since the bridge may start the server, whose
+    /// panes inherit the environment.
     static func command(herdrExecutable: String, session: String) -> String {
         HerdrRemoteCommand.command(herdrExecutable: herdrExecutable, arguments: [session], body: [
             #"session=$(printf %b "$2")"#,
@@ -150,8 +150,7 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
 
     /// A delivery can hold only stderr or startup output, which the connection never sees; then the
     /// waiting read is still owed data, so another read is requested. NIOSSH allows that from here: it
-    /// delivers the rest of the batch in order or reads from the connection (`SSHChildChannel.swift:316-334,
-    /// 670-675`).
+    /// delivers the rest of the batch in order or reads from the connection.
     private func receive(_ type: SSHChannelData.DataType, _ data: Data) {
         let (waiter, bytes, rearm) = lock.withLock { () -> (CheckedContinuation<[UInt8]?, Error>?, [UInt8], RemuxSSHExecConnection?) in
             guard type == .channel else {
