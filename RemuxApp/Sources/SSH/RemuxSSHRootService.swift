@@ -1164,6 +1164,11 @@ enum RemuxSSHAlgorithmRegistration {
 }
 
 private enum RemuxSSHRootBootstrap {
+    /// OpenSSH's channel packet size. swift-nio-ssh sizes each channel's receive window at 64
+    /// packets, so this gives every channel the 2 MiB window OpenSSH (and so Herdr's own client)
+    /// uses, which also bounds what a channel that stops reading can queue on the phone.
+    static let channelMaximumPacketSize = 32768
+
     static func authenticate(
         using configuration: RemuxSSHRootConfiguration,
         trace: RemuxTransportStartupTrace
@@ -1186,10 +1191,11 @@ private enum RemuxSSHRootBootstrap {
                         return channel.eventLoop.makeFailedFuture(error)
                     }
 
-                    let sshConfiguration = SSHClientConfiguration(
+                    var sshConfiguration = SSHClientConfiguration(
                         userAuthDelegate: authenticationMethod,
                         serverAuthDelegate: configuration.hostKeyValidator
                     )
+                    sshConfiguration.maximumPacketSize = channelMaximumPacketSize
                     let sshHandler = NIOSSHHandler(
                         role: .client(sshConfiguration),
                         allocator: channel.allocator,
