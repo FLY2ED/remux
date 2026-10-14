@@ -87,7 +87,6 @@ final class TerminalPaneRenderer {
         lifecycle == .active && rendererIsAvailable && hasPublishedFrame && presentationFailure == nil
     }
 
-    /// The live control surface while the pane accepts input.
     var inputControlSurface: GhosttyKitControlSurface? {
         acceptsInput ? renderer?.control : nil
     }
@@ -361,8 +360,9 @@ final class TerminalPaneRenderer {
         renderer = NativeRenderer(handle: surface, control: control, callbackBox: callbackBox)
         previewRelay.renderer = self
         view.onWindowAttachmentChange = { [weak self] in
-            // UIKit can attach during a SwiftUI update. Publish after that
-            // transaction while deriving attachment from the current view.
+            // didMoveToWindow can run inside a SwiftUI view update, where
+            // publishing observable state is not allowed. Apply on the next
+            // main-queue turn and read attachment from the view then.
             DispatchQueue.main.async { [weak self] in self?.applyPresentationActivity() }
         }
         observeFirstFrame()
