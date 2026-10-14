@@ -98,6 +98,26 @@ final class RemuxAppUITests: XCTestCase {
         _ = waitForTerminalHomeButton()
     }
 
+    /// iOS offers to save a typed password when the form holding it closes.
+    /// Remux keeps server passwords in its own Keychain, so the server form
+    /// closes without that offer.
+    func testServerFormClosesWithoutPasswordSaveOffer() {
+        launchSimulatorApp()
+        openConnectionSetup()
+        fillConnectionForm()
+        app.buttons["connection.cancel"].tap()
+        XCTAssertTrue(app.buttons["library.empty.add-server"].waitForExistence(timeout: 5))
+        assertNoPasswordSaveOffer(after: "Cancel")
+
+        openConnectionSetup()
+        fillConnectionForm()
+        app.buttons["connection.save"].tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["library.server.detail"].waitForExistence(timeout: 5)
+        )
+        assertNoPasswordSaveOffer(after: "Save")
+    }
+
     func testToolbarKeysUpdateRetainedSimulatorTerminalAndFirstSlotOpensShortcuts() {
         launchSeededSimulatorTerminal()
 
@@ -381,10 +401,6 @@ final class RemuxAppUITests: XCTestCase {
         let terminal = app.otherElements["terminal.screen"]
         XCTAssertTrue(terminal.waitForExistence(timeout: 5))
 
-        // The optional password-manager prompt probe may need to tap the app
-        // after the terminal appears. Normalize the hidden-keyboard phase so
-        // this test measures composer behavior rather than that probe's tap.
-        hideKeyboardIfPresent()
         XCTAssertNotNil(waitForKeyboardPresence(false, label: "terminal keyboard hidden before composer toggle"))
 
         guard let hiddenContinuity = waitForKeyboardContinuity(owner: "none") else {
@@ -1147,7 +1163,6 @@ final class RemuxAppUITests: XCTestCase {
         fillConnectionForm()
 
         app.buttons["connection.save"].tap()
-        dismissPasswordManagerPromptIfPresent()
 
         XCTAssertTrue(
             app.descendants(matching: .any)["library.server.detail"].waitForExistence(timeout: 5),
@@ -1161,8 +1176,6 @@ final class RemuxAppUITests: XCTestCase {
     }
 
     func testEditServerChecksSessionsAgain() {
-        // A seeded server skips the Add Server form, whose password iOS
-        // offers to save some seconds later, over the taps below.
         app.launchEnvironment.merge(
             [
                 "REMUX_UI_TESTING": "1",
@@ -3987,7 +4000,6 @@ final class RemuxAppUITests: XCTestCase {
     private func saveConnectionAndWaitForTerminal() {
         app.buttons["connection.save"].tap()
         XCTAssertTrue(app.otherElements["terminal.screen"].waitForExistence(timeout: 10))
-        dismissPasswordManagerPromptIfPresent()
     }
 
     private func saveServerAndStartSession() {
@@ -3995,7 +4007,6 @@ final class RemuxAppUITests: XCTestCase {
 
         let serverDetail = app.descendants(matching: .any)["library.server.detail"]
         XCTAssertTrue(serverDetail.waitForExistence(timeout: 5))
-        declinePasswordManagerPromptAfterAddingServer()
         let newSessionButton = app.buttons["library.server.new-session.empty"]
         XCTAssertTrue(newSessionButton.waitForExistence(timeout: 2))
         newSessionButton.tap()
@@ -4007,15 +4018,14 @@ final class RemuxAppUITests: XCTestCase {
         saveConnectionAndWaitForTerminal()
     }
 
-    /// After the Add Server form closes, iOS offers to save its password. The
-    /// offer appears a few seconds later, on top of whatever the test is doing
-    /// by then, and takes the taps and keystrokes meant for the app. So wait
-    /// for it and decline it before going on.
-    private func declinePasswordManagerPromptAfterAddingServer() {
-        let notNow = app.buttons["Not Now"]
-        if notNow.waitForExistence(timeout: 10) {
-            declinePasswordManagerPrompt(notNow)
-        }
+    /// iOS shows its Save Password offer a second or more after the form
+    /// closes, and several seconds later on a freshly booted simulator, so
+    /// watch for it for a while.
+    private func assertNoPasswordSaveOffer(after action: String) {
+        XCTAssertFalse(
+            app.buttons["Not Now"].waitForExistence(timeout: 10),
+            "iOS offered to save the server password after \(action)."
+        )
     }
 
     private func openHomeFromTerminal() {
@@ -4162,37 +4172,6 @@ final class RemuxAppUITests: XCTestCase {
         } else {
             serverButton.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         }
-    }
-
-    private func dismissPasswordManagerPromptIfPresent() {
-        let appNotNowButton = app.buttons["Not Now"]
-        if appNotNowButton.waitForExistence(timeout: 1) {
-            declinePasswordManagerPrompt(appNotNowButton)
-            return
-        }
-
-        app.tap()
-        if appNotNowButton.waitForExistence(timeout: 1) {
-            declinePasswordManagerPrompt(appNotNowButton)
-            return
-        }
-
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.32, dy: 0.63)).tap()
-    }
-
-    /// The Save Password prompt ignores taps for a moment after it appears,
-    /// even once it looks settled, and then stays up and covers the app. So
-    /// tap Not Now again until the prompt goes away.
-    private func declinePasswordManagerPrompt(_ notNow: XCUIElement) {
-        for _ in 0..<5 {
-            if notNow.isHittable {
-                notNow.tap()
-            }
-            if waitForElementToDisappear(notNow, timeout: 2) {
-                return
-            }
-        }
-        XCTFail("The Save Password prompt stayed up.")
     }
 
     private func installSystemPromptMonitor() {
@@ -4679,10 +4658,8 @@ final class RemuxAppUITests: XCTestCase {
 
         app.buttons["connection.cancel"].tap()
         XCTAssertTrue(app.buttons["library.add-server"].waitForExistence(timeout: 3))
-        // The cancelled connection-setup form may have left the keyboard up
-        // and/or surfaced a password-manager prompt that overlays the list.
+        // The cancelled connection-setup form may have left the keyboard up.
         sleep(1)
-        dismissPasswordManagerPromptIfPresent()
         if app.keyboards.firstMatch.exists {
             app.tap()
         }
