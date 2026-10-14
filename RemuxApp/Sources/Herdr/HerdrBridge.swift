@@ -29,7 +29,7 @@ enum HerdrBridgeError: Error, Equatable, LocalizedError {
 /// The channel has no pty, so stderr stays out of the protocol stream, and stdout up to Herdr's ready
 /// marker (`HerdrRemoteCommand`) is skipped, so text from the server's startup files never reaches the
 /// protocol. Reads are on demand: the SSH window refills only as the connection reads, so a phone that
-/// stops reading holds the server back once the current window (128 KiB) is used, and
+/// stops reading holds the server back once the current window (2 MiB, as with OpenSSH) is used, and
 /// `--idle-timeout-v1` (where the host supports it) bounds how long the server keeps it.
 final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
     /// The tail is kept: the markers and the bridge's own error come last, after any startup noise.
@@ -150,8 +150,8 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
 
     /// A delivery can hold only stderr or startup output, which the connection never sees; then the
     /// waiting read is still owed data, so another read is requested. NIOSSH allows that from here: it
-    /// delivers the rest of the batch in order or reads from the connection (`SSHChildChannel.swift:299-317,
-    /// 642-647`).
+    /// delivers the rest of the batch in order or reads from the connection (`SSHChildChannel.swift:316-334,
+    /// 670-675`).
     private func receive(_ type: SSHChannelData.DataType, _ data: Data) {
         let (waiter, bytes, rearm) = lock.withLock { () -> (CheckedContinuation<[UInt8]?, Error>?, [UInt8], RemuxSSHExecConnection?) in
             guard type == .channel else {

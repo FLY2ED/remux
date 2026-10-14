@@ -99,15 +99,13 @@ final class HerdrBridgeTests: XCTestCase {
         await bridge.close(reusable: true)
     }
 
-    /// More than one SSH window (128 KiB) arrives over several reads. The server writes 32 KiB at a
-    /// time, as sshd does: from the in-process server a single write larger than the window never
-    /// arrives, even on an ordinary channel (observed, not investigated).
+    /// More than one SSH window (2 MiB) arrives over several reads, from a single server write that the
+    /// server splits into packets and sends as the window refills.
     func testMoreThanOneWindowArrivesOverReads() async throws {
-        let payload = Data((0..<300_000).map { UInt8(truncatingIfNeeded: $0) })
-        let stream = Self.readyLine + payload
-        let bridge = try await openBridge(steps: stride(from: 0, to: stream.count, by: 32 * 1024).map {
-            SSHPublicKeyLiveExecStep(type: .channel, data: stream.subdata(in: $0..<min($0 + 32 * 1024, stream.count)))
-        })
+        let payload = Data((0..<3_000_000).map { UInt8(truncatingIfNeeded: $0) })
+        let bridge = try await openBridge(steps: [
+            SSHPublicKeyLiveExecStep(type: .channel, data: Self.readyLine + payload),
+        ])
         let bytes = try await Self.read(from: bridge, count: payload.count)
         XCTAssertEqual(Data(bytes), payload)
         await bridge.close(reusable: true)
