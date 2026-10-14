@@ -355,6 +355,48 @@ final class SSHPublicKeyInstallerTests: XCTestCase {
         XCTAssertEqual(Set(roots.closed), Set(roots.opened))
     }
 
+    func testRegisteredLegacyRSAHostKeyNegotiatesAndVerifiesAgainstTrustedLine() async throws {
+        RemuxSSHAlgorithmRegistration.ensureRegistered()
+        let generatedKey = SSHPrivateKeyInspector.generateEd25519(comment: "rsa-host-key-test")
+        let serverID = UUID()
+        let hostKey = try Insecure.RSA.PrivateKey(sshRsa: SSHPrivateKeyInspectorTests.rsaKey)
+        let server = try await SSHPublicKeyLiveTestServer.start(
+            username: "remux",
+            hostKey: NIOSSHPrivateKey(custom: hostKey)
+        )
+        defer { server.stop() }
+        XCTAssertEqual(server.hostKeyType, "ssh-rsa")
+        let trustedHostRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SSHPublicKeyInstallerRSAHostKeyTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: trustedHostRoot) }
+        let trustedHostStore = TrustedHostStore(rootURL: trustedHostRoot)
+        try trustedHostStore.trustHostKey(
+            SSHHostKeyTrustChallenge(
+                kind: .unknown,
+                serverID: serverID,
+                host: "127.0.0.1",
+                trustedKeyType: nil,
+                trustedOpenSSHPublicKey: nil,
+                receivedKeyType: server.hostKeyType,
+                receivedOpenSSHPublicKey: server.openSSHPublicKey
+            )
+        )
+        let target = SSHPublicKeyInstallTarget(
+            serverID: serverID,
+            host: "127.0.0.1",
+            port: server.port,
+            username: "remux",
+            privateKey: SSHPrivateKeyCredential(privateKeyPEM: generatedKey.privateKeyPEM),
+            publicKeyLine: generatedKey.publicKeyLine
+        )
+        let installer = try SSHPublicKeyInstaller(trustedHostStore: trustedHostStore)
+
+        let outcome = try await installer.preflight(target)
+
+        XCTAssertEqual(outcome, .alreadyInstalled)
+        XCTAssertEqual(server.recordedRoots.execRequestCount, 1)
+    }
+
     func testCancellationDuringLiveAuthenticationClosesRootWithoutExecutingAppend() async throws {
         let generatedKey = SSHPrivateKeyInspector.generateEd25519(
             comment: "cancelled-live-installer-test"
@@ -599,11 +641,11 @@ final class SSHPublicKeyLiveTestServer: @unchecked Sendable {
         username: String,
         suspendAuthentication: Bool = false,
         execOutput: Data? = nil,
-        execSteps: [SSHPublicKeyLiveExecStep] = []
+        execSteps: [SSHPublicKeyLiveExecStep] = [],
+        hostKey: NIOSSHPrivateKey = NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey())
     ) async throws -> SSHPublicKeyLiveTestServer {
         let steps = execOutput.map { [SSHPublicKeyLiveExecStep(type: .channel, data: $0)] } ?? execSteps
         let connections = SSHPublicKeyLiveConnections()
-        let hostKey = NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey())
         let authenticationDelegate = SSHPublicKeyLiveAuthenticationDelegate(
             username: username,
             suspendAuthentication: suspendAuthentication
