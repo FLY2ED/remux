@@ -191,8 +191,9 @@ private extension GhosttyComposerDictationAuthorizationClient.Result {
     }
 }
 
-/// Owns Speech and AVAudioEngine on one serial queue. The UI controller never
-/// waits for teardown and never touches audio objects directly.
+/// Runs SFSpeech recognition on one serial queue, fed by a
+/// GhosttyComposerAudioCaptureSession. The UI controller never waits for
+/// teardown and never touches audio objects directly.
 final class GhosttyLegacyComposerDictationBackend: GhosttyComposerDictationBackendProtocol,
     @unchecked Sendable
 {

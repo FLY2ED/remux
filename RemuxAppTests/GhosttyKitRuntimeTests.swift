@@ -322,10 +322,9 @@ final class GhosttyKitRuntimeTests: XCTestCase {
         }
         defer { observation.invalidate() }
         try perform()
-        // On a cold simulator shader cache, a process's first frame includes
-        // Metal pipeline compilation (and may queue behind the pipeline warmup
-        // started by ghostty_app_new), which exceeded 2 s with both the
-        // current and the upstream-synced GhosttyKit.
+        // On a cold simulator shader cache the first frame includes Metal
+        // pipeline compilation, which can queue behind the renderer warmup
+        // `ghostty_app_new` starts and take over 2 s.
         await fulfillment(of: [publication], timeout: 10)
     }
 

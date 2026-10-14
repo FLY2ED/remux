@@ -35,10 +35,8 @@ enum TerminalTheme: String, CaseIterable, Codable, Identifiable, Sendable {
             []
         case .remuxDark:
             [
-                // Catppuccin Mocha is the dark member of the popular
-                // Catppuccin family. Keep the full palette inline so iOS
-                // config updates don't depend on theme resource lookup in the
-                // embedded runtime.
+                // Palette inline: the app bundles no Ghostty theme resources
+                // for "theme = …" to resolve against.
                 "palette = 0=#45475a",
                 "palette = 1=#f38ba8",
                 "palette = 2=#a6e3a1",
@@ -65,8 +63,6 @@ enum TerminalTheme: String, CaseIterable, Codable, Identifiable, Sendable {
             ]
         case .remuxLight:
             [
-                // Catppuccin Latte is the light member of the popular
-                // Catppuccin family.
                 "palette = 0=#5c5f77",
                 "palette = 1=#d20f39",
                 "palette = 2=#40a02b",

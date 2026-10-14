@@ -3,10 +3,6 @@ import UIKit
 
 /// Single source of truth for window-preview geometry and capture budgets.
 ///
-/// Used by:
-/// - the screen when creating a preview session
-/// - the window selection sheet for preview placement
-///
 /// Capture resolves once when the picker opens. Rendering and sheet sizing use
 /// the live available size, so rotation updates the grid without recapturing
 /// the existing 4:3 preview images.
@@ -64,14 +60,10 @@ enum PanePreviewLayout {
     private static let portraitCardHeightRatio: CGFloat = 1.10
     private static let landscapeCardHeightRatio: CGFloat = 3.0 / 4.0
 
-    /// The "New Window" affordance is a fixed sheet action, not a trailing grid
-    /// cell, so dense sessions can scroll without hiding the create command.
     private static let portraitColumnCount: Int = 2
     private static let landscapeColumnCount: Int = 3
     private static let windowGridSpacing: CGFloat = 10
 
-    /// Fallback image scale for previews rendered outside an environment-backed
-    /// screen view.
     @MainActor
     static func currentScale() -> CGFloat {
         let scale = UIScreen.main.scale
