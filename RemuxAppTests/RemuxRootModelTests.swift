@@ -3114,8 +3114,6 @@ final class RemuxRootModelTests: XCTestCase {
 
         XCTAssertFalse(harness.model.hasTerminalScreenModel(for: session))
         XCTAssertEqual(harness.model.state, .library)
-        // Teardown ordering (surface -> link -> controller) is owned by
-        // the model's async stop; completion nils the session.
         await waitForStopped(terminalModel)
     }
 
@@ -4061,8 +4059,7 @@ final class RemuxRootModelTests: XCTestCase {
         )
     }
 
-    /// The new model connects eagerly at creation; "running" for tests
-    /// means the transport started and the session began attaching.
+    /// `TmuxScreenModel` starts connecting in `init`.
     private func waitForConnecting(
         _ model: TmuxScreenModel,
         file: StaticString = #filePath,

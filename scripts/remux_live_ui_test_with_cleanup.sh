@@ -731,7 +731,6 @@ cleanup_generated_sessions() {
   return "$status"
 }
 
-# Checks that a remote function prints the expected value.
 expect_remote_value() {
   local kind="$1"
   local subject="$2"
@@ -751,7 +750,6 @@ expect_remote_value() {
   printf 'Verified tmux %s expectation for %s: %s\n' "$kind" "$subject" "$expected"
 }
 
-# Checks that a remote function succeeds.
 expect_remote_success() {
   local kind="$1"
   local subject="$2"

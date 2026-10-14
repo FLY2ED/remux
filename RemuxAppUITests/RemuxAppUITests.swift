@@ -1883,16 +1883,15 @@ final class RemuxAppUITests: XCTestCase {
         composerToggle.tap()
         XCTAssertTrue(app.otherElements["terminal.composer.bounds"].waitForExistence(timeout: 5))
 
-        // The bar-hosted marker refreshes on every bar re-render, so it
-        // stays current even when the screen body no longer re-evaluates
-        // per keystroke.
+        // The marker lives in the composer bar, which re-renders on every
+        // keystroke even when the screen body does not.
         let probe = app.otherElements["terminal.composer.perf"]
         XCTAssertTrue(probe.waitForExistence(timeout: 5))
 
-        // Dictation hypothesis path: the debug backend emits 28 audio-level
-        // events plus one hypothesis that writes the draft. Screen body
-        // evals in this window quantify how much of dictation leaks into
-        // whole-screen invalidation.
+        // Dictation hypothesis path: the debug backend emits one audio level
+        // per meter bar, then one hypothesis that writes the draft. Screen body
+        // evals in this window show how much of dictation invalidates the whole
+        // screen.
         let mic = app.buttons["terminal.composer.mic"]
         XCTAssertTrue(mic.waitForExistence(timeout: 5))
         settleComposerPerfProbe()
@@ -3943,7 +3942,6 @@ final class RemuxAppUITests: XCTestCase {
         field.typeText("\n")
     }
 
-    /// Types the text and waits until the field shows it.
     private func typeTextAndConfirm(_ text: String, into field: XCUIElement) {
         field.typeText(text)
         let applied = XCTNSPredicateExpectation(
@@ -4661,7 +4659,6 @@ final class RemuxAppUITests: XCTestCase {
         sleep(1)
         attach(name: "12-connection-setup-empty")
 
-        // Fill the form so we can capture the populated state.
         let name = app.textFields["connection.name"]
         name.tap()
         name.typeText("Example SSH Server")
@@ -4710,14 +4707,12 @@ final class RemuxAppUITests: XCTestCase {
         attach(name: "22-windows-sheet")
         dismissTopSheetIfPresent()
 
-        // Toggle the keyboard mode in the grouped terminal dock, then capture.
         let keyboard = app.buttons["terminal.keyboard"]
         XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
         if keyboard.isHittable { keyboard.tap() }
         sleep(3)
         attach(name: "23-grouped-terminal-dock-keyboard")
 
-        // Capture the grouped dock with ctrl armed (modifier feedback).
         let ctrlButton = app.buttons["terminal.toolbar-key.0"]
         if ctrlButton.exists, ctrlButton.isHittable {
             ctrlButton.tap()
