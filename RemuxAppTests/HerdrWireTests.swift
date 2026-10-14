@@ -263,7 +263,7 @@ final class HerdrWireTests: XCTestCase {
         )
     }
 
-    /// Herdr declares `methods` and `capabilities` with serde defaults (`endpoint.rs:101-104`).
+    /// Herdr declares `methods` and `capabilities` with serde defaults.
     func testAWelcomeWithoutMethodsOrCapabilitiesDecodes() throws {
         let json = #"{"generation":1,"server_version":"0.9.3","snapshot_codec":"shell.snapshot.v1","surface_codec":"shell.surface.v1","input_codec":"shell.input.semantic.v1","blob_codec":"shell.blob.v1"}"#
         guard case .welcome(let welcome) = try HerdrEndpointControl.parse(kind: HerdrControlKind.welcome, data: json) else {

@@ -1,8 +1,7 @@
 import Foundation
 
-/// `shell.snapshot.v1`: this connection's view of the session (`ClientShellSnapshot`, Herdr v0.9.3
-/// `wire.rs:937-1109`). It carries no geometry; pane geometry is only in surfaces. Unknown JSON fields
-/// are ignored.
+/// `shell.snapshot.v1`: this connection's view of the session (Herdr's `ClientShellSnapshot`). It
+/// carries no geometry; pane geometry is only in surfaces. Unknown JSON fields are ignored.
 struct HerdrSnapshot: Equatable, Sendable, Decodable {
     let bootID: String
     /// Per connection; the `projectionRevision` of the surfaces rendered against it.
@@ -110,7 +109,7 @@ struct HerdrSnapshot: Equatable, Sendable, Decodable {
     }
 }
 
-/// Unknown statuses read as `unknown`, as in Herdr's own decoder (`wire.rs:918-935`).
+/// Unknown statuses read as `unknown`, as in Herdr's own decoder.
 enum HerdrAgentStatus: String, Equatable, Sendable, Decodable {
     case idle, working, blocked, done, unknown
 

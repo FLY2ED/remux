@@ -1,7 +1,7 @@
 import Foundation
 
-/// The connection's surface decoder (Herdr v0.9.3 `protocol/surface_reuse.rs:84-257`, with the delta
-/// and scroll rules of `surface_delta/decode.rs` and `surface_scroll.rs`).
+/// The connection's surface decoder, with the reuse, delta and scroll rules of Herdr's own client
+/// decoder.
 ///
 /// Every surface message on a connection passes through it, in order and before presentation drops
 /// anything, so its baseline stays in step with the server's. It expands reuse and delta messages into
@@ -21,7 +21,7 @@ struct HerdrSurfaceDecoder {
         case patch(HerdrPaneSurfacePatch)
     }
 
-    // Herdr's decoder limits (`surface_delta.rs:12`, `surface_delta/decode.rs:25-26`).
+    // Herdr's decoder limits.
     private static let maxSpans = 4096
     private static let maxGridDimension: UInt16 = 4096
     private static let maxGridCells = 1_000_000
@@ -95,9 +95,8 @@ struct HerdrSurfaceDecoder {
         }
     }
 
-    /// A patch that doesn't follow the baseline drops it rather than failing
-    /// (`surface_reuse.rs:159-163`): only presentation decides whether to show it, and the next
-    /// full surface restores a baseline.
+    /// A patch that doesn't follow the baseline drops it rather than failing, as in Herdr's decoder:
+    /// only presentation decides whether to show it, and the next full surface restores a baseline.
     private mutating func applyPatch(_ patch: HerdrPaneSurfacePatch) throws {
         guard var base = baseline else { return }
         guard base.matches(patch) else {
@@ -207,7 +206,7 @@ struct HerdrSurfaceDecoder {
 
     /// Applies the scrolled regions and the patch to the baseline and returns the ordinary patch a
     /// client without scroll support would have received: the patch rows outside every region, then
-    /// every row of each region with its final cells (`surface_scroll.rs:389-433`).
+    /// every row of each region with its final cells.
     private mutating func applyScroll(_ scroll: HerdrSurfaceScroll) throws -> HerdrPaneSurfacePatch {
         guard var base = baseline else { throw Self.invalid("surface scroll without a baseline") }
         guard base.matches(scroll.patch) else {
@@ -274,8 +273,7 @@ struct HerdrSurfaceDecoder {
         return cells
     }
 
-    /// Delta spans: non-empty, inside their row, sorted, non-overlapping, and within the cell budget
-    /// (`surface_delta/decode.rs:300-347`).
+    /// Delta spans: non-empty, inside their row, sorted, non-overlapping, and within the cell budget.
     private static func validate(_ rows: [HerdrPatchRow], width: UInt16, height: UInt16) throws {
         let budget = try gridSize(width, height)
         guard rows.count <= min(maxSpans, budget) else { throw invalid("too many surface delta spans") }
@@ -327,7 +325,7 @@ struct HerdrSurfaceDecoder {
     }
 
     /// A positive shift moves content up: row `y` shows the previous row `y + shift`. Rows that leave
-    /// the region rotate into the vacated rows, by the same swaps the server makes (`surface_scroll.rs:43-54`).
+    /// the region rotate into the vacated rows, by the same swaps the server makes.
     private static func rotate(_ region: HerdrSurfaceScroll.Region, in cells: inout [HerdrCell], width: UInt16) {
         let rect = region.rect
         let height = Int(rect.height)
@@ -350,7 +348,7 @@ struct HerdrSurfaceDecoder {
         }
     }
 
-    /// The parts of a patch row outside every scrolled region (`surface_scroll.rs:438-470`).
+    /// The parts of a patch row outside every scrolled region.
     private static func outside(_ regions: [HerdrSurfaceScroll.Region], row: HerdrPatchRow) -> [HerdrPatchRow] {
         let start = Int(row.x)
         let end = start + row.cells.count
