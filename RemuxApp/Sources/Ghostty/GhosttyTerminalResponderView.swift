@@ -294,10 +294,9 @@ final class GhosttyTerminalResponderUIView: UIView, UIKeyInput, UITextInputTrait
     }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
-        // Now that this view conforms to UITextInput, UIKit otherwise advertises
-        // the standard text edit menu (Select / Select All / Copy / Cut). The
-        // terminal has no editable selection, so suppress those and keep paste
-        // wired through the existing handler.
+        // UITextInput conformance makes UIKit offer the standard edit menu
+        // (Select, Select All, Copy, Cut). The terminal has no editable selection,
+        // so those are suppressed; paste stays available.
         switch action {
         case #selector(UIResponderStandardEditActions.select(_:)),
              #selector(UIResponderStandardEditActions.selectAll(_:)),

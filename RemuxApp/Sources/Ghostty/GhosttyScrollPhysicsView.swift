@@ -1,15 +1,10 @@
 import QuartzCore
 import UIKit
 
-/// Tuning for route-forwarded scrolling, resolved once at startup.
 enum GhosttyScrollTuning {
-    /// Device-tuned gain for both forwarded scroll routes
-    /// (2026-06-12 A/B on iPhone 14 Pro Max): at the legacy 2.0, slow
-    /// controlled drags jump ahead of the finger; 1.0 and 1.5 felt
-    /// equally calm, and 1.5 preserves more momentum reach per flick.
-    /// The alt-screen-cursor route was folded onto the same physics
-    /// path afterwards and validated at this gain (man/less on
-    /// device), so it shares the value deliberately.
+    /// Gain for both forwarded scroll routes, chosen on device: at 2.0
+    /// slow drags run ahead of the finger; 1.5 stays controlled and keeps
+    /// flick reach.
     static let routeForwardedDefaultGain: CGFloat = 1.5
 
     /// Gain from finger travel to precise scroll units on the
@@ -30,16 +25,13 @@ enum GhosttyScrollTuning {
     }()
 }
 
-/// Physics engine for route-forwarded (mouse-report) scrolling.
+/// Scroll physics driver for route-forwarded scrolling.
 ///
-/// A hit-test transparent `UIScrollView` with a large virtual content
-/// area: its pan gesture and native deceleration produce contentOffset
-/// changes that the scroll container converts into the same precise
-/// scroll events a trackpad would produce, including the momentum tail
-/// after the finger lifts. The view renders nothing and never receives
-/// touches itself — the container attaches this view's pan gesture
-/// recognizer to itself, so the scroll view acts purely as UIKit's
-/// scroll physics driver (the Blink Shell pattern).
+/// A hit-test transparent UIScrollView with a large virtual content area.
+/// Its pan gesture and native deceleration produce contentOffset changes that
+/// the container converts into precise scroll events, including the momentum
+/// tail after the finger lifts. It renders nothing; the container hosts its
+/// pan gesture recognizer.
 final class GhosttyScrollPhysicsView: UIScrollView {
     /// Virtual content height as a multiple of the viewport. Large
     /// enough that a single fling cannot reach an edge before the
@@ -78,8 +70,8 @@ final class GhosttyScrollPhysicsView: UIScrollView {
 /// Deterministic: the same gesture at the same speed always scrolls
 /// the same amount (the EMA only suppresses single-frame spikes).
 struct GhosttyScrollVelocityGain {
-    /// Below this speed (points/s) the multiplier is 1: slow,
-    /// controlled drags keep the validated 1:1-ish mapping.
+    /// Below this speed (points/s) the multiplier is 1, so slow drags keep
+    /// the base gain.
     static let slowVelocity: Double = 900
     /// Speed at which the ramp reaches `maxMultiplier`.
     static let fastVelocity: Double = 3_500
@@ -106,8 +98,6 @@ struct GhosttyScrollVelocityGain {
         return Self.multiplier(forVelocity: smoothed)
     }
 
-    /// The pure mapping: 1 below the slow knee, linear ramp to the
-    /// cap at the fast knee.
     static func multiplier(forVelocity velocity: Double) -> Double {
         guard velocity > slowVelocity else { return 1 }
         guard velocity < fastVelocity else { return maxMultiplier }
@@ -173,11 +163,9 @@ struct GhosttyScrollTailCutoff {
 /// repaint. Excess delta is dropped, not deferred: flicks saturate at
 /// the cap instead of stretching the scroll out in time.
 struct GhosttyScrollDeltaBudget {
-    /// Default burst window. Device traces (2026-06-12) showed 0.25s
-    /// lets a violent flick dump ~37 one-line ticks instantly — a
-    /// near-full-screen teleport before steady-rate pacing kicks in.
-    /// ~0.08s bounds the initial dump to a few lines while leaving
-    /// gesture-start latency imperceptible.
+    /// Burst window. A longer window lets a hard flick emit dozens of
+    /// one-line ticks at once before steady-rate pacing starts; 0.08 s
+    /// limits that to a few lines without noticeable start latency.
     static let defaultBurstSeconds: Double = 0.08
 
     private(set) var unitsPerSecond: Double
