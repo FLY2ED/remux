@@ -16,10 +16,9 @@ enum TerminalSelectionSheetPalette {
     }
 }
 
-/// Shared selector-sheet content geometry beneath system-owned navigation
-/// chrome. Preview regions own their bounded viewport heights; the sheet
-/// derives its presentation size from this content instead of duplicating
-/// the navigation bar's geometry in detent arithmetic.
+/// Selector-sheet layout below the system navigation bar. The sheet's height
+/// detent is the measured navigation bar height plus this fixed chrome plus
+/// the content's bounded height.
 enum TerminalSelectionSheetLayout {
     static let horizontalContentPadding: CGFloat = 16
 

@@ -2216,10 +2216,10 @@ private struct GhosttyTerminalInputReadyAccessibilityMarker: View {
 }
 
 #if DEBUG
-/// UI-test-only probe quantifying how often the selected terminal screen's
-/// body re-evaluates and how much main-thread time each composer-driven
-/// update pass consumes (invalidation through the end of the run-loop
-/// iteration, which covers every body evaluation plus commit for that pass).
+/// DEBUG probe, on under REMUX_UI_TESTING or REMUX_TRACE_COMPOSER_PERF:
+/// counts body evaluations of the selected terminal screen and the
+/// main-thread time of each composer-driven update pass, from invalidation to
+/// the end of that run-loop iteration.
 @MainActor
 enum GhosttySurfaceScreenPerfProbe {
     static let isEnabled = ProcessInfo.processInfo.environment["REMUX_UI_TESTING"] == "1" ||

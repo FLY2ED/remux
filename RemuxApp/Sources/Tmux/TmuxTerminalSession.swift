@@ -353,8 +353,8 @@ final class TmuxTerminalSession: ObservableObject {
                 return
             }
             creatingPaneIDs.remove(paneID)
-            // The pending owner survives creation/registration and is released
-            // only on success or an explicit, repairable terminal error.
+            // The terminal stays pending until its renderer's creation and
+            // registration finish, whatever the result.
             pendingTerminalsByPaneID.removeValue(forKey: paneID)
             switch result {
             case .failure(let error):

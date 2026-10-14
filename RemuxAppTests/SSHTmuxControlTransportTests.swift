@@ -380,7 +380,6 @@ final class SSHTmuxControlTransportTests: XCTestCase {
             _ = try await task.value
             XCTFail("expected SFTP operation cancellation")
         } catch is CancellationError {
-            // Expected.
         } catch {
             XCTFail("unexpected error: \(error)")
         }
