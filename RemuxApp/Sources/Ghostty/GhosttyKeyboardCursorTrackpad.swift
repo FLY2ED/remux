@@ -302,8 +302,8 @@ final class GhosttyKeyboardCursorTrackpadDriver {
         return feedback
     }
 
-    /// Deterministic time injection for repeat behavior tests. Delayed ticks
-    /// emit at most one key and never catch up a backlog.
+    /// Fires the repeat if it is due at now. A late tick emits at most one key
+    /// and never catches up a backlog.
     func repeatTick(at now: TimeInterval) {
         guard let state = repeatState, now >= state.nextFireAt else { return }
         repeatTimer?.invalidate()

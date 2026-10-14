@@ -49,9 +49,8 @@ struct GhosttySurfaceKeyEvent: Equatable {
             self.rawValue = rawValue
         }
 
-        /// `ghostty_surface_key` takes platform-native keycodes, not the
-        /// public `GHOSTTY_KEY_*` enum values. Ghostty's iOS build shares the
-        /// Darwin/macOS keycode table in `src/input/keycodes.zig`.
+        /// ghostty_terminal_surface_key takes platform-native keycodes, not
+        /// GHOSTTY_KEY_* values. iOS uses Ghostty's macOS keycode table.
         static let enter = Self(rawValue: 0x24)
         static let tab = Self(rawValue: 0x30)
         static let escape = Self(rawValue: 0x35)

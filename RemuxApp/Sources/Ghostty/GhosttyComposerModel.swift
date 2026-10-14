@@ -71,9 +71,8 @@ final class GhosttyComposerModel: ObservableObject {
     @Published var isPresented = false
     @Published var draft = "" {
         didSet {
-            // Editing dismisses stale status. Lives on the model because the
-            // screen no longer re-evaluates on draft changes, so a screen
-            // onChange would never fire while typing.
+            // Editing dismisses stale status. This lives on the model because
+            // the screen does not re-evaluate on draft changes.
             guard oldValue != draft else { return }
             clearStatusMessage()
         }
