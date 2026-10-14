@@ -6,9 +6,8 @@ import Foundation
 /// is bincode 2 with `config::standard()`: little endian, variable-length integers, enums as a varint
 /// variant index followed by their fields, structs as their fields in order.
 enum HerdrWire {
-    /// Largest payload Remux reads: Herdr's cap for a frame that carries images (`wire.rs:24, 29`,
-    /// applied in `server/headless/render.rs:798-802`; ordinary frames stay under 2 MiB). Herdr's own
-    /// remote client reads with the same cap (`client/mod.rs:1321-1325`).
+    /// Largest payload Remux reads: Herdr's cap for a frame that carries images; ordinary frames stay
+    /// under 2 MiB. Herdr's own remote client reads with the same cap.
     static let maxPayloadSize = 32 * 1024 * 1024
 
     static func frame(_ payload: [UInt8]) -> [UInt8] {
@@ -32,7 +31,7 @@ enum HerdrWireError: Error, Equatable, LocalizedError {
     case lengthOutOfRange(UInt64)
     case payloadTooLarge(Int)
     /// Message type 12, a binary snapshot, which only a connection without the JSON snapshot codec
-    /// gets. Herdr's client fails on it the same way (`client/mod.rs:1428-1452`).
+    /// gets. Herdr's client fails on it the same way.
     case unnegotiatedSnapshot
     /// A tag outside generation 1's frozen message set.
     case unknownMessage(tag: UInt32)
@@ -105,7 +104,7 @@ struct HerdrWireReader {
 
     var remaining: Int { bytes.count - offset }
 
-    /// Herdr's reader requires every payload to be consumed exactly (`wire.rs:1702-1736`).
+    /// Herdr's reader requires every payload to be consumed exactly.
     func finish() throws {
         guard offset == bytes.count else {
             throw HerdrWireError.trailingBytes(bytes.count - offset)
@@ -139,13 +138,11 @@ struct HerdrWireReader {
         try varint(widestMarker: 253)
     }
 
-    /// Zigzag, then varint.
     mutating func i32() throws -> Int32 {
         let zigzag = try u32()
         return Int32(bitPattern: (zigzag >> 1) ^ (0 &- (zigzag & 1)))
     }
 
-    /// Enum variant index.
     mutating func variant() throws -> UInt32 {
         try u32()
     }

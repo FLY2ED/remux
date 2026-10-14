@@ -1,7 +1,6 @@
 import Foundation
 
-/// A server message on Remux's endpoint connection (`ServerMessage`, Herdr v0.9.3 `wire.rs:1402-1527`;
-/// variant order is the tag).
+/// A server message on Remux's endpoint connection (Herdr's `ServerMessage`; variant order is the tag).
 enum HerdrServerMessage: Equatable, Sendable {
     case serverShutdown(reason: String?)
     case notify(HerdrNotify)
@@ -18,13 +17,10 @@ enum HerdrServerMessage: Equatable, Sendable {
     case responseChunk(HerdrResponseChunk)
     case paneSurfacePatch(HerdrPaneSurfacePatch)
     case control(kind: String, data: String)
-    /// A type Herdr sends only to other kinds of client: 0 `Welcome` (the binary handshake reply,
-    /// also an old server's answer to an endpoint hello), 1 `Terminal`, 2 `Graphics`, 10
-    /// `GraphicsFile`, 11 `GraphicsTransmissionRetired` and 16 `DirectTerminalKeyboardProtocol`
-    /// (send sites `server/client_transport.rs:727, 794, 807, 842`, `server/render_stream.rs:142`,
-    /// `server/headless.rs:885-892`, `server/headless/render.rs:159-165`). Herdr's client ignores
-    /// or applies them in its other modes (`client/mod.rs:1532-1557, 1707, 1975, 2141-2143`); an
-    /// endpoint connection has no use for them, so the body is skipped.
+    /// A type Herdr sends only to other kinds of client: 0 `Welcome` (the binary handshake reply, also
+    /// an old server's answer to an endpoint hello), 1 `Terminal`, 2 `Graphics`, 10 `GraphicsFile`, 11
+    /// `GraphicsTransmissionRetired` and 16 `DirectTerminalKeyboardProtocol`. An endpoint connection
+    /// has no use for them, so the body is skipped.
     case unused(tag: UInt32)
 
     /// Decodes one payload (without its length prefix) and requires it to be consumed exactly.
@@ -166,8 +162,7 @@ struct HerdrResponseChunk: Equatable, Sendable {
     }
 }
 
-// MARK: - Named controls (`protocol/endpoint.rs:16-33`, `surface_reuse.rs:7`, `surface_delta.rs:11`,
-// `surface_scroll.rs:16`)
+// MARK: - Named controls
 
 enum HerdrControlKind {
     static let hello = "endpoint.hello.v1"
@@ -192,10 +187,8 @@ enum HerdrEndpointControl: Equatable, Sendable {
     case ignored(kind: String)
 
     /// Parses a control. Invalid data in a kind Remux relies on, or any `shell.snapshot.*` kind other
-    /// than v1 (an unnegotiated codec), is an error, as in Herdr's client: snapshots and unknown
-    /// kinds in `client/endpoint/control.rs:56-66`; reuse, delta and scroll in its decoder
-    /// (`protocol/surface_reuse.rs:100-143`), whose errors fail the connection
-    /// (`client/transport.rs:61-68, 92-98`).
+    /// than v1 (an unnegotiated codec), is an error, as in Herdr's client, where these errors fail the
+    /// connection.
     static func parse(kind: String, data: String) throws -> HerdrEndpointControl {
         do {
             switch kind {
@@ -222,9 +215,8 @@ enum HerdrEndpointControl: Equatable, Sendable {
     }
 }
 
-/// `endpoint.welcome.v1` (`endpoint.rs:93-107`). A rejection carries `error` and empty lists, then the
-/// server closes the connection. `methods` and `capabilities` default to empty, as Herdr declares them
-/// (`endpoint.rs:101-104`).
+/// `endpoint.welcome.v1`. A rejection carries `error` and empty lists, then the server closes the
+/// connection. `methods` and `capabilities` default to empty, as Herdr declares them.
 struct HerdrWelcome: Equatable, Sendable, Decodable {
     struct Rejection: Equatable, Sendable, Decodable {
         /// `unsupported_generation`, `no_common_core`, `invalid_surface` or `invalid_hello`.
@@ -266,8 +258,7 @@ struct HerdrWelcome: Equatable, Sendable, Decodable {
     }
 }
 
-/// `endpoint.surface-reuse.v1`: the next surface with an empty cell list; its cells are the
-/// baseline's (`surface_reuse.rs:9-43`).
+/// `endpoint.surface-reuse.v1`: the next surface with an empty cell list; its cells are the baseline's.
 struct HerdrSurfaceReuse: Equatable, Sendable, Decodable {
     let baseSurfaceRevision: UInt64
     let surface: HerdrPaneSurfaceFrame
@@ -278,8 +269,8 @@ struct HerdrSurfaceReuse: Equatable, Sendable, Decodable {
     }
 }
 
-/// `endpoint.surface-delta.v1`: unpadded base64 of bincode (`surface_delta.rs:14-28`). The surface
-/// carries metadata only; `rows` and `popupCells` change the baseline's cells.
+/// `endpoint.surface-delta.v1`: unpadded base64 of bincode. The surface carries metadata only; `rows`
+/// and `popupCells` change the baseline's cells.
 struct HerdrSurfaceDelta: Equatable, Sendable {
     enum PopupCells: Equatable, Sendable {
         case patch([HerdrPatchRow])
@@ -326,8 +317,8 @@ struct HerdrSurfaceDelta: Equatable, Sendable {
     }
 }
 
-/// `endpoint.surface-scroll.v1`: unpadded base64 of a count, that many raw little-endian regions,
-/// and one framed `PaneSurfacePatch` (`surface_scroll.rs:18-22, 276-384`).
+/// `endpoint.surface-scroll.v1`: unpadded base64 of a count, that many raw little-endian regions, and
+/// one framed `PaneSurfacePatch`.
 struct HerdrSurfaceScroll: Equatable, Sendable {
     struct Region: Equatable, Sendable {
         let rect: HerdrSurfaceRect

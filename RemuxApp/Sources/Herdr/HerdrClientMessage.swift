@@ -1,7 +1,6 @@
 import Foundation
 
-/// The client messages Remux sends (`ClientMessage`, Herdr v0.9.3 `wire.rs:482-640`; variant order is
-/// the tag).
+/// The client messages Remux sends (Herdr's `ClientMessage`; variant order is the tag).
 enum HerdrClientMessage: Equatable, Sendable {
     /// Must be the first message.
     case hello(HerdrHello)
@@ -45,7 +44,7 @@ enum HerdrClientMessage: Equatable, Sendable {
             writer.u16(geometry.cols)
             writer.u16(geometry.rows)
             // pixel_mouse: off, as in Remux's hello. A resize with it on would switch the server to
-            // pixel mouse reports for this client (`server/headless.rs:2203`).
+            // pixel mouse reports for this client.
             writer.bool(false)
         case .paneInput(let paneID, let events):
             writer.variant(13)
@@ -76,9 +75,8 @@ enum HerdrClientMessage: Equatable, Sendable {
     }
 }
 
-/// Remux's `endpoint.hello.v1` (`protocol/endpoint.rs:47-75`): every surface encoding, the four v1
-/// codecs, and no pixel mouse, direct graphics, endpoint keybindings or client mouse capture. Cell
-/// size 0 means unknown.
+/// Remux's `endpoint.hello.v1`: every surface encoding, the four v1 codecs, and no pixel mouse, direct
+/// graphics, endpoint keybindings or client mouse capture. Cell size 0 means unknown.
 struct HerdrHello: Equatable, Sendable, Encodable {
     let cellWidthPx: UInt32
     let cellHeightPx: UInt32
@@ -152,7 +150,7 @@ private struct HerdrEndpointRequest<Params: Encodable>: Encodable {
     let params: Params
 }
 
-// MARK: - Semantic input (`shell.input.semantic.v1`, `wire.rs:64-182`)
+// MARK: - Semantic input (`shell.input.semantic.v1`)
 
 enum HerdrInputEvent: Equatable, Sendable {
     case key(HerdrKeyEvent)
@@ -211,10 +209,10 @@ struct HerdrKeyEvent: Equatable, Sendable {
     let kind: Kind
     let repeatCount: UInt16
     let shiftedCodepoint: UInt32?
-    /// The exact bytes the key produces. Herdr writes them in place of the key's own encoding, with
-    /// its modifiers ignored, except for a release, a legacy Super or Ctrl+Shift+letter chord, or a
-    /// key with `tracksRelease` going to a pane that reports every key (`input/encode.rs:26-45`).
-    /// So it is the text only for keys that type it; control chords leave it nil.
+    /// The exact bytes the key produces. Herdr writes them in place of the key's own encoding, with its
+    /// modifiers ignored, except for a release, a legacy Super or Ctrl+Shift+letter chord, or a key
+    /// with `tracksRelease` going to a pane that reports every key. So it is the text only for keys
+    /// that type it; control chords leave it nil.
     let generatedText: String?
     /// Herdr holds the press until its release and releases it itself if the surface deactivates.
     let tracksRelease: Bool
@@ -293,7 +291,7 @@ struct HerdrMouseEvent: Equatable, Sendable {
 
     let kind: Kind
     /// The cell, relative to the pane's text area. Remux's hello turns pixel mouse off, so positions
-    /// are always cells and no pixel geometry is sent (`server/pane_input.rs:13-38`).
+    /// are always cells and no pixel geometry is sent.
     let column: UInt16
     let row: UInt16
     let modifiers: HerdrKeyModifiers
@@ -342,7 +340,7 @@ struct HerdrMouseEvent: Equatable, Sendable {
     }
 }
 
-// MARK: - Host theme (`wire.rs:643-690`)
+// MARK: - Host theme
 
 struct HerdrRGB: Equatable, Sendable {
     let red: UInt8
@@ -363,7 +361,7 @@ enum HerdrHostThemeUpdate: Equatable, Sendable {
 
     case defaultColor(DefaultColorKind, HerdrRGB)
     /// Colours by palette index. One entry per index keeps the update within the 256 entries Herdr
-    /// accepts; more closes the connection (`server/client_transport.rs:1177-1189`).
+    /// accepts; more closes the connection.
     case paletteColors([UInt8: HerdrRGB])
     case appearance(Appearance)
 

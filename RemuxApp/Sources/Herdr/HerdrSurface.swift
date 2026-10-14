@@ -4,8 +4,8 @@ import Foundation
 // Each type reads both encodings Herdr uses: bincode on the wire, and serde's JSON inside
 // `endpoint.surface-reuse.v1`.
 
-/// A packed cell colour (`wire.rs:1539-1597`): high byte 0 = named (0 is the default colour),
-/// 1 = indexed palette, 2 = RGB; any other high byte means the default colour.
+/// A packed cell colour: high byte 0 = named (0 is the default colour), 1 = indexed palette, 2 = RGB;
+/// any other high byte means the default colour.
 struct HerdrColor: Equatable, Sendable, Decodable {
     enum Value: Equatable, Sendable {
         case `default`
@@ -46,9 +46,9 @@ struct HerdrColor: Equatable, Sendable, Decodable {
 }
 
 struct HerdrCell: Equatable, Sendable, Decodable {
-    /// One grapheme cluster. A wide grapheme sits in its first cell. The cell it covers is `""` in
-    /// a patch; in a full surface it is usually `" "`, but `""` after a VS16 emoji or a voiced
-    /// halfwidth kana (contract §4, "Grapheme cells").
+    /// One grapheme cluster. A wide grapheme sits in its first cell. The cell it covers is `""` in a
+    /// patch; in a full surface it is usually `" "`, but `""` after a VS16 emoji or a voiced halfwidth
+    /// kana.
     let symbol: String
     let fg: HerdrColor
     let bg: HerdrColor
@@ -108,7 +108,7 @@ struct HerdrCursor: Equatable, Sendable, Decodable {
         x = try container.decode(UInt16.self, forKey: .x)
         y = try container.decode(UInt16.self, forKey: .y)
         visible = try container.decode(Bool.self, forKey: .visible)
-        // `#[serde(default)]` (`wire.rs:780`).
+        // Herdr's JSON may omit `shape` (`#[serde(default)]`).
         shape = try container.decodeIfPresent(UInt8.self, forKey: .shape) ?? 0
     }
 }
@@ -328,7 +328,7 @@ struct HerdrPopupSurface: Equatable, Sendable, Decodable {
     }
 }
 
-// MARK: - Graphics scene (`wire.rs:1171-1287`)
+// MARK: - Graphics scene
 
 enum HerdrGraphicsSource: Equatable, Sendable, Decodable {
     enum Target: Equatable, Sendable, Decodable {
