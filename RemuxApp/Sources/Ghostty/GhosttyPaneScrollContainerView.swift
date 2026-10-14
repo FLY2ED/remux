@@ -124,20 +124,16 @@ final class GhosttyPaneScrollContainerView: UIView, UIScrollViewDelegate, UIGest
     private var isPhysicsGestureActive = false
     private var isRecenteringPhysicsScroll = false
 
-    /// Set when a touch catches a live deceleration. The tap that
-    /// lands from that touch is the catch itself, not an intentional
-    /// click — native scroll views swallow it. The tree view's tap
-    /// handler consumes this before forwarding mouse actions.
+    /// Set when a touch catches a live deceleration. The tap from that touch is
+    /// the catch, not a click, as in native scroll views; the composite
+    /// viewport's tap handler consumes it before forwarding mouse actions.
     private var lastMomentumCatchAt: TimeInterval?
     private static let momentumCatchTapWindow: TimeInterval = 0.4
 
-    /// Caps on reports one gesture may produce per second, per route.
-    /// On the mouse-report route each tick costs the remote TUI a
-    /// full repaint (opencode: ~6KB/frame), so headroom over the
-    /// proven-comfortable ~45/s is modest. On the alt-screen-cursor
-    /// route a tick is one cursor key and pagers repaint ~one line
-    /// (~100B), so the ceiling is set by feel, not cost — and one
-    /// tick is a single line, so fast flicks need the rate.
+    /// Per-route caps on reports per second of one gesture. Each mouse-report
+    /// tick makes the remote TUI repaint, so that cap stays low. An
+    /// alt-screen-cursor tick is one cursor key moving one line, so fast flicks
+    /// need a higher cap.
     private static let maxMouseReportTicksPerSecond: Double = 60
     private static let maxAltScreenTicksPerSecond: Double = 150
 
@@ -537,7 +533,7 @@ final class GhosttyPaneScrollContainerView: UIView, UIScrollViewDelegate, UIGest
         return true
     }
 
-    // MARK: Mouse-report scroll physics
+    // MARK: Route-forwarded scroll physics
 
     /// A new drag, including catching a live deceleration. Closing any
     /// previous stream first keeps the event phases well-formed.
@@ -553,10 +549,9 @@ final class GhosttyPaneScrollContainerView: UIView, UIScrollViewDelegate, UIGest
             return
         }
 
-        // Wheel reports encode at the pointer position, and touch UIs
-        // never report one: anchor the pointer at the gesture's touch
-        // point so the encoder does not drop the events
-        // (mouse_encode.zig out-of-viewport rule).
+        // Remote wheel reports are encoded at the pointer position, and the
+        // terminal surface rejects a remote scroll with no pointer. Touch input
+        // never moves the pointer, so anchor it at the touch point.
         let location = physicsScrollView.panGestureRecognizer.location(in: surface.view)
         GhosttyRuntimeTrace.diagnostics(
             "scroll.physics begin surface=\(ghosttyDiagnosticShortID(surface.id)) location=\(location.x),\(location.y) offset=\(physicsScrollView.contentOffset.y)"

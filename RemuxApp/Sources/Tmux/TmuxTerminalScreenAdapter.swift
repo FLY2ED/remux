@@ -56,9 +56,8 @@ struct TmuxMultipaneZoomDefaultPolicy {
 }
 
 
-/// Presents the new tmux session stack (`TmuxTerminalSession`) through the
-/// `GhosttyTerminalScreenModeling` boundary so `GhosttySurfaceScreen` — the
-/// full terminal UX — renders it unchanged.
+/// Presents a `TmuxTerminalSession` through the `GhosttyTerminalScreenModeling`
+/// boundary so `GhosttySurfaceScreen` renders it.
 ///
 /// Topology mapping: tmux window/pane IDs (UInt64) are mapped to stable UUIDs
 /// shared by topology and managed surfaces. The session retains one real pane

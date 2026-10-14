@@ -1274,12 +1274,10 @@ final class RemuxRootModel: ObservableObject {
         var openedWorkspace = workspace
         openedWorkspace.lastOpenedAt = Date()
 
-        // Activate before the bookkeeping: persisting lastOpenedAt and
-        // refreshing the library ordering measured 16-23ms of disk work
-        // on the open critical path. Activating first lets the screen
-        // build while the save runs; the awaits stay sequential in this
-        // call so later mutations (delete, edit) cannot interleave with
-        // a dangling save and resurrect a removed profile.
+        // Activate before the bookkeeping so the screen builds while
+        // lastOpenedAt is saved and the library reloads. The awaits stay
+        // sequential in this call so a later delete or edit cannot interleave
+        // with a dangling save and resurrect a removed profile.
         activate(server: server, workspace: openedWorkspace, sshAuth: sshAuth)
 
         do {
@@ -1992,8 +1990,8 @@ final class RemuxRootModel: ObservableObject {
                 .failingRefresh(hostKeyChallenge: challenge)
         } catch {
             guard isCurrentTmuxSessionRefresh(server, refreshID: refreshID) else { return }
-            // Discovery is auxiliary to an already-running terminal. Keep its
-            // failure inside the sheet rather than replacing the app route.
+            // Discovery is auxiliary: its failure stays in the server's
+            // discovery state and never replaces the app route.
             var executableProblem: TmuxExecutableProblem?
             if case .remoteExit(let status, let stderr) = error as? TmuxSessionDiscoveryError {
                 executableProblem = TmuxExecutableProblem(exitStatus: status, output: stderr)

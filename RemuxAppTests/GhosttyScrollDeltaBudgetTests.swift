@@ -35,7 +35,6 @@ final class GhosttyScrollDeltaBudgetTests: XCTestCase {
 
         // Burst capacity is 25 units; a violent first delta saturates.
         XCTAssertEqual(budget.clamp(1_000, at: 0), 25)
-        // Immediately after, nothing is available.
         XCTAssertEqual(budget.clamp(1_000, at: 0), 0)
     }
 
@@ -84,8 +83,7 @@ final class GhosttyScrollDeltaBudgetTests: XCTestCase {
     }
 
     func testVelocityGainIsUnityForSlowDrags() {
-        // The pure mapping: identical inputs always produce identical
-        // gain (determinism), and slow speeds are untouched.
+        // At and below `slowVelocity` (900 pt/s) the multiplier is exactly 1.
         XCTAssertEqual(GhosttyScrollVelocityGain.multiplier(forVelocity: 0), 1)
         XCTAssertEqual(GhosttyScrollVelocityGain.multiplier(forVelocity: 899), 1)
         XCTAssertEqual(GhosttyScrollVelocityGain.multiplier(forVelocity: 900), 1)
@@ -103,7 +101,6 @@ final class GhosttyScrollDeltaBudgetTests: XCTestCase {
             GhosttyScrollVelocityGain.multiplier(forVelocity: 50_000),
             GhosttyScrollVelocityGain.maxMultiplier
         )
-        // Monotonic across the ramp.
         var last = 0.0
         for v in stride(from: 0.0, through: 5_000, by: 250) {
             let m = GhosttyScrollVelocityGain.multiplier(forVelocity: v)
@@ -141,7 +138,7 @@ final class GhosttyScrollDeltaBudgetTests: XCTestCase {
         XCTAssertFalse(cutoff.shouldStop(delta: 0, at: 0, cellHeightPoints: cell))
         XCTAssertFalse(cutoff.shouldStop(delta: 3.33, at: 1.0 / 60, cellHeightPoints: cell))
 
-        // Decayed to ~1 cell/s: below the 2.5 cells/s floor.
+        // Decayed to ~1 cell/s: below the 6 cells/s floor.
         XCTAssertTrue(cutoff.shouldStop(delta: 0.33, at: 2.0 / 60, cellHeightPoints: cell))
     }
 
