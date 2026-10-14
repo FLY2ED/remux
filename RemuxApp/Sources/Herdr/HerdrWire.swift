@@ -36,7 +36,7 @@ enum HerdrWireError: Error, Equatable, LocalizedError {
     /// A tag outside generation 1's frozen message set.
     case unknownMessage(tag: UInt32)
     case invalidControl(kind: String)
-    /// A screen update that doesn't fit the decoder's baseline (`surface_reuse.rs` reasons).
+    /// A screen update that doesn't fit the decoder's baseline.
     case invalidSurfaceUpdate(String)
 
     var errorDescription: String? {
