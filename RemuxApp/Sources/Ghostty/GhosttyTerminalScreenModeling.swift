@@ -2,13 +2,6 @@ import CoreGraphics
 import Foundation
 import GhosttyKit
 
-/// The model surface `GhosttySurfaceScreen` renders against: projections of
-/// terminal readiness/topology, focused-surface input routing, tmux topology
-/// actions, and the selection-sheet/preview plumbing.
-///
-/// The tmux session stack implements it (`TmuxTerminalScreenAdapter`). The
-/// screen owns presentation behavior only; everything engine-specific flows
-/// through this boundary.
 enum GhosttyTerminalActionOutcome: Equatable, Sendable {
     case queued
     case missingTarget(GhosttyTerminalActionMissingTarget)
@@ -32,7 +25,6 @@ struct GhosttyTerminalCommandFailureEvent: Equatable {
     let message: String
 }
 
-/// App-level scene lifecycle phases forwarded into terminal screen models.
 enum GhosttyAppLifecyclePhase: Equatable {
     case active
     case inactive
@@ -72,8 +64,6 @@ extension GhosttyTerminalRenderingModeling {
 
 @MainActor
 protocol GhosttyTerminalInputModeling: ObservableObject {
-    // MARK: Focused/targeted input routing
-
     @discardableResult
     func sendInputToFocusedSurface(_ text: String) -> FocusedTerminalInputSubmissionResult
 
@@ -124,8 +114,6 @@ protocol GhosttyTerminalInputModeling: ObservableObject {
 
 @MainActor
 protocol GhosttyTerminalActionModeling: ObservableObject {
-    // MARK: tmux topology actions
-
     func reclaimActiveTmuxViewport()
 
     func claimActiveTmuxViewportIfNeeded()
@@ -206,6 +194,13 @@ protocol GhosttyTerminalSelectionModeling: ObservableObject {
     ) -> GhosttyPaneSelectionSheetRenderProjection
 }
 
+/// The model surface `GhosttySurfaceScreen` renders against: projections of
+/// terminal readiness/topology, focused-surface input routing, tmux topology
+/// actions, and the selection-sheet/preview plumbing.
+///
+/// The tmux session stack implements it (`TmuxTerminalScreenAdapter`). The
+/// screen owns presentation behavior only; everything engine-specific flows
+/// through this boundary.
 @MainActor
 protocol GhosttyTerminalScreenModeling:
     GhosttyTerminalRenderingModeling,

@@ -486,7 +486,7 @@ actor RemuxSSHRootService {
     }
 
     private enum ReleaseEntryResult {
-        /// Lease returned; the connection stays pooled.
+        /// Lease returned; the connection stays open.
         case retained
         /// Caller owns closing the connection (last lease of a retired
         /// root, or a root the pool no longer tracks).
@@ -694,7 +694,6 @@ actor RemuxSSHRootService {
         disposition: RemuxSSHRootLeaseDisposition
     ) -> ReleaseEntryResult {
         guard var entry = entries[key], entry.generation == generation else {
-            // A retired root: drain, close with the last lease.
             if var retired = retiredEntries[generation] {
                 retired.activeLeaseCount = max(0, retired.activeLeaseCount - 1)
                 if retired.activeLeaseCount == 0 {

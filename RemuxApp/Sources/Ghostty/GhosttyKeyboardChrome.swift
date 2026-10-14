@@ -539,8 +539,6 @@ private struct GhosttyKeyboardKeyButton: View {
     }
 }
 
-/// Shared press primitive for dock buttons. Owns the press scale,
-/// disabled opacity, and rising-edge feedback dispatch.
 private struct GhosttyChromePressBody<Content: View>: View {
     let isPressed: Bool
     let isEnabled: Bool

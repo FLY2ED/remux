@@ -53,8 +53,6 @@ actor TmuxSessionLink {
         guard !stopped else { throw LinkError.stopped }
         guard let viewport else { throw LinkError.missingInitialViewport }
 
-        // Idempotent transport prewarm (auth/root channel) before the
-        // session channel opens.
         await transport.prepare()
         guard !stopped else { throw LinkError.stopped }
 
@@ -65,7 +63,6 @@ actor TmuxSessionLink {
             outboundContinuation.yield(data)
         }
 
-        // Single ordered writer for the session's wire bytes.
         writeTask = Task { [weak self, transport, outbound] in
             for await data in outbound {
                 do {

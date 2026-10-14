@@ -1,14 +1,11 @@
 import UIKit
 
-// The terminal responder needs to conform to `UITextInput` so iOS will deliver
-// the spacebar long-press floating-cursor gesture (`beginFloatingCursor` /
-// `updateFloatingCursor` / `endFloatingCursor`). The terminal has no editable
-// document, so this file provides safe stubs over a virtual one-character
-// document. Everything here exists solely to keep UIKit's protocol-required
-// calls happy without surfacing autocorrect, marked text, an edit menu, or
-// other text-input behaviors. UIKit may still deliver committed software
-// keyboard input through `replace(_:withText:)`, so committed replacement text
-// is forwarded to the same terminal path as `insertText`.
+// beginFloatingCursor/updateFloatingCursor/endFloatingCursor (the spacebar
+// long-press trackpad) are UITextInput methods, so the terminal responder
+// conforms over a virtual one-character document. The stubs must not enable
+// autocorrect, marked text, or an edit menu. UIKit can deliver committed
+// keyboard text through replace(_:withText:), which goes to the same path as
+// insertText.
 
 /// Stub UITextPosition backed by an integer offset in a virtual document of
 /// length 1.

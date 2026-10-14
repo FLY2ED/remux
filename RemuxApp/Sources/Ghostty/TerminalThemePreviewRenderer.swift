@@ -83,9 +83,8 @@ struct TerminalThemePreviewRenderRequest: Equatable {
     }
 }
 
-/// Direct owner of one generic producer, its retained terminal, and one real
-/// renderer surface. There is no PTY, subprocess, preview request, or raster
-/// copy: SwiftUI mounts the Ghostty renderer view itself.
+/// Owns one producer, its retained terminal, and one renderer surface.
+/// SwiftUI mounts the Ghostty renderer view directly.
 @MainActor
 final class TerminalThemePreviewContent {
     enum CreationError: Error {
@@ -159,9 +158,8 @@ final class TerminalThemePreviewContent {
         surfaceConfig.width_px = request.pixelWidth
         surfaceConfig.height_px = request.pixelHeight
         surfaceConfig.visible = false
-        // The previous renderer preview explicitly included the cursor. A
-        // focused renderer preserves that sample appearance without making
-        // this detached, non-responder view interactive.
+        // Focused so the sample shows the cursor. The view never becomes first
+        // responder, so this does not make it interactive.
         surfaceConfig.focused = true
 
         var createdSurface: ghostty_terminal_surface_t?
