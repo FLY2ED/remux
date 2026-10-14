@@ -1023,6 +1023,12 @@ final class RemuxRootModelTests: XCTestCase {
         )
         try saveTrustedHostIdentity(originalIdentity, root: harness.trustedHostRoot)
         await harness.model.load()
+        // Launch discovery also reads this server's credential. Let it finish so
+        // the load suspended below is the edit's.
+        let launchDiscoveryFinished = await waitUntil {
+            harness.model.tmuxSessionDiscoveryState(for: pair.server.id).phase == .loaded
+        }
+        XCTAssertTrue(launchDiscoveryFinished)
         await harness.credentialStore.suspendNextLoad()
 
         let beginEditTask = Task {
