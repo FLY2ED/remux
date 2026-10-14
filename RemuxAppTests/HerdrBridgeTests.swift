@@ -3,9 +3,8 @@ import NIOCore
 import XCTest
 @testable import Remux
 
-/// The launch command, the ready marker, and the bridge transport on a real SSH channel (an
-/// in-process SSH server). The command itself also ran over real SSH against Herdr v0.9.3 (remux-docs
-/// `evidence/herdr-bridge-ssh-20261011/`).
+/// The launch command, the ready marker, and the bridge transport on a real SSH channel (an in-process
+/// SSH server).
 final class HerdrBridgeTests: XCTestCase {
     // MARK: - Launch command
 
