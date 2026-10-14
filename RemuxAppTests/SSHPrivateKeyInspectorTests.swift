@@ -292,7 +292,7 @@ final class SSHPrivateKeyInspectorTests: XCTestCase {
     -----END OPENSSH PRIVATE KEY-----
     """
 
-    private static let rsaKey = """
+    static let rsaKey = """
     -----BEGIN OPENSSH PRIVATE KEY-----
     b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAdzc2gtcn
     NhAAAAAwEAAQAAAQEAvHwbXstzv7i97hp/QLB+mOdUFRdkx1t5qUNH10SprpeID3gLAWYB
