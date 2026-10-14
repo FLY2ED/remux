@@ -7,11 +7,8 @@ final class HerdrPanePainterTests: XCTestCase {
     // MARK: - Recorded streams
 
     /// Every pane of every recorded surface and applied patch paints as the reference painter does
-    /// (`Fixtures/HerdrWire`, `painted`): whole on its first paint, then only the rows that changed since
-    /// the pane's last paint, byte for byte. The reference is a Python port by the same author; on
-    /// 9 October the same row painting, without links, written into Herdr's own libghostty-vt build,
-    /// reproduced Herdr's grid as Herdr's own encoder did (remux-docs
-    /// `evidence/herdr-stage4-traces-20261009/frames/`, Question 2).
+    /// (`Fixtures/HerdrWire`, `painted`): whole on its first paint, then only the rows that changed
+    /// since the pane's last paint, byte for byte.
     func testPaintsEveryRecordedPaneAsTheReferencePainter() throws {
         var full = 0
         var partial = 0
@@ -85,8 +82,7 @@ final class HerdrPanePainterTests: XCTestCase {
         )
     }
 
-    /// Herdr's own expectations (`render_ansi.rs:1162-1164, 1187-1197`) and the rest of its mapping
-    /// (`render_ansi.rs:341-477`).
+    /// The first two expectations are Herdr's own render tests; the rest follow its SGR mapping.
     func testCellStylesUseHerdrsSGR() {
         func sgr(fg: UInt32, bg: UInt32, modifier: UInt16) -> String {
             let cell = HerdrCell(symbol: "x", fg: HerdrColor(raw: fg), bg: HerdrColor(raw: bg), modifier: modifier, skip: false, hyperlink: nil)
@@ -120,7 +116,7 @@ final class HerdrPanePainterTests: XCTestCase {
         )
     }
 
-    /// Herdr's client never writes a cell marked skip (`render_ansi.rs:871, 962`).
+    /// Herdr's client never writes a cell marked skip.
     func testSkippedCellsAreNotWritten() {
         var frame = Self.frame(width: 2, rows: [["a", "b"]])
         frame.cells[1] = HerdrCell(symbol: "b", fg: HerdrColor(raw: 0), bg: HerdrColor(raw: 0), modifier: 0, skip: true, hyperlink: nil)
@@ -133,8 +129,8 @@ final class HerdrPanePainterTests: XCTestCase {
 
     // MARK: - Cursor
 
-    /// The area holding the cursor places it, then shows or hides it, as Herdr's client writes it
-    /// (`render_ansi.rs:827-844`); another area just hides its own.
+    /// The area holding the cursor places it, then shows or hides it, as Herdr's client writes it;
+    /// another area just hides its own.
     func testTheCursorIsPlacedOnlyInTheAreaThatHoldsIt() {
         let holding = HerdrSurfaceRect(x: 4, y: 1, width: 3, height: 2)
         let beside = HerdrSurfaceRect(x: 0, y: 1, width: 4, height: 2)
@@ -149,8 +145,7 @@ final class HerdrPanePainterTests: XCTestCase {
         XCTAssertEqual(Self.text(HerdrPanePainter.cursorBytes(nil)), "\u{1B}[?25l")
     }
 
-    /// With a popup open the popup has the only cursor, as Herdr's client composes them
-    /// (`client/shell.rs:270-279`).
+    /// With a popup open the popup has the only cursor, as Herdr's client composes them.
     func testPanesShowNoCursorWhileAPopupIsOpen() throws {
         let popup = #""popup":{"terminal_id":"t","title":"p","width":null,"height":null,"frame":{"cells":[],"width":0,"height":0,"cursor":{"x":0,"y":0,"visible":true,"shape":0},"hyperlinks":[],"graphics":[]},"mouse_reporting":false,"sgr_pixel_mouse":false,"pixel_width":0,"pixel_height":0}"#
         var withPopup = try HerdrPresentationTests.surface(projection: 1, revision: 1, extra: popup)

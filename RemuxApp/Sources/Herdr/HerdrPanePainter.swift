@@ -1,20 +1,18 @@
 import Foundation
 
 /// Turns part of a Herdr frame into VT bytes for a local terminal of exactly that part's size: a pane's
-/// text area (`innerRect`) for that pane's producer, or a whole popup frame for the popup's (plan D9).
+/// text area (`innerRect`) for that pane's producer, or a whole popup frame for the popup's.
 ///
 /// Each painted row is repainted whole, right to left, with every cell placed at its own column. A wide
 /// grapheme painted after its right neighbour covers that column, and `""` covered cells aren't written,
 /// so wide characters, emoji and combining marks land where Herdr's grid has them without a width table.
-/// Cells are encoded as Herdr's client encodes them (`protocol/render_ansi.rs`). A link carries an id made
-/// from its URI: each cell is opened separately, and Ghostty makes every link opened without an id a link
-/// of its own (`src/terminal/Screen.zig:2676-2681`), so a long URL would otherwise be one link per cell.
+/// Cells are encoded as Herdr's client encodes them (`protocol/render_ansi.rs`). A link carries an id
+/// made from its URI: each cell is opened separately, and Ghostty makes every link opened without an id
+/// a link of its own, so a long URL would otherwise be one link per cell.
 ///
-/// The painted terminal needs autowrap off, as Herdr's client sets it on its terminal
-/// (`client/terminal_setup.rs:122`), or a wide grapheme in the last column wraps into the next row. It
-/// also needs grapheme clustering (mode 2027) on, as Herdr's own pane terminals run it, or ZWJ sequences,
-/// flags and VS16 emoji split across cells (remux-docs `evidence/herdr-stage4-traces-20261009/frames/`,
-/// Question 2).
+/// The painted terminal needs autowrap off, as Herdr's client sets it on its terminal, or a wide
+/// grapheme in the last column wraps into the next row. It also needs grapheme clustering (mode 2027)
+/// on, as Herdr's own pane terminals run it, or ZWJ sequences, flags and VS16 emoji split across cells.
 ///
 /// A paint that places cells ends with the cursor, because placing cells moves the terminal's cursor.
 /// Feed each paint in one producer call, so the renderer never draws a half-painted area. The area must
@@ -32,7 +30,7 @@ enum HerdrPanePainter {
     static let terminalSetup: [UInt8] = Array("\u{1B}[?2027h\u{1B}[?7l".utf8)
 
     /// The cursor the panes show: the frame's, unless a popup is open, which then has the only cursor,
-    /// as Herdr's client composes them (`client/shell.rs:270-279`).
+    /// as Herdr's client composes them.
     static func paneCursor(of surface: HerdrPaneSurfaceFrame) -> HerdrCursor? {
         surface.popup == nil ? surface.frame.cursor : nil
     }
@@ -47,8 +45,8 @@ enum HerdrPanePainter {
 
     /// For a terminal that shows `previous`: the rows that look different, then the cursor; only the
     /// cursor when nothing else changed; nothing when nothing did. Herdr's client also writes only what
-    /// changed since the last frame (`render_ansi.rs:985-1059`). An area of another size is repainted:
-    /// its terminal is resized first.
+    /// changed since the last frame. An area of another size is repainted: its terminal is resized
+    /// first.
     static func update(from previous: Painted, to next: Painted) -> [UInt8] {
         guard let changed = changedRows(from: previous, to: next) else { return repaint(next) }
         let shown = cursor(next.cursor, in: next.area)
@@ -59,8 +57,8 @@ enum HerdrPanePainter {
     }
 
     /// The area's rows (0 is its top row) whose cells look different, compared as Herdr's client
-    /// compares them: symbol, colours, modifiers and the link's sanitized URI, not `skip`
-    /// (`render_ansi.rs:985-996`). nil for areas of different sizes, which are repainted.
+    /// compares them: symbol, colours, modifiers and the link's sanitized URI, not `skip`. nil for
+    /// areas of different sizes, which are repainted.
     static func changedRows(from previous: Painted, to next: Painted) -> [Int]? {
         let width = Int(next.area.width)
         let height = Int(next.area.height)
@@ -95,7 +93,7 @@ enum HerdrPanePainter {
             let start = (Int(area.y) + y) * Int(frame.width) + Int(area.x)
             for x in stride(from: Int(area.width) - 1, through: 0, by: -1) {
                 let cell = frame.cells[start + x]
-                // Herdr's client never writes a cell marked skip (`render_ansi.rs:871, 962`).
+                // Herdr's client never writes a cell marked skip.
                 if cell.symbol.isEmpty || cell.skip { continue }
                 let link = cell.hyperlink.flatMap { Int($0) < links.count ? links[Int($0)] : nil }
                 appendCursorPosition(row: y, column: x, to: &bytes)
@@ -131,8 +129,8 @@ enum HerdrPanePainter {
         return HerdrCursor(x: cursor.x - area.x, y: cursor.y - area.y, visible: cursor.visible, shape: cursor.shape)
     }
 
-    /// As Herdr's client writes it (`render_ansi.rs:827-844`): placed first, even when hidden, then
-    /// shaped (DECSCUSR) and shown, or hidden. A cursor outside the area is hidden where it is.
+    /// As Herdr's client writes it: placed first, even when hidden, then shaped (DECSCUSR) and shown,
+    /// or hidden. A cursor outside the area is hidden where it is.
     static func cursorBytes(_ cursor: HerdrCursor?) -> [UInt8] {
         guard let cursor else { return Array("\u{1B}[?25l".utf8) }
         var bytes: [UInt8] = []
@@ -145,8 +143,7 @@ enum HerdrPanePainter {
         return bytes
     }
 
-    /// Herdr's client drops every control character from a link and treats an empty result as no link
-    /// (`render_ansi.rs:904-910`).
+    /// Herdr's client drops every control character from a link and treats an empty result as no link.
     static func sanitizedLink(_ uri: String) -> [UInt8]? {
         var scalars = String.UnicodeScalarView()
         scalars.append(contentsOf: uri.unicodeScalars.filter { $0.properties.generalCategory != .control })
@@ -184,8 +181,7 @@ enum HerdrPanePainter {
         bytes.append(0x48)
     }
 
-    /// Herdr's `build_sgr` (`render_ansi.rs:341-477`): reset, the modifiers, then foreground and
-    /// background.
+    /// Herdr's `build_sgr`: reset, the modifiers, then foreground and background.
     private static func appendSGR(_ cell: HerdrCell, to bytes: inout [UInt8]) {
         bytes += [0x1B, 0x5B, 0x30]
         let modifier = cell.modifier
