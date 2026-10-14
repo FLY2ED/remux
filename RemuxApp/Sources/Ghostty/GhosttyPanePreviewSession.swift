@@ -1,9 +1,8 @@
 import CoreGraphics
 import Foundation
 
-/// Picker-scoped image state plus one sequential asynchronous capture task.
-/// Native renderer and terminal lifetime remain owned by the tmux session;
-/// this type owns no handles, callbacks, retries, cache, or render queue.
+/// Picker-scoped preview images and one sequential capture task. Native
+/// renderers and terminals stay owned by the session behind PreviewClient.
 @MainActor
 final class GhosttyPanePreviewSession: ObservableObject {
     struct PixelBudget: Equatable, Sendable {

@@ -340,9 +340,9 @@ enum TerminalReconnectSource: Equatable, Hashable, Sendable {
 }
 
 // Root-visible terminal state for library display and reconnect policy.
-// `.connected` is produced from the current runtime/readiness contract:
-// writable protocol attachment plus a hydrated selected pane with an available,
-// attached renderer that has published its first frame.
+// TerminalReadinessProjector.runtimeState reports .connected only with a
+// writable protocol attachment and a selected pane whose attached renderer
+// has published its first frame.
 enum TerminalRuntimeState: Equatable, Sendable {
     case connecting
     case reconnecting(TerminalReconnectSource)
@@ -433,8 +433,8 @@ struct TmuxConnectionDraft: Equatable, Sendable {
     var port: String = "22"
     var username: String = ""
     var tmuxExecutablePath: String = ""
-    // Not editable until the Herdr backend is exposed; carried so editing a
-    // server keeps it.
+    // No form field edits this; it is carried so saving an edited server
+    // keeps it.
     var herdrExecutablePath: String?
     var authenticationKind: SSHAuthenticationKind = .password
     var password: String = ""

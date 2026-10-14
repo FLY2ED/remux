@@ -215,9 +215,8 @@ extension TmuxControlViewport {
     }
 }
 
-/// Lean MainActor wrapper over one externally owned terminal surface.
-/// Native lifetime fencing is owned by TerminalPaneRenderer and its backend fence;
-/// this wrapper adds no lock, ownership mode, or alternate backend.
+/// MainActor wrapper over one terminal surface it does not own.
+/// TerminalPaneRenderer and its backend fence own the native lifetime.
 @MainActor
 final class GhosttyKitControlSurface {
     enum Failure: Equatable {

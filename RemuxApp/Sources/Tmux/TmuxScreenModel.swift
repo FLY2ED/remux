@@ -2,11 +2,10 @@ import Combine
 import Foundation
 import GhosttyKit
 
-/// The production screen model for tmux workspaces: owns one
-/// GhosttyKitRuntime (per session, as before) and one
-/// TmuxTerminalSession, connects through the app's prepared-transport
-/// pooling, and reports the domain `TerminalRuntimeState` vocabulary
-/// the root model already reduces (badges, auto-reconnect).
+/// The screen model for tmux workspaces: owns one GhosttyKitRuntime and one
+/// TmuxTerminalSession per session, connects through the app's
+/// prepared-transport pooling, and reports the domain `TerminalRuntimeState`
+/// that the root model reduces (badges, auto-reconnect).
 @MainActor
 final class TmuxScreenModel: ObservableObject {
     typealias TransportFactory = @MainActor (SessionTarget) -> any TmuxControlTransport
@@ -14,16 +13,14 @@ final class TmuxScreenModel: ObservableObject {
     let target: SessionTarget
     let sessionInstanceID: UUID
 
-    /// The screen-facing facet: presents this session through the
-    /// GhosttyTerminalScreenModeling boundary for GhosttySurfaceScreen.
-    /// Stable screen-facing adapter for this model's session.
+    /// Presents this session to `GhosttySurfaceScreen` through the
+    /// `GhosttyTerminalScreenModeling` boundary.
     let terminalScreenAdapter = TmuxTerminalScreenAdapter()
     let terminalPreviewClient: TerminalPreviewClient?
 
     @Published private(set) var session: TmuxTerminalSession?
     @Published private(set) var startupFailure: String?
 
-    /// The reducer's expectations: the target this session connects to.
     var runtimeConnectionTarget: SessionTarget { target }
 
     /// The viewport the root carries into the replacement model on

@@ -3,9 +3,8 @@ import XCTest
 @testable import Remux
 
 final class HerdrSessionDiscoveryTests: XCTestCase {
-    // `herdr session list --json` from a real run against an isolated root
-    // (remux-docs evidence/herdr-previews-20260930/app-side/raw/isolation).
-    // v0.9.3 serializes the same SessionInfo fields.
+    // `herdr session list --json` output from a real run; v0.9.3 serializes
+    // the same `SessionInfo` fields.
     private let sessionListJSON = #"{"sessions":[{"default":true,"name":"default","running":false,"session_dir":"/private/tmp/rpp-herdr/h/.config/herdr","socket_path":"/private/tmp/rpp-herdr/h/.config/herdr/herdr.sock"},{"default":false,"name":"probe","running":true,"session_dir":"/private/tmp/rpp-herdr/h/.config/herdr/sessions/probe","socket_path":"/private/tmp/rpp-herdr/h/.config/herdr/sessions/probe/herdr.sock"}]}"#
 
     func testListCommandKeepsConfiguredExecutableOutOfLoginShellSyntax() {

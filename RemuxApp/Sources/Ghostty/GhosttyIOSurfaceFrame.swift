@@ -43,8 +43,6 @@ struct GhosttyIOSurfaceFrame: Sendable {
         try copyPixels(from: layer, sourceRect: nil)
     }
 
-    /// Copies only the requested pixels from the currently published
-    /// IOSurface.
     static func read(from layer: CALayer, sourceRect: CGRect) throws -> Self {
         try copyPixels(from: layer, sourceRect: sourceRect)
     }
