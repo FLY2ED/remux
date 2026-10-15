@@ -529,7 +529,7 @@ private extension GhosttySpeechAnalyzerComposerDictationBackend {
 }
 
 @available(iOS 26.0, *)
-private final class GhosttySpeechAnalyzerAudioProcessor:
+final class GhosttySpeechAnalyzerAudioProcessor:
     GhosttyComposerAudioCaptureConsumer,
     @unchecked Sendable
 {

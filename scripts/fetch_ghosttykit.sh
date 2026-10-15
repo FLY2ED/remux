@@ -17,43 +17,97 @@ framework_path="$framework_parent/GhosttyKit.xcframework"
 # framework can be matched against the pinned release above.
 provenance_path="$framework_parent/.ghosttykit-provenance"
 
-force=0
-if [[ "${1:-}" == "--force" ]]; then
-  force=1
-elif [[ -n "${1:-}" ]]; then
-  echo "Usage: scripts/fetch_ghosttykit.sh [--force]" >&2
+usage() {
+  echo "Usage: scripts/fetch_ghosttykit.sh [--force | --verify]" >&2
   exit 2
+}
+
+mode="install"
+case "${1:-}" in
+  "") ;;
+  --force) mode="force" ;;
+  --verify) mode="verify" ;;
+  *) usage ;;
+esac
+[[ $# -le 1 ]] || usage
+
+# Hashes every file in the framework. It is recorded at install so a build
+# written over this path later no longer passes as the release: Ghostty's own
+# build writes here without touching the provenance record.
+framework_digest() {
+  (cd "$framework_path" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256) |
+    shasum -a 256 | awk '{print $1}'
+}
+
+installed_kind=""
+installed_ref=""
+installed_sha=""
+installed_digest=""
+if [[ -f "$provenance_path" ]]; then
+  read -r installed_kind installed_ref installed_sha installed_digest <"$provenance_path" || true
 fi
 
-if [[ -d "$framework_path" && "$force" -ne 1 ]]; then
-  installed_kind=""
-  installed_ref=""
-  installed_sha=""
-  if [[ -f "$provenance_path" ]]; then
-    read -r installed_kind installed_ref installed_sha <"$provenance_path" || true
-  fi
-
-  if [[ "$installed_kind" == "release" &&
-    "$installed_ref" == "$release_tag" &&
-    "$installed_sha" == "$asset_sha256" ]]; then
-    echo "GhosttyKit release $release_tag already installed at:"
-    echo "  $framework_path"
-    exit 0
-  fi
-
-  if [[ "$installed_kind" == "release" ]]; then
-    echo "Installed GhosttyKit ($installed_ref) does not match pinned release $release_tag; reinstalling."
+installed_state() {
+  if [[ ! -d "$framework_path" ]]; then
+    echo missing
+  elif [[ "$installed_kind" == "local-build" ]]; then
+    echo local-build
+  elif [[ "$installed_kind" != "release" ]]; then
+    echo unrecorded
+  elif [[ "$installed_ref" != "$release_tag" || "$installed_sha" != "$asset_sha256" ]]; then
+    echo other-release
+  elif [[ -z "$installed_digest" ]]; then
+    echo undigested
+  elif [[ "$installed_digest" != "$(framework_digest)" ]]; then
+    echo modified
   else
-    echo "Keeping existing GhosttyKit at:"
-    echo "  $framework_path"
-    if [[ "$installed_kind" == "local-build" ]]; then
-      echo "It was built locally from $installed_ref; the pinned release is $release_tag."
-    else
-      echo "It has no provenance record; the pinned release is $release_tag."
-    fi
-    echo "Re-run with --force to replace it with release $release_tag."
-    exit 0
+    echo pinned
   fi
+}
+
+describe_state() {
+  case "$1" in
+    missing) echo "No GhosttyKit is installed." ;;
+    local-build) echo "It was built locally from $installed_ref." ;;
+    unrecorded) echo "It has no provenance record." ;;
+    other-release) echo "It is release $installed_ref." ;;
+    undigested) echo "It was installed before file digests were recorded, so its contents can't be checked." ;;
+    modified) echo "Its files have changed since release $release_tag was installed." ;;
+  esac
+}
+
+state="$(installed_state)"
+
+if [[ "$mode" == "verify" ]]; then
+  if [[ "$state" != "pinned" ]]; then
+    echo "GhosttyKit at $framework_path is not the pinned release $release_tag." >&2
+    describe_state "$state" >&2
+    echo "Run scripts/fetch_ghosttykit.sh --force to install it." >&2
+    exit 1
+  fi
+  echo "Verified GhosttyKit release $release_tag at $framework_path"
+  exit 0
+fi
+
+if [[ "$mode" == "install" ]]; then
+  case "$state" in
+    pinned)
+      echo "GhosttyKit release $release_tag already installed at:"
+      echo "  $framework_path"
+      exit 0
+      ;;
+    missing) ;;
+    other-release)
+      echo "Installed GhosttyKit ($installed_ref) does not match pinned release $release_tag; reinstalling."
+      ;;
+    *)
+      echo "Keeping existing GhosttyKit at:"
+      echo "  $framework_path"
+      echo "$(describe_state "$state") The pinned release is $release_tag."
+      echo "Re-run with --force to replace it with release $release_tag."
+      exit 0
+      ;;
+  esac
 fi
 
 workdir="$(mktemp -d)"
@@ -83,6 +137,6 @@ if [[ ! -d "$framework_path" ]]; then
   exit 1
 fi
 
-printf 'release %s %s\n' "$release_tag" "$asset_sha256" >"$provenance_path"
+printf 'release %s %s %s\n' "$release_tag" "$asset_sha256" "$(framework_digest)" >"$provenance_path"
 
 echo "Done. Generate the project with 'xcodegen generate' and build."
