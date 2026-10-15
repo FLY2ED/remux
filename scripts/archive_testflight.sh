@@ -16,6 +16,13 @@ elif [[ -n "${1:-}" ]]; then
   exit 2
 fi
 
+# TestFlight ships the pinned GhosttyKit release. The framework path can also
+# hold a local build, which must never reach testers.
+if ! scripts/fetch_ghosttykit.sh --verify; then
+  echo "Refusing to archive." >&2
+  exit 1
+fi
+
 archive_path=".local/archives/Remux-$(date +%Y%m%d-%H%M%S).xcarchive"
 export_path=".local/archives/export-$(date +%Y%m%d-%H%M%S)"
 export_options="$(mktemp -t remux-export-options).plist"
