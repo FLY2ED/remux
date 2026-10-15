@@ -465,8 +465,22 @@ final class RemuxRootModelTests: XCTestCase {
     }
 
     func testClosingConnectionSetupFormEmptiesSecureFields() async {
-        var draft = TmuxConnectionDraft()
-        draft.password = "secret"
+        var passwordDraft = TmuxConnectionDraft()
+        passwordDraft.password = "secret"
+        var passphraseDraft = TmuxConnectionDraft()
+        passphraseDraft.authenticationKind = .privateKey
+        passphraseDraft.privateKeyPassphrase = "secret"
+
+        for draft in [passwordDraft, passphraseDraft] {
+            await assertClosingFormEmptiesSecureField(draft: draft)
+        }
+    }
+
+    private func assertClosingFormEmptiesSecureField(
+        draft: TmuxConnectionDraft,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
         let hostingController = UIHostingController(
             rootView: connectionSetupForm(
                 draft: draft,
@@ -482,14 +496,14 @@ final class RemuxRootModelTests: XCTestCase {
             window.isHidden = true
             window.rootViewController = nil
         }
-        let passwordField = {
+        let secureField = {
             self.descendants(of: hostingController.view, matching: UITextField.self)
                 .first { $0.isSecureTextEntry }
         }
 
         hostingController.view.layoutIfNeeded()
-        let showsPassword = await waitUntil { passwordField()?.text == "secret" }
-        XCTAssertTrue(showsPassword)
+        let showsSecret = await waitUntil { secureField()?.text == "secret" }
+        XCTAssertTrue(showsSecret, file: file, line: line)
 
         hostingController.rootView = connectionSetupForm(
             draft: draft,
@@ -497,9 +511,9 @@ final class RemuxRootModelTests: XCTestCase {
             isClosing: true
         )
         hostingController.view.layoutIfNeeded()
-        let emptied = await waitUntil { passwordField()?.text?.isEmpty == true }
-        XCTAssertTrue(emptied)
-        XCTAssertEqual(passwordField()?.placeholder ?? "", "")
+        let emptied = await waitUntil { secureField()?.text?.isEmpty == true }
+        XCTAssertTrue(emptied, file: file, line: line)
+        XCTAssertEqual(secureField()?.placeholder ?? "", "", file: file, line: line)
     }
 
     private func connectionSetupForm(
