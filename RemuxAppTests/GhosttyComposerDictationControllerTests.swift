@@ -1,5 +1,6 @@
 import Combine
 import AVFoundation
+import Speech
 import XCTest
 @testable import Remux
 
@@ -307,10 +308,38 @@ final class GhosttyComposerDictationControllerTests: XCTestCase {
         await waitUntil { transcripts == ["Please \(transcript)"] }
 
         controller.finish { completionCount += 1 }
-        await waitUntil(timeout: .seconds(5)) { controller.phase == .idle }
+        await waitUntil { controller.phase == .idle }
 
         XCTAssertEqual(completionCount, 1)
         XCTAssertEqual(transcripts, ["Please \(transcript)"])
+    }
+
+    func testDebugBackendStopBeforeHypothesisStillDeliversTranscript() async {
+        let transcript = "Review the current changes"
+        let controller = GhosttyComposerDictationController(
+            backend: GhosttyDebugComposerDictationBackend(
+                configuration: GhosttyDebugComposerDictationConfiguration(
+                    transcript: transcript
+                )
+            ),
+            authorizationClient: .debugAuthorized
+        )
+        var transcripts: [String] = []
+        var completionCount = 0
+
+        controller.start(
+            draft: "",
+            onTranscript: { transcripts.append($0) },
+            onFailure: { _ in XCTFail("Unexpected debug dictation failure") }
+        )
+        await waitUntil { controller.phase == .recording }
+        XCTAssertEqual(transcripts, [])
+
+        controller.finish { completionCount += 1 }
+        await waitUntil { controller.phase == .idle }
+
+        XCTAssertEqual(completionCount, 1)
+        XCTAssertEqual(transcripts, [transcript])
     }
 
     func testDebugBackendNoSpeechUsesControllerFailurePath() async {
@@ -570,6 +599,128 @@ final class GhosttyComposerDictationControllerTests: XCTestCase {
         XCTAssertEqual(meterUpdateCount, 1)
         withExtendedLifetime((controllerObservation, meterObservation)) {}
         controller.stopImmediately()
+    }
+
+    func testDictationPhaseComposerPresentation() {
+        typealias Phase = GhosttyComposerDictationPhase
+        let expected: [(Phase, Phase.ComposerStatus, Phase.ComposerControl, Bool)] = [
+            (.idle, .none, .dictate, true),
+            (.preparing, .message("Preparing dictation…"), .progress, false),
+            (.starting, .message("Starting…"), .progress, false),
+            (.recording, .meter, .stop, true),
+            (.transcribing, .message("Transcribing…"), .progress, false),
+        ]
+
+        for (phase, status, control, allowsSending) in expected {
+            XCTAssertEqual(phase.composerStatus, status, "\(phase)")
+            XCTAssertEqual(phase.composerControl, control, "\(phase)")
+            XCTAssertEqual(phase.allowsSending, allowsSending, "\(phase)")
+        }
+    }
+
+    func testSpeechAnalyzerAudioProcessorConvertsAndFlushesMicrophoneAudio() async throws {
+        guard #available(iOS 26.0, *) else { throw XCTSkip("SpeechAnalyzer needs iOS 26.") }
+        let microphone = try XCTUnwrap(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 1,
+            interleaved: false
+        ))
+        let analyzer = try XCTUnwrap(AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: true
+        ))
+        let (inputs, continuation) = AsyncStream<AnalyzerInput>.makeStream()
+        let processor = try GhosttySpeechAnalyzerAudioProcessor(
+            inputFormat: microphone,
+            analyzerFormat: analyzer,
+            continuation: continuation,
+            onLevel: { _ in }
+        )
+
+        // Ten 100 ms buffers, then one second in a single buffer, which needs
+        // more room than the processor's initial output capacity.
+        var sentFrames = 0
+        for frameCount in Array(repeating: 4_800, count: 10) + [48_000] {
+            let buffer = try sineBuffer(format: microphone, frameCount: frameCount, startFrame: sentFrames)
+            XCTAssertTrue(processor.accept(buffer, at: AVAudioTime(hostTime: 0)))
+            sentFrames += frameCount
+        }
+        XCTAssertTrue(processor.finish())
+        let lateBuffer = try sineBuffer(format: microphone, frameCount: 4_800, startFrame: sentFrames)
+        XCTAssertFalse(processor.accept(lateBuffer, at: AVAudioTime(hostTime: 0)))
+
+        var receivedFrames = 0
+        var peak = 0
+        for await input in inputs {
+            // AnalyzerInput.buffer builds a new buffer on each access, so
+            // keep one alive while reading its samples.
+            let buffer = input.buffer
+            XCTAssertEqual(buffer.format, analyzer)
+            try withExtendedLifetime(buffer) {
+                let samples = try XCTUnwrap(buffer.int16ChannelData?[0])
+                for index in 0..<Int(buffer.frameLength) {
+                    peak = max(peak, abs(Int(samples[index])))
+                }
+            }
+            receivedFrames += Int(buffer.frameLength)
+        }
+        XCTAssertEqual(receivedFrames, sentFrames / 3)
+        XCTAssertGreaterThan(peak, Int(Int16.max) / 4)
+    }
+
+    func testSpeechAnalyzerAudioProcessorCancelEndsInputWithoutFlushing() async throws {
+        guard #available(iOS 26.0, *) else { throw XCTSkip("SpeechAnalyzer needs iOS 26.") }
+        let microphone = try XCTUnwrap(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 1,
+            interleaved: false
+        ))
+        let analyzer = try XCTUnwrap(AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: true
+        ))
+        let (inputs, continuation) = AsyncStream<AnalyzerInput>.makeStream()
+        let processor = try GhosttySpeechAnalyzerAudioProcessor(
+            inputFormat: microphone,
+            analyzerFormat: analyzer,
+            continuation: continuation,
+            onLevel: { _ in }
+        )
+        let buffer = try sineBuffer(format: microphone, frameCount: 4_800, startFrame: 0)
+        XCTAssertTrue(processor.accept(buffer, at: AVAudioTime(hostTime: 0)))
+
+        processor.cancel()
+
+        XCTAssertFalse(processor.accept(buffer, at: AVAudioTime(hostTime: 0)))
+        var receivedFrames = 0
+        for await input in inputs {
+            receivedFrames += Int(input.buffer.frameLength)
+        }
+        XCTAssertLessThanOrEqual(receivedFrames, 4_800 / 3)
+    }
+
+    private func sineBuffer(
+        format: AVAudioFormat,
+        frameCount: Int,
+        startFrame: Int
+    ) throws -> AVAudioPCMBuffer {
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: AVAudioFrameCount(frameCount)
+        ))
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        let samples = try XCTUnwrap(buffer.floatChannelData?[0])
+        for index in 0..<frameCount {
+            let time = Float(startFrame + index) / Float(format.sampleRate)
+            samples[index] = 0.5 * sinf(2 * .pi * 440 * time)
+        }
+        return buffer
     }
 
     private func waitUntil(
