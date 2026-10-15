@@ -432,24 +432,11 @@ final class RemuxRootModelTests: XCTestCase {
     }
 
     func testConnectionSetupFormDisablesTextInputDuringAction() async {
-        let view = NavigationStack {
-            ConnectionSetupView(
-                draft: TmuxConnectionDraft(),
-                validation: .empty,
-                mode: .newServer,
-                setupSessionID: UUID(),
-                terminalTheme: .remuxDark,
-                isActionInProgress: true,
-                showsServerSummaryForNewSession: false,
-                onChange: { _ in },
-                onConnect: {},
-                publicKeyInstallTarget: { _ in throw CancellationError() },
-                preflightPublicKeyInstallation: { _ in .passwordRequired },
-                appendPublicKey: { _, _ in },
-                verifyPublicKeyInstallation: { _ in },
-                trustSetupHostKey: { _ in }
-            )
-        }
+        let view = connectionSetupForm(
+            draft: TmuxConnectionDraft(),
+            isActionInProgress: true,
+            isClosing: false
+        )
         let hostingController = UIHostingController(rootView: view)
         let window = UIWindow(frame: UIScreen.main.bounds)
         window.rootViewController = hostingController
@@ -475,6 +462,84 @@ final class RemuxRootModelTests: XCTestCase {
             matching: UITextField.self
         )
         XCTAssertTrue(textFields.allSatisfy { !$0.isEnabled })
+    }
+
+    func testClosingConnectionSetupFormEmptiesSecureFields() async {
+        var passwordDraft = TmuxConnectionDraft()
+        passwordDraft.password = "secret"
+        var passphraseDraft = TmuxConnectionDraft()
+        passphraseDraft.authenticationKind = .privateKey
+        passphraseDraft.privateKeyPassphrase = "secret"
+
+        for draft in [passwordDraft, passphraseDraft] {
+            await assertClosingFormEmptiesSecureField(draft: draft)
+        }
+    }
+
+    private func assertClosingFormEmptiesSecureField(
+        draft: TmuxConnectionDraft,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let hostingController = UIHostingController(
+            rootView: connectionSetupForm(
+                draft: draft,
+                isActionInProgress: false,
+                isClosing: false
+            )
+        )
+        let window = UIWindow(frame: UIScreen.main.bounds)
+        window.rootViewController = hostingController
+        window.makeKeyAndVisible()
+        hostingController.view.frame = window.bounds
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        let secureField = {
+            self.descendants(of: hostingController.view, matching: UITextField.self)
+                .first { $0.isSecureTextEntry }
+        }
+
+        hostingController.view.layoutIfNeeded()
+        let showsSecret = await waitUntil { secureField()?.text == "secret" }
+        XCTAssertTrue(showsSecret, file: file, line: line)
+
+        hostingController.rootView = connectionSetupForm(
+            draft: draft,
+            isActionInProgress: false,
+            isClosing: true
+        )
+        hostingController.view.layoutIfNeeded()
+        let emptied = await waitUntil { secureField()?.text?.isEmpty == true }
+        XCTAssertTrue(emptied, file: file, line: line)
+        XCTAssertEqual(secureField()?.placeholder ?? "", "", file: file, line: line)
+    }
+
+    private func connectionSetupForm(
+        draft: TmuxConnectionDraft,
+        isActionInProgress: Bool,
+        isClosing: Bool
+    ) -> some View {
+        NavigationStack {
+            ConnectionSetupView(
+                draft: draft,
+                validation: .empty,
+                mode: .newServer,
+                setupSessionID: UUID(),
+                terminalTheme: .remuxDark,
+                isActionInProgress: isActionInProgress,
+                showsServerSummaryForNewSession: false,
+                isClosing: isClosing,
+                onChange: { _ in },
+                onConnect: {},
+                publicKeyInstallTarget: { _ in throw CancellationError() },
+                preflightPublicKeyInstallation: { _ in .passwordRequired },
+                appendPublicKey: { _, _ in },
+                verifyPublicKeyInstallation: { _ in },
+                trustSetupHostKey: { _ in }
+            )
+        }
     }
 
     func testInstallTargetUsesDraftStableIDAndNormalizedEndpoint() throws {
