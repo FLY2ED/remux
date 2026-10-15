@@ -245,6 +245,25 @@ final class GhosttyKitRuntime {
             throw GhosttyKitRuntimeError.initializationFailed(result)
         }
         initialized = true
+        removeRetiredCrashReports()
+    }
+
+    // GhosttyKit is built without Sentry, so nothing reads or writes these
+    // any more; builds that linked it left crash dumps and Sentry's run
+    // database in Ghostty's state and cache directories.
+    private static func removeRetiredCrashReports() {
+        let retired: [(variable: String, subdirectory: String)] = [
+            ("XDG_STATE_HOME", "ghostty/crash"),
+            ("XDG_CACHE_HOME", "ghostty/sentry"),
+        ]
+        let paths = retired.compactMap { entry in
+            getenv(entry.variable).map { "\(String(cString: $0))/\(entry.subdirectory)" }
+        }
+        Task.detached(priority: .utility) {
+            for path in paths {
+                try? FileManager.default.removeItem(atPath: path)
+            }
+        }
     }
 
     private static func configureProcessDirectories() throws {
