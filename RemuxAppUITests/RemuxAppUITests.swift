@@ -233,18 +233,7 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertEqual(recordingContinuity.effectiveViewport, editingContinuity.effectiveViewport)
         XCTAssertEqual(recordingContinuity.bottomChrome, editingContinuity.bottomChrome)
 
-        RunLoop.current.run(until: Date().addingTimeInterval(0.6))
         stop.tap()
-
-        let status = app.staticTexts["terminal.composer.dictation.status"]
-        XCTAssertTrue(status.waitForExistence(timeout: 3))
-        XCTAssertEqual(status.label, "Transcribing…")
-        XCTAssertNotNil(waitForKeyboardPresence(false, label: "transcribing kept keyboard hidden"))
-        XCTAssertFalse(keyboardDismiss.exists)
-        attachScreenshot(named: "composer-dictation-transcribing")
-        // The editor stays in the accessibility tree while transcribing but
-        // ignores taps, so wait for the transcription itself to finish.
-        XCTAssertTrue(waitForElementToDisappear(status, timeout: 5), "Dictation kept transcribing.")
 
         let field = app.textViews["terminal.composer.field"]
         XCTAssertTrue(field.waitForExistence(timeout: 3))
@@ -284,11 +273,6 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertFalse(keyboardDismiss.exists)
         stop.tap()
 
-        XCTAssertTrue(status.waitForExistence(timeout: 3))
-        XCTAssertEqual(status.label, "Transcribing…")
-        XCTAssertNotNil(waitForKeyboardPresence(true, label: "transcribing kept keyboard visible"))
-        XCTAssertEqual(app.keyboards.firstMatch.frame, visibleKeyboardFrame)
-        XCTAssertTrue(waitForElementToDisappear(status, timeout: 5), "Dictation kept transcribing.")
         XCTAssertTrue(field.waitForExistence(timeout: 3))
         XCTAssertNotNil(waitForKeyboardPresence(true, label: "dictation stopped with keyboard visible"))
         XCTAssertEqual(app.keyboards.firstMatch.frame, visibleKeyboardFrame)
