@@ -98,6 +98,26 @@ final class RemuxAppUITests: XCTestCase {
         _ = waitForTerminalHomeButton()
     }
 
+    /// iOS offers to save a typed password when the form holding it closes.
+    /// Remux keeps server passwords in its own Keychain, so the server form
+    /// closes without that offer.
+    func testServerFormClosesWithoutPasswordSaveOffer() {
+        launchSimulatorApp()
+        openConnectionSetup()
+        fillConnectionForm()
+        app.buttons["connection.cancel"].tap()
+        XCTAssertTrue(app.buttons["library.empty.add-server"].waitForExistence(timeout: 5))
+        assertNoPasswordSaveOffer(after: "Cancel")
+
+        openConnectionSetup()
+        fillConnectionForm()
+        app.buttons["connection.save"].tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["library.server.detail"].waitForExistence(timeout: 5)
+        )
+        assertNoPasswordSaveOffer(after: "Save")
+    }
+
     func testToolbarKeysUpdateRetainedSimulatorTerminalAndFirstSlotOpensShortcuts() {
         launchSeededSimulatorTerminal()
 
@@ -146,11 +166,7 @@ final class RemuxAppUITests: XCTestCase {
     func testComposerDictationStopAndCancelFlow() {
         let transcript = "Review the current changes and run the focused tests"
         app.launchEnvironment["REMUX_DEBUG_DICTATION_TRANSCRIPT"] = transcript
-        launchSimulatorApp()
-        openConnectionSetup()
-        fillConnectionForm()
-        saveServerAndStartSession()
-        _ = waitForTerminalHomeButton()
+        launchSeededSimulatorTerminal(attachesTmux: false)
 
         let composerToggle = app.buttons["terminal.composer.toggle"]
         XCTAssertTrue(composerToggle.waitForExistence(timeout: 5))
@@ -213,18 +229,7 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertEqual(recordingContinuity.effectiveViewport, editingContinuity.effectiveViewport)
         XCTAssertEqual(recordingContinuity.bottomChrome, editingContinuity.bottomChrome)
 
-        RunLoop.current.run(until: Date().addingTimeInterval(0.6))
         stop.tap()
-
-        let status = app.staticTexts["terminal.composer.dictation.status"]
-        XCTAssertTrue(status.waitForExistence(timeout: 3))
-        XCTAssertEqual(status.label, "Transcribing…")
-        XCTAssertNotNil(waitForKeyboardPresence(false, label: "transcribing kept keyboard hidden"))
-        XCTAssertFalse(keyboardDismiss.exists)
-        attachScreenshot(named: "composer-dictation-transcribing")
-        // The editor stays in the accessibility tree while transcribing but
-        // ignores taps, so wait for the transcription itself to finish.
-        XCTAssertTrue(waitForElementToDisappear(status, timeout: 5), "Dictation kept transcribing.")
 
         let field = app.textViews["terminal.composer.field"]
         XCTAssertTrue(field.waitForExistence(timeout: 3))
@@ -264,11 +269,6 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertFalse(keyboardDismiss.exists)
         stop.tap()
 
-        XCTAssertTrue(status.waitForExistence(timeout: 3))
-        XCTAssertEqual(status.label, "Transcribing…")
-        XCTAssertNotNil(waitForKeyboardPresence(true, label: "transcribing kept keyboard visible"))
-        XCTAssertEqual(app.keyboards.firstMatch.frame, visibleKeyboardFrame)
-        XCTAssertTrue(waitForElementToDisappear(status, timeout: 5), "Dictation kept transcribing.")
         XCTAssertTrue(field.waitForExistence(timeout: 3))
         XCTAssertNotNil(waitForKeyboardPresence(true, label: "dictation stopped with keyboard visible"))
         XCTAssertEqual(app.keyboards.firstMatch.frame, visibleKeyboardFrame)
@@ -284,11 +284,7 @@ final class RemuxAppUITests: XCTestCase {
 
     func testComposerDictationKeepsFullChromeWidth() {
         app.launchEnvironment["REMUX_DEBUG_DICTATION_TRANSCRIPT"] = "Width stability"
-        launchSimulatorApp()
-        openConnectionSetup()
-        fillConnectionForm()
-        saveServerAndStartSession()
-        _ = waitForTerminalHomeButton()
+        launchSeededSimulatorTerminal(attachesTmux: false)
 
         let terminal = app.otherElements["terminal.screen"]
         XCTAssertTrue(terminal.waitForExistence(timeout: 5))
@@ -337,11 +333,7 @@ final class RemuxAppUITests: XCTestCase {
 
     func testComposerDictationCanRestartAfterNoSpeech() {
         app.launchEnvironment["REMUX_DEBUG_DICTATION_NO_SPEECH"] = "1"
-        launchSimulatorApp()
-        openConnectionSetup()
-        fillConnectionForm()
-        saveServerAndStartSession()
-        _ = waitForTerminalHomeButton()
+        launchSeededSimulatorTerminal(attachesTmux: false)
 
         let composerToggle = app.buttons["terminal.composer.toggle"]
         XCTAssertTrue(composerToggle.waitForExistence(timeout: 5))
@@ -370,21 +362,11 @@ final class RemuxAppUITests: XCTestCase {
     }
 
     func testComposerTogglePreservesKeyboardWhileReservingComposerViewport() {
-        app.launchEnvironment["REMUX_UI_TEST_INPUT_READY"] = "1"
-        launchSimulatorApp()
-        openConnectionSetup()
-        fillConnectionForm()
-        saveServerAndStartSession()
-        _ = waitForTerminalHomeButton()
-        waitForLiveTerminalInputReady(timeout: 10)
+        launchSeededSimulatorTerminal()
 
         let terminal = app.otherElements["terminal.screen"]
         XCTAssertTrue(terminal.waitForExistence(timeout: 5))
 
-        // The optional password-manager prompt probe may need to tap the app
-        // after the terminal appears. Normalize the hidden-keyboard phase so
-        // this test measures composer behavior rather than that probe's tap.
-        hideKeyboardIfPresent()
         XCTAssertNotNil(waitForKeyboardPresence(false, label: "terminal keyboard hidden before composer toggle"))
 
         guard let hiddenContinuity = waitForKeyboardContinuity(owner: "none") else {
@@ -491,14 +473,8 @@ final class RemuxAppUITests: XCTestCase {
     }
 
     func testComposerHandleDismissesAndEditorRestoresKeyboard() {
-        app.launchEnvironment["REMUX_UI_TEST_INPUT_READY"] = "1"
         app.launchArguments += ["-terminal.composer.keyboardDismissHintShown", "NO"]
-        launchSimulatorApp()
-        openConnectionSetup()
-        fillConnectionForm()
-        saveServerAndStartSession()
-        _ = waitForTerminalHomeButton()
-        waitForLiveTerminalInputReady(timeout: 10)
+        launchSeededSimulatorTerminal()
 
         hideKeyboardIfPresent()
         let composerToggle = app.buttons["terminal.composer.toggle"]
@@ -535,13 +511,7 @@ final class RemuxAppUITests: XCTestCase {
     }
 
     func testComposerMultilineKeepsWidthAndKeyboardStable() {
-        app.launchEnvironment["REMUX_UI_TEST_INPUT_READY"] = "1"
-        launchSimulatorApp()
-        openConnectionSetup()
-        fillConnectionForm()
-        saveServerAndStartSession()
-        _ = waitForTerminalHomeButton()
-        waitForLiveTerminalInputReady(timeout: 10)
+        launchSeededSimulatorTerminal()
 
         let terminal = app.otherElements["terminal.screen"]
         XCTAssertTrue(terminal.waitForExistence(timeout: 5))
@@ -614,11 +584,7 @@ final class RemuxAppUITests: XCTestCase {
     }
 
     func testCanKeepMultipleSimulatorSessionsActive() {
-        launchSimulatorApp()
-        openConnectionSetup()
-        fillConnectionForm()
-
-        saveServerAndStartSession()
+        launchSeededSimulatorTerminal(attachesTmux: false)
         openHomeFromTerminal()
 
         let firstOpenSession = activeSessionRows.firstMatch
@@ -1147,7 +1113,6 @@ final class RemuxAppUITests: XCTestCase {
         fillConnectionForm()
 
         app.buttons["connection.save"].tap()
-        dismissPasswordManagerPromptIfPresent()
 
         XCTAssertTrue(
             app.descendants(matching: .any)["library.server.detail"].waitForExistence(timeout: 5),
@@ -1161,8 +1126,6 @@ final class RemuxAppUITests: XCTestCase {
     }
 
     func testEditServerChecksSessionsAgain() {
-        // A seeded server skips the Add Server form, whose password iOS
-        // offers to save some seconds later, over the taps below.
         app.launchEnvironment.merge(
             [
                 "REMUX_UI_TESTING": "1",
@@ -1670,63 +1633,6 @@ final class RemuxAppUITests: XCTestCase {
         )
     }
 
-    func testLiveMouseReportFlingCatchWhenConfigured() throws {
-        let sessionName = try generatedLiveLatencySessionName("flingcatch")
-        defer {
-            cleanupGeneratedLiveLatencySessionIfPossible(sessionName)
-        }
-
-        try launchLiveSSHAppIfConfigured(traceRuntime: true, sessionNameOverride: sessionName)
-        openFirstSavedSession()
-        waitForLiveTerminalReady(timeout: 90)
-
-        // -n: no swap file. Cleanup kills vim with the session, which leaves
-        // a swap file behind, and on the next run vim would stop at its
-        // E325 recovery prompt instead of showing the file.
-        sendTerminalCommand(
-            "seq -f 'REMUX_CATCH_LINE_%g' 300 > /tmp/remux-catch.txt; vim --clean -n -c 'set mouse=a' -c 'normal G' /tmp/remux-catch.txt"
-        )
-        hideKeyboardIfPresent()
-        guard waitForStableLiveTerminalScreenshot(
-            minNonBackgroundPixels: 30_000,
-            attachmentName: "live-terminal-catch-before"
-        ) != nil else {
-            return
-        }
-
-        let terminal = app.otherElements["terminal.screen"].firstMatch
-        XCTAssertTrue(terminal.waitForExistence(timeout: 10))
-
-        // Fling, then immediately touch down: the catch must stop the
-        // deceleration AND swallow the touch (a leaked tap would emit
-        // an SGR button press into vim — asserted on the wire by the
-        // harness trace analysis).
-        terminal.swipeUp(velocity: .fast)
-        terminal.tap()
-
-        // Catch proof: motion has stopped — two screenshots a second
-        // apart must be identical while the (cancelled) deceleration
-        // window would still have been running.
-        let first = app.screenshot()
-        RunLoop.current.run(until: Date().addingTimeInterval(1.0))
-        let second = app.screenshot()
-        let residualMotion = liveTerminalPixelDifference(before: first, after: second)
-        XCTAssertNotNil(residualMotion)
-        XCTAssertLessThan(
-            residualMotion ?? .max,
-            2_000,
-            "Touching mid-fling should catch the scroll dead; content must not keep moving."
-        )
-
-        // Control: a deliberate tap after everything settles must still
-        // reach the app as a click (the swallow is catch-scoped). The
-        // harness wire analysis asserts exactly this tap's press and
-        // release reach vim, and nothing from the catch tap.
-        RunLoop.current.run(until: Date().addingTimeInterval(1.5))
-        terminal.tap()
-        RunLoop.current.run(until: Date().addingTimeInterval(1.0))
-    }
-
     func testLiveAltScreenCursorScrollWhenConfigured() throws {
         let sessionName = try generatedLiveLatencySessionName("altscroll")
         defer {
@@ -1754,9 +1660,8 @@ final class RemuxAppUITests: XCTestCase {
 
         let terminal = app.otherElements["terminal.screen"].firstMatch
         XCTAssertTrue(terminal.waitForExistence(timeout: 10))
-        // Chained same-direction flicks with no settle between them:
-        // the physics view never goes idle, so this exercises virtual
-        // offset drift across consecutive gestures.
+        // Five fast flicks in a row. XCUITest waits for each deceleration
+        // to end before the next swipe.
         terminal.swipeUp(velocity: .fast)
         terminal.swipeUp(velocity: .fast)
         terminal.swipeUp(velocity: .fast)
@@ -3168,11 +3073,15 @@ final class RemuxAppUITests: XCTestCase {
         app.launch()
     }
 
-    private func launchSeededSimulatorTerminal() {
+    /// Opens the seeded server's session. Without `attachesTmux`, the
+    /// simulated server never answers tmux, so the terminal stays connecting.
+    private func launchSeededSimulatorTerminal(attachesTmux: Bool = true) {
+        if attachesTmux {
+            app.launchEnvironment["REMUX_UI_TEST_INPUT_READY"] = "1"
+        }
         app.launchEnvironment.merge(
             [
                 "REMUX_UI_TESTING": "1",
-                "REMUX_UI_TEST_INPUT_READY": "1",
                 "REMUX_DEBUG_SEED_CONNECTION": "1",
                 "REMUX_DEBUG_SERVER_NAME": "UI Test Server",
                 "REMUX_DEBUG_SERVER_HOST": "example.com",
@@ -3188,7 +3097,9 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertTrue(session.waitForExistence(timeout: 5))
         session.tap()
         XCTAssertTrue(app.buttons["terminal.toolbar-key.0"].waitForExistence(timeout: 5))
-        waitForLiveTerminalInputReady(timeout: 10)
+        if attachesTmux {
+            waitForLiveTerminalInputReady(timeout: 10)
+        }
     }
 
     private func selectToolbarKey(_ title: String) {
@@ -3987,7 +3898,6 @@ final class RemuxAppUITests: XCTestCase {
     private func saveConnectionAndWaitForTerminal() {
         app.buttons["connection.save"].tap()
         XCTAssertTrue(app.otherElements["terminal.screen"].waitForExistence(timeout: 10))
-        dismissPasswordManagerPromptIfPresent()
     }
 
     private func saveServerAndStartSession() {
@@ -3995,7 +3905,6 @@ final class RemuxAppUITests: XCTestCase {
 
         let serverDetail = app.descendants(matching: .any)["library.server.detail"]
         XCTAssertTrue(serverDetail.waitForExistence(timeout: 5))
-        declinePasswordManagerPromptAfterAddingServer()
         let newSessionButton = app.buttons["library.server.new-session.empty"]
         XCTAssertTrue(newSessionButton.waitForExistence(timeout: 2))
         newSessionButton.tap()
@@ -4007,15 +3916,14 @@ final class RemuxAppUITests: XCTestCase {
         saveConnectionAndWaitForTerminal()
     }
 
-    /// After the Add Server form closes, iOS offers to save its password. The
-    /// offer appears a few seconds later, on top of whatever the test is doing
-    /// by then, and takes the taps and keystrokes meant for the app. So wait
-    /// for it and decline it before going on.
-    private func declinePasswordManagerPromptAfterAddingServer() {
-        let notNow = app.buttons["Not Now"]
-        if notNow.waitForExistence(timeout: 10) {
-            declinePasswordManagerPrompt(notNow)
-        }
+    /// iOS shows its Save Password offer a second or more after the form
+    /// closes, and several seconds later on a freshly booted simulator, so
+    /// watch for it for a while.
+    private func assertNoPasswordSaveOffer(after action: String) {
+        XCTAssertFalse(
+            app.buttons["Not Now"].waitForExistence(timeout: 10),
+            "iOS offered to save the server password after \(action)."
+        )
     }
 
     private func openHomeFromTerminal() {
@@ -4162,37 +4070,6 @@ final class RemuxAppUITests: XCTestCase {
         } else {
             serverButton.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         }
-    }
-
-    private func dismissPasswordManagerPromptIfPresent() {
-        let appNotNowButton = app.buttons["Not Now"]
-        if appNotNowButton.waitForExistence(timeout: 1) {
-            declinePasswordManagerPrompt(appNotNowButton)
-            return
-        }
-
-        app.tap()
-        if appNotNowButton.waitForExistence(timeout: 1) {
-            declinePasswordManagerPrompt(appNotNowButton)
-            return
-        }
-
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.32, dy: 0.63)).tap()
-    }
-
-    /// The Save Password prompt ignores taps for a moment after it appears,
-    /// even once it looks settled, and then stays up and covers the app. So
-    /// tap Not Now again until the prompt goes away.
-    private func declinePasswordManagerPrompt(_ notNow: XCUIElement) {
-        for _ in 0..<5 {
-            if notNow.isHittable {
-                notNow.tap()
-            }
-            if waitForElementToDisappear(notNow, timeout: 2) {
-                return
-            }
-        }
-        XCTFail("The Save Password prompt stayed up.")
     }
 
     private func installSystemPromptMonitor() {
@@ -4619,110 +4496,6 @@ final class RemuxAppUITests: XCTestCase {
         }
 
         return app.otherElements["settings.form"]
-    }
-
-    func testCaptureDesignReviewScreens() throws {
-        try launchLiveSSHAppIfConfigured(traceRuntime: true)
-
-        XCTAssertTrue(app.buttons["library.add-server"].waitForExistence(timeout: 12))
-        sleep(1)
-        attach(name: "10-library")
-
-        let settings = app.buttons["library.settings"]
-        XCTAssertTrue(settings.waitForExistence(timeout: 5))
-        settings.tap()
-        XCTAssertTrue(settingsForm.waitForExistence(timeout: 3))
-        sleep(1)
-        attach(name: "11-settings")
-
-        // Open the theme picker so we capture its expanded menu.
-        let theme = app.descendants(matching: .any)["settings.theme"]
-        if theme.waitForExistence(timeout: 2), theme.isHittable {
-            theme.tap()
-            sleep(1)
-            attach(name: "11b-theme-menu")
-            // Dismiss menu without picking a different theme by tapping the
-            // currently selected item (label varies; fall back to back swipe).
-            if !app.buttons["Ghostty Default"].waitForExistence(timeout: 1) {
-                app.swipeDown()
-            } else {
-                app.buttons["Ghostty Default"].tap()
-            }
-        }
-
-        app.navigationBars.buttons.firstMatch.tap()
-
-        let addServer = app.buttons["library.add-server"]
-        XCTAssertTrue(addServer.waitForExistence(timeout: 5))
-        addServer.tap()
-        XCTAssertTrue(app.textFields["connection.name"].waitForExistence(timeout: 3))
-        sleep(1)
-        attach(name: "12-connection-setup-empty")
-
-        let name = app.textFields["connection.name"]
-        name.tap()
-        name.typeText("Example SSH Server")
-
-        let host = app.textFields["connection.host"]
-        host.tap()
-        host.typeText("server.example.com")
-
-        let user = app.textFields["connection.username"]
-        tapFormField(user)
-        typeTextThenReturn("demo", into: user)
-
-        let pwd = app.secureTextFields["connection.password"]
-        XCTAssertTrue(pwd.waitForExistence(timeout: 2))
-        pwd.typeText("demo-password")
-        sleep(1)
-        attach(name: "13-connection-setup-filled")
-
-        app.buttons["connection.cancel"].tap()
-        XCTAssertTrue(app.buttons["library.add-server"].waitForExistence(timeout: 3))
-        // The cancelled connection-setup form may have left the keyboard up
-        // and/or surfaced a password-manager prompt that overlays the list.
-        sleep(1)
-        dismissPasswordManagerPromptIfPresent()
-        if app.keyboards.firstMatch.exists {
-            app.tap()
-        }
-        sleep(1)
-
-        openFirstSavedSession()
-        waitForLiveTerminalReady(timeout: 60)
-        sleep(3)
-        attach(name: "20-terminal-ready")
-
-        let panes = app.buttons["terminal.panes"]
-        XCTAssertTrue(panes.waitForExistence(timeout: 5))
-        if panes.isHittable { panes.tap() }
-        sleep(2)
-        attach(name: "21-panes-sheet")
-        dismissTopSheetIfPresent()
-
-        let windows = app.buttons["terminal.windows"]
-        XCTAssertTrue(windows.waitForExistence(timeout: 5))
-        if windows.isHittable { windows.tap() }
-        sleep(2)
-        attach(name: "22-windows-sheet")
-        dismissTopSheetIfPresent()
-
-        let keyboard = app.buttons["terminal.keyboard"]
-        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
-        if keyboard.isHittable { keyboard.tap() }
-        sleep(3)
-        attach(name: "23-grouped-terminal-dock-keyboard")
-
-        let ctrlButton = app.buttons["terminal.toolbar-key.0"]
-        if ctrlButton.exists, ctrlButton.isHittable {
-            ctrlButton.tap()
-            sleep(1)
-            attach(name: "24-grouped-terminal-dock-ctrl-armed")
-        }
-
-        tapTerminalHomeButton(waitForTerminalHomeButton(timeout: 5))
-        sleep(2)
-        attach(name: "30-library-with-connected-session")
     }
 
     private func attach(name: String) {

@@ -147,7 +147,10 @@ jobs:
           CONFIGURATION: Release
           GHOSTTYKIT_XCFRAMEWORK: ${{ github.workspace }}/../ghostty-remux-upstream-rebuild/macos/GhosttyKit.xcframework
         shell: bash
-        run: scripts/verify_ghosttykit_release_mode.sh
+        run: |
+          set -euo pipefail
+          scripts/fetch_ghosttykit.sh --verify
+          scripts/verify_ghosttykit_release_mode.sh
 
       - name: Verify generated Xcode project
         shell: bash
