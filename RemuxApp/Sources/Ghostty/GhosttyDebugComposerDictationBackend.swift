@@ -37,7 +37,7 @@ final class GhosttyDebugComposerDictationBackend:
         let handler: @Sendable (GhosttyComposerDictationBackendEvent) -> Void
         var startWork: DispatchWorkItem?
         var hypothesisWork: DispatchWorkItem?
-        var completionWork: DispatchWorkItem?
+        var deliveredHypothesis = false
 
         init(
             id: UInt64,
@@ -50,7 +50,6 @@ final class GhosttyDebugComposerDictationBackend:
         func cancel() {
             startWork?.cancel()
             hypothesisWork?.cancel()
-            completionWork?.cancel()
         }
     }
 
@@ -95,6 +94,7 @@ final class GhosttyDebugComposerDictationBackend:
                           activeRun === run else {
                         return
                     }
+                    run.deliveredHypothesis = true
                     run.handler(.hypothesis(transcript))
                 }
                 run.hypothesisWork = hypothesisWork
@@ -119,23 +119,15 @@ final class GhosttyDebugComposerDictationBackend:
                 return
             }
 
-            run.completionWork?.cancel()
-            let completionWork = DispatchWorkItem { [weak self, weak run] in
-                guard let self,
-                      let run,
-                      activeRun === run else {
-                    return
-                }
-                run.handler(.completed)
+            // Like a recognizer's final result, a stop delivers the transcript
+            // even if the hypothesis hasn't arrived yet.
+            if let transcript = configuration.transcript, !run.deliveredHypothesis {
+                run.hypothesisWork?.cancel()
+                run.deliveredHypothesis = true
+                run.handler(.hypothesis(transcript))
             }
-            run.completionWork = completionWork
-            // With a transcript, stay in Transcribing… long enough for a UI
-            // test to see it: XCUITest's first existence check lands about a
-            // second after a tap, later on a slow CI runner.
-            let delay: DispatchTimeInterval = configuration.transcript == nil
-                ? .milliseconds(250)
-                : .seconds(3)
-            queue.asyncAfter(deadline: .now() + delay, execute: completionWork)
+            activeRun = nil
+            run.handler(.completed)
         }
     }
 

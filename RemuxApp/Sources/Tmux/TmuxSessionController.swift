@@ -800,10 +800,7 @@ final class TmuxSessionController: @unchecked Sendable {
             }
             var admittedWork = false
             if clientSize != nextSize {
-                guard admitCommandOnWriter(
-                    command: "refresh-client -C \(cols)x\(rows)",
-                    request: .setClientSize
-                ) else { return }
+                guard admitClientSizeOnWriter(nextSize) else { return }
                 clientSize = nextSize
                 admittedWork = true
             }
@@ -1487,6 +1484,26 @@ final class TmuxSessionController: @unchecked Sendable {
             topologyRevisionAtSubmission: topologyRevision,
             onSuccess: onSuccess
         )
+        return true
+    }
+
+    /// The tmux client sends the resize and applies tmux's resize of each
+    /// pane to its terminal when the reply arrives.
+    private func admitClientSizeOnWriter(_ size: ClientSize) -> Bool {
+        preconditionOnWriterQueue()
+        guard let client, outboundSink != nil, !shuttingDown else {
+            reportRequestFailure(.setClientSize)
+            return false
+        }
+        let result = ghostty_tmux_client_set_client_size(
+            client,
+            UInt16(size.cols),
+            UInt16(size.rows)
+        )
+        guard result == GHOSTTY_TMUX_RESULT_OK else {
+            reportImmediateFailure(result, request: .setClientSize)
+            return false
+        }
         return true
     }
 
