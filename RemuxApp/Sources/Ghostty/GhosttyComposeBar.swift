@@ -45,6 +45,50 @@ enum GhosttyComposeBarSubmissionState: Equatable {
     }
 }
 
+extension GhosttyComposerDictationPhase {
+    enum ComposerStatus: Equatable {
+        case none
+        case message(String)
+        case meter
+    }
+
+    enum ComposerControl: Equatable {
+        case dictate
+        case stop
+        case progress
+    }
+
+    var composerStatus: ComposerStatus {
+        switch self {
+        case .idle:
+            .none
+        case .preparing:
+            .message("Preparing dictation…")
+        case .starting:
+            .message("Starting…")
+        case .recording:
+            .meter
+        case .transcribing:
+            .message("Transcribing…")
+        }
+    }
+
+    var composerControl: ComposerControl {
+        switch self {
+        case .idle:
+            .dictate
+        case .recording:
+            .stop
+        case .preparing, .starting, .transcribing:
+            .progress
+        }
+    }
+
+    var allowsSending: Bool {
+        !isActive || self == .recording
+    }
+}
+
 private struct GhosttyComposerInputLayout: Layout {
     let isDictationActive: Bool
     let horizontalSpacing: CGFloat
@@ -332,8 +376,7 @@ struct GhosttyComposeBar: View {
 
             sendButton(
                 state: submissionState,
-                allowsTap: submissionState.isSendEnabled
-                    && (!dictationPhase.isActive || dictationPhase == .recording),
+                allowsTap: submissionState.isSendEnabled && dictationPhase.allowsSending,
                 action: onSend
             )
         }
@@ -455,33 +498,29 @@ struct GhosttyComposeBar: View {
 
     @ViewBuilder
     private var dictationCenterContent: some View {
-        switch dictationPhase {
-        case .idle:
+        switch dictationPhase.composerStatus {
+        case .none:
             EmptyView()
-        case .preparing:
-            dictationStatus("Preparing dictation…")
-        case .starting:
-            dictationStatus("Starting…")
-        case .recording:
+        case .message(let title):
+            dictationStatus(title)
+        case .meter:
             GhosttyComposerDictationMeter(model: dictationAudioLevelModel)
-        case .transcribing:
-            dictationStatus("Transcribing…")
         }
     }
 
     @ViewBuilder
     private var dictationControl: some View {
-        switch dictationPhase {
-        case .idle:
+        switch dictationPhase.composerControl {
+        case .dictate:
             dictationButton
-        case .recording:
+        case .stop:
             dictationModeButton(
                 systemName: "stop.fill",
                 accessibilityLabel: "Stop dictation",
                 accessibilityIdentifier: "terminal.composer.dictation.stop",
                 action: onFinishDictation
             )
-        case .preparing, .starting, .transcribing:
+        case .progress:
             ProgressView()
                 .controlSize(.small)
                 .tint(GhosttyPhoneChromePalette.chromeForeground)

@@ -153,11 +153,22 @@ final class TmuxSessionLinkWriteFailureTests: XCTestCase {
 
     func testExplicitStopKeepsChannelOpenUntilTmuxEndsTheClient() async throws {
         let runtime = try GhosttyKitRuntime()
+        let stateRecorder = SessionStateRecorder()
         let transport = LinkTestTransport(failWrites: false, exitsOnClientExitRequest: false)
-        let controller = TmuxSessionController(callbacks: .init())
+        let controller = TmuxSessionController(
+            callbacks: TmuxSessionController.Callbacks(
+                onState: { state in
+                    stateRecorder.append(state)
+                }
+            )
+        )
         let link = TmuxSessionLink(controller: controller, transport: transport)
 
         try await link.start(viewport: .default)
+        // The client accepts the exit request only after it has read tmux's greeting.
+        try await waitUntil("controller did not process the initial tmux response") {
+            stateRecorder.contains(.syncing)
+        }
         let stop = Task { await link.stop() }
         try await waitUntil("client exit was not requested") {
             await transport.sentLines().contains(TmuxControlClientExit.command)
@@ -179,8 +190,15 @@ final class TmuxSessionLinkWriteFailureTests: XCTestCase {
 
     func testExplicitStopClosesChannelWhenTmuxNeverEndsTheClient() async throws {
         let runtime = try GhosttyKitRuntime()
+        let stateRecorder = SessionStateRecorder()
         let transport = LinkTestTransport(failWrites: false, exitsOnClientExitRequest: false)
-        let controller = TmuxSessionController(callbacks: .init())
+        let controller = TmuxSessionController(
+            callbacks: TmuxSessionController.Callbacks(
+                onState: { state in
+                    stateRecorder.append(state)
+                }
+            )
+        )
         let link = TmuxSessionLink(
             controller: controller,
             transport: transport,
@@ -188,8 +206,14 @@ final class TmuxSessionLinkWriteFailureTests: XCTestCase {
         )
 
         try await link.start(viewport: .default)
+        // The client accepts the exit request only after it has read tmux's greeting.
+        try await waitUntil("controller did not process the initial tmux response") {
+            stateRecorder.contains(.syncing)
+        }
         await link.stop()
 
+        let sentLines = await transport.sentLines()
+        XCTAssertEqual(sentLines.last, TmuxControlClientExit.command)
         let closeDispositions = await transport.closeDispositions()
         XCTAssertEqual(closeDispositions, [.reusable])
         await withCheckedContinuation { continuation in
