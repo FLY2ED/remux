@@ -388,7 +388,9 @@ final class RemuxRootModel: ObservableObject {
             updateLibrary(library)
             state = .library
             scheduleLibrarySSHPrewarm(snapshot: library)
-            scheduleLaunchTmuxSessionDiscovery()
+            // Each launch check is registered before load returns, so a later
+            // request for the same server joins it instead of repeating it.
+            refreshTmuxSessions()
         } catch {
             guard setupAllowsLibraryReload else { return }
             transitionToFailed(error)
@@ -1998,13 +2000,6 @@ final class RemuxRootModel: ObservableObject {
             }
             tmuxSessionDiscoveryStates[server.id] = tmuxSessionDiscoveryState(for: server.id)
                 .failingRefresh(executableProblem: executableProblem)
-        }
-    }
-
-    private func scheduleLaunchTmuxSessionDiscovery() {
-        Task(priority: .utility) { @MainActor [weak self] in
-            await Task.yield()
-            self?.refreshTmuxSessions()
         }
     }
 
