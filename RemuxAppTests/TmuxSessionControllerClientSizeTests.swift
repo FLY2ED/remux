@@ -637,7 +637,11 @@ final class TmuxSessionControllerClientSizeTests: XCTestCase {
         ))
         await drain(harness.controller)
 
-        XCTAssertEqual(harness.recorder.takeStrings(), ["resize-pane -Z -t @1\n"])
+        // Zooming widened pane 1, so its terminal is recaptured from tmux.
+        XCTAssertEqual(
+            harness.recorder.takeStrings(),
+            ["resize-pane -Z -t @1\n" + Self.paneRecapture(1)]
+        )
     }
 
     func testGlobalZoomIsNotDiscardedByLaterPaneNavigation() async throws {
@@ -667,7 +671,11 @@ final class TmuxSessionControllerClientSizeTests: XCTestCase {
         ))
         await drain(harness.controller)
 
-        XCTAssertEqual(harness.recorder.takeStrings(), ["select-pane -Z -t %1\n"])
+        // Zooming widened pane 2, so its terminal is recaptured from tmux.
+        XCTAssertEqual(
+            harness.recorder.takeStrings(),
+            ["select-pane -Z -t %1\n" + Self.paneRecapture(2)]
+        )
     }
 
     func testWindowNavigationCoalescesRollbackToLatestWindow() async throws {
@@ -768,13 +776,23 @@ final class TmuxSessionControllerClientSizeTests: XCTestCase {
             "the renderer reporting the already-submitted initial grid must do no work"
         )
 
+        var nextCommandNumber = harness.nextCommandNumber
         harness.controller.setClientSize(cols: 83, rows: 40)
         await drain(harness.controller)
-        XCTAssertEqual(harness.recorder.takeStrings(), ["refresh-client -C 83x40\n"])
+        XCTAssertEqual(harness.recorder.takeStrings(), [Self.clientResize(cols: 83, rows: 40)])
 
         harness.controller.setClientSize(cols: 100, rows: 40)
         await drain(harness.controller)
-        XCTAssertEqual(harness.recorder.takeStrings(), ["refresh-client -C 100x40\n"])
+        XCTAssertTrue(
+            harness.recorder.takeStrings().isEmpty,
+            "a resize waits for the reply to the one in flight"
+        )
+
+        harness.controller.pump(Data(
+            responseBlocks(count: 3, commandNumber: &nextCommandNumber).utf8
+        ))
+        await drain(harness.controller)
+        XCTAssertEqual(harness.recorder.takeStrings(), [Self.clientResize(cols: 100, rows: 40)])
     }
 
     func testClientSizeBeforeStartBecomesLatestInitialGrid() async throws {
@@ -832,13 +850,18 @@ final class TmuxSessionControllerClientSizeTests: XCTestCase {
             listWindowsBody: Self.onePaneWindow,
             expectedPaneCount: 1
         )
+        var nextCommandNumber = harness.nextCommandNumber
         harness.controller.setClientSize(cols: 100, rows: 40)
         harness.controller.setClientSize(cols: 83, rows: 44)
         await drain(harness.controller)
-        XCTAssertEqual(
-            harness.recorder.takeStrings(),
-            ["refresh-client -C 100x40\n", "refresh-client -C 83x44\n"]
-        )
+        XCTAssertEqual(harness.recorder.takeStrings(), [Self.clientResize(cols: 100, rows: 40)])
+
+        // The newest size goes out once the resize in flight is answered.
+        harness.controller.pump(Data(
+            responseBlocks(count: 3, commandNumber: &nextCommandNumber).utf8
+        ))
+        await drain(harness.controller)
+        XCTAssertEqual(harness.recorder.takeStrings(), [Self.clientResize(cols: 83, rows: 44)])
     }
 
     func testActiveViewportClaimDoesNothingWhenWindowMatchesClientSize() async throws {
@@ -890,11 +913,12 @@ final class TmuxSessionControllerClientSizeTests: XCTestCase {
         ))
         await drain(harness.controller)
 
+        // Another client resized the pane, so its terminal is recaptured.
         XCTAssertTrue(harness.controller.sendInput(paneID: 0, Data("a".utf8)))
         await drain(harness.controller)
         XCTAssertEqual(
             harness.recorder.takeStrings(),
-            ["select-window\nsend-keys -H -t %0 61\n"]
+            [Self.paneRecapture(0), "select-window\nsend-keys -H -t %0 61\n"]
         )
 
         XCTAssertTrue(harness.controller.sendInput(paneID: 0, Data("b".utf8)))
@@ -905,6 +929,9 @@ final class TmuxSessionControllerClientSizeTests: XCTestCase {
             "key repeat must not enqueue duplicate viewport claims"
         )
 
+        harness.controller.pump(Data(
+            responseBlocks(count: 5, commandNumber: &nextCommandNumber).utf8
+        ))
         harness.controller.pump(Data(
             "%layout-change @0 \(desktopLayout) \(desktopLayout) *\n".utf8
         ))
@@ -934,7 +961,7 @@ final class TmuxSessionControllerClientSizeTests: XCTestCase {
         await drain(harness.controller)
         XCTAssertEqual(
             harness.recorder.takeStrings(),
-            ["select-window\nsend-keys -H -t %0 64\n"]
+            [Self.paneRecapture(0), "select-window\nsend-keys -H -t %0 64\n"]
         )
     }
 
@@ -953,7 +980,7 @@ final class TmuxSessionControllerClientSizeTests: XCTestCase {
 
         XCTAssertEqual(
             harness.recorder.takeStrings(),
-            ["refresh-client -C 100x40\nselect-window\n"]
+            [Self.clientResize(cols: 100, rows: 40) + "select-window\n"]
         )
     }
 
@@ -977,7 +1004,7 @@ final class TmuxSessionControllerClientSizeTests: XCTestCase {
 
         XCTAssertEqual(
             harness.recorder.takeStrings(),
-            ["refresh-client -C 100x40\nselect-window\n"]
+            [Self.clientResize(cols: 100, rows: 40) + "select-window\n"]
         )
     }
 
@@ -995,9 +1022,10 @@ final class TmuxSessionControllerClientSizeTests: XCTestCase {
         harness.controller.requestNewWindow()
         await drain(harness.controller)
 
+        // Another client resized the pane, so its terminal is recaptured.
         XCTAssertEqual(
             harness.recorder.takeStrings(),
-            ["select-window\nnew-window\n"]
+            [Self.paneRecapture(0), "select-window\nnew-window\n"]
         )
     }
 
@@ -1111,7 +1139,12 @@ final class TmuxSessionControllerClientSizeTests: XCTestCase {
         ))
         await drain(harness.controller)
 
-        XCTAssertTrue(harness.recorder.takeStrings().isEmpty)
+        // Closing the zoomed pane widened the other two, so both are
+        // recaptured; no further tmux mutation is sent.
+        XCTAssertEqual(
+            harness.recorder.takeStrings().joined(),
+            Self.paneRecapture(1) + Self.paneRecapture(2)
+        )
     }
 
     func testZoomedTwoPaneCloseLeavesSinglePaneUnzoomed() async throws {
@@ -1166,7 +1199,13 @@ final class TmuxSessionControllerClientSizeTests: XCTestCase {
 
         harness.controller.requestClosePane(paneID: 2)
         await drain(harness.controller)
-        XCTAssertEqual(harness.recorder.takeStrings(), ["kill-pane -t %2\n"])
+
+        // Pane 2 took the closed pane's space, so its terminal was
+        // recaptured before the close went out.
+        XCTAssertEqual(
+            harness.recorder.takeStrings(),
+            [Self.paneRecapture(2), "kill-pane -t %2\n"]
+        )
     }
 
     func testWindowCloseWaitsForAuthoritativeRemovalBeforeAnotherClose() async throws {
@@ -1448,6 +1487,41 @@ final class TmuxSessionControllerClientSizeTests: XCTestCase {
         defer { commandNumber += 1 }
         return "%begin \(commandNumber) \(commandNumber) 1\n"
             + "%end \(commandNumber) \(commandNumber) 1\n"
+    }
+
+    /// The tmux client samples every pane around `refresh-client -C` so it
+    /// can repeat tmux's resize of each pane.
+    private static func clientResize(cols: Int, rows: Int) -> String {
+        let sample = "list-panes -s -F '#{pane_id};#{pane_width};#{pane_height};"
+            + "#{cursor_x};#{cursor_y};#{history_size};#{alternate_on};"
+            + "#{?#{||:#{&&:#{window_zoomed_flag},#{pane_active}},#{&&:#{pane_at_top},#{pane_at_left}}},"
+            + "#{window_layout};#{?window_zoomed_flag,#{window_visible_layout},},;}'"
+        return "\(sample) ; refresh-client -C \(cols)x\(rows) ; \(sample)\n"
+    }
+
+    /// The tmux client recaptures a shown pane that something other than its
+    /// own client resize resized. The fixtures report tmux 3.1, which can't
+    /// pause a pane, so the snapshot group goes out directly.
+    private static func paneRecapture(_ paneID: Int) -> String {
+        "display-message -p -t %\(paneID) -F '#{pane_id};#{pane_width};#{pane_height};"
+            + "#{cursor_x};#{cursor_y};#{cursor_flag};#{cursor_shape};#{cursor_colour};"
+            + "#{cursor_blinking};#{alternate_on};#{alternate_saved_x};#{alternate_saved_y};"
+            + "#{insert_flag};#{wrap_flag};#{keypad_flag};#{keypad_cursor_flag};#{origin_flag};"
+            + "#{mouse_all_flag};#{mouse_button_flag};#{mouse_standard_flag};#{mouse_utf8_flag};"
+            + "#{mouse_sgr_flag};#{focus_flag};#{bracketed_paste};#{history_size};"
+            + "#{scroll_region_upper};#{scroll_region_lower};#{pane_tabs};"
+            + "#{pane_current_command};#{pane_current_path}'"
+            + " ; capture-pane -p -e -N -q -S -2000 -E -1 -t %\(paneID)"
+            + " ; capture-pane -p -e -N -a -q -t %\(paneID)"
+            + " ; capture-pane -p -e -N -q -t %\(paneID)"
+            + " ; capture-pane -p -P -C -t %\(paneID)\n"
+    }
+
+    /// Empty replies for each command of `count` command groups' members.
+    private func responseBlocks(count: Int, commandNumber: inout Int) -> String {
+        var blocks = ""
+        for _ in 0..<count { blocks += responseBlock(commandNumber: &commandNumber) }
+        return blocks
     }
 
     private func responseBlock(

@@ -19,15 +19,10 @@ fi
 printf 'Building ReleaseFast GhosttyKit from %s\n' "$ghostty_root"
 (
   cd "$ghostty_root"
-  # Every slice inherits the macOS host's default, which turns Sentry on.
-  # On iOS, Breakpad's signal handler neither chains nor re-raises, so a
-  # real crash spins forever instead of exiting, and iOS never writes its
-  # own crash report.
   zig build \
     -Doptimize=ReleaseFast \
     -Demit-xcframework=true \
-    -Demit-macos-app=false \
-    -Dsentry=false
+    -Demit-macos-app=false
 )
 
 GHOSTTYKIT_XCFRAMEWORK="$xcframework" \
