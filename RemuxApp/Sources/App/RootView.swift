@@ -93,6 +93,13 @@ private struct RemuxRootContentView: View {
     }
 }
 
+/// The setup the connection setup sheet keeps showing while it closes, after
+/// the model has let go of it. A reference, so keeping it current on every
+/// draft change doesn't redraw the shell.
+private final class LastConnectionSetup {
+    var setup: RemuxRootModel.ConnectionSetupState?
+}
+
 private struct RemuxWorkspaceShell: View {
     @Environment(\.scenePhase) private var scenePhase
     @ObservedObject var model: RemuxRootModel
@@ -103,6 +110,8 @@ private struct RemuxWorkspaceShell: View {
     @State private var isSessionSwitcherPresented = false
     @State private var presentedServerID: SavedServer.ID?
     @State private var connectionSetupSheetShowsServerSummary = true
+    @State private var isConnectionSetupSheetPresented = false
+    @State private var lastConnectionSetup = LastConnectionSetup()
 
     var body: some View {
         ZStack {
@@ -192,6 +201,7 @@ private struct RemuxWorkspaceShell: View {
                             connectionSetupView(
                                 setup,
                                 showsServerSummaryForNewSession: true,
+                                isClosing: false,
                                 onSave: saveSessionFromTerminal
                             )
                         }
@@ -210,13 +220,37 @@ private struct RemuxWorkspaceShell: View {
                 isActive: true
             )
         }
-        .sheet(isPresented: connectionSetupSheetIsPresented) {
+        .sheet(
+            isPresented: $isConnectionSetupSheetPresented,
+            onDismiss: {
+                if model.connectionSetup == nil {
+                    lastConnectionSetup.setup = nil
+                }
+            }
+        ) {
             connectionSetupSheet
                 .interactiveDismissDisabled()
                 .tailscaleSSHCheckAlert(
                     request: $tailscaleSSHCheckRequest,
                     isActive: true
                 )
+        }
+        .onChange(of: model.connectionSetup, initial: true) { _, setup in
+            if let setup {
+                lastConnectionSetup.setup = setup
+            }
+        }
+        .onChange(of: showsConnectionSetupSheet, initial: true) { _, shows in
+            guard !shows else {
+                isConnectionSetupSheetPresented = true
+                return
+            }
+            // The closing sheet first redraws its secure fields empty. SwiftUI
+            // drops content changes made in the update that dismisses a
+            // sheet, so dismiss it on the next turn.
+            DispatchQueue.main.async {
+                isConnectionSetupSheetPresented = showsConnectionSetupSheet
+            }
         }
         .alert(
             "Settings Couldn’t Be Saved",
@@ -240,20 +274,18 @@ private struct RemuxWorkspaceShell: View {
         )
     }
 
-    private var connectionSetupSheetIsPresented: Binding<Bool> {
-        Binding(
-            get: { model.connectionSetup != nil && !isSessionSwitcherPresented },
-            set: { _ in }
-        )
+    private var showsConnectionSetupSheet: Bool {
+        model.connectionSetup != nil && !isSessionSwitcherPresented
     }
 
     @ViewBuilder
     private var connectionSetupSheet: some View {
-        if let setup = model.connectionSetup {
+        if let setup = model.connectionSetup ?? lastConnectionSetup.setup {
             NavigationStack {
                 connectionSetupView(
                     setup,
                     showsServerSummaryForNewSession: connectionSetupSheetShowsServerSummary,
+                    isClosing: model.connectionSetup == nil,
                     onSave: saveConnectionSetupSheet
                 )
                 .toolbar {
@@ -383,6 +415,7 @@ private struct RemuxWorkspaceShell: View {
     private func connectionSetupView(
         _ setup: RemuxRootModel.ConnectionSetupState,
         showsServerSummaryForNewSession: Bool,
+        isClosing: Bool,
         onSave: @escaping @MainActor () -> Void
     ) -> some View {
         let setupSessionID = model.setupSessionID
@@ -394,6 +427,7 @@ private struct RemuxWorkspaceShell: View {
             terminalTheme: model.terminalSettings.theme,
             isActionInProgress: model.isSetupActionInProgress,
             showsServerSummaryForNewSession: showsServerSummaryForNewSession,
+            isClosing: isClosing,
             onChange: model.updateDraft,
             onConnect: onSave,
             publicKeyInstallTarget: { draft in
@@ -2211,6 +2245,10 @@ struct ConnectionSetupView: View {
     let terminalTheme: TerminalTheme
     let isActionInProgress: Bool
     let showsServerSummaryForNewSession: Bool
+    /// The sheet is closing, so the secure fields show empty. iOS offers to
+    /// save the password in a secure field that is still filled when its
+    /// sheet closes, and Remux keeps server secrets in its own Keychain only.
+    let isClosing: Bool
     let onChange: ((inout TmuxConnectionDraft) -> Void) -> Void
     let onConnect: () -> Void
     let publicKeyInstallTarget: (
@@ -2694,10 +2732,9 @@ struct ConnectionSetupView: View {
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(.secondary)
 
-            SecureField("Required", text: binding(for: \.password))
+            SecureField(isClosing ? "" : "Required", text: secureBinding(for: \.password))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-                .textContentType(.oneTimeCode)
                 .multilineTextAlignment(.leading)
                 .focused($focusedField, equals: .password)
                 .submitLabel(nextField(after: .password) == nil ? .go : .next)
@@ -2758,6 +2795,12 @@ struct ConnectionSetupView: View {
                 }
             }
         )
+    }
+
+    private func secureBinding(
+        for keyPath: WritableKeyPath<TmuxConnectionDraft, String>
+    ) -> Binding<String> {
+        isClosing ? .constant("") : binding(for: keyPath)
     }
 
     private var authenticationKindBinding: Binding<SSHAuthenticationKind> {
@@ -3030,16 +3073,18 @@ struct ConnectionSetupView: View {
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(.secondary)
 
-            SecureField("Required for encrypted keys", text: binding(for: \.privateKeyPassphrase))
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .textContentType(.oneTimeCode)
-                .multilineTextAlignment(.leading)
-                .focused($focusedField, equals: .privateKeyPassphrase)
-                .submitLabel(nextField(after: .privateKeyPassphrase) == nil ? .go : .next)
-                .onSubmit { advance(from: .privateKeyPassphrase) }
-                .frame(minHeight: 28)
-                .accessibilityIdentifier("connection.private-key.passphrase")
+            SecureField(
+                isClosing ? "" : "Required for encrypted keys",
+                text: secureBinding(for: \.privateKeyPassphrase)
+            )
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .multilineTextAlignment(.leading)
+            .focused($focusedField, equals: .privateKeyPassphrase)
+            .submitLabel(nextField(after: .privateKeyPassphrase) == nil ? .go : .next)
+            .onSubmit { advance(from: .privateKeyPassphrase) }
+            .frame(minHeight: 28)
+            .accessibilityIdentifier("connection.private-key.passphrase")
 
             fieldValidationMessage(validation.privateKeyPassphrase)
         }
