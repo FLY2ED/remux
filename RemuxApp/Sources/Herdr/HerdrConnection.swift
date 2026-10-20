@@ -5,7 +5,8 @@ import Foundation
 /// instead of buffering without bound.
 protocol HerdrBridgeTransport: Sendable {
     /// The next bytes from the server, or nil at the end of the stream. A stream that ended badly
-    /// throws its reason, with text for the user where the transport has it.
+    /// throws its reason, with text for the user where the transport has it. One read at a time: the
+    /// connection is the only reader.
     func read() async throws -> [UInt8]?
     func write(_ bytes: [UInt8]) async throws
     /// Ends the stream at once: a pending read returns nil, and the call doesn't wait for the other

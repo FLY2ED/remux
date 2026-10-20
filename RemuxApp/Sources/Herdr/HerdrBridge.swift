@@ -95,6 +95,7 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
             let (outcome, connection) = lock.withLock { () -> (Outcome, RemuxSSHExecConnection?) in
                 if !chunks.isEmpty { return (.chunk(chunks.removeFirst()), nil) }
                 if case .ended(let error) = state { return (.ended(error), nil) }
+                assert(waiter == nil, "HerdrBridgeTransport allows one read at a time")
                 waiter = continuation
                 return (.wait, self.connection)
             }
