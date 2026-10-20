@@ -143,8 +143,9 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
 
     /// Ends the stream here at once: a waiting read returns nil and waiting writes fail, without
     /// waiting for the server, whose answer never comes on a dead path. A failed channel, or a caller
-    /// that saw the path go silent, gives the SSH connection back as not reusable, which releases it
-    /// at once.
+    /// that saw the path go silent, gives the SSH connection back as not reusable before returning, so
+    /// a reconnect right after never gets it again; that needs nothing from the server. A reusable
+    /// close finishes in the background, since it waits for the server to answer the channel close.
     func close(reusable: Bool) async {
         let (connection, disposition, writes) = lock.withLock { () -> (RemuxSSHExecConnection?, RemuxSSHRootLeaseDisposition, [CheckedContinuation<Void, Error>]) in
             let channelFailed: Bool
@@ -163,7 +164,12 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
         lock.withLock { chunks.removeAll() }
         writes.forEach { $0.resume(throwing: HerdrBridgeError.channel("the bridge has ended")) }
         guard let connection else { return }
-        Task { await connection.close(disposition: disposition) }
+        switch disposition {
+        case .invalidated:
+            await connection.close(disposition: .invalidated)
+        case .reusable:
+            Task { await connection.close(disposition: .reusable) }
+        }
     }
 
     // MARK: - Channel callbacks (NIO event loop)
