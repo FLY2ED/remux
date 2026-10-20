@@ -166,8 +166,8 @@ final class HerdrBridgeTests: XCTestCase {
         XCTAssertLessThan(ContinuousClock.now - started, .seconds(1))
     }
 
-    /// A close for a path that went silent gives the SSH connection back without the server's answer,
-    /// so a connection nobody else uses (here a dedicated one) closes at once.
+    /// A close for a path that went silent gives the SSH connection back without the server's answer
+    /// and before returning, so a connection nobody else uses (here a dedicated one) is already closed.
     func testAnUnreusableCloseReleasesTheSSHConnectionWithoutTheServersAnswer() async throws {
         let server = try await SSHPublicKeyLiveTestServer.start(username: "remux")
         defer { server.stop() }
@@ -176,11 +176,66 @@ final class HerdrBridgeTests: XCTestCase {
 
         let started = ContinuousClock.now
         await bridge.close(reusable: false)
-        while root.sshRoot.rootChannel.isActive, ContinuousClock.now - started < .seconds(2) {
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        XCTAssertFalse(root.sshRoot.rootChannel.isActive, "the SSH connection is still open")
         XCTAssertLessThan(ContinuousClock.now - started, .seconds(1))
+        XCTAssertFalse(root.sshRoot.rootChannel.isActive, "the SSH connection is still open")
+    }
+
+    /// After an unreusable close returns, the pool no longer offers that SSH connection, so a reconnect
+    /// made right away gets a new one.
+    func testAnUnreusableCloseLeavesThePoolBeforeReturning() async throws {
+        let server = try await SSHPublicKeyLiveTestServer.start(username: "remux")
+        defer { server.stop() }
+        let trace = RemuxTransportStartupTrace(flowID: "herdr-bridge-pool-test")
+        let id = UUID()
+        let saved = SavedServer(id: id, displayName: "loopback", host: "127.0.0.1", port: server.port, username: "remux", identityID: id)
+        let trustedHostRoot = FileManager.default.temporaryDirectory.appendingPathComponent("HerdrBridgePool-\(id)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: trustedHostRoot) }
+        let trustedHostStore = TrustedHostStore(rootURL: trustedHostRoot)
+        try trustedHostStore.trustHostKey(
+            SSHHostKeyTrustChallenge(
+                kind: .unknown,
+                serverID: id,
+                host: "127.0.0.1",
+                trustedKeyType: nil,
+                trustedOpenSSHPublicKey: nil,
+                receivedKeyType: server.hostKeyType,
+                receivedOpenSSHPublicKey: server.openSSHPublicKey
+            )
+        )
+        let key = RemuxSSHRootKey(
+            target: SessionTarget(
+                server: saved,
+                workspace: SavedWorkspace(serverID: id, sessionName: "pool"),
+                sshAuth: .password(username: "remux", password: "pool", identityID: id, displayLabel: "pool")
+            )
+        )
+        let configuration = RemuxSSHRootConfiguration(
+            host: "127.0.0.1",
+            port: server.port,
+            authenticationMethod: { try SSHAuthenticationMethodFactory.make(username: "remux", credential: .password("pool")) },
+            hostKeyValidator: trustedHostStore.validator(for: saved),
+            connectTimeout: .seconds(10)
+        )
+        let pool = RemuxSSHRootService()
+        addTeardownBlock { await pool.closeAllConnectionsForTesting() }
+
+        for _ in 0..<5 {
+            let prepared = await pool.preparedRoot(for: key, configuration: configuration, trace: trace)
+            let root = try await prepared.sshRoot()
+            let bridge = try await HerdrSSHBridge.open(
+                using: try await prepared.claim(root, trace: trace),
+                herdrExecutable: "herdr",
+                session: "pool",
+                trace: trace
+            )
+            await bridge.close(reusable: false)
+
+            let next = await pool.preparedRoot(for: key, configuration: configuration, trace: trace)
+            let nextRoot = try await next.sshRoot()
+            XCTAssertFalse(nextRoot === root, "the pool offered the connection the bridge gave up")
+            let claimed = try await next.claim(nextRoot, trace: trace)
+            await claimed.release(.invalidated)
+        }
     }
 
     // MARK: - Helpers
