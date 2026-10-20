@@ -44,6 +44,9 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
     private let lock = NIOLock()
     private var chunks: [[UInt8]] = []
     private var waiter: CheckedContinuation<[UInt8]?, Error>?
+    /// Writes the channel hasn't taken yet, by number; closing fails them.
+    private var pendingWrites: [UInt64: CheckedContinuation<Void, Error>] = [:]
+    private var nextWrite: UInt64 = 0
     private var state = State.running
     private var stderr = Data()
     private var readyLine = HerdrRemoteCommand.ReadyLine()
@@ -112,22 +115,38 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
         }
     }
 
-    /// After the stream ended, a write reports why it ended.
+    /// After the stream ended, a write reports why it ended. A write completes once the channel has
+    /// taken it, which needs the server to read; closing fails a write still waiting for that.
     func write(_ bytes: [UInt8]) async throws {
-        let connection = try lock.withLock { () -> RemuxSSHExecConnection? in
-            if case .ended(let error) = state {
-                throw error ?? HerdrBridgeError.channel("the bridge has ended")
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let started = lock.withLock { () -> Result<(UInt64, RemuxSSHExecConnection), Error> in
+                if case .ended(let error) = state {
+                    return .failure(error ?? HerdrBridgeError.channel("the bridge has ended"))
+                }
+                guard let connection else {
+                    return .failure(HerdrBridgeError.channel("the bridge has ended"))
+                }
+                nextWrite += 1
+                pendingWrites[nextWrite] = continuation
+                return .success((nextWrite, connection))
             }
-            return self.connection
+            switch started {
+            case .failure(let error):
+                continuation.resume(throwing: error)
+            case .success(let (id, connection)):
+                connection.write(Data(bytes)) { [self] error in
+                    completeWrite(id, error: error)
+                }
+            }
         }
-        try await connection?.write(Data(bytes))
     }
 
-    /// Ends the stream here at once and closes the channel without waiting for the server's answer,
-    /// which never comes on a dead path. A failed channel, or a caller that saw the path go silent,
-    /// takes the SSH connection out of reuse before returning.
+    /// Ends the stream here at once: a waiting read returns nil and waiting writes fail, without
+    /// waiting for the server, whose answer never comes on a dead path. A failed channel, or a caller
+    /// that saw the path go silent, gives the SSH connection back as not reusable, which releases it
+    /// at once.
     func close(reusable: Bool) async {
-        let (connection, disposition) = lock.withLock { () -> (RemuxSSHExecConnection?, RemuxSSHRootLeaseDisposition) in
+        let (connection, disposition, writes) = lock.withLock { () -> (RemuxSSHExecConnection?, RemuxSSHRootLeaseDisposition, [CheckedContinuation<Void, Error>]) in
             let channelFailed: Bool
             if case .ended(let error?) = state, case .channel(_)? = error as? HerdrBridgeError {
                 channelFailed = true
@@ -136,14 +155,14 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
             }
             let connection = self.connection
             self.connection = nil
-            return (connection, reusable && !channelFailed ? .reusable : .invalidated)
+            let writes = Array(pendingWrites.values)
+            pendingWrites.removeAll()
+            return (connection, reusable && !channelFailed ? .reusable : .invalidated, writes)
         }
         finish(status: nil, error: nil)
         lock.withLock { chunks.removeAll() }
+        writes.forEach { $0.resume(throwing: HerdrBridgeError.channel("the bridge has ended")) }
         guard let connection else { return }
-        if disposition == .invalidated {
-            await connection.invalidateRootForReuse()
-        }
         Task { await connection.close(disposition: disposition) }
     }
 
@@ -174,6 +193,15 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
         }
         waiter?.resume(returning: bytes)
         rearm?.requestRead()
+    }
+
+    private func completeWrite(_ id: UInt64, error: Error?) {
+        guard let continuation = lock.withLock({ pendingWrites.removeValue(forKey: id) }) else { return }
+        if let error {
+            continuation.resume(throwing: error)
+        } else {
+            continuation.resume()
+        }
     }
 
     private func finish(status: Int?, error: Error?) {
