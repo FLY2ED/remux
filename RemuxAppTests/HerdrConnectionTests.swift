@@ -101,6 +101,50 @@ final class HerdrConnectionTests: XCTestCase {
         XCTAssertEqual(reusable, false)
     }
 
+    /// The deadline covers the hello too: a write that never completes still times out.
+    func testAStalledHelloTimesOutAndCloses() async throws {
+        let transport = FakeBridgeTransport()
+        await transport.stallWrites()
+        let (sentHello, shortTiming) = (hello, timing(welcome: .milliseconds(100)))
+        let opening = Task {
+            try await HerdrConnection.open(transport: transport, hello: sentHello, appActive: false, timing: shortTiming, onEvent: { _ in })
+        }
+        let returned = expectation(description: "open returned")
+        Task {
+            if case .failure(let error) = await opening.result {
+                XCTAssertEqual(error as? HerdrConnectionError, .handshakeTimedOut)
+            } else {
+                XCTFail("opened")
+            }
+            returned.fulfill()
+        }
+        await fulfillment(of: [returned], timeout: 2)
+        let reusable = await transport.closedReusable
+        XCTAssertEqual(reusable, false)
+    }
+
+    /// Cancelling the open while the hello is stalled returns at once.
+    func testCancellingTheOpenDuringAStalledHelloReturns() async throws {
+        let transport = FakeBridgeTransport()
+        await transport.stallWrites()
+        let (sentHello, slowTiming) = (hello, relaxed)
+        let opening = Task {
+            try await HerdrConnection.open(transport: transport, hello: sentHello, appActive: false, timing: slowTiming, onEvent: { _ in })
+        }
+        await transport.waitForStalledWrites(1)
+        opening.cancel()
+        let returned = expectation(description: "open returned")
+        Task {
+            if case .failure(let error) = await opening.result {
+                XCTAssertTrue(error is CancellationError, "\(error)")
+            } else {
+                XCTFail("opened")
+            }
+            returned.fulfill()
+        }
+        await fulfillment(of: [returned], timeout: 2)
+    }
+
     /// An old server answers the hello with the binary welcome; Herdr's client asks for an update.
     func testAnOldServerIsAskedToUpdate() async throws {
         let transport = FakeBridgeTransport()
