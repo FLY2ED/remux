@@ -275,6 +275,50 @@ final class HerdrConnectionTests: XCTestCase {
         }
     }
 
+    /// The newest show or hide wins: Herdr keeps one surface switch per connection, so a show that
+    /// fails after a newer show must not turn the surface off again.
+    func testAnOlderShowFailingLaterDoesNotUndoANewerShow() async throws {
+        let (connection, transport, _) = try await openedSession(surfaceActive: false)
+        let geometry = HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 40, rows: 12)
+        let older = Task { try await connection.show(geometry) }
+        _ = try await transport.written(3)
+        async let newer = connection.show(geometry)
+        let set = try Self.request(try await transport.written(5))
+        await transport.serve(Self.reply(id: set.id, json: #"{"type":"client_shell_surface_set","active":true,"projection_revision":4}"#))
+        _ = try await newer
+        older.cancel()
+        _ = await older.result
+
+        try await Task.sleep(for: .milliseconds(30))
+        let written = await transport.writtenCount
+        XCTAssertEqual(written, 7, "the hello and both shows, with no rollback")
+        try await connection.send([.text("a")], toPane: "w1:p1")
+    }
+
+    /// Likewise a show that fails after a newer hide sends nothing more: the hide already turned the
+    /// surface off.
+    func testAnOlderShowFailingLaterAfterAHideSendsNothingMore() async throws {
+        let (connection, transport, _) = try await openedSession(surfaceActive: false)
+        let older = Task { try await connection.show(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 40, rows: 12)) }
+        _ = try await transport.written(3)
+        async let hidden: Void = connection.hide()
+        let unset = try Self.request(try await transport.written(5))
+        await transport.serve(Self.reply(id: unset.id, json: #"{"type":"client_shell_surface_set","active":false,"projection_revision":4}"#))
+        try await hidden
+        older.cancel()
+        _ = await older.result
+
+        try await Task.sleep(for: .milliseconds(30))
+        let written = await transport.writtenCount
+        XCTAssertEqual(written, 6, "the hello, the show and the hide")
+        do {
+            try await connection.send([.text("a")], toPane: "w1:p1")
+            XCTFail("sent")
+        } catch let error as HerdrInputError {
+            XCTAssertEqual(error, .inactive)
+        }
+    }
+
     func testInputIsRefusedWhileHiddenOrOverHerdrsLimits() async throws {
         let (connection, transport, _) = try await openedSession(surfaceActive: false)
         do {
@@ -534,6 +578,30 @@ final class HerdrConnectionTests: XCTestCase {
         let written = await transport.writtenCount
         XCTAssertEqual(written, 1, "only the hello")
         try await Task.sleep(for: .milliseconds(30))
+        let ended = await events.hasEnded
+        XCTAssertFalse(ended)
+    }
+
+    /// A close also covers an end found earlier (here a failed write) that the screen hasn't been told
+    /// about yet because it still holds a message: no `ended` event follows.
+    func testCloseAfterAnEndTheScreenHasNotSeenReportsNothing() async throws {
+        let (connection, transport, events) = try await openedSession(surfaceActive: true)
+        await events.hold()
+        await transport.serve(HerdrWire.frame([9, 1]))
+        await events.waitForCount(2)
+        await transport.failWrites(with: NotInstalled())
+        try await connection.send([.text("a")], toPane: "w1:p1")
+        var waited = 0
+        while !(await transport.isClosed), waited < 200 {
+            try await Task.sleep(for: .milliseconds(10))
+            waited += 1
+        }
+        let closedByTheFailure = await transport.isClosed
+        XCTAssertTrue(closedByTheFailure)
+
+        await connection.close()
+        await events.release()
+        try await Task.sleep(for: .milliseconds(50))
         let ended = await events.hasEnded
         XCTAssertFalse(ended)
     }

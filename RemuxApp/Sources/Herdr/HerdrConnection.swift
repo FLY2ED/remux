@@ -165,6 +165,9 @@ actor HerdrConnection {
     private var splitter: HerdrFrameSplitter
     private var bootID: String?
     private var isActive = false
+    /// Counts shows and hides. Herdr keeps one surface switch per connection and the last request
+    /// sets it, so a failed show rolls back only while it is still the newest request.
+    private var visibilityRequests: UInt64 = 0
     private var ended = false
     /// Why the connection ended, for the reader to report; nil after a close Remux asked for.
     private var endReason: HerdrConnectionError?
@@ -440,7 +443,8 @@ actor HerdrConnection {
     /// Shows the session as Herdr's own client does: the tab takes this size (at least one cell each
     /// way), the surface activates, then the phone takes focus. Returns the projection floor from
     /// `surface.set`; the next full surface is at least that revision. If Herdr doesn't acknowledge it
-    /// within the activation timeout, the show is rolled back as Herdr's client rolls it back.
+    /// within the activation timeout, the show is rolled back as Herdr's client rolls it back, unless a
+    /// newer show or hide was asked for meanwhile: as in Herdr's client, the newest request wins.
     func show(_ geometry: HerdrSurfaceGeometry) async throws -> UInt64 {
         let size = HerdrSurfaceGeometry(
             cellWidthPx: geometry.cellWidthPx,
@@ -449,6 +453,8 @@ actor HerdrConnection {
             rows: max(geometry.rows, 1)
         )
         let (id, request) = try surfaceSet(active: true)
+        visibilityRequests += 1
+        let position = visibilityRequests
         isActive = true
         do {
             let data = try await reply(
@@ -460,7 +466,7 @@ actor HerdrConnection {
             )
             return try Self.acknowledgedRevision(from: data, active: true)
         } catch {
-            rollBackShow()
+            if position == visibilityRequests { rollBackShow() }
             throw error
         }
     }
@@ -469,6 +475,7 @@ actor HerdrConnection {
     /// so without it the next show's focus would be ignored.
     func hide() async throws {
         let (id, request) = try surfaceSet(active: false)
+        visibilityRequests += 1
         isActive = false
         let data = try await reply(
             to: id,
@@ -768,10 +775,11 @@ actor HerdrConnection {
 
     // MARK: - Ending
 
-    /// Ends the connection; no `ended` event follows. Nothing is written first: Herdr removes an
-    /// endpoint client whose stream ends just as one that sends `Detach`, and the bridge passes the end
-    /// of its input on.
+    /// Ends the connection; no `ended` event follows, not even for an end found earlier that the screen
+    /// hasn't been told about yet. Nothing is written first: Herdr removes an endpoint client whose
+    /// stream ends just as one that sends `Detach`, and the bridge passes the end of its input on.
     func close() async {
+        endReason = nil
         guard !ended else { return }
         finish()
         await transport.close(reusable: true)
