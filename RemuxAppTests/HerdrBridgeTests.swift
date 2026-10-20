@@ -132,6 +132,57 @@ final class HerdrBridgeTests: XCTestCase {
         }
     }
 
+    /// A write the server never takes (it stopped reading, so the SSH window never refills) fails at once
+    /// when the bridge closes, also on a reusable close, where the SSH connection stays open for others.
+    func testCloseFailsAWriteTheServerNeverTakes() async throws {
+        let server = try await SSHPublicKeyLiveTestServer.start(username: "remux")
+        defer { server.stop() }
+        let (bridge, _) = try await openBridgeAndRoot(on: server)
+        try await server.stopReadingFromClients()
+        let outcome = WriteOutcome()
+        // Four times the 2 MiB window.
+        let bytes = [UInt8](repeating: 0x61, count: 8 * 1024 * 1024)
+        Task {
+            do {
+                try await bridge.write(bytes)
+                outcome.record(.success(()))
+            } catch {
+                outcome.record(.failure(error))
+            }
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertNil(outcome.result, "the write finished although the server stopped reading")
+
+        let started = ContinuousClock.now
+        await bridge.close(reusable: true)
+        while outcome.result == nil, ContinuousClock.now - started < .seconds(2) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard case .failure(let error)? = outcome.result else {
+            XCTFail("the write didn't fail when the bridge closed: \(String(describing: outcome.result))")
+            return
+        }
+        XCTAssertEqual(error as? HerdrBridgeError, .channel("the bridge has ended"))
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(1))
+    }
+
+    /// A close for a path that went silent gives the SSH connection back without the server's answer,
+    /// so a connection nobody else uses (here a dedicated one) closes at once.
+    func testAnUnreusableCloseReleasesTheSSHConnectionWithoutTheServersAnswer() async throws {
+        let server = try await SSHPublicKeyLiveTestServer.start(username: "remux")
+        defer { server.stop() }
+        let (bridge, root) = try await openBridgeAndRoot(on: server)
+        try await server.stopReadingFromClients()
+
+        let started = ContinuousClock.now
+        await bridge.close(reusable: false)
+        while root.sshRoot.rootChannel.isActive, ContinuousClock.now - started < .seconds(2) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(root.sshRoot.rootChannel.isActive, "the SSH connection is still open")
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(1))
+    }
+
     // MARK: - Helpers
 
     private static let readyLine = Data("\nherdr-remote-output-ready:1\n".utf8)
@@ -143,13 +194,24 @@ final class HerdrBridgeTests: XCTestCase {
     }
 
     private func openBridge(on server: SSHPublicKeyLiveTestServer) async throws -> HerdrSSHBridge {
+        try await openBridgeAndRoot(on: server).bridge
+    }
+
+    /// The bridge on a dedicated SSH connection, which the test closes afterwards whatever the bridge
+    /// left open.
+    private func openBridgeAndRoot(
+        on server: SSHPublicKeyLiveTestServer
+    ) async throws -> (bridge: HerdrSSHBridge, root: RemuxSSHClaimedRoot) {
         let trace = RemuxTransportStartupTrace(flowID: "herdr-bridge-test")
-        return try await HerdrSSHBridge.open(
-            using: try await claimedLoopbackRoot(server: server, trace: trace),
+        let root = try await claimedLoopbackRoot(server: server, trace: trace)
+        addTeardownBlock { await root.sshRoot.close() }
+        let bridge = try await HerdrSSHBridge.open(
+            using: root,
             herdrExecutable: "herdr",
             session: "default",
             trace: trace
         )
+        return (bridge, root)
     }
 
     /// Reads until `count` bytes arrived, failing after five seconds.
@@ -171,6 +233,20 @@ final class HerdrBridgeTests: XCTestCase {
             group.cancelAll()
             return first
         }
+    }
+}
+
+/// How a write ended, for a test that can't await a write that may never return.
+private final class WriteOutcome: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Result<Void, Error>?
+
+    var result: Result<Void, Error>? {
+        lock.withLock { stored }
+    }
+
+    func record(_ result: Result<Void, Error>) {
+        lock.withLock { stored = result }
     }
 }
 
