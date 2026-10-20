@@ -180,8 +180,8 @@ actor HerdrConnection {
     private var writeQueue: [[UInt8]] = []
     private var isWriting = false
 
-    /// A request awaiting its final chunk. After a timeout or cancellation nobody waits any more, but
-    /// the entry stays so the late reply is recognised and dropped.
+    /// A request awaiting its final chunk. After a cancellation nobody waits any more, but the entry
+    /// stays until the reply or the timeout frees the lane.
     private struct Pending {
         var continuation: CheckedContinuation<Data, Error>?
         var data: [UInt8] = []
@@ -205,10 +205,8 @@ actor HerdrConnection {
         timing: Timing = Timing(),
         onEvent: @escaping @Sendable (HerdrConnectionEvent) async -> Void
     ) async throws -> HerdrConnection {
-        // A failed write ends the stream, and the read below then reports why.
-        try? await transport.write(HerdrClientMessage.hello(hello).frame)
-        // A read doesn't end when its task is cancelled, so the timeout and a cancelled open close the
-        // transport, which ends the read. A timeout means the path may be dead.
+        // Neither a stalled write nor a read ends when its task is cancelled, so the timeout and a
+        // cancelled open close the transport, which ends both. A timeout means the path may be dead.
         let timer = Task {
             try await Task.sleep(for: timing.welcome)
             await transport.close(reusable: false)
@@ -217,7 +215,9 @@ actor HerdrConnection {
         let splitter: HerdrFrameSplitter
         do {
             (welcome, splitter) = try await withTaskCancellationHandler {
-                try await readWelcome(from: transport)
+                // A failed write ends the stream, and the read then reports why.
+                try? await transport.write(HerdrClientMessage.hello(hello).frame)
+                return try await readWelcome(from: transport)
             } onCancel: {
                 Task { await transport.close(reusable: true) }
             }
@@ -620,16 +620,11 @@ actor HerdrConnection {
     }
 
     /// Herdr's client retires a request that didn't answer in time: the caller fails, the lane frees,
-    /// and the late reply is dropped.
+    /// and the late reply is dropped, as `receive` drops every reply to an unknown request.
     private func expire(_ id: String, method: String) {
-        guard var request = pending[id] else { return }
+        guard let request = pending.removeValue(forKey: id) else { return }
         request.continuation?.resume(throwing: HerdrCommandError.timedOut(method: method))
-        request.continuation = nil
-        if request.holdsLane {
-            request.holdsLane = false
-            releaseLane()
-        }
-        pending[id] = request
+        if request.holdsLane { releaseLane() }
     }
 
     private func stopWaiting(for id: String) {
