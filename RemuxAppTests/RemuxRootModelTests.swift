@@ -1926,10 +1926,21 @@ final class RemuxRootModelTests: XCTestCase {
         await harness.model.saveAndConnect()
         XCTAssertEqual(harness.model.state, .library)
 
-        prewarmer.resumeAll()
+        // Saving also starts a prewarm of the edited server, which may already be suspended; only the
+        // one started before the edit is resumed here.
+        prewarmer.resume { $0.server.host == server.host }
         try? await Task.sleep(for: .milliseconds(50))
 
         XCTAssertEqual(transportFactory.targets, [])
+
+        let didStartEditedServerPrewarm = await waitUntil {
+            prewarmer.targets.map(\.server.host) == [server.host, "new-build.example.test"]
+        }
+        XCTAssertTrue(didStartEditedServerPrewarm)
+        prewarmer.resumeAll()
+        let didPrepareEditedServer = await waitUntil { !transportFactory.targets.isEmpty }
+        XCTAssertTrue(didPrepareEditedServer)
+        XCTAssertEqual(transportFactory.targets.map(\.server.host), ["new-build.example.test"])
     }
 
     func testInFlightLibraryPrewarmDoesNotPrepareAfterSettingsChange() async throws {
@@ -4571,7 +4582,7 @@ private enum RecordingRootTransportEvent: Equatable {
 private final class SuspendingSSHConnectionPrewarmer: @unchecked Sendable {
     private let lock = NSLock()
     private var recordedTargets: [SessionTarget] = []
-    private var continuations: [CheckedContinuation<Void, Never>] = []
+    private var suspended: [(target: SessionTarget, continuation: CheckedContinuation<Void, Never>)] = []
 
     var targets: [SessionTarget] {
         lock.lock()
@@ -4583,19 +4594,24 @@ private final class SuspendingSSHConnectionPrewarmer: @unchecked Sendable {
         await withCheckedContinuation { continuation in
             lock.lock()
             recordedTargets.append(target)
-            continuations.append(continuation)
+            suspended.append((target, continuation))
             lock.unlock()
         }
     }
 
     func resumeAll() {
+        resume { _ in true }
+    }
+
+    /// Resumes the suspended prewarms whose target matches.
+    func resume(where matches: (SessionTarget) -> Bool) {
         lock.lock()
-        let continuations = continuations
-        self.continuations.removeAll()
+        let resumed = suspended.filter { matches($0.target) }
+        suspended.removeAll { matches($0.target) }
         lock.unlock()
 
-        for continuation in continuations {
-            continuation.resume()
+        for entry in resumed {
+            entry.continuation.resume()
         }
     }
 }
