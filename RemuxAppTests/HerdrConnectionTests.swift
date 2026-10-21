@@ -598,6 +598,37 @@ final class HerdrConnectionTests: XCTestCase {
         XCTAssertEqual(finalAnswer, false)
     }
 
+    /// Messages without a snapshot don't extend the first-snapshot limit, even with the app in the
+    /// background, where the health check isn't running.
+    func testConfirmAliveGivesUpWhenNoSnapshotCameInTime() async throws {
+        let transport = FakeBridgeTransport()
+        await transport.serve(HerdrWire.frame(try Self.frames(Self.recording("herdr-01-handshake-all-caps-A"))[0]))
+        let connection = try await HerdrConnection.open(
+            transport: transport,
+            hello: hello,
+            appActive: false,
+            timing: timing(unansweredPing: .milliseconds(300), firstSnapshot: .milliseconds(400)),
+            onEvent: EventRecorder().record
+        )
+        addTeardownBlock { await connection.close() }
+        let bells = Task {
+            while !Task.isCancelled {
+                await transport.serve(HerdrWire.frame([9, 1]))
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+        defer { bells.cancel() }
+        let answer = AnswerBox()
+        let check = Task { await answer.set(await connection.confirmAlive()) }
+        defer { check.cancel() }
+        let deadline = ContinuousClock.now + .seconds(3)
+        while await answer.value == nil, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let answered = await answer.value
+        XCTAssertEqual(answered, false, "the check must give up at the first-snapshot limit")
+    }
+
     func testConfirmAliveIsAnsweredByItsOwnPong() async throws {
         let (connection, transport, _) = try await openedSession(surfaceActive: true)
         async let alive = connection.confirmAlive()

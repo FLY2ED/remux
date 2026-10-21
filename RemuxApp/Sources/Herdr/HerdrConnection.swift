@@ -731,8 +731,8 @@ actor HerdrConnection {
 
     /// Sends a ping with a fresh id and reports whether its own reply came back: the check before
     /// showing a session again after the app returns. It gives up once nothing has arrived for
-    /// `unansweredPing`, not counting time the screen spends taking the backlog queued ahead of the
-    /// reply, or, before anything has come since the welcome, at the first-snapshot limit.
+    /// `unansweredPing` after the server has sent something, not counting time the screen spends taking
+    /// the backlog queued ahead of the reply, or when no snapshot has come by the first-snapshot limit.
     func confirmAlive() async -> Bool {
         guard !ended else { return false }
         let data = makeID("alive")
@@ -749,10 +749,9 @@ actor HerdrConnection {
             try? await Task.sleep(for: timing.healthTick)
             if delivering { continue }
             let now = ContinuousClock.now
-            let expired = heardSinceWelcome
-                ? now - max(sentAt, lastProgress) >= timing.unansweredPing
-                : now - openedAt >= timing.firstSnapshot
-            if expired {
+            let noSnapshotInTime = bootID == nil && now - openedAt >= timing.firstSnapshot
+            let unanswered = heardSinceWelcome && now - max(sentAt, lastProgress) >= timing.unansweredPing
+            if noSnapshotInTime || unanswered {
                 pongWaiters.removeValue(forKey: data)?.resume(returning: false)
             }
         }
