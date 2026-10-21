@@ -15,6 +15,10 @@ own `HOME` and XDG directories. One file pair per recorded client:
   `final` is the reference presentation's committed surface after the whole recording and its
   count of rejected patches.
 
+`herdr-wide-cells-patch-A` draws CJK, emoji, ZWJ sequences, flags, skin tones, VS16 and VS15,
+combining marks, voiced halfwidth kana and a link in one pane of a split, through full surfaces and
+patches.
+
 `herdr-graphics-placements-A` holds two single messages from a recording of a PNG shown with the kitty
 graphics protocol: a delta and a full surface that place the picture without carrying its bytes (the
 picture itself is 3 MB). Its asset fingerprint is above 2^63.

@@ -8,7 +8,7 @@ final class HerdrWireTests: XCTestCase {
 
     func testDecodesEveryRecordedServerMessage() throws {
         let fixtures = try Self.goldenFixtures()
-        XCTAssertEqual(fixtures.count, 23)
+        XCTAssertEqual(fixtures.count, 24)
         var checked = 0
         for fixture in fixtures {
             var splitter = HerdrFrameSplitter()
@@ -25,7 +25,7 @@ final class HerdrWireTests: XCTestCase {
             }
             XCTAssertNil(try splitter.nextPayload(), fixture.name)
         }
-        XCTAssertEqual(checked, 259)
+        XCTAssertEqual(checked, 303)
     }
 
     func testEncodesEveryRecordedClientMessage() throws {
@@ -57,7 +57,7 @@ final class HerdrWireTests: XCTestCase {
                 checked += 1
             }
         }
-        XCTAssertEqual(checked, 47)
+        XCTAssertEqual(checked, 58)
         // Six hellos with options Remux doesn't use (no or only some encodings, generation 2, a missing
         // codec, zero columns, invalid JSON), the presentation fence, an unknown control, and Detach (a
         // closed stream ends the client the same way; `HerdrConnection.close()`).
