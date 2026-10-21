@@ -5,16 +5,14 @@ import XCTest
 final class HerdrPanePainterTests: XCTestCase {
     // MARK: - Cells
 
+    /// Each cell goes to its own column; a CUP or SGR the terminal already has isn't written.
     func testRowsAreErasedThenWrittenLeftToRightEachCellAtItsColumn() {
         let frame = Self.frame(width: 5, rows: [["a", "漢", "", "b", "c"]])
         let area = HerdrSurfaceRect(x: 1, y: 0, width: 3, height: 1)
 
         XCTAssertEqual(
             Self.text(HerdrPanePainter.rows([0], of: frame, area: area)),
-            "\u{1B}[1;1H\u{1B}[0m\u{1B}[2K"
-                + "\u{1B}[1;1H\u{1B}[0;39;49m漢"
-                + "\u{1B}[1;3H\u{1B}[0;39;49mb"
-                + "\u{1B}[0m"
+            "\u{1B}[1;1H\u{1B}[0m\u{1B}[2K" + "漢" + "\u{1B}[1;3Hb" + "\u{1B}[0m"
         )
     }
 
@@ -26,12 +24,12 @@ final class HerdrPanePainterTests: XCTestCase {
         XCTAssertEqual(
             Self.text(HerdrPanePainter.rows([0, 1], of: frame, area: HerdrSurfaceRect(x: 0, y: 0, width: 4, height: 2))),
             "\u{1B}[1;1H\u{1B}[0m\u{1B}[2K"
-                + "\u{1B}[1;1H\u{1B}[0;39;49mᄀ"
-                + "\u{1B}[1;3H\u{1B}[0;39;49m\u{1B}[?2027lᄀ\u{1B}[?2027h"
+                + "ᄀ"
+                + "\u{1B}[1;3H\u{1B}[?2027lᄀ\u{1B}[?2027h"
                 + "\u{1B}[2;1H\u{1B}[0m\u{1B}[2K"
-                + "\u{1B}[2;1H\u{1B}[0;39;49ma"
-                + "\u{1B}[2;2H\u{1B}[0;39;49me\u{301}"
-                + "\u{1B}[2;3H\u{1B}[0;39;49m\u{1B}[?2027l👍\u{1B}[?2027h🏽"
+                + "a"
+                + "e\u{301}"
+                + "\u{1B}[2;3H\u{1B}[?2027l👍\u{1B}[?2027h🏽"
                 + "\u{1B}[0m"
         )
     }
@@ -46,21 +44,34 @@ final class HerdrPanePainterTests: XCTestCase {
         XCTAssertEqual(
             Self.text(HerdrPanePainter.rows([0], of: frame, area: HerdrSurfaceRect(x: 0, y: 0, width: 5, height: 1))),
             "\u{1B}[1;1H\u{1B}[0m\u{1B}[2K"
-                + "\u{1B}[1;1H\u{1B}[0;39;49m漢"
+                + "漢"
                 + "\u{1B}[1;3H\u{1B}[0;39;41m "
-                + "\u{1B}[1;4H\u{1B}[0;39;49m\u{1B}[?2027l⌚\u{1B}[?2027h\u{FE0E}"
-                + "\u{1B}[1;5H\u{1B}[0;39;49m "
+                + "\u{1B}[0;39;49m\u{1B}[?2027l⌚\u{1B}[?2027h\u{FE0E}"
+                + "\u{1B}[1;5H "
                 + "\u{1B}[0m"
         )
     }
 
-    /// The first two expectations are Herdr's own render tests; the rest follow its SGR mapping.
+    /// A symbol's control characters (C0, DEL, C1) never reach the terminal; a symbol of nothing else
+    /// isn't written.
+    func testControlCharactersInASymbolAreNotWritten() {
+        let frame = Self.frame(width: 3, rows: [["e\u{1B}\u{301}", "\u{1B}", "b\u{9B}\u{7F}"]])
+
+        XCTAssertEqual(
+            Self.text(HerdrPanePainter.rows([0], of: frame, area: HerdrSurfaceRect(x: 0, y: 0, width: 3, height: 1))),
+            "\u{1B}[1;1H\u{1B}[0m\u{1B}[2K" + "e\u{301}" + "\u{1B}[1;3Hb" + "\u{1B}[0m"
+        )
+    }
+
+    /// The first two expectations are Herdr's own render tests; the rest follow its SGR mapping. Each
+    /// style follows a hidden "p", so its SGR is written.
     func testCellStylesUseHerdrsSGR() {
         func sgr(fg: UInt32, bg: UInt32, modifier: UInt16) -> String {
+            let primer = HerdrCell(symbol: "p", fg: HerdrColor(raw: 0), bg: HerdrColor(raw: 0), modifier: 128, skip: false, hyperlink: nil)
             let cell = HerdrCell(symbol: "x", fg: HerdrColor(raw: fg), bg: HerdrColor(raw: bg), modifier: modifier, skip: false, hyperlink: nil)
-            let frame = HerdrFrame(cells: [cell], width: 1, height: 1, cursor: nil, hyperlinks: [], graphics: [])
-            let text = Self.text(HerdrPanePainter.rows([0], of: frame, area: HerdrSurfaceRect(x: 0, y: 0, width: 1, height: 1)))
-            return String(text.dropFirst("\u{1B}[1;1H\u{1B}[0m\u{1B}[2K\u{1B}[1;1H".count).dropLast("x\u{1B}[0m".count))
+            let frame = HerdrFrame(cells: [primer, cell], width: 2, height: 1, cursor: nil, hyperlinks: [], graphics: [])
+            let text = Self.text(HerdrPanePainter.rows([0], of: frame, area: HerdrSurfaceRect(x: 0, y: 0, width: 2, height: 1)))
+            return String(text.dropFirst("\u{1B}[1;1H\u{1B}[0m\u{1B}[2K\u{1B}[0;8;39;49mp".count).dropLast("x\u{1B}[0m".count))
         }
 
         XCTAssertEqual(sgr(fg: 0, bg: 0, modifier: 0), "\u{1B}[0;39;49m")
@@ -82,9 +93,9 @@ final class HerdrPanePainterTests: XCTestCase {
         XCTAssertEqual(
             Self.text(HerdrPanePainter.rows([0], of: frame, area: HerdrSurfaceRect(x: 0, y: 0, width: 3, height: 1))),
             "\u{1B}[1;1H\u{1B}[0m\u{1B}[2K"
-                + "\u{1B}[1;1H\u{1B}[0;39;49m\u{1B}]8;id=d718a06433e710f0;https://e.com/xy\u{1B}\\a\u{1B}]8;;\u{1B}\\"
-                + "\u{1B}[1;2H\u{1B}[0;39;49mb"
-                + "\u{1B}[1;3H\u{1B}[0;39;49mc"
+                + "\u{1B}]8;id=d718a06433e710f0;https://e.com/xy\u{1B}\\a\u{1B}]8;;\u{1B}\\"
+                + "b"
+                + "c"
                 + "\u{1B}[0m"
         )
     }
@@ -96,7 +107,7 @@ final class HerdrPanePainterTests: XCTestCase {
 
         XCTAssertEqual(
             Self.text(HerdrPanePainter.rows([0], of: frame, area: HerdrSurfaceRect(x: 0, y: 0, width: 2, height: 1))),
-            "\u{1B}[1;1H\u{1B}[0m\u{1B}[2K\u{1B}[1;1H\u{1B}[0;39;49ma\u{1B}[0m"
+            "\u{1B}[1;1H\u{1B}[0m\u{1B}[2Ka\u{1B}[0m"
         )
     }
 

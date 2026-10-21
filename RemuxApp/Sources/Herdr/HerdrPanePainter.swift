@@ -20,9 +20,11 @@ import Foundation
 /// grapheme (printing gives it the grapheme's style), and a VS15 grapheme with a wide first code point
 /// in the last column (Ghostty doesn't print a wide code point there with autowrap off).
 ///
-/// Cells are encoded as Herdr's client encodes them (`protocol/render_ansi.rs`). A link carries an id
-/// made from its URI: each cell is opened separately, and Ghostty makes every link opened without an id
-/// a link of its own, so a long URL would otherwise be one link per cell.
+/// Cells are encoded as Herdr's client encodes them (`protocol/render_ansi.rs`), which also writes a
+/// cell's SGR only when it differs from the style in effect, and its CUP only when the cursor isn't
+/// already there: right after an ASCII cell, which Ghostty prints into exactly one cell. A link carries
+/// an id made from its URI: each cell is opened separately, and Ghostty makes every link opened without
+/// an id a link of its own, so a long URL would otherwise be one link per cell.
 ///
 /// The painted terminal needs autowrap off, as Herdr's client sets it on its terminal, so no cell spills
 /// into the next row, and clustering on.
@@ -109,18 +111,31 @@ enum HerdrPanePainter {
             bytes += eraseLine
             let start = (Int(area.y) + y) * Int(frame.width) + Int(area.x)
             var afterVS15 = false
+            // The cursor's column when known, and the style in effect (SGR 0 sets the default one).
+            var cursorColumn: Int? = 0
+            var style: (fg: HerdrColor.Value, bg: HerdrColor.Value, modifier: UInt16) = (.default, .default, 0)
             for x in 0..<Int(area.width) {
                 let cell = frame.cells[start + x]
+                // A cell's text never controls the terminal. Herdr's cells come from Ghostty cells,
+                // which never hold a control character.
+                let symbol = withoutControlCharacters(cell.symbol)
                 let link = cell.hyperlink.flatMap { Int($0) < links.count ? links[Int($0)] : nil }
                 // A covered cell, a cell marked skip (Herdr's client never writes those), or one the
                 // erased row already shows.
-                if cell.symbol.isEmpty || cell.skip || (link == nil && looksErased(cell) && !afterVS15) {
+                if symbol.isEmpty || cell.skip || (link == nil && looksErased(symbol, cell) && !afterVS15) {
                     afterVS15 = false
                     continue
                 }
-                afterVS15 = cell.symbol.unicodeScalars.contains(variationSelector15)
-                appendCursorPosition(row: y, column: x, to: &bytes)
-                appendSGR(cell, to: &bytes)
+                afterVS15 = symbol.utf8.count > 1 && symbol.unicodeScalars.contains(variationSelector15)
+                if cursorColumn != x {
+                    appendCursorPosition(row: y, column: x, to: &bytes)
+                }
+                let cellStyle = (fg: cell.fg.value, bg: cell.bg.value, modifier: cell.modifier)
+                if cellStyle != style {
+                    appendSGR(cell, to: &bytes)
+                    style = cellStyle
+                }
+                cursorColumn = symbol.utf8.count == 1 && x + 1 < Int(area.width) ? x + 1 : nil
                 if let link {
                     bytes += osc8Prefix
                     bytes += linkID(link)
@@ -128,7 +143,7 @@ enum HerdrPanePainter {
                     bytes += link
                     bytes += stringTerminator
                 }
-                appendSymbol(cell.symbol, atColumn: x, to: &bytes)
+                appendSymbol(symbol, atColumn: x, to: &bytes)
                 if link != nil {
                     bytes += osc8Prefix
                     bytes.append(0x3B)
@@ -168,9 +183,8 @@ enum HerdrPanePainter {
 
     /// Herdr's client drops every control character from a link and treats an empty result as no link.
     static func sanitizedLink(_ uri: String) -> [UInt8]? {
-        var scalars = String.UnicodeScalarView()
-        scalars.append(contentsOf: uri.unicodeScalars.filter { $0.properties.generalCategory != .control })
-        return scalars.isEmpty ? nil : Array(String(scalars).utf8)
+        let sanitized = withoutControlCharacters(uri)
+        return sanitized.isEmpty ? nil : Array(sanitized.utf8)
     }
 
     /// `id=` and 16 hex digits of the URI's 64-bit FNV-1a hash, so every cell of a link, in every
@@ -201,14 +215,34 @@ enum HerdrPanePainter {
     ]
 
     /// A blank in the default colours without modifiers: what an erased cell shows.
-    private static func looksErased(_ cell: HerdrCell) -> Bool {
-        cell.symbol == " " && cell.fg.value == .default && cell.bg.value == .default && cell.modifier == 0
+    private static func looksErased(_ symbol: String, _ cell: HerdrCell) -> Bool {
+        symbol == " " && cell.fg.value == .default && cell.bg.value == .default && cell.modifier == 0
+    }
+
+    /// Unicode's control characters (general category Cc, fixed by Unicode's stability policy): C0, DEL
+    /// and C1.
+    private static func isControl(_ scalar: Unicode.Scalar) -> Bool {
+        scalar.value < 0x20 || (0x7F...0x9F).contains(scalar.value)
+    }
+
+    private static func withoutControlCharacters(_ text: String) -> String {
+        // In UTF-8 a C0 or DEL is one byte below 0x20 or 0x7F, and a C1 is 0xC2 then 0x80-0x9F.
+        var lead: UInt8 = 0
+        let hasControl = text.utf8.contains { byte in
+            defer { lead = byte }
+            return byte < 0x20 || byte == 0x7F || (lead == 0xC2 && byte < 0xA0)
+        }
+        guard hasControl else { return text }
+        var scalars = String.UnicodeScalarView()
+        scalars.append(contentsOf: text.unicodeScalars.filter { !isControl($0) })
+        return String(scalars)
     }
 
     /// The symbol, its first code point printed with clustering off where Ghostty could join it to the
     /// cell on the left.
     private static func appendSymbol(_ symbol: String, atColumn column: Int, to bytes: inout [UInt8]) {
-        guard column > 0, let first = symbol.unicodeScalars.first, first.value > 0xFF else {
+        // A UTF-8 lead byte below 0xC4 starts a code point up to U+00FF.
+        guard column > 0, let lead = symbol.utf8.first, lead >= 0xC4, let first = symbol.unicodeScalars.first else {
             bytes += symbol.utf8
             return
         }
