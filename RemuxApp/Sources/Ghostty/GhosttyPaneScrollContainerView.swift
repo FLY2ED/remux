@@ -207,12 +207,16 @@ final class GhosttyPaneScrollContainerView: UIView, UIScrollViewDelegate, UIGest
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        scrollView.frame = bounds
-        physicsScrollView.frame = bounds
-        rendererRecoveryImageView.frame = bounds
-        physicsScrollView.synchronizeVirtualContent()
-        recenterPhysicsScrollIfIdle()
-        synchronizeFromSurface()
+        // The pane's frames are cell geometry and never animate, even in a layout pass that
+        // runs inside another animation.
+        UIView.performWithoutAnimation {
+            scrollView.frame = bounds
+            physicsScrollView.frame = bounds
+            rendererRecoveryImageView.frame = bounds
+            physicsScrollView.synchronizeVirtualContent()
+            recenterPhysicsScrollIfIdle()
+            synchronizeFromSurface()
+        }
     }
 
     func detachSurfaceIfNeeded(_ surface: GhosttyManagedSurface) {

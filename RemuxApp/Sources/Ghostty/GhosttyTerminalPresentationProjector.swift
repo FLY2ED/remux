@@ -377,14 +377,11 @@ struct GhosttyCompositeViewportLayout: Equatable {
             width: CGFloat(grid.columns) * cellSize.width,
             height: CGFloat(grid.rows) * cellSize.height
         )
-        let unsnappedOrigin = CGPoint(
-            x: max((bounds.width - canvasSize.width) / 2, 0),
-            y: max((bounds.height - canvasSize.height) / 2, 0)
-        )
-        origin = CGPoint(
-            x: (unsnappedOrigin.x * scale).rounded() / scale,
-            y: (unsnappedOrigin.y * scale).rounded() / scale
-        )
+        // The canvas is centred across but anchored to the top. A grid that doesn't fill the
+        // viewport, as while a resize waits for the server, must not move when the viewport
+        // changes: centring it shifted the content each time the keyboard moved.
+        let unsnappedOriginX = max((bounds.width - canvasSize.width) / 2, 0)
+        origin = CGPoint(x: (unsnappedOriginX * scale).rounded() / scale, y: 0)
     }
 
     func frame(for gridRect: GhosttyTerminalGridRect) -> CGRect {

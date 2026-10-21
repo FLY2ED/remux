@@ -1,8 +1,30 @@
 import CoreGraphics
+import UIKit
 import XCTest
 @testable import Remux
 
 final class GhosttySurfaceScrollGestureTests: XCTestCase {
+    /// The keyboard's layout pass runs inside its animation; the pane's own frames must not join it.
+    @MainActor
+    func testPaneContainerLayoutInsideAnotherAnimationAnimatesNoPaneFrames() {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 440, height: 900))
+        let container = GhosttyPaneScrollContainerView(frame: CGRect(x: 0, y: 0, width: 440, height: 512))
+        window.addSubview(container)
+        window.isHidden = false
+        container.layoutIfNeeded()
+
+        UIView.animate(withDuration: 1) {
+            container.frame = CGRect(x: 0, y: 0, width: 440, height: 795)
+            container.layoutIfNeeded()
+        }
+
+        XCTAssertFalse(container.subviews.isEmpty)
+        for subview in container.subviews {
+            XCTAssertNil(subview.layer.animationKeys(), "\(type(of: subview)) frame was animated")
+        }
+        window.isHidden = true
+    }
+
     func testPaneScrollGeometryRejectsUnsizedDisplayViewport() {
         XCTAssertNil(GhosttyPaneScrollGeometry.displayViewportSize(for: .zero))
         XCTAssertNil(GhosttyPaneScrollGeometry.displayViewportSize(for: CGRect(x: 0, y: 0, width: 120, height: 0)))
