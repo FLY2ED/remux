@@ -3,16 +3,29 @@ import Foundation
 /// Turns part of a Herdr frame into VT bytes for a local terminal of exactly that part's size: a pane's
 /// text area (`innerRect`) for that pane's producer, or a whole popup frame for the popup's.
 ///
-/// Each painted row is repainted whole, right to left, with every cell placed at its own column. A wide
-/// grapheme painted after its right neighbour covers that column, and `""` covered cells aren't written,
-/// so wide characters, emoji and combining marks land where Herdr's grid has them without a width table.
+/// Herdr's cells are copies of the cells of its own Ghostty terminals, which run grapheme clustering
+/// (mode 2027). Each painted row is erased, then written left to right with every cell at its own
+/// column, so the local Ghostty rebuilds every cell from its code points the way Herdr's built it:
+/// - A cell's first code point above U+00FF is printed with clustering off, because with it on Ghostty
+///   may join it to the cell on its left, which Herdr's grid keeps apart (Ghostty never joins at column 0
+///   or for code points up to U+00FF). The rest of the cell is printed with clustering on, and lands in
+///   that cell because the cells to its right are still erased.
+/// - A wide grapheme writes the cell it covers itself. Herdr sends that cell as `""`, or in a full
+///   surface usually as a default blank, so a cell that looks like an erased one is not written: written
+///   over a covered cell it would erase the wide grapheme. The one exception is the cell after a VS15
+///   grapheme: Ghostty prints such a grapheme's first code point wide before VS15 narrows it, which
+///   leaves that cell styled.
+///
+/// Two cells Herdr's Ghostty can hold can't be printed: a covered cell styled apart from its wide
+/// grapheme (printing gives it the grapheme's style), and a VS15 grapheme with a wide first code point
+/// in the last column (Ghostty doesn't print a wide code point there with autowrap off).
+///
 /// Cells are encoded as Herdr's client encodes them (`protocol/render_ansi.rs`). A link carries an id
 /// made from its URI: each cell is opened separately, and Ghostty makes every link opened without an id
 /// a link of its own, so a long URL would otherwise be one link per cell.
 ///
-/// The painted terminal needs autowrap off, as Herdr's client sets it on its terminal, or a wide
-/// grapheme in the last column wraps into the next row. It also needs grapheme clustering (mode 2027)
-/// on, as Herdr's own pane terminals run it, or ZWJ sequences, flags and VS16 emoji split across cells.
+/// The painted terminal needs autowrap off, as Herdr's client sets it on its terminal, so no cell spills
+/// into the next row, and clustering on.
 ///
 /// A paint that places cells ends with the cursor, because placing cells moves the terminal's cursor.
 /// Feed each paint in one producer call, so the renderer never draws a half-painted area. The area must
@@ -85,17 +98,27 @@ enum HerdrPanePainter {
         }
     }
 
-    /// The listed rows of the area (0 is its top row), each right to left, then SGR 0.
+    /// The listed rows of the area (0 is its top row), each erased and then written left to right, then
+    /// SGR 0.
     static func rows(_ rows: some Sequence<Int>, of frame: HerdrFrame, area: HerdrSurfaceRect) -> [UInt8] {
         let links = frame.hyperlinks.map(sanitizedLink)
         var bytes: [UInt8] = []
         for y in rows {
+            appendCursorPosition(row: y, column: 0, to: &bytes)
+            bytes += resetSGR
+            bytes += eraseLine
             let start = (Int(area.y) + y) * Int(frame.width) + Int(area.x)
-            for x in stride(from: Int(area.width) - 1, through: 0, by: -1) {
+            var afterVS15 = false
+            for x in 0..<Int(area.width) {
                 let cell = frame.cells[start + x]
-                // Herdr's client never writes a cell marked skip.
-                if cell.symbol.isEmpty || cell.skip { continue }
                 let link = cell.hyperlink.flatMap { Int($0) < links.count ? links[Int($0)] : nil }
+                // A covered cell, a cell marked skip (Herdr's client never writes those), or one the
+                // erased row already shows.
+                if cell.symbol.isEmpty || cell.skip || (link == nil && looksErased(cell) && !afterVS15) {
+                    afterVS15 = false
+                    continue
+                }
+                afterVS15 = cell.symbol.unicodeScalars.contains(variationSelector15)
                 appendCursorPosition(row: y, column: x, to: &bytes)
                 appendSGR(cell, to: &bytes)
                 if let link {
@@ -105,7 +128,7 @@ enum HerdrPanePainter {
                     bytes += link
                     bytes += stringTerminator
                 }
-                bytes += cell.symbol.utf8
+                appendSymbol(cell.symbol, atColumn: x, to: &bytes)
                 if link != nil {
                     bytes += osc8Prefix
                     bytes.append(0x3B)
@@ -164,6 +187,11 @@ enum HerdrPanePainter {
     // MARK: - Encoding
 
     private static let resetSGR: [UInt8] = Array("\u{1B}[0m".utf8)
+    /// EL 2: the whole row, blank with the default background after SGR 0.
+    private static let eraseLine: [UInt8] = Array("\u{1B}[2K".utf8)
+    private static let clusteringOff: [UInt8] = Array("\u{1B}[?2027l".utf8)
+    private static let clusteringOn: [UInt8] = Array("\u{1B}[?2027h".utf8)
+    private static let variationSelector15: Unicode.Scalar = "\u{FE0E}"
     private static let osc8Prefix: [UInt8] = Array("\u{1B}]8;".utf8)
     private static let stringTerminator: [UInt8] = [0x1B, 0x5C]
     /// ratatui's modifier bits before and after underline, with their SGR codes.
@@ -171,6 +199,24 @@ enum HerdrPanePainter {
     private static let trailingModifiers: [(bit: UInt16, code: UInt8)] = [
         (16, 0x35), (32, 0x36), (64, 0x37), (128, 0x38), (256, 0x39),
     ]
+
+    /// A blank in the default colours without modifiers: what an erased cell shows.
+    private static func looksErased(_ cell: HerdrCell) -> Bool {
+        cell.symbol == " " && cell.fg.value == .default && cell.bg.value == .default && cell.modifier == 0
+    }
+
+    /// The symbol, its first code point printed with clustering off where Ghostty could join it to the
+    /// cell on the left.
+    private static func appendSymbol(_ symbol: String, atColumn column: Int, to bytes: inout [UInt8]) {
+        guard column > 0, let first = symbol.unicodeScalars.first, first.value > 0xFF else {
+            bytes += symbol.utf8
+            return
+        }
+        bytes += clusteringOff
+        bytes += first.utf8
+        bytes += clusteringOn
+        bytes += symbol.utf8.dropFirst(first.utf8.count)
+    }
 
     /// CUP, 1-based.
     private static func appendCursorPosition(row: Int, column: Int, to bytes: inout [UInt8]) {
