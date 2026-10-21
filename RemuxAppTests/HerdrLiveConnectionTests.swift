@@ -8,7 +8,11 @@ import XCTest
 final class HerdrLiveConnectionTests: XCTestCase {
     func testConnectionShowsAPaneAndDeliversInput() async throws {
         let fixture = try await HerdrLiveFixture.start(try HerdrLiveConfiguration.load())
-        addTeardownBlock { await fixture.tearDown() }
+        addTeardownBlock {
+            for problem in await fixture.tearDown() {
+                XCTFail(problem)
+            }
+        }
         let trace = RemuxTransportStartupTrace(flowID: "herdr-live-connection")
         let log = HerdrLiveEventLog()
 
@@ -24,6 +28,8 @@ final class HerdrLiveConnectionTests: XCTestCase {
             appActive: true,
             onEvent: { await log.append($0) }
         )
+        // Teardown blocks run last first, so the connection closes before the fixture stops Herdr.
+        addTeardownBlock { await connection.close() }
         XCTAssertTrue(connection.negotiated.delta)
         XCTAssertTrue(connection.negotiated.scroll)
 
@@ -53,8 +59,6 @@ final class HerdrLiveConnectionTests: XCTestCase {
         XCTAssertGreaterThan(surfacesAfterInput, surfacesBeforeInput, "no surface update reached Remux after the input")
         let ended = await log.endReason
         XCTAssertNil(ended, "the connection ended early: \(String(describing: ended))")
-
-        await connection.close()
     }
 }
 

@@ -93,12 +93,20 @@ final class HerdrLiveFixture: @unchecked Sendable {
         )
     }
 
-    /// Stops this fixture's server and removes its folder. Safe to call more than once.
-    func tearDown() async {
-        let trace = RemuxTransportStartupTrace(flowID: "herdr-live-teardown")
-        _ = try? await herdr(["server", "stop"], trace: trace)
-        _ = try? await runScript(#"rm -rf -- "$(printf %b "$1")""#, arguments: [root])
-        try? FileManager.default.removeItem(at: trustedHostRoot)
+    /// Stops this fixture's server and removes its folder, and returns what went wrong, if anything. A
+    /// server that doesn't stop keeps its folder, which holds what stopping it by hand needs. Safe to
+    /// call more than once.
+    func tearDown() async -> [String] {
+        defer { try? FileManager.default.removeItem(at: trustedHostRoot) }
+        do {
+            let result = try await runScript(Self.teardownScript, arguments: [root, session])
+            guard result.exitStatus == 0 else {
+                return ["The live Herdr fixture at \(root) was not cleaned up: \(String(decoding: result.stderr, as: UTF8.self))"]
+            }
+            return []
+        } catch {
+            return ["The live Herdr fixture at \(root) was not cleaned up: \(error)"]
+        }
     }
 
     /// A new dedicated SSH connection to the live host.
@@ -192,4 +200,16 @@ final class HerdrLiveFixture: @unchecked Sendable {
         trap - EXIT
         """#
     }
+
+    /// Stops the session's server if it has one (its API socket exists; `server stop` returns once the
+    /// server's sockets are gone), then removes the folder only if that worked.
+    private static let teardownScript = #"""
+        set -u
+        root=$(printf %b "$1")
+        session=$(printf %b "$2")
+        if [ -S "$root/config/herdr/sessions/$session/herdr.sock" ]; then
+          "$root/herdr-isolated" --session "$session" server stop || exit 1
+        fi
+        rm -rf -- "$root"
+        """#
 }
