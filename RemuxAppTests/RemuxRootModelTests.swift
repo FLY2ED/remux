@@ -1938,7 +1938,7 @@ final class RemuxRootModelTests: XCTestCase {
         }
         XCTAssertTrue(didStartEditedServerPrewarm)
         prewarmer.resumeAll()
-        let didPrepareEditedServer = await waitUntil { !transportFactory.targets.isEmpty }
+        let didPrepareEditedServer = await waitUntil { transportFactory.preparedIDs.count == 1 }
         XCTAssertTrue(didPrepareEditedServer)
         XCTAssertEqual(transportFactory.targets.map(\.server.host), ["new-build.example.test"])
     }
