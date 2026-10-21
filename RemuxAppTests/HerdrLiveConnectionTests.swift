@@ -44,6 +44,11 @@ final class HerdrLiveConnectionTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(300))
         }
         XCTAssertTrue(visible.contains("live-\(token)"), "the pane never showed the command's output:\n\(visible)")
+        // Herdr sends surfaces over the bridge and answers the CLI over its own connection, in no set order.
+        let surfaceDeadline = ContinuousClock.now + .seconds(15)
+        while await log.surfaceCount <= surfacesBeforeInput, ContinuousClock.now < surfaceDeadline {
+            try await Task.sleep(for: .milliseconds(100))
+        }
         let surfacesAfterInput = await log.surfaceCount
         XCTAssertGreaterThan(surfacesAfterInput, surfacesBeforeInput, "no surface update reached Remux after the input")
         let ended = await log.endReason
