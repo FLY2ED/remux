@@ -537,6 +537,98 @@ final class HerdrConnectionTests: XCTestCase {
         XCTAssertFalse(ended)
     }
 
+    /// Herdr's client: a ping after 5 s of silence, its reply within 10 s, and 60 s for the first
+    /// snapshot, as long as a remote server's setup.
+    func testTheDefaultTimingIsHerdrsHealthRule() {
+        let timing = HerdrConnection.Timing()
+        XCTAssertEqual(timing.pingAfterSilence, .seconds(5))
+        XCTAssertEqual(timing.unansweredPing, .seconds(10))
+        XCTAssertEqual(timing.firstSnapshot, .seconds(60))
+    }
+
+    /// Herdr's server answers pings only once it has registered the client, which a busy server can put
+    /// off after the welcome. So an unanswered ping fails the connection only after the server has sent
+    /// something; before that only the first-snapshot limit applies.
+    func testAPingCountsAsUnansweredOnlyOnceTheServerHasSentSomething() async throws {
+        let transport = FakeBridgeTransport()
+        await transport.serve(HerdrWire.frame(try Self.frames(Self.recording("herdr-01-handshake-all-caps-A"))[0]))
+        let events = EventRecorder()
+        let connection = try await HerdrConnection.open(
+            transport: transport,
+            hello: hello,
+            appActive: true,
+            timing: timing(pingAfterSilence: .milliseconds(50), unansweredPing: .milliseconds(100)),
+            onEvent: events.record
+        )
+        addTeardownBlock { await connection.close() }
+        let ping = try Self.control(try await transport.written(1))
+        XCTAssertEqual(ping.kind, HerdrControlKind.healthPing)
+        try await Task.sleep(for: .milliseconds(500))
+        let endedBeforeAnything = await events.hasEnded
+        XCTAssertFalse(endedBeforeAnything)
+
+        await transport.serve(HerdrWire.frame([9, 1]))
+        let kinds = await events.waitForEnd().map(\.kind)
+        XCTAssertEqual(kinds, ["bell", "ended(unresponsive)"])
+    }
+
+    /// The check after the app returns follows the same rule: before anything has come since the welcome
+    /// it keeps waiting, and once the server has sent something an unanswered check gives up.
+    func testConfirmAliveWaitsUntilTheServerHasSentSomething() async throws {
+        let transport = FakeBridgeTransport()
+        await transport.serve(HerdrWire.frame(try Self.frames(Self.recording("herdr-01-handshake-all-caps-A"))[0]))
+        let connection = try await HerdrConnection.open(
+            transport: transport,
+            hello: hello,
+            appActive: false,
+            timing: timing(unansweredPing: .milliseconds(100)),
+            onEvent: EventRecorder().record
+        )
+        addTeardownBlock { await connection.close() }
+        let answer = AnswerBox()
+        let check = Task { await answer.set(await connection.confirmAlive()) }
+        _ = try await transport.written(1)
+        try await Task.sleep(for: .milliseconds(500))
+        let earlyAnswer = await answer.value
+        XCTAssertNil(earlyAnswer)
+
+        await transport.serve(HerdrWire.frame([9, 1]))
+        await check.value
+        let finalAnswer = await answer.value
+        XCTAssertEqual(finalAnswer, false)
+    }
+
+    /// Messages without a snapshot don't extend the first-snapshot limit, even with the app in the
+    /// background, where the health check isn't running.
+    func testConfirmAliveGivesUpWhenNoSnapshotCameInTime() async throws {
+        let transport = FakeBridgeTransport()
+        await transport.serve(HerdrWire.frame(try Self.frames(Self.recording("herdr-01-handshake-all-caps-A"))[0]))
+        let connection = try await HerdrConnection.open(
+            transport: transport,
+            hello: hello,
+            appActive: false,
+            timing: timing(unansweredPing: .milliseconds(300), firstSnapshot: .milliseconds(400)),
+            onEvent: EventRecorder().record
+        )
+        addTeardownBlock { await connection.close() }
+        let bells = Task {
+            while !Task.isCancelled {
+                await transport.serve(HerdrWire.frame([9, 1]))
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+        defer { bells.cancel() }
+        let answer = AnswerBox()
+        let check = Task { await answer.set(await connection.confirmAlive()) }
+        defer { check.cancel() }
+        let deadline = ContinuousClock.now + .seconds(3)
+        while await answer.value == nil, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let answered = await answer.value
+        XCTAssertEqual(answered, false, "the check must give up at the first-snapshot limit")
+    }
+
     func testConfirmAliveIsAnsweredByItsOwnPong() async throws {
         let (connection, transport, _) = try await openedSession(surfaceActive: true)
         async let alive = connection.confirmAlive()
@@ -909,6 +1001,14 @@ actor FakeBridgeTransport: HerdrBridgeTransport {
 }
 
 /// Records connection events; `hold()` makes delivery wait, as a busy screen would.
+private actor AnswerBox {
+    private(set) var value: Bool?
+
+    func set(_ answer: Bool) {
+        value = answer
+    }
+}
+
 actor EventRecorder {
     private(set) var events: [HerdrConnectionEvent] = []
     private var held = false

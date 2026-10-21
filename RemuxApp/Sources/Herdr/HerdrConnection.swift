@@ -134,10 +134,10 @@ actor HerdrConnection {
         var welcome: Duration = .seconds(10)
         /// Herdr's health rule: a ping after this long with nothing received, and the connection fails
         /// when nothing arrives this long after it, or when no snapshot has come this long after
-        /// connecting.
+        /// connecting. Herdr gives the first snapshot as long as a remote server's setup.
         var pingAfterSilence: Duration = .seconds(5)
         var unansweredPing: Duration = .seconds(10)
-        var firstSnapshot: Duration = .seconds(10)
+        var firstSnapshot: Duration = .seconds(60)
         /// How often health is checked; adds at most this much to the rules above.
         var healthTick: Duration = .seconds(1)
         /// Herdr's command timeout.
@@ -177,6 +177,10 @@ actor HerdrConnection {
     private var lastProgress = ContinuousClock.now
     /// The screen is taking messages, so nothing is read; that time isn't server silence.
     private var delivering = false
+    /// A message has come since the welcome. Herdr's server answers pings only once its main loop has
+    /// registered the client, which a busy server can put off after the welcome; until then only the
+    /// first-snapshot limit applies.
+    private var heardSinceWelcome = false
     private var outstandingPing: (data: String, sentAt: ContinuousClock.Instant)?
     private var pongWaiters: [String: CheckedContinuation<Bool, Never>] = [:]
     private var nextID: UInt64 = 0
@@ -376,6 +380,7 @@ actor HerdrConnection {
     /// While the session is hidden, bells, clipboard writes and input refusals are dropped, as in
     /// Herdr's client; surfaces still go to the decoder.
     private func route(_ message: HerdrServerMessage) async throws {
+        heardSinceWelcome = true
         switch message {
         case .control(let kind, let data):
             switch try HerdrEndpointControl.parse(kind: kind, data: data) {
@@ -726,8 +731,8 @@ actor HerdrConnection {
 
     /// Sends a ping with a fresh id and reports whether its own reply came back: the check before
     /// showing a session again after the app returns. It gives up once nothing has arrived for
-    /// `unansweredPing`, not counting time the screen spends taking the backlog queued ahead of the
-    /// reply.
+    /// `unansweredPing` after the server has sent something, not counting time the screen spends taking
+    /// the backlog queued ahead of the reply, or when no snapshot has come by the first-snapshot limit.
     func confirmAlive() async -> Bool {
         guard !ended else { return false }
         let data = makeID("alive")
@@ -743,7 +748,10 @@ actor HerdrConnection {
         while pongWaiters[data] != nil {
             try? await Task.sleep(for: timing.healthTick)
             if delivering { continue }
-            if ContinuousClock.now - max(sentAt, lastProgress) >= timing.unansweredPing {
+            let now = ContinuousClock.now
+            let noSnapshotInTime = bootID == nil && now - openedAt >= timing.firstSnapshot
+            let unanswered = heardSinceWelcome && now - max(sentAt, lastProgress) >= timing.unansweredPing
+            if noSnapshotInTime || unanswered {
                 pongWaiters.removeValue(forKey: data)?.resume(returning: false)
             }
         }
@@ -762,7 +770,7 @@ actor HerdrConnection {
             if let ping = outstandingPing {
                 if lastProgress > ping.sentAt {
                     outstandingPing = nil
-                } else if now - ping.sentAt >= timing.unansweredPing {
+                } else if heardSinceWelcome, now - ping.sentAt >= timing.unansweredPing {
                     await end(.unresponsive)
                     return
                 }
