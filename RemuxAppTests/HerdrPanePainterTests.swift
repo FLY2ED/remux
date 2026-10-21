@@ -1,94 +1,77 @@
-import CryptoKit
 import Foundation
 import XCTest
 @testable import Remux
 
 final class HerdrPanePainterTests: XCTestCase {
-    // MARK: - Recorded streams
-
-    /// Every pane of every recorded surface and applied patch paints as the reference painter does
-    /// (`Fixtures/HerdrWire`, `painted`): whole on its first paint, then only the rows that changed
-    /// since the pane's last paint, byte for byte.
-    func testPaintsEveryRecordedPaneAsTheReferencePainter() throws {
-        var full = 0
-        var partial = 0
-        var unchanged = 0
-        for fixture in try HerdrWireTests.goldenFixtures() {
-            guard let negotiated = fixture.golden.negotiated else { continue }
-            var decoder = HerdrSurfaceDecoder(deltaNegotiated: negotiated.delta, scrollNegotiated: negotiated.scroll)
-            var presentation = HerdrPresentation()
-            var lastPainted: [String: HerdrPanePainter.Painted] = [:]
-            var splitter = HerdrFrameSplitter()
-            splitter.append(fixture.serverStream)
-
-            func check(_ surface: HerdrPaneSurfaceFrame, against expected: [String: HerdrWireTests.GoldenPainted], _ context: String) {
-                XCTAssertEqual(Set(expected.keys), Set(surface.panes.map(\.paneID)), context)
-                for pane in surface.panes {
-                    let next = HerdrPanePainter.Painted(
-                        frame: surface.frame,
-                        area: pane.innerRect,
-                        cursor: HerdrPanePainter.paneCursor(of: surface)
-                    )
-                    let rows = lastPainted[pane.paneID].flatMap { HerdrPanePainter.changedRows(from: $0, to: next) }
-                    lastPainted[pane.paneID] = next
-                    let paneContext = "\(context) \(pane.paneID)"
-                    XCTAssertEqual(rows, expected[pane.paneID]?.rows, paneContext)
-                    if rows == [] {
-                        XCTAssertNil(expected[pane.paneID]?.digest, paneContext)
-                        unchanged += 1
-                        continue
-                    }
-                    let bytes = HerdrPanePainter.rows(rows ?? Array(0..<Int(pane.innerRect.height)), of: surface.frame, area: pane.innerRect)
-                    XCTAssertEqual(Self.digest(bytes), expected[pane.paneID]?.digest, paneContext)
-                    if rows == nil { full += 1 } else { partial += 1 }
-                }
-            }
-
-            for entry in fixture.golden.server {
-                let context = "\(fixture.name) @\(entry.offset)"
-                let message = try HerdrServerMessage.decode(try XCTUnwrap(try splitter.nextPayload(), context))
-                if case .control(let kind, let data) = message,
-                   case .snapshot(let snapshot) = try HerdrEndpointControl.parse(kind: kind, data: data) {
-                    presentation.receive(snapshot)
-                }
-                guard let surfaceMessage = try HerdrSurfaceDecoderTests.surfaceMessage(message) else { continue }
-                switch try decoder.decode(surfaceMessage) {
-                case .surface(let surface):
-                    try presentation.receive(surface)
-                    check(surface, against: try XCTUnwrap(entry.painted, context), context)
-                case .patch(let patch):
-                    guard presentation.receive(patch) == .applied else {
-                        XCTAssertNil(entry.painted, context)
-                        continue
-                    }
-                    check(try XCTUnwrap(presentation.surface, context), against: try XCTUnwrap(entry.painted, context), context)
-                }
-            }
-        }
-        XCTAssertEqual(full, 22)
-        XCTAssertEqual(partial, 66)
-        XCTAssertEqual(unchanged, 55)
-    }
-
     // MARK: - Cells
 
-    func testRowsArePaintedRightToLeftWithEachCellAtItsColumn() {
+    /// Each cell goes to its own column; a CUP or SGR the terminal already has isn't written.
+    func testRowsAreErasedThenWrittenLeftToRightEachCellAtItsColumn() {
         let frame = Self.frame(width: 5, rows: [["a", "漢", "", "b", "c"]])
         let area = HerdrSurfaceRect(x: 1, y: 0, width: 3, height: 1)
 
         XCTAssertEqual(
             Self.text(HerdrPanePainter.rows([0], of: frame, area: area)),
-            "\u{1B}[1;3H\u{1B}[0;39;49mb\u{1B}[1;1H\u{1B}[0;39;49m漢\u{1B}[0m"
+            "\u{1B}[1;1H\u{1B}[0m\u{1B}[2K" + "漢" + "\u{1B}[1;3Hb" + "\u{1B}[0m"
         )
     }
 
-    /// The first two expectations are Herdr's own render tests; the rest follow its SGR mapping.
+    /// A first code point above U+00FF outside column 0 is printed with grapheme clustering off, so it
+    /// can't join the cell on its left; the rest of the cell is printed with clustering on.
+    func testAFirstCodePointGhosttyCouldJoinIsPrintedWithClusteringOff() {
+        let frame = Self.frame(width: 4, rows: [["ᄀ", "", "ᄀ", ""], ["a", "e\u{301}", "👍🏽", ""]])
+
+        XCTAssertEqual(
+            Self.text(HerdrPanePainter.rows([0, 1], of: frame, area: HerdrSurfaceRect(x: 0, y: 0, width: 4, height: 2))),
+            "\u{1B}[1;1H\u{1B}[0m\u{1B}[2K"
+                + "ᄀ"
+                + "\u{1B}[1;3H\u{1B}[?2027lᄀ\u{1B}[?2027h"
+                + "\u{1B}[2;1H\u{1B}[0m\u{1B}[2K"
+                + "a"
+                + "e\u{301}"
+                + "\u{1B}[2;3H\u{1B}[?2027l👍\u{1B}[?2027h🏽"
+                + "\u{1B}[0m"
+        )
+    }
+
+    /// A blank in the default colours is what an erased cell shows, and in a full surface it can be the
+    /// cell a wide grapheme covers, so it isn't written; a styled blank is. After a VS15 grapheme the
+    /// next cell is written anyway.
+    func testCellsThatLookErasedAreNotWrittenExceptAfterAVS15Grapheme() {
+        var frame = Self.frame(width: 5, rows: [["漢", " ", " ", "⌚\u{FE0E}", " "]])
+        frame.cells[2] = HerdrCell(symbol: " ", fg: HerdrColor(raw: 0), bg: HerdrColor(raw: 2), modifier: 0, skip: false, hyperlink: nil)
+
+        XCTAssertEqual(
+            Self.text(HerdrPanePainter.rows([0], of: frame, area: HerdrSurfaceRect(x: 0, y: 0, width: 5, height: 1))),
+            "\u{1B}[1;1H\u{1B}[0m\u{1B}[2K"
+                + "漢"
+                + "\u{1B}[1;3H\u{1B}[0;39;41m "
+                + "\u{1B}[0;39;49m\u{1B}[?2027l⌚\u{1B}[?2027h\u{FE0E}"
+                + "\u{1B}[1;5H "
+                + "\u{1B}[0m"
+        )
+    }
+
+    /// A symbol's control characters (C0, DEL, C1) never reach the terminal; a symbol of nothing else
+    /// isn't written.
+    func testControlCharactersInASymbolAreNotWritten() {
+        let frame = Self.frame(width: 3, rows: [["e\u{1B}\u{301}", "\u{1B}", "b\u{9B}\u{7F}"]])
+
+        XCTAssertEqual(
+            Self.text(HerdrPanePainter.rows([0], of: frame, area: HerdrSurfaceRect(x: 0, y: 0, width: 3, height: 1))),
+            "\u{1B}[1;1H\u{1B}[0m\u{1B}[2K" + "e\u{301}" + "\u{1B}[1;3Hb" + "\u{1B}[0m"
+        )
+    }
+
+    /// The first two expectations are Herdr's own render tests; the rest follow its SGR mapping. Each
+    /// style follows a hidden "p", so its SGR is written.
     func testCellStylesUseHerdrsSGR() {
         func sgr(fg: UInt32, bg: UInt32, modifier: UInt16) -> String {
+            let primer = HerdrCell(symbol: "p", fg: HerdrColor(raw: 0), bg: HerdrColor(raw: 0), modifier: 128, skip: false, hyperlink: nil)
             let cell = HerdrCell(symbol: "x", fg: HerdrColor(raw: fg), bg: HerdrColor(raw: bg), modifier: modifier, skip: false, hyperlink: nil)
-            let frame = HerdrFrame(cells: [cell], width: 1, height: 1, cursor: nil, hyperlinks: [], graphics: [])
-            let text = Self.text(HerdrPanePainter.rows([0], of: frame, area: HerdrSurfaceRect(x: 0, y: 0, width: 1, height: 1)))
-            return String(text.dropFirst("\u{1B}[1;1H".count).dropLast("x\u{1B}[0m".count))
+            let frame = HerdrFrame(cells: [primer, cell], width: 2, height: 1, cursor: nil, hyperlinks: [], graphics: [])
+            let text = Self.text(HerdrPanePainter.rows([0], of: frame, area: HerdrSurfaceRect(x: 0, y: 0, width: 2, height: 1)))
+            return String(text.dropFirst("\u{1B}[1;1H\u{1B}[0m\u{1B}[2K\u{1B}[0;8;39;49mp".count).dropLast("x\u{1B}[0m".count))
         }
 
         XCTAssertEqual(sgr(fg: 0, bg: 0, modifier: 0), "\u{1B}[0;39;49m")
@@ -100,7 +83,7 @@ final class HerdrPanePainterTests: XCTestCase {
     }
 
     /// Control characters are dropped from a link and an empty result is no link, as in Herdr's
-    /// client; every cell of a link opens it with the same id (the reference's FNV-1a of the URI).
+    /// client; every cell of a link opens it with the same id (a 64-bit FNV-1a hash of the URI).
     func testLinksCarryAnIDFromTheirURIWithoutControlCharacters() {
         var frame = Self.frame(width: 3, rows: [["a", "b", "c"]], hyperlinks: ["https://e.com/\u{1B}x\u{07}y\u{85}", "\u{1B}\u{07}"])
         frame.cells[0] = Self.cell("a", hyperlink: 0)
@@ -109,9 +92,10 @@ final class HerdrPanePainterTests: XCTestCase {
 
         XCTAssertEqual(
             Self.text(HerdrPanePainter.rows([0], of: frame, area: HerdrSurfaceRect(x: 0, y: 0, width: 3, height: 1))),
-            "\u{1B}[1;3H\u{1B}[0;39;49mc"
-                + "\u{1B}[1;2H\u{1B}[0;39;49mb"
-                + "\u{1B}[1;1H\u{1B}[0;39;49m\u{1B}]8;id=d718a06433e710f0;https://e.com/xy\u{1B}\\a\u{1B}]8;;\u{1B}\\"
+            "\u{1B}[1;1H\u{1B}[0m\u{1B}[2K"
+                + "\u{1B}]8;id=d718a06433e710f0;https://e.com/xy\u{1B}\\a\u{1B}]8;;\u{1B}\\"
+                + "b"
+                + "c"
                 + "\u{1B}[0m"
         )
     }
@@ -123,7 +107,7 @@ final class HerdrPanePainterTests: XCTestCase {
 
         XCTAssertEqual(
             Self.text(HerdrPanePainter.rows([0], of: frame, area: HerdrSurfaceRect(x: 0, y: 0, width: 2, height: 1))),
-            "\u{1B}[1;1H\u{1B}[0;39;49ma\u{1B}[0m"
+            "\u{1B}[1;1H\u{1B}[0m\u{1B}[2Ka\u{1B}[0m"
         )
     }
 
@@ -209,10 +193,6 @@ final class HerdrPanePainterTests: XCTestCase {
 // MARK: - Helpers
 
 extension HerdrPanePainterTests {
-    static func digest(_ bytes: [UInt8]) -> String {
-        SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
-    }
-
     static func text(_ bytes: [UInt8]) -> String {
         String(decoding: bytes, as: UTF8.self)
     }

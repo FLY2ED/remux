@@ -345,15 +345,6 @@ extension HerdrWireTests {
         let rows: String?
     }
 
-    /// One pane painted by the reference painter against what was last painted for it: which pane rows
-    /// and the SHA-256 of the bytes.
-    struct GoldenPainted: Decodable {
-        /// nil: every row (a first paint, or a new size); empty: nothing changed.
-        let rows: [Int]?
-        /// nil when nothing is painted.
-        let digest: String?
-    }
-
     enum GoldenScalar: Decodable, Equatable {
         case string(String)
         case integer(Int64)
@@ -411,11 +402,9 @@ extension HerdrWireTests {
         let scroll: GoldenScroll?
         let reuse: HerdrSurfaceReuse?
         let decoded: GoldenDecoded?
-        /// The reference painter's output for each pane, by pane id.
-        let painted: [String: GoldenPainted]?
 
         private enum CodingKeys: String, CodingKey {
-            case offset, length, tag, message, delta, scroll, reuse, decoded, painted
+            case offset, length, tag, message, delta, scroll, reuse, decoded
         }
 
         init(from decoder: Decoder) throws {
@@ -432,7 +421,6 @@ extension HerdrWireTests {
             scroll = try container.decodeIfPresent(GoldenScroll.self, forKey: .scroll)
             reuse = try container.decodeIfPresent(HerdrSurfaceReuse.self, forKey: .reuse)
             decoded = try container.decodeIfPresent(GoldenDecoded.self, forKey: .decoded)
-            painted = try container.decodeIfPresent([String: GoldenPainted].self, forKey: .painted)
         }
     }
 
