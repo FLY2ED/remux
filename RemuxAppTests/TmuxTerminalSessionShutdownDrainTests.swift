@@ -418,8 +418,113 @@ final class TmuxTerminalSessionShutdownDrainTests: XCTestCase {
         XCTAssertTrue(fixture.session.creatingPaneIDsForTesting.isEmpty)
     }
 
+    /// Ghostty requires the app to outlive every surface, and the screen model frees the app once the
+    /// session's shutdown returns, so the shutdown waits until a renderer it turned away after it
+    /// began is freed.
+    func testShutdownWaitsForARendererRejectedAfterItBegan() async throws {
+        let gate = CloseGate()
+        let fixture = try await makeDelayedNativeFixture(closeGate: gate)
+        let shutdown = Task {
+            await fixture.session.shutdown()
+            gate.record("shut down")
+        }
+        await drain(fixture.session.controller)
+        fixture.deliver()
+        try await waitUntil { gate.heldCount == 1 }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(gate.log, [], "the shutdown returned before the rejected renderer was freed")
+
+        gate.release()
+        await shutdown.value
+        XCTAssertEqual(gate.log, ["closed", "shut down"])
+        XCTAssertNil(fixture.surface.renderer.rawSurface)
+    }
+
+    /// A renderer still closing because its pane left is freed before the shutdown returns.
+    func testShutdownWaitsForTheRendererOfAPaneThatLeft() async throws {
+        let gate = CloseGate()
+        let fixture = try await makeNativeFixture(attach: false, closeGate: gate)
+        fixture.session.handlePaneRemovedForTesting(0)
+        try await waitUntil { gate.heldCount == 1 }
+        let shutdown = Task {
+            await fixture.session.shutdown()
+            gate.record("shut down")
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(gate.log, [], "the shutdown returned before the pane's renderer was freed")
+
+        gate.release()
+        await shutdown.value
+        XCTAssertEqual(gate.log, ["closed", "shut down"])
+        XCTAssertNil(fixture.surface.renderer.rawSurface)
+    }
+
     private final class ThemeBox {
         var value = TerminalTheme.remuxDark
+    }
+
+    /// Holds renderer unregistrations back until released, and logs each close as its surface is
+    /// about to be freed.
+    @MainActor
+    private final class CloseGate {
+        private(set) var log: [String] = []
+        private var holds = true
+        private var held: [() -> Void] = []
+
+        var heldCount: Int { held.count }
+
+        func record(_ event: String) {
+            log.append(event)
+        }
+
+        func pass(_ deliver: @escaping () -> Void) {
+            if holds { held.append(deliver) } else { deliver() }
+        }
+
+        func release() {
+            holds = false
+            let released = held
+            held.removeAll()
+            released.forEach { $0() }
+        }
+    }
+
+    /// The controller's fence, with its unregistration answers passed through a `CloseGate`.
+    @MainActor
+    private final class HeldCloseFence: TerminalPaneRendererFence {
+        private let base: any TerminalPaneRendererFence
+        private let gate: CloseGate
+
+        init(base: any TerminalPaneRendererFence, gate: CloseGate) {
+            self.base = base
+            self.gate = gate
+        }
+
+        func registerRenderer(
+            _ surface: ghostty_terminal_surface_t,
+            completion: @escaping @MainActor @Sendable (Result<Void, any Error>) -> Void
+        ) {
+            base.registerRenderer(surface, completion: completion)
+        }
+
+        func unregisterRenderer(
+            _ surface: ghostty_terminal_surface_t,
+            completion: @escaping @MainActor @Sendable () -> Void
+        ) {
+            base.unregisterRenderer(surface) { [gate] in
+                gate.pass {
+                    gate.record("closed")
+                    completion()
+                }
+            }
+        }
+    }
+
+    private static func fence(
+        _ fence: any TerminalPaneRendererFence,
+        heldBy gate: CloseGate?
+    ) -> any TerminalPaneRendererFence {
+        gate.map { HeldCloseFence(base: fence, gate: $0) } ?? fence
     }
 
     private struct DelayedNativeFixture {
@@ -431,7 +536,7 @@ final class TmuxTerminalSessionShutdownDrainTests: XCTestCase {
         let deliver: () -> Void
     }
 
-    private func makeDelayedNativeFixture() async throws -> DelayedNativeFixture {
+    private func makeDelayedNativeFixture(closeGate: CloseGate? = nil) async throws -> DelayedNativeFixture {
         let runtime = try GhosttyKitRuntime()
         let theme = ThemeBox()
         var created: TmuxPaneSurface?
@@ -444,7 +549,8 @@ final class TmuxTerminalSessionShutdownDrainTests: XCTestCase {
             createPaneSurface: { app, controller, terminal, config, metrics, paneTheme, failure, completion in
                 TmuxPaneSurface.create(
                     app: app, controller: controller, terminal: terminal, baseConfig: config,
-                    metrics: metrics, theme: paneTheme, onRendererFailure: failure
+                    metrics: metrics, theme: paneTheme, onRendererFailure: failure,
+                    wrapFence: { Self.fence($0, heldBy: closeGate) }
                 ) { result in
                     if case .success(let surface) = result { created = surface }
                     deliver = { completion(result) }
@@ -472,13 +578,24 @@ final class TmuxTerminalSessionShutdownDrainTests: XCTestCase {
         let window: UIWindow
     }
 
-    private func makeNativeFixture(attach: Bool = true) async throws -> NativeFixture {
+    private func makeNativeFixture(
+        attach: Bool = true,
+        closeGate: CloseGate? = nil
+    ) async throws -> NativeFixture {
         let runtime = try GhosttyKitRuntime()
         let session = TmuxTerminalSession(
             app: runtime.appHandleForTesting,
             transport: DeterministicTmuxControlTransport(chunks: []),
             baseSurfaceConfig: { runtime.makeTmuxBaseSurfaceConfig() },
-            paneViewTheme: { .remuxDark }
+            paneViewTheme: { .remuxDark },
+            createPaneSurface: { app, controller, terminal, config, metrics, paneTheme, failure, completion in
+                TmuxPaneSurface.create(
+                    app: app, controller: controller, terminal: terminal, baseConfig: config,
+                    metrics: metrics, theme: paneTheme, onRendererFailure: failure,
+                    wrapFence: { Self.fence($0, heldBy: closeGate) },
+                    completion: completion
+                )
+            }
         )
         let measurement = try XCTUnwrap(runtime.measureTmuxViewportLayout(
             size: CGSize(width: 390, height: 600), scale: UIScreen.main.scale
