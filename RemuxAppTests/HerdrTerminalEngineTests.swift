@@ -1,0 +1,542 @@
+import GhosttyKit
+import UIKit
+import XCTest
+@testable import Remux
+
+/// The engine against real GhosttyKit: producers, renderers created through `HerdrPaneRendererFence`,
+/// and the terminals' text read back through Ghostty's own selection.
+@MainActor
+final class HerdrTerminalEngineTests: XCTestCase {
+    private var runtime: GhosttyKitRuntime!
+    private var measurement: GhosttyTerminalViewportMeasurement!
+    private var renderers: [TerminalPaneRenderer] = []
+
+    override func setUp() async throws {
+        runtime = try GhosttyKitRuntime(terminalSettings: .default)
+        measurement = try XCTUnwrap(runtime.measureTmuxViewportLayout(size: CGSize(width: 390, height: 844), scale: 3))
+    }
+
+    override func tearDown() async throws {
+        for renderer in renderers {
+            await close(renderer)
+        }
+        measurement = nil
+        runtime = nil
+    }
+
+    // MARK: - Painting
+
+    /// A pane's terminal is painted before any renderer exists; a renderer created later shows it.
+    func testPanesArePaintedBeforeTheirRenderersExist() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        await engine.receive(try Self.snapshot(revision: 1))
+        await engine.receive(.surface(try Self.surface(
+            revision: 1,
+            lines: ["left 1    right 1", "left 2    right 2"],
+            panes: [Self.pane("L", x: 0, width: 8, height: 2, focused: true), Self.pane("R", x: 10, width: 7, height: 2)]
+        )))
+
+        let terminals = try await updates.terminals(count: 2)
+        XCTAssertEqual(Set(terminals.keys), ["L", "R"])
+        let layout = try await updates.nextLayout()
+        XCTAssertEqual(layout.panes.map(\.paneID), ["L", "R"])
+        XCTAssertEqual(layout.panes.map(\.focused), [true, false])
+
+        let left = try await makeRenderer(engine: engine, paneID: "L", terminal: try XCTUnwrap(terminals["L"]), columns: 8, rows: 2)
+        let right = try await makeRenderer(engine: engine, paneID: "R", terminal: try XCTUnwrap(terminals["R"]), columns: 7, rows: 2)
+        XCTAssertEqual(rows(of: left, columns: 8, rows: 2), ["left 1", "left 2"])
+        XCTAssertEqual(rows(of: right, columns: 7, rows: 2), ["right 1", "right 2"])
+        await engine.stop()
+    }
+
+    /// A patch repaints only what changed; the rest of the pane, and the other pane, keep their text.
+    func testAPatchChangesOnlyTheRowsItTouches() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let panes = [Self.pane("L", x: 0, width: 8, height: 2), Self.pane("R", x: 10, width: 7, height: 2)]
+        await engine.receive(try Self.snapshot(revision: 1))
+        await engine.receive(.surface(try Self.surface(revision: 1, lines: ["left 1    right 1", "left 2    right 2"], panes: panes)))
+        let terminals = try await updates.terminals(count: 2)
+        let left = try await makeRenderer(engine: engine, paneID: "L", terminal: try XCTUnwrap(terminals["L"]), columns: 8, rows: 2)
+        let right = try await makeRenderer(engine: engine, paneID: "R", terminal: try XCTUnwrap(terminals["R"]), columns: 7, rows: 2)
+
+        await engine.receive(.patch(try Self.patch(
+            base: 1,
+            rows: [HerdrPatchRow(x: 0, y: 1, cells: Self.cells("LEFT 2  "))],
+            panes: panes
+        )))
+
+        XCTAssertEqual(rows(of: left, columns: 8, rows: 2), ["left 1", "LEFT 2"])
+        XCTAssertEqual(rows(of: right, columns: 7, rows: 2), ["right 1", "right 2"])
+        await engine.stop()
+    }
+
+    /// A pane whose text area changes size is resized and repainted at once: none of its old text
+    /// survives beside the new content.
+    func testAResizedPaneIsRepaintedAtItsNewSize() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        await engine.receive(try Self.snapshot(revision: 1))
+        await engine.receive(.surface(try Self.surface(
+            revision: 1,
+            lines: ["0123456789AB", "second line ", "third line  "],
+            panes: [Self.pane("P", x: 0, width: 12, height: 3)]
+        )))
+        let terminal = try await updates.terminal(for: "P")
+        _ = try await updates.nextLayout()
+        let renderer = try await makeRenderer(engine: engine, paneID: "P", terminal: terminal, columns: 12, rows: 3)
+
+        await engine.receive(try Self.snapshot(revision: 2))
+        await engine.receive(.surface(try Self.surface(
+            projection: 2,
+            revision: 2,
+            lines: ["abcde", "fghij"],
+            panes: [Self.pane("P", x: 0, width: 5, height: 2)]
+        )))
+
+        let layout = try await updates.nextLayout()
+        XCTAssertEqual(layout.panes.first?.innerRect, HerdrSurfaceRect(x: 0, y: 0, width: 5, height: 2))
+        XCTAssertEqual(rows(of: renderer, columns: 12, rows: 2), ["abcde", "fghij"])
+        await engine.stop()
+    }
+
+    /// Every recorded stream, decoded and painted, leaves each pane's terminal showing its cells in the
+    /// last frame drawn.
+    func testRecordedStreamsLeaveEveryPaneShowingTheLastDrawnFrame() async throws {
+        var comparedRows = 0
+        for fixture in try HerdrWireTests.goldenFixtures() {
+            guard let negotiated = fixture.golden.negotiated else { continue }
+            let engine = makeEngine()
+            let updates = UpdateLog(engine)
+            var decoder = HerdrSurfaceDecoder(deltaNegotiated: negotiated.delta, scrollNegotiated: negotiated.scroll)
+            var reference = HerdrPresentation()
+            var splitter = HerdrFrameSplitter()
+            splitter.append(fixture.serverStream)
+            while let payload = try splitter.nextPayload() {
+                let message = try HerdrServerMessage.decode(payload)
+                if case .control(let kind, let data) = message,
+                   case .snapshot(let snapshot) = try HerdrEndpointControl.parse(kind: kind, data: data) {
+                    reference.receive(snapshot)
+                    await engine.receive(snapshot)
+                    continue
+                }
+                guard let surfaceMessage = try HerdrSurfaceDecoderTests.surfaceMessage(message) else { continue }
+                let output = try decoder.decode(surfaceMessage)
+                switch output {
+                case .surface(let surface): try reference.receive(surface)
+                case .patch(let patch): _ = reference.receive(patch)
+                }
+                await engine.receive(output)
+            }
+            await engine.stop()
+            guard let surface = reference.presented?.surface else { continue }
+            var terminals: [String: HerdrRetainedTerminal] = [:]
+            for update in await updates.drain() {
+                switch update {
+                case .paneTerminal(let paneID, let terminal): terminals[paneID] = terminal
+                case .paneTerminalFailed, .rendererWakeFailed, .failed: XCTFail("\(fixture.name): \(update)")
+                case .layout: break
+                }
+            }
+            for pane in surface.panes where pane.innerRect.width > 0 && pane.innerRect.height > 0 {
+                let terminal = try XCTUnwrap(terminals[pane.paneID], fixture.name)
+                let columns = Int(pane.innerRect.width)
+                let height = Int(pane.innerRect.height)
+                let renderer = try await makeRenderer(engine: nil, paneID: pane.paneID, terminal: terminal, columns: columns, rows: height)
+                let shown = rows(of: renderer, columns: columns, rows: height)
+                for (y, expected) in Self.expectedRows(of: surface.frame, area: pane.innerRect).enumerated() {
+                    guard let expected else { continue }
+                    XCTAssertEqual(shown[y], expected, "\(fixture.name) pane \(pane.paneID) row \(y)")
+                    comparedRows += 1
+                }
+                await close(renderer)
+            }
+        }
+        XCTAssertGreaterThan(comparedRows, 100)
+    }
+
+    /// Panes the next frame doesn't list are dropped; their renderers can't register any more.
+    func testAPaneMissingFromTheNextFrameIsDropped() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        await engine.receive(try Self.snapshot(revision: 1))
+        await engine.receive(.surface(try Self.surface(
+            revision: 1,
+            lines: ["a  b"],
+            panes: [Self.pane("A", x: 0, width: 1, height: 1), Self.pane("B", x: 3, width: 1, height: 1)]
+        )))
+        let terminals = try await updates.terminals(count: 2)
+        _ = try await updates.nextLayout()
+
+        await engine.receive(try Self.snapshot(revision: 2))
+        await engine.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["a   "], panes: [Self.pane("A", x: 0, width: 4, height: 1)])))
+        let layout = try await updates.nextLayout()
+        XCTAssertEqual(layout.panes.map(\.paneID), ["A"])
+
+        let error = await registrationError(engine: engine, paneID: "B", terminal: try XCTUnwrap(terminals["B"]))
+        XCTAssertEqual(error, .terminalGone)
+        await engine.stop()
+    }
+
+    /// A listed pane with no text area has no terminal; with room again it gets a new one.
+    func testAPaneWithoutRoomGetsANewTerminalWhenItHasRoomAgain() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        await engine.receive(try Self.snapshot(revision: 1))
+        await engine.receive(.surface(try Self.surface(revision: 1, lines: ["ab"], panes: [Self.pane("P", x: 0, width: 2, height: 1)])))
+        let first = try await updates.terminal(for: "P")
+        _ = try await updates.nextLayout()
+
+        await engine.receive(try Self.snapshot(revision: 2))
+        await engine.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["ab"], panes: [Self.pane("P", x: 0, width: 0, height: 1)])))
+        let layout = try await updates.nextLayout()
+        XCTAssertEqual(layout.panes.map(\.paneID), ["P"])
+        let stale = await registrationError(engine: engine, paneID: "P", terminal: first)
+        XCTAssertEqual(stale, .terminalGone)
+
+        await engine.receive(try Self.snapshot(revision: 3))
+        await engine.receive(.surface(try Self.surface(projection: 3, revision: 3, lines: ["cd"], panes: [Self.pane("P", x: 0, width: 2, height: 1)])))
+        let second = try await updates.terminal(for: "P")
+        XCTAssertFalse(first === second)
+        let renderer = try await makeRenderer(engine: engine, paneID: "P", terminal: second, columns: 2, rows: 1)
+        XCTAssertEqual(rows(of: renderer, columns: 2, rows: 1), ["cd"])
+        await engine.stop()
+    }
+
+    /// A new server boot's panes get new terminals, even under the same ids.
+    func testANewBootGivesItsPanesNewTerminals() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        await engine.receive(try Self.snapshot(revision: 1, boot: "one"))
+        await engine.receive(.surface(try Self.surface(boot: "one", revision: 1, lines: ["one"], panes: [Self.pane("P", x: 0, width: 3, height: 1)])))
+        let first = try await updates.terminal(for: "P")
+        _ = try await updates.nextLayout()
+
+        await engine.receive(try Self.snapshot(revision: 1, boot: "two"))
+        await engine.receive(.surface(try Self.surface(boot: "two", revision: 1, lines: ["two"], panes: [Self.pane("P", x: 0, width: 3, height: 1)])))
+        let second = try await updates.terminal(for: "P")
+        XCTAssertFalse(first === second)
+        let layout = try await updates.nextLayout()
+        XCTAssertEqual(layout.bootID, "two")
+
+        let stale = await registrationError(engine: engine, paneID: "P", terminal: first)
+        XCTAssertEqual(stale, .terminalGone)
+        let renderer = try await makeRenderer(engine: engine, paneID: "P", terminal: second, columns: 3, rows: 1)
+        XCTAssertEqual(rows(of: renderer, columns: 3, rows: 1), ["two"])
+        await engine.stop()
+    }
+
+    /// A grid Remux can't index ends the engine as a wire failure; nothing after it is painted.
+    func testAnUnindexableSurfaceIsAWireFailure() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        await engine.receive(try Self.snapshot(revision: 1))
+        await engine.receive(.surface(try Self.surface(
+            revision: 1,
+            lines: ["abcd"],
+            panes: [Self.pane("P", x: 2, width: 5, height: 1)]
+        )))
+        guard case .failed(.wire) = try await updates.next() else {
+            return XCTFail("expected a wire failure")
+        }
+        await engine.receive(.surface(try Self.surface(revision: 1, lines: ["abcd"], panes: [Self.pane("P", x: 0, width: 4, height: 1)])))
+        await engine.stop()
+        let after = await updates.drain()
+        XCTAssertTrue(after.isEmpty, "\(after)")
+    }
+
+    // MARK: - Fence and stop
+
+    /// One registered surface per pane; a closed renderer is unregistered before its surface is freed,
+    /// and the engine never wakes it again.
+    func testRegistrationGoesThroughTheEngineAndUnregistrationFencesWakes() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let panes = [Self.pane("P", x: 0, width: 4, height: 1)]
+        await engine.receive(try Self.snapshot(revision: 1))
+        await engine.receive(.surface(try Self.surface(revision: 1, lines: ["abcd"], panes: panes)))
+        let terminal = try await updates.terminal(for: "P")
+        let renderer = try await makeRenderer(engine: engine, paneID: "P", terminal: terminal, columns: 4, rows: 1)
+
+        // Ghostty gives a terminal one renderer at a time, so only the same surface can come back.
+        let surface = HerdrRendererSurface(handle: try XCTUnwrap(renderer.rawSurface))
+        guard case .failure(.alreadyRegistered) = await engine.register(surface, paneID: "P", terminal: terminal) else {
+            return XCTFail("expected the second registration to be refused")
+        }
+
+        await close(renderer)
+        // The surface is freed: painting the pane now must not wake it.
+        for revision in UInt64(2)...UInt64(20) {
+            await engine.receive(.patch(try Self.patch(
+                base: revision - 1,
+                rows: [HerdrPatchRow(x: 0, y: 0, cells: Self.cells(String(format: "%04d", revision)))],
+                panes: panes
+            )))
+        }
+        let again = try await makeRenderer(engine: engine, paneID: "P", terminal: terminal, columns: 4, rows: 1)
+        XCTAssertEqual(rows(of: again, columns: 4, rows: 1), ["0020"])
+        await engine.stop()
+    }
+
+    /// Frames and cell sizes still arriving while the engine stops are either applied before the stop
+    /// or dropped; after it, registration fails, an unregistration still completes, and the updates end.
+    func testStopWithWorkInFlight() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let panes = [Self.pane("P", x: 0, width: 4, height: 1)]
+        await engine.receive(try Self.snapshot(revision: 1))
+        await engine.receive(.surface(try Self.surface(revision: 1, lines: ["abcd"], panes: panes)))
+        let terminal = try await updates.terminal(for: "P")
+        _ = try await updates.nextLayout()
+        let renderer = try await makeRenderer(engine: engine, paneID: "P", terminal: terminal, columns: 4, rows: 1)
+
+        let patches = try (UInt64(2)...UInt64(400)).map { revision in
+            try Self.patch(
+                base: revision - 1,
+                rows: [HerdrPatchRow(x: 0, y: 0, cells: Self.cells(String(format: "%04d", revision)))],
+                panes: panes
+            )
+        }
+        let feeding = Task.detached {
+            for patch in patches { await engine.receive(.patch(patch)) }
+        }
+        let resizing = Task.detached {
+            for size in UInt32(10)...UInt32(60) { await engine.setCellSize(widthPx: size, heightPx: size * 2) }
+        }
+        await Task.yield()
+        await engine.stop()
+        await feeding.value
+        await resizing.value
+
+        await close(renderer)
+        let afterStop = await registrationError(engine: engine, paneID: "P", terminal: terminal)
+        XCTAssertEqual(afterStop, .engineEnded)
+        let rest = await updates.drain()
+        XCTAssertTrue(rest.isEmpty, "\(rest)")
+    }
+
+    // MARK: - Fixtures
+
+    private func makeEngine() -> HerdrTerminalEngine {
+        HerdrTerminalEngine(
+            cellWidthPx: measurement.cellMetrics.pixelWidth,
+            cellHeightPx: measurement.cellMetrics.pixelHeight
+        )
+    }
+
+    /// A renderer of `columns` × `rows` cells over `terminal`, registered through the engine's fence,
+    /// or through a fence that admits it as is for a stopped engine's terminal.
+    private func makeRenderer(
+        engine: HerdrTerminalEngine?,
+        paneID: String,
+        terminal: HerdrRetainedTerminal,
+        columns: Int,
+        rows: Int
+    ) async throws -> TerminalPaneRenderer {
+        let fence: any TerminalPaneRendererFence = engine.map { HerdrPaneRendererFence(engine: $0, paneID: paneID, terminal: terminal) }
+            ?? AdmittingFence()
+        let metrics = try XCTUnwrap(measurement.displayMetrics(columns: UInt32(columns), rows: UInt32(rows)))
+        let renderer = try await withCheckedThrowingContinuation { continuation in
+            TerminalPaneRenderer.create(
+                app: runtime.appHandleForTesting,
+                terminal: terminal,
+                fence: fence,
+                writeInput: nil,
+                baseConfig: runtime.makeTmuxBaseSurfaceConfig(),
+                metrics: metrics,
+                theme: .ghosttyDefault,
+                diagnosticName: "test pane=\(paneID)",
+                onRendererFailure: {}
+            ) { result in continuation.resume(with: result) }
+        }
+        renderers.append(renderer)
+        return renderer
+    }
+
+    private func close(_ renderer: TerminalPaneRenderer) async {
+        renderers.removeAll { $0 === renderer }
+        await withCheckedContinuation { continuation in
+            renderer.close { continuation.resume() }
+        }
+    }
+
+    private func registrationError(
+        engine: HerdrTerminalEngine,
+        paneID: String,
+        terminal: HerdrRetainedTerminal
+    ) async -> HerdrRendererRegistrationError? {
+        do {
+            let renderer = try await makeRenderer(engine: engine, paneID: paneID, terminal: terminal, columns: 1, rows: 1)
+            await close(renderer)
+            return nil
+        } catch TerminalPaneRenderer.CreateError.registrationFailed(let error) {
+            return error as? HerdrRendererRegistrationError
+        } catch {
+            XCTFail("unexpected error \(error)")
+            return nil
+        }
+    }
+
+    /// Each row's text as Ghostty selects it: a word in the row, stretched across `columns` cells.
+    private func rows(of renderer: TerminalPaneRenderer, columns: Int, rows: Int) -> [String] {
+        guard let surface = renderer.rawSurface else {
+            XCTFail("renderer has no surface")
+            return []
+        }
+        let cellWidth = Double(measurement.cellMetrics.pixelWidth)
+        let cellHeight = Double(measurement.cellMetrics.pixelHeight)
+        var snapshot = ghostty_terminal_surface_selection_snapshot_s()
+        defer { _ = ghostty_terminal_surface_clear_selection(surface, &snapshot) }
+        return (0..<rows).map { row in
+            let y = (Double(row) + 0.5) * cellHeight
+            var anchored = false
+            for column in 0..<columns where !anchored {
+                _ = ghostty_terminal_surface_select_word(surface, (Double(column) + 0.5) * cellWidth, y, &snapshot)
+                anchored = snapshot.active
+            }
+            guard anchored else { return "" }
+            _ = ghostty_terminal_surface_set_selection_endpoint(
+                surface, GHOSTTY_TERMINAL_SURFACE_SELECTION_ENDPOINT_START, 0.5 * cellWidth, y, &snapshot
+            )
+            _ = ghostty_terminal_surface_set_selection_endpoint(
+                surface, GHOSTTY_TERMINAL_SURFACE_SELECTION_ENDPOINT_END, (Double(columns) - 0.5) * cellWidth, y, &snapshot
+            )
+            var text = ghostty_text_s()
+            guard ghostty_terminal_surface_read_selection(surface, &text) == GHOSTTY_TERMINAL_SURFACE_INPUT_SENT else {
+                return ""
+            }
+            defer { _ = ghostty_terminal_surface_free_text(surface, &text) }
+            let bytes = UnsafeRawBufferPointer(start: text.text, count: Int(text.text_len))
+            return String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespaces)
+        }
+    }
+
+    /// Each row of the area as text without surrounding blanks; nil for a row this check can't predict
+    /// (anything but printable ASCII).
+    private static func expectedRows(of frame: HerdrFrame, area: HerdrSurfaceRect) -> [String?] {
+        (0..<Int(area.height)).map { y in
+            let start = (Int(area.y) + y) * Int(frame.width) + Int(area.x)
+            let symbols = frame.cells[start..<(start + Int(area.width))].map(\.symbol)
+            guard symbols.allSatisfy({ $0.unicodeScalars.count == 1 && $0.unicodeScalars.allSatisfy { (0x20..<0x7F).contains($0.value) } })
+            else { return nil }
+            return symbols.joined().trimmingCharacters(in: .whitespaces)
+        }
+    }
+
+    static func snapshot(revision: UInt64, boot: String = "boot") throws -> HerdrSnapshot {
+        try HerdrPresentationTests.snapshot(revision: revision, boot: boot)
+    }
+
+    static func cells(_ text: String) -> [HerdrCell] {
+        text.map {
+            HerdrCell(symbol: String($0), fg: HerdrColor(raw: 0), bg: HerdrColor(raw: 0), modifier: 0, skip: false, hyperlink: nil)
+        }
+    }
+
+    static func pane(_ id: String, x: Int, width: Int, height: Int, focused: Bool = false) -> String {
+        """
+        {"pane_id":"\(id)","content_revision":1,"rect":{"x":\(x),"y":0,"width":\(width),"height":\(height)},
+         "inner_rect":{"x":\(x),"y":0,"width":\(width),"height":\(height)},"scrollbar_rect":null,"scroll":null,
+         "focused":\(focused),"mouse_reporting":false,"sgr_pixel_mouse":false,
+         "alternate_screen_active":false,"pixel_width":0,"pixel_height":0}
+        """
+    }
+
+    /// A surface of the given lines, all of one width.
+    static func surface(
+        boot: String = "boot",
+        projection: UInt64 = 1,
+        revision: UInt64,
+        lines: [String],
+        panes: [String]
+    ) throws -> HerdrPaneSurfaceFrame {
+        let width = lines.first?.count ?? 0
+        precondition(lines.allSatisfy { $0.count == width })
+        let cells = lines.joined().map {
+            #"{"symbol":"\#($0)","fg":0,"bg":0,"modifier":0,"skip":false,"hyperlink":null}"#
+        }
+        let json = """
+        {"boot_id":"\(boot)","projection_revision":\(projection),"surface_revision":\(revision),
+         "frame":{"cells":[\(cells.joined(separator: ","))],"width":\(width),"height":\(lines.count),"cursor":null,"hyperlinks":[],"graphics":[]},
+         "panes":[\(panes.joined(separator: ","))],"splits":[],"popup":null,
+         "graphics":{"assets":[],"placements":[],"retained_assets":[]}}
+        """
+        return try JSONDecoder().decode(HerdrPaneSurfaceFrame.self, from: Data(json.utf8))
+    }
+
+    static func patch(base: UInt64, rows: [HerdrPatchRow], panes: [String]) throws -> HerdrPaneSurfacePatch {
+        try HerdrPresentationTests.patch(base: base, rows: rows, panes: panes)
+    }
+}
+
+/// The engine's updates, read in order through the stream's one iterator.
+@MainActor
+private final class UpdateLog {
+    private var iterator: AsyncStream<HerdrEngineUpdate>.AsyncIterator
+
+    init(_ engine: HerdrTerminalEngine) {
+        iterator = engine.updates.makeAsyncIterator()
+    }
+
+    func next() async throws -> HerdrEngineUpdate {
+        guard let update = await nextOrEnd() else { throw UpdateLogError.finished }
+        return update
+    }
+
+    /// The rest of the updates, once the engine has stopped.
+    func drain() async -> [HerdrEngineUpdate] {
+        var rest: [HerdrEngineUpdate] = []
+        while let update = await nextOrEnd() { rest.append(update) }
+        return rest
+    }
+
+    func terminals(count: Int) async throws -> [String: HerdrRetainedTerminal] {
+        var terminals: [String: HerdrRetainedTerminal] = [:]
+        while terminals.count < count {
+            guard case .paneTerminal(let paneID, let terminal) = try await next() else { continue }
+            terminals[paneID] = terminal
+        }
+        return terminals
+    }
+
+    func terminal(for paneID: String) async throws -> HerdrRetainedTerminal {
+        while true {
+            if case .paneTerminal(paneID, let terminal) = try await next() { return terminal }
+        }
+    }
+
+    func nextLayout() async throws -> HerdrPaneLayout {
+        while true {
+            if case .layout(let layout) = try await next() { return layout }
+        }
+    }
+
+    private func nextOrEnd() async -> HerdrEngineUpdate? {
+        var iterator = self.iterator
+        defer { self.iterator = iterator }
+        return await iterator.next(isolation: #isolation)
+    }
+}
+
+private enum UpdateLogError: Error {
+    case finished
+}
+
+/// Admits renderers over a stopped engine's terminals, which nothing feeds any more.
+@MainActor
+private final class AdmittingFence: TerminalPaneRendererFence {
+    func registerRenderer(
+        _ surface: ghostty_terminal_surface_t,
+        completion: @escaping @MainActor @Sendable (Result<Void, any Error>) -> Void
+    ) {
+        completion(.success(()))
+    }
+
+    func unregisterRenderer(
+        _ surface: ghostty_terminal_surface_t,
+        completion: @escaping @MainActor @Sendable () -> Void
+    ) {
+        completion()
+    }
+}

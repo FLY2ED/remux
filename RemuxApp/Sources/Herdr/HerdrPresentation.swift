@@ -59,7 +59,7 @@ struct HerdrPresentation {
     }
 
     /// Throws for a grid Remux can't index (see `validate`), which ends the attachment.
-    mutating func receive(_ surface: HerdrPaneSurfaceFrame) throws {
+    mutating func receive(_ surface: HerdrPaneSurfaceFrame) throws(HerdrWireError) {
         try Self.validate(surface)
         guard let snapshot,
               surface.bootID == snapshot.bootID,
@@ -176,7 +176,7 @@ struct HerdrPresentation {
     /// (its decoder does for deltas); Herdr builds them this way, so these only catch a corrupt stream.
     /// Link indexes aren't checked: a link that doesn't resolve paints as plain text, as in Herdr's
     /// renderer.
-    private static func validate(_ surface: HerdrPaneSurfaceFrame) throws {
+    private static func validate(_ surface: HerdrPaneSurfaceFrame) throws(HerdrWireError) {
         let frames = [surface.frame] + (surface.popup.map { [$0.frame] } ?? [])
         for frame in frames where frame.cells.count != Int(frame.width) * Int(frame.height) {
             throw HerdrWireError.invalidSurfaceUpdate("surface cells do not match its size")
