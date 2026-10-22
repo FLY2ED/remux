@@ -196,9 +196,9 @@ final class HerdrScreenModelTests: XCTestCase {
             harness.states.last?.disconnectedReason != nil
         }
         XCTAssertEqual(harness.states.last?.disconnectedReason?.kind, .transportIO)
-        let closed = await bridge.isClosed
-        XCTAssertTrue(closed)
         XCTAssertTrue(harness.model.isDisconnected)
+        // The failure is reported at once; the close follows it.
+        try await harness.waitUntil("the connection wasn't closed") { await bridge.isClosed }
     }
 
     // MARK: - Panes
