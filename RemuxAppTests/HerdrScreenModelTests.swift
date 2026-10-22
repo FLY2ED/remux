@@ -518,6 +518,38 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(Set(gate.log.dropLast()), ["closed w1:p1", "closed w1:p2", "closed w1:p3"])
     }
 
+    /// The panes take no input yet, so a session ready on screen still offers no keyboard: the screen is
+    /// told input is unavailable, as for a session whose input is down, and keys aren't typed into a
+    /// sink that drops them.
+    func testAReadySessionOffersNoInput() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge()
+        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        await bridge.serve(HerdrServerScript.surface(
+            projection: 1,
+            revision: 1,
+            lines: ["one"],
+            panes: [.init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true)]
+        ))
+        harness.setScreenSize()
+        harness.model.setSelected(true)
+        try await harness.waitUntil("the pane's renderer wasn't created") {
+            harness.model.paneSurface("w1:p1") != nil
+        }
+        let renderer = try XCTUnwrap(harness.model.paneSurface("w1:p1")).renderer
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 600))
+        let viewController = UIViewController()
+        window.rootViewController = viewController
+        viewController.view.addSubview(renderer.view)
+        window.isHidden = false
+        defer { window.isHidden = true }
+
+        try await harness.waitUntil("the session wasn't ready") { harness.states.last == .connected }
+        let interaction = harness.model.terminalScreenAdapter.terminalInteractionProjection
+        XCTAssertTrue(interaction.hasFocusedSurface)
+        XCTAssertFalse(interaction.isInputAvailable)
+    }
+
     /// While shown, a new screen size goes to Herdr at once; a hidden session gets it with its show.
     func testAResizeIsSentWhileShown() async throws {
         let harness = await makeHarness()

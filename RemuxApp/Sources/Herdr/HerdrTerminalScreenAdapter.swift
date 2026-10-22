@@ -166,12 +166,23 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         )
     }
 
+    /// The panes take no input yet, so the screen offers them no keyboard, as for a session whose
+    /// input is down: keys typed there would be dropped.
     var terminalInteractionProjection: GhosttyTerminalInteractionProjection {
-        GhosttyTerminalPresentationProjector.terminalInteractionProjection(
+        let projection = GhosttyTerminalPresentationProjector.terminalInteractionProjection(
             phase: runtimePhase,
             presentedSurfaceID: presentedSurfaceID,
             snapshot: topologySnapshot,
             selectedPanePresentation: model?.presentation(ofPane: focusedPaneID) ?? .pending
+        )
+        return GhosttyTerminalInteractionProjection(
+            isInputAvailable: false,
+            hasFocusedSurface: projection.hasFocusedSurface,
+            selectedActiveLeafID: projection.selectedActiveLeafID,
+            selectedWindowIndex: projection.selectedWindowIndex,
+            windowCount: projection.windowCount,
+            paneCount: projection.paneCount,
+            isWaitingForPanes: projection.isWaitingForPanes
         )
     }
 
