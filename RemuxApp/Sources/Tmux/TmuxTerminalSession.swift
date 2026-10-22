@@ -62,6 +62,10 @@ final class TmuxTerminalSession: ObservableObject {
     private var linkIsActive = false
     private var isShutDown = false
     private var shutdownDrainContinuation: CheckedContinuation<Void, Never>?
+    /// Renderers whose surfaces aren't freed yet. Ghostty requires the app to outlive every surface,
+    /// so a shutdown returns, and its owner frees the app, only once this is back to zero.
+    private var closingRenderers = 0
+    private var closesDrainedContinuation: CheckedContinuation<Void, Never>?
 
     private final class Relay: @unchecked Sendable {
         weak var target: TmuxTerminalSession?
@@ -164,29 +168,16 @@ final class TmuxTerminalSession: ObservableObject {
         if !creatingPaneIDs.isEmpty {
             await withCheckedContinuation { shutdownDrainContinuation = $0 }
         }
-        await closeAllRetainedSurfaces()
+        for surface in surfacesByPaneID.values {
+            closeRetainedSurface(surface)
+        }
+        if closingRenderers > 0 {
+            await withCheckedContinuation { closesDrainedContinuation = $0 }
+        }
         linkIsActive = false
         await link.stop()
         await withCheckedContinuation { continuation in
             controller.shutdown { continuation.resume() }
-        }
-    }
-
-    private func closeAllRetainedSurfaces() async {
-        let surfaces = Array(surfacesByPaneID.values)
-        guard !surfaces.isEmpty else { return }
-        await withCheckedContinuation { continuation in
-            var remaining = surfaces.count
-            for surface in surfaces {
-                surface.renderer.close { [weak self, weak surface] in
-                    if let self, let surface,
-                       self.surfacesByPaneID[surface.paneID] === surface {
-                        self.surfacesByPaneID.removeValue(forKey: surface.paneID)
-                    }
-                    remaining -= 1
-                    if remaining == 0 { continuation.resume() }
-                }
-            }
         }
     }
 
@@ -366,7 +357,7 @@ final class TmuxTerminalSession: ObservableObject {
                 guard !isShutDown,
                       self.topology?.panes.contains(where: { $0.id == paneID }) == true
                 else {
-                    surface.renderer.close()
+                    close(surface.renderer)
                     resumeShutdownDrainIfQuiescent()
                     return
                 }
@@ -478,12 +469,32 @@ final class TmuxTerminalSession: ObservableObject {
     }
 
     private func closeRetainedSurface(_ surface: TmuxPaneSurface) {
-        surface.renderer.close { [weak self, weak surface] in
+        close(surface.renderer) { [weak self, weak surface] in
             guard let self, let surface else { return }
             if surfacesByPaneID[surface.paneID] === surface {
                 surfacesByPaneID.removeValue(forKey: surface.paneID)
             }
         }
+    }
+
+    /// Every renderer is closed here, so a shutdown can wait for all of them; `completion` runs once
+    /// the renderer's surface is freed.
+    private func close(
+        _ renderer: TerminalPaneRenderer,
+        completion: @escaping @MainActor @Sendable () -> Void = {}
+    ) {
+        closingRenderers += 1
+        renderer.close { [weak self] in
+            completion()
+            self?.rendererClosed()
+        }
+    }
+
+    private func rendererClosed() {
+        closingRenderers -= 1
+        guard closingRenderers == 0, let continuation = closesDrainedContinuation else { return }
+        closesDrainedContinuation = nil
+        continuation.resume()
     }
 
     func setAppActive(_ active: Bool) {
