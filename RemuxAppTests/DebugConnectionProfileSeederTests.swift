@@ -69,6 +69,34 @@ final class DebugConnectionProfileSeederTests: XCTestCase {
         XCTAssertEqual(credential, .password("debug-password"))
     }
 
+    /// A named Herdr session is seeded in place of the tmux one, with the server's Herdr executable,
+    /// and tmux discovery doesn't list it.
+    func testSeedPersistsHerdrSessionWhenOneIsNamed() async throws {
+        let repository = InMemoryConnectionProfileRepository()
+        let credentialStore = InMemorySSHCredentialStore()
+        let environment = [
+            "REMUX_DEBUG_SEED_CONNECTION": "1",
+            "REMUX_DEBUG_SERVER_HOST": "server.example.com",
+            "REMUX_DEBUG_SERVER_USERNAME": "demo",
+            "REMUX_DEBUG_SERVER_PASSWORD": "debug-password",
+            "REMUX_DEBUG_TMUX_SESSION": "base",
+            "REMUX_DEBUG_HERDR_SESSION": "agents",
+            "REMUX_DEBUG_HERDR_EXECUTABLE_PATH": "/opt/herdr/bin/herdr",
+        ]
+
+        let seeded = try await DebugConnectionProfileSeeder.seedIfRequested(
+            environment: environment,
+            profileRepository: repository,
+            credentialStore: credentialStore
+        )
+
+        let profile = try await repository.loadProfile()
+        XCTAssertTrue(seeded)
+        XCTAssertEqual(profile?.1.locator, SessionLocator(backend: .herdr, name: "agents"))
+        XCTAssertEqual(profile?.0.herdrExecutablePath, "/opt/herdr/bin/herdr")
+        XCTAssertNil(DebugConnectionProfileSeeder.seededSessionName(environment: environment))
+    }
+
     func testSeedPersistsPrivateKeyProfileAndCredentialFromCredentialsFile() async throws {
         let repository = InMemoryConnectionProfileRepository()
         let credentialStore = InMemorySSHCredentialStore()

@@ -43,6 +43,11 @@ struct ActiveTerminalSession: Identifiable, Equatable, Sendable {
 
     mutating func replaceRuntime(source: TerminalReconnectSource) {
         instanceID = UUID()
+        reconnectRuntime(source: source)
+    }
+
+    /// A reconnect that keeps the runtime, which opens a new connection itself.
+    mutating func reconnectRuntime(source: TerminalReconnectSource) {
         runtimeState = .reconnecting(source)
         if !source.isAutomatic {
             automaticReconnectAttemptedSources.removeAll()
@@ -84,17 +89,79 @@ enum TerminalRuntimeStopReason: Equatable, Sendable {
     case replacedByNewAttempt
 }
 
+/// The screen model behind one active session, by the session's backend. The root speaks to both
+/// through these operations; the view builds the shared screen over the model's adapter.
+@MainActor
+enum TerminalRuntime {
+    case tmux(TmuxScreenModel)
+    case herdr(HerdrScreenModel)
+
+    var target: SessionTarget {
+        switch self {
+        case .tmux(let model): model.target
+        case .herdr(let model): model.target
+        }
+    }
+
+    /// True when no connection is open or opening, so the root may replace the model.
+    var isDisconnected: Bool {
+        switch self {
+        case .tmux(let model): model.isDisconnected
+        case .herdr(let model): model.isDisconnected
+        }
+    }
+
+    /// Previews read files and forward ports through the tmux transport's SSH connection.
+    var terminalPreviewClient: TerminalPreviewClient? {
+        switch self {
+        case .tmux(let model): model.terminalPreviewClient
+        case .herdr: nil
+        }
+    }
+
+    func handleAppLifecyclePhase(_ phase: GhosttyAppLifecyclePhase) {
+        switch self {
+        case .tmux(let model): model.handleAppLifecyclePhase(phase)
+        case .herdr(let model): model.handleAppLifecyclePhase(phase)
+        }
+    }
+
+    func applyTerminalSettings(_ settings: TerminalSettings) throws {
+        switch self {
+        case .tmux(let model): try model.applyTerminalSettings(settings)
+        case .herdr(let model): try model.applyTerminalSettings(settings)
+        }
+    }
+
+    /// Whether the root shows this session. A Herdr session is shown and hidden on the server; a tmux
+    /// session stays attached either way, and its screen claims the viewport once selected.
+    func setSelected(_ selected: Bool) {
+        switch self {
+        case .tmux: break
+        case .herdr(let model): model.setSelected(selected)
+        }
+    }
+
+    /// Herdr keeps nothing of Remux's on the server for a stop to undo or hand on.
+    func stop(_ reason: TerminalRuntimeStopReason) async {
+        switch self {
+        case .tmux(let model): await model.stop(reason)
+        case .herdr(let model): await model.stop()
+        }
+    }
+}
+
 struct ActiveTerminalScreenEntry: Identifiable {
     let id: SavedWorkspace.ID
     let instanceID: UUID
     let runtimeAttemptKey: TerminalRuntimeAttemptKey
     let presentation: GhosttySurfaceScreenPresentation
-    let model: TmuxScreenModel
+    let runtime: TerminalRuntime
     let attachmentTransferServiceFactory: @Sendable () -> any GhosttyAttachmentTransferService
 
     init(
         session: ActiveTerminalSession,
-        model: TmuxScreenModel,
+        runtime: TerminalRuntime,
         attachmentTransferServiceFactory: @escaping @Sendable () -> any GhosttyAttachmentTransferService
     ) {
         self.id = session.id
@@ -109,7 +176,7 @@ struct ActiveTerminalScreenEntry: Identifiable {
                 for: session.runtimeState
             ).loadingTitle ?? TerminalRuntimeStatusPresentation.defaultLoadingTitle
         )
-        self.model = model
+        self.runtime = runtime
         self.attachmentTransferServiceFactory = attachmentTransferServiceFactory
     }
 }
@@ -299,7 +366,9 @@ final class RemuxRootModel: ObservableObject {
         case failed(String)
     }
 
-    @Published private(set) var state: State = .loading
+    @Published private(set) var state: State = .loading {
+        didSet { reconcileRuntimeSelection() }
+    }
     @Published private(set) var connectionSetup: ConnectionSetupState?
     @Published private(set) var library: ConnectionLibrarySnapshot = .empty
     @Published private(set) var serverOrderSaveFailed = false
@@ -315,11 +384,11 @@ final class RemuxRootModel: ObservableObject {
 
     var activeTerminalScreenEntries: [ActiveTerminalScreenEntry] {
         activeSessions.map { session in
-            let model = terminalScreenModel(for: session)
-            let attachmentTarget = model.runtimeConnectionTarget
+            let runtime = terminalRuntime(for: session)
+            let attachmentTarget = runtime.target
             return ActiveTerminalScreenEntry(
                 session: session,
-                model: model,
+                runtime: runtime,
                 attachmentTransferServiceFactory: { [dependencies, attachmentTarget] in
                     dependencies.makeAttachmentTransferService(for: attachmentTarget)
                 }
@@ -331,7 +400,7 @@ final class RemuxRootModel: ObservableObject {
     private let preparedTransportCoordinator: RemuxPreparedTransportCoordinator
     private let librarySSHPrewarmCoordinator: RemuxLibrarySSHPrewarmCoordinator
     private let terminalScreenModelFactory: TerminalScreenModelFactory
-    private var terminalScreenModels: [TerminalRuntimeAttemptKey: TmuxScreenModel] = [:]
+    private var terminalRuntimes: [TerminalRuntimeAttemptKey: TerminalRuntime] = [:]
     private var currentAppLifecyclePhase: GhosttyAppLifecyclePhase?
     private var currentSetupID: UUID?
     private var activeSetupAction: SetupAction?
@@ -369,7 +438,7 @@ final class RemuxRootModel: ObservableObject {
             for refresh in tmuxSessionRefreshes.values {
                 refresh.task.cancel()
             }
-            stopAllTerminalScreenModels()
+            stopAllTerminalRuntimes()
         }
     }
 
@@ -1006,7 +1075,7 @@ final class RemuxRootModel: ObservableObject {
                     sshAuth: updatedSSHAuth,
                     in: &activeSessions
                 )
-                refreshDisconnectedTerminalScreenModels(serverID: server.id)
+                refreshDisconnectedTerminalRuntimes(serverID: server.id)
 
                 guard let reconnectWorkspaceID else {
                     finishSetupSession(action.setupID)
@@ -1254,7 +1323,14 @@ final class RemuxRootModel: ObservableObject {
             event: "model.connect.begin",
             fields: ["workspaceID": workspaceID.uuidString]
         )
-        cancelTmuxSessionRefreshForInteractiveConnection(serverID: server.id)
+        switch workspace.backend {
+        case .tmux:
+            cancelTmuxSessionRefreshForInteractiveConnection(serverID: server.id)
+        case .herdr:
+            // Only a connected tmux session starts discovery again, and the bridge shares the server's
+            // pooled SSH connection with a running discovery.
+            break
+        }
 
         let sshAuth: ResolvedSSHAuth
         do {
@@ -1419,6 +1495,26 @@ final class RemuxRootModel: ObservableObject {
             forServerID: currentSession.target.server.id,
             excludingWorkspaceID: id
         )
+        // A Herdr model opens the new connection itself, and its panes keep the last frame meanwhile.
+        // One made before its server was edited is replaced, as a tmux one is, to take the new profile.
+        if case .herdr(let model)? = terminalRuntimes[TerminalRuntimeAttemptKey(session: currentSession)],
+           Self.opensTheSameHerdrBridge(model.target, currentSession.target),
+           model.reconnect() {
+            var session = currentSession
+            session.reconnectRuntime(source: source)
+            RemuxActiveSessionCollection.replaceRuntime(with: session, in: &activeSessions)
+            state = .terminal(id)
+            GhosttyRuntimeTrace.flowEvent(
+                sessionReconnectFlowID(id),
+                event: "model.reconnect.restarted",
+                fields: [
+                    "instanceID": session.instanceID.uuidString,
+                    "source": source.traceLabel,
+                    "workspaceID": id.uuidString,
+                ]
+            )
+            return
+        }
         guard let session = RemuxActiveSessionCollection.runtimeReplacementSession(
             workspaceID: id,
             source: source,
@@ -1427,8 +1523,8 @@ final class RemuxRootModel: ObservableObject {
             state = .library
             return
         }
-        prepareTransport(for: session.target, reason: .reconnect)
-        replaceTerminalScreenModel(for: session)
+        prepareTmuxTransport(for: session.target, reason: .reconnect)
+        replaceTerminalRuntime(for: session)
         RemuxActiveSessionCollection.replaceRuntime(with: session, in: &activeSessions)
         state = .terminal(id)
         applyCurrentAppLifecyclePhase(to: session)
@@ -1441,6 +1537,17 @@ final class RemuxRootModel: ObservableObject {
                 "workspaceID": id.uuidString,
             ]
         )
+    }
+
+    /// Whether two targets reach the same Herdr session the same way. Terminal settings don't count:
+    /// a running model takes them live.
+    private static func opensTheSameHerdrBridge(_ lhs: SessionTarget, _ rhs: SessionTarget) -> Bool {
+        lhs.server.host == rhs.server.host
+            && lhs.server.port == rhs.server.port
+            && lhs.server.herdrExecutablePath == rhs.server.herdrExecutablePath
+            && lhs.workspace.locator == rhs.workspace.locator
+            && lhs.sshAuth.username == rhs.sshAuth.username
+            && lhs.sshAuth.authFingerprint == rhs.sshAuth.authFingerprint
     }
 
     func trustHostKeyAndReconnect(_ id: SavedWorkspace.ID) {
@@ -1471,11 +1578,12 @@ final class RemuxRootModel: ObservableObject {
         case .applied(.connected),
              .automaticReconnectStarted(_, .connected),
              .automaticReconnectSkipped(_, .connected):
+            // A Herdr session has no tmux viewport to claim, and tmux discovery doesn't list it.
             if let session = RemuxActiveSessionCollection.session(
                 update.workspaceID,
                 in: activeSessions
-            ) {
-                claimActiveTmuxViewportIfSelectedAndActive(for: session)
+            ), case .tmux(let model)? = terminalRuntimes[TerminalRuntimeAttemptKey(session: session)] {
+                claimActiveTmuxViewportIfSelectedAndActive(model, for: session)
                 let serverID = session.target.server.id
                 let discoveryState = tmuxSessionDiscoveryState(for: serverID)
                 tmuxSessionDiscoveryStates[serverID] = discoveryState
@@ -1499,9 +1607,9 @@ final class RemuxRootModel: ObservableObject {
         if phase == .background {
             cancelAllTmuxSessionRefreshes()
         }
-        let models = Array(terminalScreenModels.values)
-        for model in models {
-            model.handleAppLifecyclePhase(phase)
+        let runtimes = Array(terminalRuntimes.values)
+        for runtime in runtimes {
+            runtime.handleAppLifecyclePhase(phase)
         }
 
         guard phase == .active,
@@ -1510,23 +1618,21 @@ final class RemuxRootModel: ObservableObject {
               let session = RemuxActiveSessionCollection.session(
                   selectedID,
                   in: activeSessions
-              )
+              ),
+              case .tmux(let model)? = terminalRuntimes[TerminalRuntimeAttemptKey(session: session)]
         else { return }
-        terminalScreenModels[TerminalRuntimeAttemptKey(session: session)]?
-            .terminalScreenAdapter
-            .reclaimActiveTmuxViewport()
+        model.terminalScreenAdapter.reclaimActiveTmuxViewport()
     }
 
     private func claimActiveTmuxViewportIfSelectedAndActive(
+        _ model: TmuxScreenModel,
         for session: ActiveTerminalSession
     ) {
         guard currentAppLifecyclePhase == .active,
               connectionSetup == nil,
               state == .terminal(session.id)
         else { return }
-        terminalScreenModels[TerminalRuntimeAttemptKey(session: session)]?
-            .terminalScreenAdapter
-            .claimActiveTmuxViewportIfNeeded()
+        model.terminalScreenAdapter.claimActiveTmuxViewportIfNeeded()
     }
 
     func disconnectActiveSession(_ id: SavedWorkspace.ID) {
@@ -1535,7 +1641,7 @@ final class RemuxRootModel: ObservableObject {
         let displayedIndex = RemuxActiveSessionCollection.sortedForDisplay(activeSessions)
             .firstIndex { $0.id == id }
         closePreparedTransport(for: id)
-        stopTerminalScreenModels(workspaceID: id)
+        stopTerminalRuntimes(workspaceID: id)
         RemuxActiveSessionCollection.removeWorkspace(id, from: &activeSessions)
 
         guard case .terminal(let selectedID) = state, selectedID == id else {
@@ -1571,7 +1677,7 @@ final class RemuxRootModel: ObservableObject {
             }
             closePreparedTransports(forServerID: id)
             dependencies.closeIdleSSHConnections(forServerID: id)
-            stopTerminalScreenModels(serverID: id)
+            stopTerminalRuntimes(serverID: id)
             RemuxActiveSessionCollection.removeServer(id, from: &activeSessions)
             updateLibrary(snapshot)
             state = .library
@@ -1585,7 +1691,7 @@ final class RemuxRootModel: ObservableObject {
         do {
             try await dependencies.profileRepository.deleteWorkspace(id: id)
             closePreparedTransport(for: id)
-            stopTerminalScreenModels(workspaceID: id)
+            stopTerminalRuntimes(workspaceID: id)
             RemuxActiveSessionCollection.removeWorkspace(id, from: &activeSessions)
             updateLibrary(try await dependencies.profileRepository.loadSnapshot())
             state = .library
@@ -1629,34 +1735,36 @@ final class RemuxRootModel: ObservableObject {
 
         for session in activeSessions {
             let key = TerminalRuntimeAttemptKey(session: session)
-            guard let model = terminalScreenModels[key] else { continue }
+            guard let runtime = terminalRuntimes[key] else { continue }
             do {
-                try model.applyTerminalSettings(settings)
+                try runtime.applyTerminalSettings(settings)
             } catch {
                 NSLog("Remux terminal settings apply failed: %@", String(describing: error))
             }
         }
     }
 
-    private func refreshDisconnectedTerminalScreenModels(serverID: SavedServer.ID) {
+    /// A runtime's target is fixed when it's made, so a disconnected one is replaced to take the
+    /// server's new profile.
+    private func refreshDisconnectedTerminalRuntimes(serverID: SavedServer.ID) {
         for session in activeSessions where session.target.server.id == serverID {
             let key = TerminalRuntimeAttemptKey(session: session)
-            guard terminalScreenModels[key]?.isDisconnected == true else { continue }
-            replaceTerminalScreenModel(for: session)
+            guard terminalRuntimes[key]?.isDisconnected == true else { continue }
+            replaceTerminalRuntime(for: session)
             applyCurrentAppLifecyclePhase(to: session)
         }
     }
 
-    func terminalScreenModel(for session: ActiveTerminalSession) -> TmuxScreenModel {
+    func terminalRuntime(for session: ActiveTerminalSession) -> TerminalRuntime {
         let key = TerminalRuntimeAttemptKey(session: session)
-        guard let model = terminalScreenModels[key] else {
-            preconditionFailure("Missing terminal screen model for active runtime attempt")
+        guard let runtime = terminalRuntimes[key] else {
+            preconditionFailure("Missing terminal runtime for active runtime attempt")
         }
-        return model
+        return runtime
     }
 
-    func hasTerminalScreenModel(for session: ActiveTerminalSession) -> Bool {
-        terminalScreenModels[TerminalRuntimeAttemptKey(session: session)] != nil
+    func hasTerminalRuntime(for session: ActiveTerminalSession) -> Bool {
+        terminalRuntimes[TerminalRuntimeAttemptKey(session: session)] != nil
     }
 
     private func closePreparedTransport(for workspaceID: SavedWorkspace.ID) {
@@ -1696,8 +1804,8 @@ final class RemuxRootModel: ObservableObject {
         closePreparedTransports(forServerID: server.id, excludingWorkspaceID: workspace.id)
         let target = target(server: server, workspace: workspace, sshAuth: sshAuth)
         let activeSession = ActiveTerminalSession(target: target)
-        prepareTransport(for: target, reason: .activation)
-        replaceTerminalScreenModel(for: activeSession)
+        prepareTmuxTransport(for: target, reason: .activation)
+        replaceTerminalRuntime(for: activeSession)
         RemuxActiveSessionCollection.upsertActivatedSession(
             activeSession,
             in: &activeSessions
@@ -2064,77 +2172,106 @@ final class RemuxRootModel: ObservableObject {
         )
     }
 
-    private func replaceTerminalScreenModel(for session: ActiveTerminalSession) {
-        // Carry the previous attempt's viewport into the replacement so
-        // it attaches already sized (captures land at this width).
-        let carriedClientSize = terminalScreenModels.first(where: {
+    private func replaceTerminalRuntime(for session: ActiveTerminalSession) {
+        let previous = terminalRuntimes.first(where: {
             $0.key.workspaceID == session.id
-        })?.value.carriedClientSize
-        stopTerminalScreenModels(workspaceID: session.id, reason: .replacedByNewAttempt)
+        })?.value
+        stopTerminalRuntimes(workspaceID: session.id, reason: .replacedByNewAttempt)
         let key = TerminalRuntimeAttemptKey(session: session)
-        let transportFactory: TmuxScreenModel.TransportFactory = { [preparedTransportCoordinator] target in
-            preparedTransportCoordinator.claimOrCreateTransport(for: target)
+        let onRuntimeStateChange: (TerminalRuntimeStateUpdate) -> Void = { [weak self] update in
+            guard let self else { return }
+            _ = self.handleTerminalRuntimeStateUpdate(update)
         }
-        let model = terminalScreenModelFactory(
-            session.target,
-            session.instanceID,
-            transportFactory,
-            { [weak self] update in
-                guard let self else { return }
-                _ = self.handleTerminalRuntimeStateUpdate(update)
-            },
-            carriedClientSize
-        )
-        terminalScreenModels[key] = model
+        let runtime: TerminalRuntime
+        switch session.target.workspace.backend {
+        case .tmux:
+            // Carry the previous attempt's viewport into the replacement so
+            // it attaches already sized (captures land at this width).
+            var carriedClientSize: TmuxSessionController.ClientSize?
+            if case .tmux(let previousModel)? = previous {
+                carriedClientSize = previousModel.carriedClientSize
+            }
+            let transportFactory: TmuxScreenModel.TransportFactory = { [preparedTransportCoordinator] target in
+                preparedTransportCoordinator.claimOrCreateTransport(for: target)
+            }
+            runtime = .tmux(terminalScreenModelFactory(
+                session.target,
+                session.instanceID,
+                transportFactory,
+                onRuntimeStateChange,
+                carriedClientSize
+            ))
+        case .herdr:
+            let target = session.target
+            runtime = .herdr(HerdrScreenModel(
+                target: target,
+                sessionInstanceID: session.instanceID,
+                openBridge: { [dependencies] in
+                    try await dependencies.openHerdrBridge(for: target)
+                },
+                onRuntimeStateChange: onRuntimeStateChange
+            ))
+        }
+        terminalRuntimes[key] = runtime
+        runtime.setSelected(state == .terminal(session.id))
     }
 
     private func applyCurrentAppLifecyclePhase(to session: ActiveTerminalSession) {
         if let currentAppLifecyclePhase {
-            terminalScreenModels[TerminalRuntimeAttemptKey(session: session)]?
+            terminalRuntimes[TerminalRuntimeAttemptKey(session: session)]?
                 .handleAppLifecyclePhase(currentAppLifecyclePhase)
         }
     }
 
-    private func stopTerminalScreenModels(
+    /// The root shows the selected session, outside Home; another session and Home hide it, and the
+    /// sheets over it don't.
+    private func reconcileRuntimeSelection() {
+        for session in activeSessions {
+            terminalRuntimes[TerminalRuntimeAttemptKey(session: session)]?
+                .setSelected(state == .terminal(session.id))
+        }
+    }
+
+    private func stopTerminalRuntimes(
         workspaceID: SavedWorkspace.ID,
         reason: TerminalRuntimeStopReason = .sessionEnded
     ) {
-        stopTerminalScreenModels(reason: reason) { key, _ in
+        stopTerminalRuntimes(reason: reason) { key, _ in
             key.workspaceID == workspaceID
         }
     }
 
-    private func stopTerminalScreenModels(serverID: SavedServer.ID) {
-        stopTerminalScreenModels { key, _ in
+    private func stopTerminalRuntimes(serverID: SavedServer.ID) {
+        stopTerminalRuntimes { key, _ in
             return activeSessions.contains {
                 $0.id == key.workspaceID && $0.target.server.id == serverID
             }
         }
     }
 
-    private func stopAllTerminalScreenModels() {
-        stopTerminalScreenModels { _, _ in true }
+    private func stopAllTerminalRuntimes() {
+        stopTerminalRuntimes { _, _ in true }
     }
 
-    private func stopTerminalScreenModels(
+    private func stopTerminalRuntimes(
         reason: TerminalRuntimeStopReason = .sessionEnded,
-        where shouldStop: (TerminalRuntimeAttemptKey, TmuxScreenModel) -> Bool
+        where shouldStop: (TerminalRuntimeAttemptKey, TerminalRuntime) -> Bool
     ) {
-        let removed = terminalScreenModels.filter(shouldStop)
+        let removed = terminalRuntimes.filter(shouldStop)
         for key in removed.keys {
-            terminalScreenModels[key] = nil
+            terminalRuntimes[key] = nil
         }
-        for model in removed.values {
+        for runtime in removed.values {
             // Teardown ordering (surface unregister/free before terminal
             // release, link before controller) is owned by the model; the
             // task retains it until shutdown completes.
-            Task { await model.stop(reason) }
+            Task { await runtime.stop(reason) }
         }
     }
 
     private func transitionToFailed(_ error: any Error) {
         finishSetupSession(currentSetupID)
-        stopAllTerminalScreenModels()
+        stopAllTerminalRuntimes()
         activeSessions.removeAll()
         state = .failed(String(describing: error))
     }
@@ -2210,11 +2347,17 @@ final class RemuxRootModel: ObservableObject {
         }
     }
 
-    private func prepareTransport(
+    /// Herdr's bridge claims its SSH connection when its model opens it.
+    private func prepareTmuxTransport(
         for target: SessionTarget,
         reason: RemuxPreparedTransportPrepareReason
     ) {
-        preparedTransportCoordinator.prepareTransport(for: target, reason: reason)
+        switch target.workspace.backend {
+        case .tmux:
+            preparedTransportCoordinator.prepareTransport(for: target, reason: reason)
+        case .herdr:
+            break
+        }
     }
 
     private func scheduleLibrarySSHPrewarm(snapshot: ConnectionLibrarySnapshot) {
@@ -2237,7 +2380,7 @@ final class RemuxRootModel: ObservableObject {
                 )
             },
             onEligibleTarget: { [weak self] target in
-                self?.prepareTransport(for: target, reason: .library)
+                self?.prepareTmuxTransport(for: target, reason: .library)
             }
         )
     }

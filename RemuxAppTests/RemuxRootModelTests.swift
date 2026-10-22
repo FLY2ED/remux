@@ -2820,7 +2820,7 @@ final class RemuxRootModelTests: XCTestCase {
         await harness.model.load()
         await harness.model.connect(to: workspace.id)
         let originalSession = try XCTUnwrap(harness.model.activeSessions.first)
-        let originalModel = harness.model.terminalScreenModel(for: originalSession)
+        let originalModel = harness.model.terminalRuntime(for: originalSession).tmuxModel
 
         await harness.model.beginEditServer(serverID: server.id)
         harness.model.updateDraft { draft in
@@ -2841,7 +2841,7 @@ final class RemuxRootModelTests: XCTestCase {
         // A connecting model is not replaced by the edit (it would drop
         // the user's session); the refreshed target applies to the NEXT
         // runtime attempt.
-        let refreshedModel = harness.model.terminalScreenModel(for: refreshedSession)
+        let refreshedModel = harness.model.terminalRuntime(for: refreshedSession).tmuxModel
         XCTAssertTrue(originalModel === refreshedModel)
         XCTAssertEqual(modelFactory.createdKeys.count, 1)
 
@@ -2873,7 +2873,7 @@ final class RemuxRootModelTests: XCTestCase {
         await harness.model.load()
         await harness.model.connect(to: workspace.id)
         let originalSession = try XCTUnwrap(harness.model.activeSessions.first)
-        let runningModel = harness.model.terminalScreenModel(for: originalSession)
+        let runningModel = harness.model.terminalRuntime(for: originalSession).tmuxModel
         await waitForConnecting(runningModel)
 
         await harness.model.beginEditServer(serverID: server.id)
@@ -2888,7 +2888,7 @@ final class RemuxRootModelTests: XCTestCase {
         let refreshedSession = try XCTUnwrap(harness.model.activeSessions.first)
         XCTAssertEqual(refreshedSession.target.server.host, "updated.example.com")
         XCTAssertEqual(refreshedSession.target.sshAuth.username, "deploy")
-        XCTAssertTrue(runningModel === harness.model.terminalScreenModel(for: refreshedSession))
+        XCTAssertTrue(runningModel === harness.model.terminalRuntime(for: refreshedSession).tmuxModel)
 
         let entry = try XCTUnwrap(harness.model.activeTerminalScreenEntries.first)
         _ = entry.attachmentTransferServiceFactory()
@@ -2949,7 +2949,7 @@ final class RemuxRootModelTests: XCTestCase {
         await harness.model.connect(to: workspace.id)
 
         let sessionBeforeEdit = try XCTUnwrap(harness.model.activeSessions.first)
-        let terminalModel = harness.model.terminalScreenModel(for: sessionBeforeEdit)
+        let terminalModel = harness.model.terminalRuntime(for: sessionBeforeEdit).tmuxModel
         XCTAssertEqual(harness.model.activeTerminalScreenEntries.first?.presentation.sessionName, "base")
 
         await harness.model.beginEditWorkspace(serverID: server.id, workspaceID: workspace.id)
@@ -2962,7 +2962,7 @@ final class RemuxRootModelTests: XCTestCase {
         let sessionAfterEdit = try XCTUnwrap(harness.model.activeSessions.first)
         let entry = try XCTUnwrap(harness.model.activeTerminalScreenEntries.first)
         XCTAssertEqual(sessionAfterEdit.instanceID, sessionBeforeEdit.instanceID)
-        XCTAssertTrue(entry.model === terminalModel)
+        XCTAssertTrue(entry.runtime.tmuxModel === terminalModel)
         XCTAssertEqual(entry.presentation.workspaceID, workspace.id)
         XCTAssertEqual(entry.presentation.sessionName, "logs")
         XCTAssertEqual(entry.presentation.terminalTheme, settings.theme)
@@ -3018,9 +3018,9 @@ final class RemuxRootModelTests: XCTestCase {
 
         let session = try XCTUnwrap(harness.model.activeSessions.first)
         let key = TerminalRuntimeAttemptKey(session: session)
-        let terminalModel = harness.model.terminalScreenModel(for: session)
+        let terminalModel = harness.model.terminalRuntime(for: session).tmuxModel
 
-        XCTAssertTrue(harness.model.hasTerminalScreenModel(for: session))
+        XCTAssertTrue(harness.model.hasTerminalRuntime(for: session))
         XCTAssertEqual(modelFactory.createdKeys, [key])
         XCTAssertTrue(terminalModel === modelFactory.createdModels[key])
     }
@@ -3138,7 +3138,7 @@ final class RemuxRootModelTests: XCTestCase {
             let recordedModel = try XCTUnwrap(modelFactory.createdModels[key])
 
             XCTAssertEqual(entry.runtimeAttemptKey, key)
-            XCTAssertTrue(entry.model === recordedModel)
+            XCTAssertTrue(entry.runtime.tmuxModel === recordedModel)
             XCTAssertEqual(entry.presentation.workspaceID, session.target.workspace.id)
             XCTAssertEqual(entry.presentation.sessionName, session.target.workspace.sessionName)
             XCTAssertEqual(entry.presentation.terminalTheme, session.target.terminalSettings.theme)
@@ -3163,12 +3163,12 @@ final class RemuxRootModelTests: XCTestCase {
         await harness.model.load()
         await harness.model.connect(to: workspace.id)
         let session = try XCTUnwrap(harness.model.activeSessions.first)
-        let terminalModel = harness.model.terminalScreenModel(for: session)
+        let terminalModel = harness.model.terminalRuntime(for: session).tmuxModel
 
         await harness.model.showLibrary()
 
         XCTAssertEqual(harness.model.state, .library)
-        XCTAssertTrue(harness.model.terminalScreenModel(for: session) === terminalModel)
+        XCTAssertTrue(harness.model.terminalRuntime(for: session).tmuxModel === terminalModel)
     }
 
     func testDisconnectActiveSessionStopsOwnedTerminalModel() async throws {
@@ -3189,12 +3189,12 @@ final class RemuxRootModelTests: XCTestCase {
         await harness.model.load()
         await harness.model.connect(to: workspace.id)
         let session = try XCTUnwrap(harness.model.activeSessions.first)
-        let terminalModel = harness.model.terminalScreenModel(for: session)
+        let terminalModel = harness.model.terminalRuntime(for: session).tmuxModel
         await waitForConnecting(terminalModel)
 
         harness.model.disconnectActiveSession(workspace.id)
 
-        XCTAssertFalse(harness.model.hasTerminalScreenModel(for: session))
+        XCTAssertFalse(harness.model.hasTerminalRuntime(for: session))
         XCTAssertEqual(harness.model.state, .library)
         await waitForStopped(terminalModel)
     }
@@ -3217,7 +3217,7 @@ final class RemuxRootModelTests: XCTestCase {
         await harness.model.load()
         await harness.model.connect(to: workspace.id)
         let session = try XCTUnwrap(harness.model.activeSessions.first)
-        let terminalModel = harness.model.terminalScreenModel(for: session)
+        let terminalModel = harness.model.terminalRuntime(for: session).tmuxModel
         await waitForConnecting(terminalModel)
 
         // Disconnect outside the terminal screen so the root's
@@ -3260,7 +3260,7 @@ final class RemuxRootModelTests: XCTestCase {
         harness.model.handleAppLifecyclePhase(.active)
         await harness.model.connect(to: workspace.id)
         let session = try XCTUnwrap(harness.model.activeSessions.first)
-        let terminalModel = harness.model.terminalScreenModel(for: session)
+        let terminalModel = harness.model.terminalRuntime(for: session).tmuxModel
         await waitForConnecting(terminalModel)
 
         modelFactory.clearRecordedUpdates()
@@ -3288,7 +3288,7 @@ final class RemuxRootModelTests: XCTestCase {
         await harness.model.load()
         await harness.model.connect(to: workspace.id)
         let oldSession = try XCTUnwrap(harness.model.activeSessions.first)
-        let oldModel = harness.model.terminalScreenModel(for: oldSession)
+        let oldModel = harness.model.terminalRuntime(for: oldSession).tmuxModel
         await waitForConnecting(oldModel)
 
         harness.model.reconnectActiveSession(workspace.id, source: .manualButton)
@@ -3321,17 +3321,17 @@ final class RemuxRootModelTests: XCTestCase {
         await harness.model.load()
         await harness.model.connect(to: workspace.id)
         let oldSession = try XCTUnwrap(harness.model.activeSessions.first)
-        let oldModel = harness.model.terminalScreenModel(for: oldSession)
+        let oldModel = harness.model.terminalRuntime(for: oldSession).tmuxModel
         await waitForConnecting(oldModel)
 
         harness.model.reconnectActiveSession(workspace.id, source: .manualButton)
 
         let newSession = try XCTUnwrap(harness.model.activeSessions.first)
         XCTAssertNotEqual(newSession.instanceID, oldSession.instanceID)
-        XCTAssertFalse(harness.model.hasTerminalScreenModel(for: oldSession))
-        XCTAssertTrue(harness.model.hasTerminalScreenModel(for: newSession))
+        XCTAssertFalse(harness.model.hasTerminalRuntime(for: oldSession))
+        XCTAssertTrue(harness.model.hasTerminalRuntime(for: newSession))
         await waitForStopped(oldModel)
-        XCTAssertTrue(harness.model.hasTerminalScreenModel(for: newSession))
+        XCTAssertTrue(harness.model.hasTerminalRuntime(for: newSession))
         XCTAssertEqual(
             modelFactory.createdKeys,
             [TerminalRuntimeAttemptKey(session: oldSession), TerminalRuntimeAttemptKey(session: newSession)]
@@ -3356,15 +3356,15 @@ final class RemuxRootModelTests: XCTestCase {
         await harness.model.load()
         await harness.model.connect(to: workspace.id)
         let oldSession = try XCTUnwrap(harness.model.activeSessions.first)
-        let oldModel = harness.model.terminalScreenModel(for: oldSession)
+        let oldModel = harness.model.terminalRuntime(for: oldSession).tmuxModel
         await waitForConnecting(oldModel)
 
         await harness.model.connect(to: workspace.id)
 
         let newSession = try XCTUnwrap(harness.model.activeSessions.first)
         XCTAssertNotEqual(newSession.instanceID, oldSession.instanceID)
-        XCTAssertFalse(harness.model.hasTerminalScreenModel(for: oldSession))
-        XCTAssertTrue(harness.model.hasTerminalScreenModel(for: newSession))
+        XCTAssertFalse(harness.model.hasTerminalRuntime(for: oldSession))
+        XCTAssertTrue(harness.model.hasTerminalRuntime(for: newSession))
         await waitForStopped(oldModel)
     }
 
@@ -3386,13 +3386,13 @@ final class RemuxRootModelTests: XCTestCase {
         await harness.model.load()
         await harness.model.connect(to: workspace.id)
         let session = try XCTUnwrap(harness.model.activeSessions.first)
-        let terminalModel = harness.model.terminalScreenModel(for: session)
+        let terminalModel = harness.model.terminalRuntime(for: session).tmuxModel
         await waitForConnecting(terminalModel)
 
         await harness.model.deleteWorkspace(workspace.id)
 
         XCTAssertEqual(harness.model.state, .library)
-        XCTAssertFalse(harness.model.hasTerminalScreenModel(for: session))
+        XCTAssertFalse(harness.model.hasTerminalRuntime(for: session))
         await waitForStopped(terminalModel)
     }
 
@@ -3422,7 +3422,7 @@ final class RemuxRootModelTests: XCTestCase {
 
         XCTAssertEqual(harness.model.state, .library)
         XCTAssertTrue(harness.model.activeSessions.isEmpty)
-        XCTAssertTrue(sessions.allSatisfy { !harness.model.hasTerminalScreenModel(for: $0) })
+        XCTAssertTrue(sessions.allSatisfy { !harness.model.hasTerminalRuntime(for: $0) })
         let snapshot = try await harness.profileRepository.loadSnapshot()
         let credential = try await harness.credentialStore.loadCredential(
             identityID: passwordBackedServer.identity.id
@@ -3458,7 +3458,7 @@ final class RemuxRootModelTests: XCTestCase {
         await harness.model.load()
         await harness.model.connect(to: workspace.id)
         let session = try XCTUnwrap(harness.model.activeSessions.first)
-        let terminalModel = harness.model.terminalScreenModel(for: session)
+        let terminalModel = harness.model.terminalRuntime(for: session).tmuxModel
         await waitForConnecting(terminalModel)
         let previousSettings = harness.model.terminalSettings
 
@@ -3470,8 +3470,8 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertEqual(harness.model.terminalSettings, previousSettings)
         XCTAssertEqual(harness.model.activeSessions.map(\.id), [workspace.id])
         XCTAssertEqual(harness.model.activeTerminalScreenEntries.map(\.id), [workspace.id])
-        XCTAssertTrue(harness.model.hasTerminalScreenModel(for: session))
-        XCTAssertTrue(harness.model.terminalScreenModel(for: session) === terminalModel)
+        XCTAssertTrue(harness.model.hasTerminalRuntime(for: session))
+        XCTAssertTrue(harness.model.terminalRuntime(for: session).tmuxModel === terminalModel)
         XCTAssertNotNil(terminalModel.session)
         XCTAssertTrue(harness.model.terminalSettingsSaveFailed)
 
@@ -4014,8 +4014,8 @@ final class RemuxRootModelTests: XCTestCase {
         let refreshedSession = try XCTUnwrap(harness.model.activeSessions.first)
         XCTAssertEqual(refreshedSession.instanceID, originalSession.instanceID)
         XCTAssertEqual(refreshedSession.target.terminalSettings, updated)
-        XCTAssertTrue(harness.model.hasTerminalScreenModel(for: refreshedSession))
-        XCTAssertTrue(originalModel === harness.model.terminalScreenModel(for: refreshedSession))
+        XCTAssertTrue(harness.model.hasTerminalRuntime(for: refreshedSession))
+        XCTAssertTrue(originalModel === harness.model.terminalRuntime(for: refreshedSession).tmuxModel)
         XCTAssertEqual(
             harness.model.activeTerminalScreenEntries.first?.presentation.terminalTheme,
             updated.theme
@@ -4030,7 +4030,7 @@ final class RemuxRootModelTests: XCTestCase {
         let rsaRefreshedSession = try XCTUnwrap(harness.model.activeSessions.first)
         XCTAssertEqual(rsaRefreshedSession.instanceID, originalSession.instanceID)
         XCTAssertEqual(rsaRefreshedSession.target.terminalSettings, rsaUpdated)
-        XCTAssertTrue(originalModel === harness.model.terminalScreenModel(for: rsaRefreshedSession))
+        XCTAssertTrue(originalModel === harness.model.terminalRuntime(for: rsaRefreshedSession).tmuxModel)
 
         var toolbarUpdated = rsaUpdated
         toolbarUpdated.toolbarKeys = TerminalToolbarKeys(
@@ -4047,7 +4047,7 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertEqual(toolbarRefreshedSession.instanceID, originalSession.instanceID)
         XCTAssertEqual(toolbarEntry.runtimeAttemptKey, originalKey)
         XCTAssertEqual(toolbarEntry.presentation.toolbarKeys, toolbarUpdated.toolbarKeys)
-        XCTAssertTrue(originalModel === harness.model.terminalScreenModel(for: toolbarRefreshedSession))
+        XCTAssertTrue(originalModel === harness.model.terminalRuntime(for: toolbarRefreshedSession).tmuxModel)
         XCTAssertEqual(factory.createdKeys, [originalKey])
         let savedSettings = try await harness.settingsRepository.loadSettings()
         XCTAssertEqual(savedSettings, toolbarUpdated)
@@ -4085,6 +4085,11 @@ final class RemuxRootModelTests: XCTestCase {
             RemuxSSHRootService
         ) async throws -> Void)? = nil,
         publicKeyInstaller: SSHPublicKeyInstaller? = nil,
+        herdrBridgeOpener: (@Sendable (
+            SessionTarget,
+            TrustedHostStore,
+            RemuxSSHRootService
+        ) async throws -> any HerdrBridgeTransport)? = nil,
         terminalScreenModelFactory: RemuxRootModel.TerminalScreenModelFactory? = nil
     ) -> RemuxRootModelHarness {
         let profileRepository = TestConnectionProfileRepository(
@@ -4125,6 +4130,9 @@ final class RemuxRootModelTests: XCTestCase {
             attachmentTransferServiceFactory: resolvedAttachmentTransferServiceFactory,
             tmuxSessionDiscoverer: resolvedTmuxSessionDiscoverer,
             sshAccessVerifier: sshAccessVerifier ?? { _, _, _ in },
+            herdrBridgeOpener: herdrBridgeOpener ?? { _, _, _ in
+                throw HerdrBridgeError.channel("this test opens no Herdr bridge")
+            },
             debugConnectionSeeder: { _, _ in false }
         )
 
@@ -4291,6 +4299,226 @@ final class RemuxRootModelTests: XCTestCase {
         )
     }
 
+    // MARK: - Herdr sessions
+
+    /// A Herdr session opens its bridge through the app's dependencies and gets no tmux transport.
+    /// The root shows it while it's the selected session: Home hides it, coming back shows it again,
+    /// and disconnecting closes its bridge.
+    func testHerdrSessionOpensItsBridgeAndIsShownWhileSelected() async throws {
+        let pair = makePasswordBackedServer()
+        let workspace = SavedWorkspace(serverID: pair.server.id, backend: .herdr, sessionName: "agents")
+        let opener = RecordingHerdrBridgeOpener()
+        let transportFactory = RecordingRootTransportFactory()
+        let harness = makeHarness(
+            servers: [pair.server],
+            workspaces: [workspace],
+            identities: [pair.identity],
+            transportFactory: { target, trustedHostStore, _ in
+                transportFactory.makeTransport(target: target, trustedHostStore: trustedHostStore)
+            },
+            herdrBridgeOpener: { target, _, _ in await opener.open(target) }
+        )
+        try await harness.credentialHelper.savePassword("secret", for: pair.server.id)
+        await harness.model.load()
+        await harness.model.connect(to: workspace.id)
+
+        let session = try XCTUnwrap(harness.model.activeSessions.first)
+        guard case .herdr(let model) = harness.model.terminalRuntime(for: session) else {
+            return XCTFail("expected a Herdr runtime")
+        }
+        let bridge = try await opener.bridge(0)
+        let openedLocators = await opener.targets.map(\.locator)
+        XCTAssertEqual(openedLocators, [SessionLocator(backend: .herdr, name: "agents")])
+        XCTAssertTrue(transportFactory.targets.isEmpty, "\(transportFactory.targets)")
+
+        model.terminalScreenAdapter.prepareInitialViewport(size: CGSize(width: 390, height: 844), scale: 3)
+        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        var index = 0
+        let shown = try await nextSurfaceSet(bridge, from: &index)
+        XCTAssertTrue(shown)
+
+        await harness.model.showLibrary()
+        let hiddenAtHome = try await nextSurfaceSet(bridge, from: &index)
+        XCTAssertFalse(hiddenAtHome)
+
+        harness.model.showActiveSession(workspace.id)
+        let shownAgain = try await nextSurfaceSet(bridge, from: &index)
+        XCTAssertTrue(shownAgain)
+
+        harness.model.disconnectActiveSession(workspace.id)
+        let closed = await eventually { await bridge.isClosed }
+        XCTAssertTrue(closed)
+    }
+
+    /// A reconnect keeps a Herdr session's model and instance, so its panes keep the last frame, and
+    /// the model opens a new bridge in place of the old one.
+    func testHerdrReconnectKeepsTheModelAndOpensANewBridge() async throws {
+        let pair = makePasswordBackedServer()
+        let workspace = SavedWorkspace(serverID: pair.server.id, backend: .herdr, sessionName: "agents")
+        let opener = RecordingHerdrBridgeOpener()
+        let harness = makeHarness(
+            servers: [pair.server],
+            workspaces: [workspace],
+            identities: [pair.identity],
+            herdrBridgeOpener: { target, _, _ in await opener.open(target) }
+        )
+        try await harness.credentialHelper.savePassword("secret", for: pair.server.id)
+        await harness.model.load()
+        await harness.model.connect(to: workspace.id)
+        let session = try XCTUnwrap(harness.model.activeSessions.first)
+        guard case .herdr(let model) = harness.model.terminalRuntime(for: session) else {
+            return XCTFail("expected a Herdr runtime")
+        }
+        let first = try await opener.bridge(0)
+
+        harness.model.reconnectActiveSession(workspace.id, source: .manualButton)
+
+        _ = try await opener.bridge(1)
+        let reconnected = try XCTUnwrap(harness.model.activeSessions.first)
+        XCTAssertEqual(reconnected.instanceID, session.instanceID)
+        guard case .herdr(let reconnectedModel) = harness.model.terminalRuntime(for: reconnected) else {
+            return XCTFail("expected a Herdr runtime")
+        }
+        XCTAssertTrue(reconnectedModel === model)
+        let firstClosed = await eventually { await first.isClosed }
+        XCTAssertTrue(firstClosed)
+    }
+
+    /// A Herdr model made before its server was edited isn't reconnected in place: the reconnect
+    /// replaces it, as for tmux, and the new bridge opens with the edited profile.
+    func testHerdrReconnectAfterAServerEditReplacesTheModel() async throws {
+        let pair = makePasswordBackedServer()
+        let workspace = SavedWorkspace(serverID: pair.server.id, backend: .herdr, sessionName: "agents")
+        let opener = RecordingHerdrBridgeOpener()
+        let harness = makeHarness(
+            servers: [pair.server],
+            workspaces: [workspace],
+            identities: [pair.identity],
+            herdrBridgeOpener: { target, _, _ in await opener.open(target) }
+        )
+        try await harness.credentialStore.saveCredential(
+            .password("demo-password"),
+            identityID: pair.identity.id
+        )
+        await harness.model.load()
+        await harness.model.connect(to: workspace.id)
+        let session = try XCTUnwrap(harness.model.activeSessions.first)
+        guard case .herdr(let model) = harness.model.terminalRuntime(for: session) else {
+            return XCTFail("expected a Herdr runtime")
+        }
+        _ = try await opener.bridge(0)
+
+        await harness.model.beginEditServer(serverID: pair.server.id)
+        harness.model.updateDraft { draft in
+            draft.host = "updated.example.com"
+        }
+        await harness.model.saveAndConnect()
+        harness.model.reconnectActiveSession(workspace.id, source: .manualButton)
+
+        _ = try await opener.bridge(1)
+        let reconnected = try XCTUnwrap(harness.model.activeSessions.first)
+        XCTAssertNotEqual(reconnected.instanceID, session.instanceID)
+        guard case .herdr(let replacement) = harness.model.terminalRuntime(for: reconnected) else {
+            return XCTFail("expected a Herdr runtime")
+        }
+        XCTAssertFalse(replacement === model)
+        let hosts = await opener.targets.map(\.server.host)
+        XCTAssertEqual(hosts, ["build.example.test", "updated.example.com"])
+    }
+
+    /// Opening a Herdr session leaves the server's tmux discovery running: only a connected tmux session
+    /// starts discovery again, and the bridge shares the server's pooled SSH connection with it.
+    func testOpeningAHerdrSessionLeavesTmuxDiscoveryRunning() async throws {
+        let pair = makePasswordBackedServer()
+        let workspace = SavedWorkspace(serverID: pair.server.id, backend: .herdr, sessionName: "agents")
+        let discoverer = SuspendingTmuxSessionDiscoverer()
+        let opener = RecordingHerdrBridgeOpener()
+        let harness = makeHarness(
+            servers: [pair.server],
+            workspaces: [workspace],
+            identities: [pair.identity],
+            tmuxSessionDiscoverer: { target, _, _ in
+                await discoverer.discover(target)
+            },
+            herdrBridgeOpener: { target, _, _ in await opener.open(target) }
+        )
+        try await harness.credentialHelper.savePassword("secret", for: pair.server.id)
+        await harness.model.load()
+        await discoverer.waitForCall()
+
+        await harness.model.connect(to: workspace.id)
+
+        XCTAssertEqual(harness.model.tmuxSessionDiscoveryState(for: pair.server.id).phase, .loading)
+        await discoverer.resumeAll(with: ["main"])
+        let discovered = await waitUntil {
+            harness.model.tmuxSessionDiscoveryState(for: pair.server.id).sessionNames == ["main"]
+        }
+        XCTAssertTrue(discovered)
+    }
+
+    /// The library warms a Herdr workspace's SSH connection, which its bridge claims when it opens, and
+    /// prepares no tmux transport for it.
+    func testLibraryPrewarmWarmsAHerdrWorkspacesConnectionWithoutATmuxTransport() async throws {
+        let now = Date()
+        let herdrServer = SavedServer(displayName: "Agents Host", host: "agents.example.test", username: "builder")
+        let tmuxServer = SavedServer(displayName: "Build Host", host: "build.example.test", username: "builder")
+        let herdrWorkspace = SavedWorkspace(
+            serverID: herdrServer.id,
+            backend: .herdr,
+            sessionName: "agents",
+            lastOpenedAt: now
+        )
+        let tmuxWorkspace = SavedWorkspace(
+            serverID: tmuxServer.id,
+            sessionName: "base",
+            lastOpenedAt: now.addingTimeInterval(-30)
+        )
+        let prewarmer = RecordingSSHConnectionPrewarmer()
+        let transportFactory = RecordingRootTransportFactory()
+        let harness = makeHarness(
+            servers: [herdrServer, tmuxServer],
+            workspaces: [herdrWorkspace, tmuxWorkspace],
+            transportFactory: { target, trustedHostStore, _ in
+                transportFactory.makeTransport(target: target, trustedHostStore: trustedHostStore)
+            },
+            sshConnectionPrewarmer: { target, _, _ in
+                prewarmer.record(target)
+            }
+        )
+        try await harness.credentialHelper.savePassword("agents-secret", for: herdrServer.id)
+        try await harness.credentialHelper.savePassword("build-secret", for: tmuxServer.id)
+
+        await harness.model.load()
+
+        // The newest workspace is warmed first, so the tmux one is prepared after the Herdr one was
+        // passed over.
+        let didPrepare = await waitUntil { !transportFactory.preparedIDs.isEmpty }
+        XCTAssertTrue(didPrepare)
+        XCTAssertEqual(prewarmer.targets.map(\.workspace.id), [herdrWorkspace.id, tmuxWorkspace.id])
+        XCTAssertEqual(transportFactory.targets.map(\.workspace.id), [tmuxWorkspace.id])
+    }
+
+    /// The next `surface.set` from `index` on; whether it shows the session.
+    private func nextSurfaceSet(_ bridge: FakeBridgeTransport, from index: inout Int) async throws -> Bool {
+        while true {
+            let write = try ClientWrite.decode(try await bridge.written(index))
+            index += 1
+            if case .surfaceSet(_, let active) = write { return active }
+        }
+    }
+
+    private func eventually(
+        timeout: Duration = .seconds(2),
+        _ condition: () async -> Bool
+    ) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if await condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return await condition()
+    }
+
     private func waitUntil(
         timeout: TimeInterval = 1.0,
         condition: () -> Bool
@@ -4380,6 +4608,28 @@ private actor RecordingTmuxSessionDiscoverer {
 
     func targets() -> [SessionTarget] {
         recordedTargets
+    }
+}
+
+/// Hands the root a fake bridge for each Herdr session it opens.
+private actor RecordingHerdrBridgeOpener {
+    private(set) var targets: [SessionTarget] = []
+    private var bridges: [FakeBridgeTransport] = []
+
+    func open(_ target: SessionTarget) -> any HerdrBridgeTransport {
+        targets.append(target)
+        let bridge = FakeBridgeTransport()
+        bridges.append(bridge)
+        return bridge
+    }
+
+    /// The bridge opened `index`th, waiting up to two seconds for it.
+    func bridge(_ index: Int) async throws -> FakeBridgeTransport {
+        for _ in 0..<200 where bridges.count <= index {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard index < bridges.count else { throw CancellationError() }
+        return bridges[index]
     }
 }
 
@@ -4496,6 +4746,14 @@ private func makeTestTerminalScreenModel(
         onRuntimeStateChange: onRuntimeStateChange,
         initialClientSize: initialClientSize ?? .rootModelTestViewport
     )
+}
+
+private extension TerminalRuntime {
+    /// These tests' sessions are tmux sessions.
+    var tmuxModel: TmuxScreenModel {
+        guard case .tmux(let model) = self else { preconditionFailure("expected a tmux runtime") }
+        return model
+    }
 }
 
 @MainActor

@@ -273,11 +273,16 @@ final class HerdrScreenModel {
     /// so a reconnect also tries the failed panes again: a pane Ghostty couldn't paint gets a new
     /// terminal from the new connection's first frame, and a failed renderer is replaced over its
     /// terminal now.
-    func reconnect() {
-        guard !stopped, runtime != nil else { return }
+    ///
+    /// Returns false when the model can't open a connection, because its terminal runtime didn't start
+    /// or it has stopped; the root then replaces it.
+    @discardableResult
+    func reconnect() -> Bool {
+        guard !stopped, runtime != nil else { return false }
         if let attempt { retire(attempt) }
         startAttempt()
         retryFailedPanes()
+        return true
     }
 
     /// Closes the connection, lets the engine finish its event and free the pane producers, waits for
