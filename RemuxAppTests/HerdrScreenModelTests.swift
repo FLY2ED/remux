@@ -276,45 +276,48 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(adapter.topLevelNoun, .tab)
     }
 
-    /// The pane sheet names each pane as Herdr's client does in its lists: the pane's label or its
-    /// agent's name, then the agent's title, then the agent's kind; with the directory of the pane's
-    /// foreground program, else of its shell.
-    func testPanesAreNamedAndPlacedAsHerdrsClientShowsThem() async throws {
+    /// The pane sheet shows, as for a tmux pane, the folder of the pane's foreground program and what
+    /// runs there: the label Herdr puts on the pane's border, in Herdr's order (the pane's title, then
+    /// its manual label, then its agent's display name or label). A plain pane has neither.
+    func testPanesAreNamedAsHerdrLabelsTheirBorders() async throws {
         let harness = await makeHarness()
         let bridge = try await harness.bridge()
         let snapshot = HerdrServerScript.snapshot(
             revision: 1,
             panes: [
                 HerdrServerScript.snapshotPane("w1:p1", label: "editor", cwd: "/repo", foregroundCWD: "/repo/src"),
-                HerdrServerScript.snapshotPane("w1:p2", cwd: "/home"),
-                HerdrServerScript.snapshotPane("w1:p3"),
+                HerdrServerScript.snapshotPane("w1:p2", label: "worker", cwd: "/home"),
+                HerdrServerScript.snapshotPane("w1:p3", cwd: "/srv", foregroundCWD: "/srv/app"),
+                HerdrServerScript.snapshotPane("w1:p4"),
             ],
             agents: [
-                HerdrServerScript.snapshotAgent("w1:p1", name: "reviewer", title: "Reviewing"),
-                HerdrServerScript.snapshotAgent("w1:p2", title: "Fixing tests", agent: "claude"),
-                HerdrServerScript.snapshotAgent("w1:p3", agent: "codex"),
+                HerdrServerScript.snapshotAgent(
+                    "w1:p2", name: "fixer", title: "Fixing tests", agent: "claude", displayAgent: "Claude Code"
+                ),
+                HerdrServerScript.snapshotAgent("w1:p3", agent: "codex", displayAgent: "Codex"),
             ]
         )
         await bridge.serve(try HerdrServerScript.welcome() + snapshot)
         await bridge.serve(HerdrServerScript.surface(
             projection: 1,
             revision: 1,
-            lines: ["a b c"],
+            lines: ["a b c d"],
             panes: [
                 .init(id: "w1:p1", x: 0, width: 1, height: 1, focused: true),
                 .init(id: "w1:p2", x: 2, width: 1, height: 1),
                 .init(id: "w1:p3", x: 4, width: 1, height: 1),
+                .init(id: "w1:p4", x: 6, width: 1, height: 1),
             ]
         ))
         harness.setScreenSize()
 
         let adapter = harness.model.terminalScreenAdapter
         try await harness.waitUntil("the panes weren't laid out") {
-            adapter.terminalScreenPresentationProjection.viewport.panes.count == 3
+            adapter.terminalScreenPresentationProjection.viewport.panes.count == 4
         }
         let panes = adapter.terminalScreenPresentationProjection.viewport.panes
-        XCTAssertEqual(panes.map(\.currentCommand), ["editor", "Fixing tests", "codex"])
-        XCTAssertEqual(panes.map(\.currentPath), ["/repo/src", "/home", ""])
+        XCTAssertEqual(panes.map(\.currentCommand), ["editor", "Fixing tests", "Codex", ""])
+        XCTAssertEqual(panes.map(\.currentPath), ["/repo/src", "/home", "/srv/app", ""])
     }
 
     /// A frame left behind by a lost connection shows no live cursor: the focused pane is unfocused

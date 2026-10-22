@@ -8,7 +8,7 @@ struct HerdrPaneLayout: Equatable, Sendable {
         /// The pane's text area: its terminal's size, and where it sits in the frame.
         let innerRect: HerdrSurfaceRect
         let focused: Bool
-        /// What Herdr's client calls the pane in its lists, from the snapshot; empty without one.
+        /// The label Herdr puts on the pane's border, from the snapshot; empty without one.
         var name = ""
         /// The directory of the pane's foreground program, else of its shell; empty when unknown.
         var path = ""
@@ -317,23 +317,19 @@ actor HerdrTerminalEngine {
         continuation.yield(.layout(next))
     }
 
-    /// As Herdr's client names a pane in its lists: the pane's label or its agent's name, then the
-    /// agent's title, then the agent's kind.
+    /// The label Herdr puts on the pane's border, in its order: the pane's title, then its manual
+    /// label, then its agent's display name or label. The snapshot carries a title only for an agent's
+    /// pane.
     private static func name(ofPane paneID: String, in snapshot: HerdrSnapshot) -> String {
         let pane = snapshot.panes.first { $0.paneID == paneID }
         let agent = snapshot.agents.first { $0.paneID == paneID }
-        let candidates = [
-            pane?.label,
-            agent?.name,
-            agent?.title,
-            agent?.terminalTitleStripped,
-            agent?.agent,
-            agent?.displayAgent,
-        ]
-        return candidates.lazy.compactMap { $0 }.first { !$0.isEmpty } ?? ""
+        let candidates = [agent?.title, pane?.label, agent?.displayAgent, agent?.agent]
+        return candidates.lazy
+            .compactMap { $0?.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty } ?? ""
     }
 
-    /// As Herdr's client shows a pane's directory: its foreground program's, else its shell's.
+    /// The directory of the pane's foreground program, as tmux's current path is, else of its shell.
     private static func path(ofPane paneID: String, in snapshot: HerdrSnapshot) -> String {
         let pane = snapshot.panes.first { $0.paneID == paneID }
         return [pane?.foregroundCWD, pane?.cwd].lazy.compactMap { $0 }.first { !$0.isEmpty } ?? ""
