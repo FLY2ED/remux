@@ -257,22 +257,28 @@ enum ClientWrite: Equatable {
 final class HerdrModelHarness {
     actor Bridges {
         private(set) var opened: [FakeBridgeTransport] = []
-        /// When each bridge opened.
-        private(set) var openedAt: [ContinuousClock.Instant] = []
+        /// When each opening started.
+        private(set) var openingsStartedAt: [ContinuousClock.Instant] = []
+        private let openingTakes: Duration
         private var failure: Error?
+
+        init(openingTakes: Duration) {
+            self.openingTakes = openingTakes
+        }
 
         func failNextOpen(with error: Error) {
             failure = error
         }
 
-        func open() throws -> FakeBridgeTransport {
+        func open() async throws -> FakeBridgeTransport {
+            openingsStartedAt.append(.now)
             if let failure {
                 self.failure = nil
                 throw failure
             }
+            if openingTakes > .zero { try await Task.sleep(for: openingTakes) }
             let transport = FakeBridgeTransport()
             opened.append(transport)
-            openedAt.append(.now)
             return transport
         }
     }
@@ -289,9 +295,10 @@ final class HerdrModelHarness {
         settings: TerminalSettings = .default,
         timing: HerdrConnection.Timing = HerdrConnection.Timing(),
         failingOpenWith openError: Error? = nil,
+        bridgeOpeningTakes: Duration = .zero,
         producerFailure: ProducerFailure? = nil
     ) async {
-        let bridges = Bridges()
+        let bridges = Bridges(openingTakes: bridgeOpeningTakes)
         let stateLog = StateLog()
         if let openError { await bridges.failNextOpen(with: openError) }
         let server = SavedServer(displayName: "Herdr Host", host: "herdr.example.test", username: "builder")
@@ -323,7 +330,7 @@ final class HerdrModelHarness {
 
     var states: [TerminalRuntimeState] { stateLog.updates.map(\.state) }
 
-    /// The bridge the model opened `index`th, waiting up to two seconds for it.
+    /// The bridge the model opened `index`th, waiting up to three seconds for it.
     func bridge(_ index: Int = 0) async throws -> FakeBridgeTransport {
         try await waitUntil("bridge \(index) wasn't opened") { await self.bridges.opened.count > index }
         return await bridges.opened[index]

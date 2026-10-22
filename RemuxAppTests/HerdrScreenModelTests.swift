@@ -20,12 +20,14 @@ final class HerdrScreenModelTests: XCTestCase {
         settings: TerminalSettings = .default,
         timing: HerdrConnection.Timing = HerdrConnection.Timing(),
         failingOpenWith error: Error? = nil,
+        bridgeOpeningTakes: Duration = .zero,
         producerFailure: ProducerFailure? = nil
     ) async -> HerdrModelHarness {
         let harness = await HerdrModelHarness(
             settings: settings,
             timing: timing,
             failingOpenWith: error,
+            bridgeOpeningTakes: bridgeOpeningTakes,
             producerFailure: producerFailure
         )
         harnesses.append(harness)
@@ -59,19 +61,21 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertFalse(closed)
     }
 
-    /// Herdr's server drops a connection that sends no hello within 4 s. A bridge still waiting for the
-    /// screen's size is closed before then, keeping its SSH connection for reuse, and a new one opens
-    /// once the size arrives; the hello goes on it.
+    /// Herdr's server drops a connection that sends no hello within 4 s of the bridge reaching it, which
+    /// can be well before a slow opening returns. A bridge still waiting for the screen's size is closed
+    /// within 4 s of its opening's start, keeping its SSH connection for reuse, and a new one opens once
+    /// the size arrives; the hello goes on it.
     func testABridgeWaitingTooLongForTheSizeIsClosedAndOpenedAgain() async throws {
-        let harness = await makeHarness()
+        let beforeOpening = ContinuousClock.now
+        let harness = await makeHarness(bridgeOpeningTakes: .milliseconds(1500))
         let first = try await harness.bridge(0)
-        let openTimes = await harness.bridges.openedAt
-        let openedAt = try XCTUnwrap(openTimes.first)
+        let openingStarts = await harness.bridges.openingsStartedAt
+        let openingStarted = try XCTUnwrap(openingStarts.first)
 
         try await harness.waitUntil("the waiting bridge wasn't closed", timeout: .seconds(5)) { await first.isClosed }
-        let waited = ContinuousClock.now - openedAt
-        XCTAssertLessThan(waited, .seconds(4), "closed after Herdr's server would have given up")
-        XCTAssertGreaterThanOrEqual(waited, HerdrScreenModel.helloDeadline)
+        let closedAt = ContinuousClock.now
+        XCTAssertLessThan(closedAt - openingStarted, .seconds(4), "closed after Herdr's server would have given up")
+        XCTAssertGreaterThanOrEqual(closedAt - beforeOpening, HerdrScreenModel.helloDeadline)
         let reusable = await first.closedReusable
         let firstWrites = await first.writtenCount
         XCTAssertEqual(reusable, true)

@@ -333,23 +333,10 @@ final class HerdrScreenModel {
         didChange()
     }
 
-    /// The bridge opens at once, so its setup overlaps the screen's layout, and the hello goes once the
-    /// screen has a size. A bridge still waiting for a size at the hello deadline is closed and opened
-    /// again once the size arrives. Once the connection is open, the attempt's operations are carried
-    /// out in order.
+    /// Once the connection is open, the attempt's operations are carried out in order.
     private func run(_ attempt: Attempt) async {
         // Whoever retires the attempt closes its bridge.
-        guard var transport = await openTransport(for: attempt) else { return }
-        if await screenSize(for: attempt, until: ContinuousClock.now + Self.helloDeadline) == nil {
-            guard isCurrent(attempt) else { return }
-            attempt.transport = nil
-            await transport.close(reusable: true)
-            guard await screenSize(for: attempt, until: nil) != nil,
-                  let reopened = await openTransport(for: attempt)
-            else { return }
-            transport = reopened
-        }
-        guard let size = geometry else { return }
+        guard let (transport, size) = await bridgeAndScreenSize(for: attempt) else { return }
         // Frames can arrive before `open` returns; the engine paints them at the hello's cell size.
         await engine.setCellSize(widthPx: size.cellWidthPx, heightPx: size.cellHeightPx)
         let feed = await engine.beginConnection()
@@ -388,6 +375,25 @@ final class HerdrScreenModel {
         while let operation = await attempt.nextOperation() {
             guard isCurrent(attempt) else { break }
             await perform(operation, on: connection, attemptID: attempt.id)
+        }
+    }
+
+    /// A bridge and the screen size for its hello, or nil when the attempt is over. The bridge opens at
+    /// once, so its setup overlaps the screen's layout. A bridge still waiting for a size at the hello
+    /// deadline is closed, and another opens once the size arrives.
+    private func bridgeAndScreenSize(
+        for attempt: Attempt
+    ) async -> (any HerdrBridgeTransport, HerdrSurfaceGeometry)? {
+        while true {
+            // Herdr's clock starts when the bridge reaches its socket, which can be before the opening
+            // returns.
+            let deadline = ContinuousClock.now + Self.helloDeadline
+            guard let transport = await openTransport(for: attempt) else { return nil }
+            if let size = await screenSize(for: attempt, until: deadline) { return (transport, size) }
+            guard isCurrent(attempt) else { return nil }
+            attempt.transport = nil
+            await transport.close(reusable: true)
+            guard await screenSize(for: attempt, until: nil) != nil else { return nil }
         }
     }
 
@@ -476,12 +482,15 @@ final class HerdrScreenModel {
         for attempt: Attempt,
         until deadline: ContinuousClock.Instant?
     ) async -> HerdrSurfaceGeometry? {
-        if let deadline {
+        let timer = deadline.map { deadline in
             Task { [weak self] in
                 try? await Task.sleep(until: deadline, clock: .continuous)
+                // A wait that ended first cancelled its timer, which then wakes no later wait.
+                guard !Task.isCancelled else { return }
                 self?.resumeSizeWaiter()
             }
         }
+        defer { timer?.cancel() }
         while isCurrent(attempt) {
             if let geometry { return geometry }
             if let deadline, ContinuousClock.now >= deadline { return nil }
