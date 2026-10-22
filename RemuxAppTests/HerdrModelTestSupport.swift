@@ -420,10 +420,12 @@ final class HerdrModelHarness {
             engine: producerFailure.map {
                 HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1, makeProducer: SwitchableProducer.factory($0))
             } ?? HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1),
-            makeRendererFence: rendererFenceGate?.factory ?? {
-                HerdrPaneRendererFence(engine: $0, paneID: $1, terminal: $2)
-            }
+            makeRendererFence: rendererFenceGate?.factory ?? Self.herdrRendererFence
         )
+    }
+
+    private static let herdrRendererFence: HerdrScreenModel.RendererFenceFactory = {
+        HerdrPaneRendererFence(engine: $0, paneID: $1, terminal: $2)
     }
 
     var states: [TerminalRuntimeState] { stateLog.updates.map(\.state) }
