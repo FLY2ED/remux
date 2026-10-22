@@ -1,0 +1,732 @@
+import Foundation
+import GhosttyKit
+
+/// One Herdr pane's renderer, over the pane terminal the engine gave it.
+@MainActor
+final class HerdrPaneSurface: TerminalPaneInputSink {
+    let paneID: String
+    let terminal: HerdrRetainedTerminal
+    let renderer: TerminalPaneRenderer
+
+    init(paneID: String, terminal: HerdrRetainedTerminal, renderer: TerminalPaneRenderer) {
+        self.paneID = paneID
+        self.terminal = terminal
+        self.renderer = renderer
+    }
+
+    func screenSurface(id: UUID) -> GhosttyManagedSurface {
+        renderer.screenSurface(id: id, inputSink: self)
+    }
+
+    func sendPasteAwaitingCommandCompletion(_ text: String) async -> Bool { false }
+
+    func sendKeyEventAwaitingCommandCompletion(_ event: GhosttySurfaceKeyEvent) async -> Bool { false }
+}
+
+/// The screen model for one Herdr session, as `TmuxScreenModel` is for tmux: one connection at a time
+/// to the session's server, the session's terminal engine, and a renderer for each pane terminal. It
+/// reports the domain `TerminalRuntimeState` that the root reduces.
+///
+/// The root says whether it wants the session on screen; the model speaks the protocol as Herdr's own
+/// client does for a remote session: it connects hidden, then shows the session. Frames go from the
+/// connection to the engine without passing through the main actor; the model lays out the panes and
+/// owns their renderers.
+@MainActor
+final class HerdrScreenModel {
+    typealias BridgeOpener = @Sendable () async throws -> any HerdrBridgeTransport
+
+    let target: SessionTarget
+    let sessionInstanceID: UUID
+    let terminalScreenAdapter = HerdrTerminalScreenAdapter()
+
+    /// One connection to the server, from opening its bridge to its end. A reconnect replaces it, and
+    /// the panes keep their last frame meanwhile.
+    @MainActor
+    private final class Attempt {
+        let id: UInt64
+        var task: Task<Void, Never>?
+        /// The bridge, while the hello waits for the screen's size.
+        var transport: (any HerdrBridgeTransport)?
+        var connection: HerdrConnection?
+        var feed: HerdrEngineFeed?
+        /// Herdr's surface switch names the snapshot's boot, so nothing is shown before one arrives.
+        var hasSnapshot = false
+        var requestedShown = false
+        var visibilityRequests: UInt64 = 0
+        var ended = false
+
+        init(id: UInt64) {
+            self.id = id
+        }
+    }
+
+    /// Calls to the connection and the engine go out in the order they're made: each task starts on the
+    /// main actor in order and goes straight to the actor, which takes tasks of one priority in order.
+    /// Herdr takes the newest of a show and a hide, so their order is the session's state.
+    private static let callPriority = TaskPriority.userInitiated
+
+    private let openBridge: BridgeOpener
+    private let connectionTiming: HerdrConnection.Timing
+    private let onRuntimeStateChange: (TerminalRuntimeStateUpdate) -> Void
+    private let engine = HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1)
+    private var runtime: GhosttyKitRuntime?
+    private var currentTerminalSettings: TerminalSettings
+    private var reportTracker = TerminalRuntimeStateReportTracker()
+    private var stopped = false
+    private var failure: TerminalDisconnectReason?
+    private var updatesTask: Task<Void, Never>?
+
+    private var attempt: Attempt?
+    private var attemptCount: UInt64 = 0
+    private var sizeWaiter: CheckedContinuation<Void, Never>?
+
+    private var isSelected = false
+    private var appPhase = GhosttyAppLifecyclePhase.active
+    private var lastViewport: (size: CGSize, scale: CGFloat)?
+    private(set) var measurement: GhosttyTerminalViewportMeasurement?
+
+    private(set) var layout: HerdrPaneLayout?
+    private var terminals: [String: HerdrRetainedTerminal] = [:]
+    private var surfaces: [String: HerdrPaneSurface] = [:]
+    private var presentationFailures: [String: TerminalDisconnectReason] = [:]
+    private var creatingTerminals: Set<ObjectIdentifier> = []
+    private var creationsDrained: CheckedContinuation<Void, Never>?
+
+    init(
+        target: SessionTarget,
+        sessionInstanceID: UUID,
+        openBridge: @escaping BridgeOpener,
+        onRuntimeStateChange: @escaping (TerminalRuntimeStateUpdate) -> Void,
+        connectionTiming: HerdrConnection.Timing = HerdrConnection.Timing()
+    ) {
+        self.target = target
+        self.sessionInstanceID = sessionInstanceID
+        self.openBridge = openBridge
+        self.onRuntimeStateChange = onRuntimeStateChange
+        self.connectionTiming = connectionTiming
+        currentTerminalSettings = target.terminalSettings
+        terminalScreenAdapter.attach(to: self)
+        do {
+            runtime = try GhosttyKitRuntime(terminalSettings: target.terminalSettings)
+        } catch {
+            failure = Self.runtimeStartFailure
+            didChange()
+            return
+        }
+        let engine = self.engine
+        updatesTask = Task { [weak self] in
+            for await update in engine.updates {
+                self?.handle(update)
+            }
+        }
+        startAttempt()
+    }
+
+    /// True when no connection is open or opening, so the root may replace this model without dropping
+    /// a session the user is attached to.
+    var isDisconnected: Bool {
+        guard let attempt else { return true }
+        return attempt.ended
+    }
+
+    // MARK: - What the root wants
+
+    /// Whether the root shows this session: the selected session, outside Home. A sheet over the
+    /// terminal keeps it shown.
+    func setSelected(_ selected: Bool) {
+        guard !stopped, selected != isSelected else { return }
+        isSelected = selected
+        reconcileVisibility()
+    }
+
+    /// The background hides the session; the app's other phases leave it on screen.
+    func handleAppLifecyclePhase(_ phase: GhosttyAppLifecyclePhase) {
+        guard !stopped else { return }
+        appPhase = phase
+        reconcilePresentationActivity()
+        if let connection = attempt?.connection {
+            let active = phase != .background
+            Task(priority: Self.callPriority) { await connection.setAppActive(active) }
+        }
+        reconcileVisibility()
+        didChange()
+    }
+
+    /// Live settings: the renderers take the new appearance in place, and Herdr gets the new colours.
+    func applyTerminalSettings(_ settings: TerminalSettings) throws {
+        guard !stopped, settings != currentTerminalSettings else { return }
+        guard !settings.hasSameTerminalAppearance(as: currentTerminalSettings) else {
+            currentTerminalSettings = settings
+            return
+        }
+        try runtime?.applyTerminalSettings(settings)
+        let themeChanged = settings.theme != currentTerminalSettings.theme
+        currentTerminalSettings = settings
+        for surface in surfaces.values where !surface.renderer.isClosing {
+            if !surface.renderer.applyTerminalConfiguration(theme: settings.theme) {
+                surface.renderer.failPresentation(message: Self.configurationFailureMessage)
+            }
+        }
+        if themeChanged, let connection = attempt?.connection {
+            reportTheme(to: connection)
+        }
+        if let lastViewport {
+            prepareViewport(size: lastViewport.size, scale: lastViewport.scale)
+        }
+    }
+
+    /// The screen's size. Herdr's client sends its size on every resize; a hidden session gets it with
+    /// the next show.
+    func prepareViewport(size: CGSize, scale: CGFloat) {
+        guard !stopped, let runtime else { return }
+        lastViewport = (size, scale)
+        let measured: GhosttyTerminalViewportMeasurement?
+        do {
+            measured = try runtime.measureTmuxViewportLayout(size: size, scale: scale)
+        } catch {
+            if let attempt { end(attempt, Self.viewportFailure) }
+            return
+        }
+        guard let measured, measured != measurement else { return }
+        measurement = measured
+        let engine = self.engine
+        let cell = measured.cellMetrics
+        Task(priority: Self.callPriority) {
+            await engine.setCellSize(widthPx: cell.pixelWidth, heightPx: cell.pixelHeight)
+        }
+        if let connection = attempt?.connection, let geometry {
+            Task(priority: Self.callPriority) { await connection.resize(geometry) }
+        }
+        resumeSizeWaiter()
+        for paneID in Array(surfaces.keys) {
+            guard let surface = surfaces[paneID], let metrics = displayMetrics(for: paneID) else { continue }
+            _ = surface.renderer.updateDisplay(metrics: metrics)
+        }
+        for paneID in Array(terminals.keys) {
+            createRendererIfPossible(paneID)
+        }
+        didChange()
+    }
+
+    /// Ends the current connection, if any, and opens a new one. The panes keep their terminals, so
+    /// the last frame stays on screen until the new connection's first.
+    func reconnect() {
+        guard !stopped, runtime != nil else { return }
+        if let attempt { retire(attempt) }
+        startAttempt()
+    }
+
+    /// Closes the connection, lets the engine finish its event and free the pane producers, waits for
+    /// renderers still being created, then closes every renderer, which unregisters it from the engine
+    /// before freeing it.
+    func stop() async {
+        guard !stopped else { return }
+        stopped = true
+        resumeSizeWaiter()
+        if let attempt {
+            attempt.task?.cancel()
+            if let connection = attempt.connection {
+                await connection.close()
+            } else if let transport = attempt.transport {
+                await transport.close(reusable: true)
+            }
+            // An opening still under way closes what it opened once it sees the stop.
+            await attempt.task?.value
+        }
+        await engine.stop()
+        if !creatingTerminals.isEmpty {
+            await withCheckedContinuation { creationsDrained = $0 }
+        }
+        await closeAllSurfaces()
+        terminals.removeAll()
+        presentationFailures.removeAll()
+        layout = nil
+        terminalScreenAdapter.invalidate()
+        runtime = nil
+    }
+
+    // MARK: - What the screen reads
+
+    var runtimePhase: GhosttyTerminalRuntimePhase {
+        if let failure { return .failed(message: failure.message, reason: failure) }
+        return attempt?.connection == nil ? .starting : .running
+    }
+
+    var isConnectionOpen: Bool {
+        guard let attempt else { return false }
+        return attempt.connection != nil && !attempt.ended
+    }
+
+    var stateTraceLabel: String {
+        if stopped { return "released" }
+        if failure != nil { return "ended" }
+        guard let attempt, attempt.connection != nil else { return "connecting" }
+        return attempt.requestedShown ? "shown" : "hidden"
+    }
+
+    func paneSurface(_ paneID: String) -> HerdrPaneSurface? {
+        surfaces[paneID]
+    }
+
+    func presentation(ofPane paneID: String?) -> TerminalPanePresentation {
+        guard let paneID else { return .pending }
+        if let failure = presentationFailures[paneID] { return .failed(failure) }
+        return surfaces[paneID]?.renderer.presentation ?? .pending
+    }
+
+    // MARK: - Connection
+
+    private func startAttempt() {
+        attemptCount += 1
+        let attempt = Attempt(id: attemptCount)
+        self.attempt = attempt
+        failure = nil
+        attempt.task = Task { [weak self] in await self?.run(attempt) }
+        didChange()
+    }
+
+    /// The bridge opens at once; the hello goes once the screen has a size. Herdr's server waits 4 s
+    /// for the hello and closes the connection after that, which then ends here as an ordinary dropped
+    /// connection.
+    private func run(_ attempt: Attempt) async {
+        let transport: any HerdrBridgeTransport
+        do {
+            transport = try await openBridge()
+        } catch {
+            // A cancelled opening releases what it claimed.
+            guard isCurrent(attempt) else { return }
+            end(attempt, Self.disconnectReason(openingBridgeFailedWith: error))
+            return
+        }
+        guard isCurrent(attempt) else {
+            await transport.close(reusable: true)
+            return
+        }
+        attempt.transport = transport
+        // Whoever retires the attempt closes its bridge.
+        guard let size = await screenSize(for: attempt) else { return }
+        let feed = await engine.beginConnection()
+        guard isCurrent(attempt) else { return }
+        attempt.feed = feed
+        let connection: HerdrConnection
+        do {
+            connection = try await HerdrConnection.open(
+                transport: transport,
+                hello: HerdrHello(
+                    cellWidthPx: size.cellWidthPx,
+                    cellHeightPx: size.cellHeightPx,
+                    cols: size.cols,
+                    rows: size.rows,
+                    surfaceActive: false
+                ),
+                appActive: appPhase != .background,
+                timing: connectionTiming,
+                onEvent: Self.eventHandler(feed: feed, attemptID: attempt.id, model: self)
+            )
+        } catch {
+            guard isCurrent(attempt) else { return }
+            end(attempt, Self.disconnectReason(connectionFailedWith: error))
+            return
+        }
+        guard isCurrent(attempt), !attempt.ended else {
+            await connection.close()
+            return
+        }
+        attempt.transport = nil
+        attempt.connection = connection
+        // The app may have changed phase while the connection opened.
+        let appActive = appPhase != .background
+        Task(priority: Self.callPriority) { await connection.setAppActive(appActive) }
+        reportTheme(to: connection)
+        reconcileVisibility()
+        didChange()
+    }
+
+    /// Frames and snapshots go to the engine from the connection's reader; only what the model acts on
+    /// comes to the main actor, and nothing here waits for a reply from the connection.
+    private static func eventHandler(
+        feed: HerdrEngineFeed,
+        attemptID: UInt64,
+        model: HerdrScreenModel
+    ) -> @Sendable (HerdrConnectionEvent) async -> Void {
+        { [weak model] event in
+            guard let model else { return }
+            switch event {
+            case .snapshot(let snapshot):
+                await feed.receive(snapshot)
+                Task { @MainActor in model.snapshotArrived(attemptID) }
+            case .surface(let output):
+                await feed.receive(output)
+            case .ended(let error):
+                await model.connectionEnded(attemptID, error)
+            case .bell, .notification, .clipboard, .inputRefused:
+                break
+            }
+        }
+    }
+
+    private func isCurrent(_ attempt: Attempt) -> Bool {
+        !stopped && self.attempt === attempt
+    }
+
+    private var geometry: HerdrSurfaceGeometry? {
+        guard let measurement else { return nil }
+        return HerdrSurfaceGeometry(
+            cellWidthPx: measurement.cellMetrics.pixelWidth,
+            cellHeightPx: measurement.cellMetrics.pixelHeight,
+            cols: measurement.controlViewport.columns,
+            rows: measurement.controlViewport.rows
+        )
+    }
+
+    private func screenSize(for attempt: Attempt) async -> HerdrSurfaceGeometry? {
+        while isCurrent(attempt) {
+            if let geometry { return geometry }
+            await withCheckedContinuation { sizeWaiter = $0 }
+        }
+        return nil
+    }
+
+    private func resumeSizeWaiter() {
+        sizeWaiter?.resume()
+        sizeWaiter = nil
+    }
+
+    private func snapshotArrived(_ attemptID: UInt64) {
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt), !attempt.hasSnapshot else { return }
+        attempt.hasSnapshot = true
+        reconcileVisibility()
+    }
+
+    private func connectionEnded(_ attemptID: UInt64, _ error: HerdrConnectionError) {
+        guard let attempt, attempt.id == attemptID else { return }
+        end(attempt, error.terminalDisconnectReason)
+    }
+
+    /// Ends the attempt and reports why. A connection Remux closes sends no `ended` event, so whoever
+    /// finds the reason reports it here.
+    private func end(_ attempt: Attempt, _ reason: TerminalDisconnectReason) {
+        guard isCurrent(attempt), !attempt.ended else { return }
+        failure = reason
+        retire(attempt)
+        didChange()
+    }
+
+    private func retire(_ attempt: Attempt) {
+        attempt.ended = true
+        attempt.task?.cancel()
+        if attempt === self.attempt { resumeSizeWaiter() }
+        if let connection = attempt.connection {
+            Task(priority: Self.callPriority) { await connection.close() }
+        } else if let transport = attempt.transport {
+            Task { await transport.close(reusable: true) }
+        }
+    }
+
+    /// Shows the session while the root wants it on screen and hides it otherwise. Herdr takes the
+    /// newest of a show and a hide, so each change is sent at once, even while the last is unanswered.
+    private func reconcileVisibility() {
+        guard let attempt, isCurrent(attempt), !attempt.ended, attempt.hasSnapshot,
+              let connection = attempt.connection, let geometry
+        else { return }
+        let wanted = isSelected && appPhase != .background
+        guard wanted != attempt.requestedShown else { return }
+        attempt.requestedShown = wanted
+        attempt.visibilityRequests += 1
+        let request = attempt.visibilityRequests
+        if wanted {
+            Task(priority: Self.callPriority) { [weak self] in
+                do {
+                    _ = try await connection.show(geometry)
+                } catch {
+                    self?.showFailed(attempt, request: request, error: error)
+                }
+            }
+        } else {
+            // The session is off screen and takes no input either way; a hide Herdr doesn't confirm
+            // leaves only its stale foreground on the server.
+            Task(priority: Self.callPriority) { try? await connection.hide() }
+        }
+    }
+
+    /// Herdr's client rolls a failed show back and stays on what it showed before; a Remux session
+    /// screen has nothing else to show, so the connection ends and the root offers a reconnect.
+    private func showFailed(_ attempt: Attempt, request: UInt64, error: Error) {
+        guard isCurrent(attempt), request == attempt.visibilityRequests else { return }
+        if case .connectionEnded? = error as? HerdrCommandError { return }
+        attempt.requestedShown = false
+        end(attempt, Self.disconnectReason(showFailedWith: error))
+    }
+
+    /// Herdr stores a client's colours and uses them whenever that client is in front, so one report
+    /// before the first show, and one after each theme change, keeps the server on the phone's colours.
+    /// Light or dark isn't sent: Herdr infers it from the background, which is how Remux's themes
+    /// differ, and an explicit one would outlive the next theme's background.
+    private func reportTheme(to connection: HerdrConnection) {
+        // Without a report Herdr uses another client's colours; nothing else is lost.
+        guard let colors = try? runtime?.terminalColors() else { return }
+        for update in Self.hostTheme(colors) {
+            Task(priority: Self.callPriority) { await connection.reportHostTheme(update) }
+        }
+    }
+
+    static func hostTheme(_ colors: GhosttyTerminalColors) -> [HerdrHostThemeUpdate] {
+        func rgb(_ color: GhosttyTerminalColors.Color) -> HerdrRGB {
+            HerdrRGB(red: color.red, green: color.green, blue: color.blue)
+        }
+        var palette: [UInt8: HerdrRGB] = [:]
+        for (index, color) in colors.palette.prefix(256).enumerated() {
+            palette[UInt8(index)] = rgb(color)
+        }
+        return [
+            .defaultColor(.foreground, rgb(colors.foreground)),
+            .defaultColor(.background, rgb(colors.background)),
+            .paletteColors(palette),
+        ]
+    }
+
+    // MARK: - Panes
+
+    private func handle(_ update: HerdrEngineUpdate) {
+        guard !stopped else { return }
+        switch update {
+        case .paneTerminal(let paneID, let terminal):
+            terminals[paneID] = terminal
+            presentationFailures.removeValue(forKey: paneID)
+            if let surface = surfaces[paneID], surface.terminal !== terminal {
+                closeSurface(paneID)
+            }
+            createRendererIfPossible(paneID)
+        case .layout(let layout):
+            self.layout = layout
+            let shown = Set(layout.panes.lazy.filter(\.hasTextArea).map(\.paneID))
+            terminals = terminals.filter { shown.contains($0.key) }
+            presentationFailures = presentationFailures.filter { shown.contains($0.key) }
+            for paneID in Array(surfaces.keys) where !shown.contains(paneID) {
+                closeSurface(paneID)
+            }
+            for paneID in shown {
+                if let surface = surfaces[paneID], let metrics = displayMetrics(for: paneID) {
+                    _ = surface.renderer.updateDisplay(metrics: metrics)
+                } else {
+                    createRendererIfPossible(paneID)
+                }
+            }
+            reconcilePresentationActivity()
+            #if DEBUG
+            onPanesLaidOutForTesting?()
+            #endif
+        case .paneTerminalFailed(let paneID):
+            presentationFailures[paneID] = Self.paneFailure
+            surfaces[paneID]?.renderer.failPresentation(message: Self.paneFailure.message)
+        case .rendererWakeFailed(let paneID):
+            surfaces[paneID]?.renderer.failPresentation(message: Self.rendererFailureMessage)
+        case .failed(let error, let connection):
+            if let attempt, attempt.feed?.connection == connection {
+                end(attempt, error.terminalDisconnectReason)
+            }
+        }
+        didChange()
+    }
+
+    private func displayMetrics(for paneID: String) -> GhosttySurfaceDisplayMetrics? {
+        guard let measurement,
+              let pane = layout?.panes.first(where: { $0.paneID == paneID })
+        else { return nil }
+        return measurement.displayMetrics(
+            columns: UInt32(pane.innerRect.width),
+            rows: UInt32(pane.innerRect.height)
+        )
+    }
+
+    private func createRendererIfPossible(_ paneID: String) {
+        guard !stopped, let runtime,
+              let terminal = terminals[paneID],
+              surfaces[paneID]?.terminal !== terminal,
+              presentationFailures[paneID] == nil,
+              let metrics = displayMetrics(for: paneID),
+              creatingTerminals.insert(ObjectIdentifier(terminal)).inserted
+        else { return }
+        TerminalPaneRenderer.create(
+            app: runtime.appHandle,
+            terminal: terminal,
+            fence: HerdrPaneRendererFence(engine: engine, paneID: paneID, terminal: terminal),
+            writeInput: nil,
+            baseConfig: runtime.makeTmuxBaseSurfaceConfig(),
+            metrics: metrics,
+            theme: currentTerminalSettings.theme,
+            diagnosticName: "herdr pane=\(paneID)",
+            onRendererFailure: { [weak self] in self?.rendererFailed(paneID, terminal: terminal) }
+        ) { [weak self] result in
+            guard let self else {
+                if case .success(let renderer) = result { renderer.close() }
+                return
+            }
+            self.rendererCreated(result, paneID: paneID, terminal: terminal)
+        }
+    }
+
+    private func rendererCreated(
+        _ result: Result<TerminalPaneRenderer, TerminalPaneRenderer.CreateError>,
+        paneID: String,
+        terminal: HerdrRetainedTerminal
+    ) {
+        creatingTerminals.remove(ObjectIdentifier(terminal))
+        defer { resumeCreationDrainIfQuiescent() }
+        // The engine may have replaced or dropped the terminal while its renderer was being registered.
+        let isCurrentTerminal = !stopped && terminals[paneID] === terminal
+        switch result {
+        case .failure(let error):
+            guard isCurrentTerminal else { return }
+            presentationFailures[paneID] = TerminalDisconnectReason(
+                kind: .runtime,
+                message: "Terminal renderer could not be created. Reconnect to try again."
+            )
+            GhosttyRuntimeTrace.diagnostics(
+                "herdrPane.createFailed pane=\(paneID) error=\(String(describing: error))"
+            )
+        case .success(let renderer):
+            guard isCurrentTerminal, let metrics = displayMetrics(for: paneID) else {
+                renderer.close()
+                return
+            }
+            surfaces[paneID] = HerdrPaneSurface(paneID: paneID, terminal: terminal, renderer: renderer)
+            renderer.onPresentationChange = { [weak self] in self?.didChange() }
+            // Settings and the pane's size may have changed while the renderer was being registered.
+            if !renderer.applyTerminalConfiguration(theme: currentTerminalSettings.theme)
+                || !renderer.updateDisplay(metrics: metrics) {
+                renderer.failPresentation(message: Self.configurationFailureMessage)
+            }
+            reconcilePresentationActivity()
+        }
+        didChange()
+    }
+
+    private func rendererFailed(_ paneID: String, terminal: HerdrRetainedTerminal) {
+        guard let surface = surfaces[paneID], surface.terminal === terminal else { return }
+        surface.renderer.failPresentation(message: Self.rendererFailureMessage)
+        didChange()
+    }
+
+    private func reconcilePresentationActivity() {
+        let sceneActive = appPhase == .active
+        for (paneID, surface) in surfaces {
+            let pane = layout?.panes.first { $0.paneID == paneID }
+            surface.renderer.setSceneActive(sceneActive)
+            surface.renderer.setPresented(pane != nil)
+            surface.renderer.setFocused(pane?.focused == true)
+        }
+    }
+
+    private func closeSurface(_ paneID: String) {
+        surfaces.removeValue(forKey: paneID)?.renderer.close()
+    }
+
+    private func closeAllSurfaces() async {
+        let closing = Array(surfaces.values)
+        surfaces.removeAll()
+        guard !closing.isEmpty else { return }
+        await withCheckedContinuation { continuation in
+            var remaining = closing.count
+            for surface in closing {
+                surface.renderer.close {
+                    remaining -= 1
+                    if remaining == 0 { continuation.resume() }
+                }
+            }
+        }
+    }
+
+    private func resumeCreationDrainIfQuiescent() {
+        guard creatingTerminals.isEmpty, let continuation = creationsDrained else { return }
+        creationsDrained = nil
+        continuation.resume()
+    }
+
+    // MARK: - Reporting
+
+    private func didChange() {
+        guard !stopped else { return }
+        terminalScreenAdapter.objectWillChange.send()
+        let readiness = terminalScreenAdapter.terminalScreenPresentationProjection.readiness
+        let state = TerminalReadinessProjector.runtimeState(readiness)
+        let source: TerminalRuntimeStateUpdateSource = readiness.phase == .running ? .readiness : .runtime
+        guard reportTracker.shouldReport(state: state, source: source) else { return }
+        onRuntimeStateChange(TerminalRuntimeStateUpdate(
+            workspaceID: target.workspace.id,
+            instanceID: sessionInstanceID,
+            state: state,
+            source: source
+        ))
+    }
+
+    #if DEBUG
+    var rendererCreationsInFlightForTesting: Int { creatingTerminals.count }
+    var onPanesLaidOutForTesting: (() -> Void)?
+    #endif
+
+    private static let runtimeStartFailure = TerminalDisconnectReason(
+        kind: .runtime,
+        message: "terminal runtime failed to initialize"
+    )
+
+    private static let viewportFailure = TerminalDisconnectReason(
+        kind: .runtime,
+        message: "terminal viewport failed to initialize"
+    )
+
+    private static let paneFailure = TerminalDisconnectReason(
+        kind: .runtime,
+        message: "Terminal pane could not be painted. Reconnect to try again."
+    )
+
+    private static let rendererFailureMessage = "Terminal renderer is unavailable. Reconnect to try again."
+    private static let configurationFailureMessage =
+        "Terminal renderer could not apply its current configuration. Reconnect to try again."
+
+    private static func disconnectReason(openingBridgeFailedWith error: Error) -> TerminalDisconnectReason {
+        switch error as? HerdrBridgeError {
+        case .herdrNotFound?, .herdrNotExecutable?:
+            return TerminalDisconnectReason(kind: .profile, message: error.localizedDescription)
+        case .remoteExit?:
+            return TerminalDisconnectReason(kind: .remoteExit, message: error.localizedDescription)
+        case .channel?:
+            return TerminalDisconnectReason(kind: .transportIO, message: error.localizedDescription)
+        case nil:
+            return GhosttyTerminalDisconnectReasonClassifier.transportStartFailure(error)
+        }
+    }
+
+    private static func disconnectReason(connectionFailedWith error: Error) -> TerminalDisconnectReason {
+        (error as? HerdrConnectionError)?.terminalDisconnectReason
+            ?? TerminalDisconnectReason(kind: .unknown, message: error.localizedDescription)
+    }
+
+    private static func disconnectReason(showFailedWith error: Error) -> TerminalDisconnectReason {
+        if case .timedOut? = error as? HerdrCommandError {
+            return TerminalDisconnectReason(kind: .transportIO, message: error.localizedDescription)
+        }
+        return TerminalDisconnectReason(kind: .runtime, message: error.localizedDescription)
+    }
+}
+
+extension HerdrConnectionError {
+    var terminalDisconnectReason: TerminalDisconnectReason {
+        let message = errorDescription ?? "The connection to Herdr failed."
+        switch self {
+        case .closed, .transport, .unresponsive, .handshakeTimedOut:
+            return TerminalDisconnectReason(kind: .transportIO, message: message)
+        case .serverShutdown:
+            return TerminalDisconnectReason(kind: .remoteExit, message: message)
+        case .rejected, .incompatible, .wire:
+            return TerminalDisconnectReason(kind: .runtime, message: message)
+        }
+    }
+}
+
+extension HerdrPaneLayout.Pane {
+    /// A pane with no text area has no terminal.
+    var hasTextArea: Bool {
+        innerRect.width > 0 && innerRect.height > 0
+    }
+}

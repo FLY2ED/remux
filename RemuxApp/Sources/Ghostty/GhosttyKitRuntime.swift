@@ -12,6 +12,21 @@ enum GhosttyKitRuntimeError: Error, Equatable {
     case configCreationFailed
     case appCreationFailed
     case surfaceMeasurementFailed(ghostty_terminal_surface_result_e)
+    case colorsUnavailable
+}
+
+/// The terminal's colours as Ghostty resolves them from the settings: its default text and background
+/// colours and all 256 indexed colours.
+struct GhosttyTerminalColors: Equatable, Sendable {
+    struct Color: Equatable, Sendable {
+        let red: UInt8
+        let green: UInt8
+        let blue: UInt8
+    }
+
+    let foreground: Color
+    let background: Color
+    let palette: [Color]
 }
 
 enum GhosttyTerminalDeviceClass {
@@ -237,6 +252,11 @@ final class GhosttyKitRuntime {
         try state.applyTerminalSettings(settings)
     }
 
+    /// The colours of the current settings, for a backend that reports them to its server.
+    func terminalColors() throws -> GhosttyTerminalColors {
+        try state.terminalColors()
+    }
+
     private static func initializeBackend() throws {
         guard !initialized else { return }
         try configureProcessDirectories()
@@ -369,6 +389,47 @@ private final class GhosttyKitRuntimeState {
         ghostty_config_finalize(replacement)
         ghostty_app_update_config(app, replacement)
         terminalSettings = settings
+    }
+
+    /// Read from a config built from the current settings: a settings change gives the app a new
+    /// config, and `config` keeps the first.
+    func terminalColors() throws -> GhosttyTerminalColors {
+        guard let config = ghostty_config_new() else {
+            throw GhosttyKitRuntimeError.configCreationFailed
+        }
+        defer { ghostty_config_free(config) }
+        try Self.loadSettings(terminalSettings, into: config, effectiveFontSize: nil)
+        ghostty_config_finalize(config)
+
+        var foreground = ghostty_config_color_s()
+        var background = ghostty_config_color_s()
+        var palette = ghostty_config_palette_s()
+        guard Self.read("foreground", from: config, into: &foreground),
+              Self.read("background", from: config, into: &background),
+              Self.read("palette", from: config, into: &palette)
+        else { throw GhosttyKitRuntimeError.colorsUnavailable }
+
+        func color(_ value: ghostty_config_color_s) -> GhosttyTerminalColors.Color {
+            GhosttyTerminalColors.Color(red: value.r, green: value.g, blue: value.b)
+        }
+        let paletteColors = withUnsafeBytes(of: palette.colors) { bytes in
+            bytes.bindMemory(to: ghostty_config_color_s.self).map(color)
+        }
+        return GhosttyTerminalColors(
+            foreground: color(foreground),
+            background: color(background),
+            palette: paletteColors
+        )
+    }
+
+    private static func read<Value>(
+        _ key: String,
+        from config: ghostty_config_t,
+        into value: inout Value
+    ) -> Bool {
+        withUnsafeMutablePointer(to: &value) { pointer in
+            ghostty_config_get(config, pointer, key, UInt(key.utf8.count))
+        }
     }
 
     private static func loadSettings(

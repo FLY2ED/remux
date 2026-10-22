@@ -30,8 +30,9 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testPanesArePaintedBeforeTheirRenderersExist() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        await engine.receive(try Self.snapshot(revision: 1))
-        await engine.receive(.surface(try Self.surface(
+        let feed = await engine.beginConnection()
+        await feed.receive(try Self.snapshot(revision: 1))
+        await feed.receive(.surface(try Self.surface(
             revision: 1,
             lines: ["left 1    right 1", "left 2    right 2"],
             panes: [Self.pane("L", x: 0, width: 8, height: 2, focused: true), Self.pane("R", x: 10, width: 7, height: 2)]
@@ -54,14 +55,15 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAPatchChangesOnlyTheRowsItTouches() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection()
         let panes = [Self.pane("L", x: 0, width: 8, height: 2), Self.pane("R", x: 10, width: 7, height: 2)]
-        await engine.receive(try Self.snapshot(revision: 1))
-        await engine.receive(.surface(try Self.surface(revision: 1, lines: ["left 1    right 1", "left 2    right 2"], panes: panes)))
+        await feed.receive(try Self.snapshot(revision: 1))
+        await feed.receive(.surface(try Self.surface(revision: 1, lines: ["left 1    right 1", "left 2    right 2"], panes: panes)))
         let terminals = try await updates.terminals(count: 2)
         let left = try await makeRenderer(engine: engine, paneID: "L", terminal: try XCTUnwrap(terminals["L"]), columns: 8, rows: 2)
         let right = try await makeRenderer(engine: engine, paneID: "R", terminal: try XCTUnwrap(terminals["R"]), columns: 7, rows: 2)
 
-        await engine.receive(.patch(try Self.patch(
+        await feed.receive(.patch(try Self.patch(
             base: 1,
             rows: [HerdrPatchRow(x: 0, y: 1, cells: Self.cells("LEFT 2  "))],
             panes: panes
@@ -77,8 +79,9 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAResizedPaneIsRepaintedAtItsNewSize() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        await engine.receive(try Self.snapshot(revision: 1))
-        await engine.receive(.surface(try Self.surface(
+        let feed = await engine.beginConnection()
+        await feed.receive(try Self.snapshot(revision: 1))
+        await feed.receive(.surface(try Self.surface(
             revision: 1,
             lines: ["0123456789AB", "second line ", "third line  "],
             panes: [Self.pane("P", x: 0, width: 12, height: 3)]
@@ -87,8 +90,8 @@ final class HerdrTerminalEngineTests: XCTestCase {
         _ = try await updates.nextLayout()
         let renderer = try await makeRenderer(engine: engine, paneID: "P", terminal: terminal, columns: 12, rows: 3)
 
-        await engine.receive(try Self.snapshot(revision: 2))
-        await engine.receive(.surface(try Self.surface(
+        await feed.receive(try Self.snapshot(revision: 2))
+        await feed.receive(.surface(try Self.surface(
             projection: 2,
             revision: 2,
             lines: ["abcde", "fghij"],
@@ -109,6 +112,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
             guard let negotiated = fixture.golden.negotiated else { continue }
             let engine = makeEngine()
             let updates = UpdateLog(engine)
+            let feed = await engine.beginConnection()
             var decoder = HerdrSurfaceDecoder(deltaNegotiated: negotiated.delta, scrollNegotiated: negotiated.scroll)
             var reference = HerdrPresentation()
             var splitter = HerdrFrameSplitter()
@@ -118,7 +122,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
                 if case .control(let kind, let data) = message,
                    case .snapshot(let snapshot) = try HerdrEndpointControl.parse(kind: kind, data: data) {
                     reference.receive(snapshot)
-                    await engine.receive(snapshot)
+                    await feed.receive(snapshot)
                     continue
                 }
                 guard let surfaceMessage = try HerdrSurfaceDecoderTests.surfaceMessage(message) else { continue }
@@ -127,7 +131,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
                 case .surface(let surface): try reference.receive(surface)
                 case .patch(let patch): _ = reference.receive(patch)
                 }
-                await engine.receive(output)
+                await feed.receive(output)
             }
             await engine.stop()
             guard let surface = reference.presented?.surface else { continue }
@@ -160,8 +164,9 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAPaneMissingFromTheNextFrameIsDropped() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        await engine.receive(try Self.snapshot(revision: 1))
-        await engine.receive(.surface(try Self.surface(
+        let feed = await engine.beginConnection()
+        await feed.receive(try Self.snapshot(revision: 1))
+        await feed.receive(.surface(try Self.surface(
             revision: 1,
             lines: ["a  b"],
             panes: [Self.pane("A", x: 0, width: 1, height: 1), Self.pane("B", x: 3, width: 1, height: 1)]
@@ -169,8 +174,8 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let terminals = try await updates.terminals(count: 2)
         _ = try await updates.nextLayout()
 
-        await engine.receive(try Self.snapshot(revision: 2))
-        await engine.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["a   "], panes: [Self.pane("A", x: 0, width: 4, height: 1)])))
+        await feed.receive(try Self.snapshot(revision: 2))
+        await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["a   "], panes: [Self.pane("A", x: 0, width: 4, height: 1)])))
         let layout = try await updates.nextLayout()
         XCTAssertEqual(layout.panes.map(\.paneID), ["A"])
 
@@ -183,20 +188,21 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAPaneWithoutRoomGetsANewTerminalWhenItHasRoomAgain() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        await engine.receive(try Self.snapshot(revision: 1))
-        await engine.receive(.surface(try Self.surface(revision: 1, lines: ["ab"], panes: [Self.pane("P", x: 0, width: 2, height: 1)])))
+        let feed = await engine.beginConnection()
+        await feed.receive(try Self.snapshot(revision: 1))
+        await feed.receive(.surface(try Self.surface(revision: 1, lines: ["ab"], panes: [Self.pane("P", x: 0, width: 2, height: 1)])))
         let first = try await updates.terminal(for: "P")
         _ = try await updates.nextLayout()
 
-        await engine.receive(try Self.snapshot(revision: 2))
-        await engine.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["ab"], panes: [Self.pane("P", x: 0, width: 0, height: 1)])))
+        await feed.receive(try Self.snapshot(revision: 2))
+        await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["ab"], panes: [Self.pane("P", x: 0, width: 0, height: 1)])))
         let layout = try await updates.nextLayout()
         XCTAssertEqual(layout.panes.map(\.paneID), ["P"])
         let stale = await registrationError(engine: engine, paneID: "P", terminal: first)
         XCTAssertEqual(stale, .terminalGone)
 
-        await engine.receive(try Self.snapshot(revision: 3))
-        await engine.receive(.surface(try Self.surface(projection: 3, revision: 3, lines: ["cd"], panes: [Self.pane("P", x: 0, width: 2, height: 1)])))
+        await feed.receive(try Self.snapshot(revision: 3))
+        await feed.receive(.surface(try Self.surface(projection: 3, revision: 3, lines: ["cd"], panes: [Self.pane("P", x: 0, width: 2, height: 1)])))
         let second = try await updates.terminal(for: "P")
         XCTAssertFalse(first === second)
         let renderer = try await makeRenderer(engine: engine, paneID: "P", terminal: second, columns: 2, rows: 1)
@@ -208,13 +214,14 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testANewBootGivesItsPanesNewTerminals() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        await engine.receive(try Self.snapshot(revision: 1, boot: "one"))
-        await engine.receive(.surface(try Self.surface(boot: "one", revision: 1, lines: ["one"], panes: [Self.pane("P", x: 0, width: 3, height: 1)])))
+        let feed = await engine.beginConnection()
+        await feed.receive(try Self.snapshot(revision: 1, boot: "one"))
+        await feed.receive(.surface(try Self.surface(boot: "one", revision: 1, lines: ["one"], panes: [Self.pane("P", x: 0, width: 3, height: 1)])))
         let first = try await updates.terminal(for: "P")
         _ = try await updates.nextLayout()
 
-        await engine.receive(try Self.snapshot(revision: 1, boot: "two"))
-        await engine.receive(.surface(try Self.surface(boot: "two", revision: 1, lines: ["two"], panes: [Self.pane("P", x: 0, width: 3, height: 1)])))
+        await feed.receive(try Self.snapshot(revision: 1, boot: "two"))
+        await feed.receive(.surface(try Self.surface(boot: "two", revision: 1, lines: ["two"], panes: [Self.pane("P", x: 0, width: 3, height: 1)])))
         let second = try await updates.terminal(for: "P")
         XCTAssertFalse(first === second)
         let layout = try await updates.nextLayout()
@@ -227,20 +234,52 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// A later connection's feed takes over: the earlier one's late events are dropped, and the same
+    /// boot's next frame is painted into the same terminals, so the last frame stays until then.
+    func testALaterConnectionDropsTheEarlierOnesEventsAndKeepsThePanes() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let first = await engine.beginConnection()
+        let panes = [Self.pane("P", x: 0, width: 3, height: 1)]
+        await first.receive(try Self.snapshot(revision: 1))
+        await first.receive(.surface(try Self.surface(revision: 1, lines: ["one"], panes: panes)))
+        let terminal = try await updates.terminal(for: "P")
+        let layout = try await updates.nextLayout()
+        let renderer = try await makeRenderer(engine: engine, paneID: "P", terminal: terminal, columns: 3, rows: 1)
+
+        let second = await engine.beginConnection()
+        await first.receive(.patch(try Self.patch(
+            base: 1,
+            rows: [HerdrPatchRow(x: 0, y: 0, cells: Self.cells("old"))],
+            panes: panes
+        )))
+        XCTAssertEqual(rows(of: renderer, columns: 3, rows: 1), ["one"])
+
+        // Revisions restart with each connection.
+        await second.receive(try Self.snapshot(revision: 1))
+        await second.receive(.surface(try Self.surface(revision: 1, lines: ["two"], panes: panes)))
+        XCTAssertEqual(rows(of: renderer, columns: 3, rows: 1), ["two"])
+        await engine.stop()
+        let rest = await updates.drain()
+        XCTAssertTrue(rest.isEmpty, "the same panes need no new terminals or layout: \(rest)")
+        XCTAssertEqual(layout.tab, nil)
+    }
+
     /// A grid Remux can't index ends the engine as a wire failure; nothing after it is painted.
     func testAnUnindexableSurfaceIsAWireFailure() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        await engine.receive(try Self.snapshot(revision: 1))
-        await engine.receive(.surface(try Self.surface(
+        let feed = await engine.beginConnection()
+        await feed.receive(try Self.snapshot(revision: 1))
+        await feed.receive(.surface(try Self.surface(
             revision: 1,
             lines: ["abcd"],
             panes: [Self.pane("P", x: 2, width: 5, height: 1)]
         )))
-        guard case .failed(.wire) = try await updates.next() else {
+        guard case .failed(.wire, _) = try await updates.next() else {
             return XCTFail("expected a wire failure")
         }
-        await engine.receive(.surface(try Self.surface(revision: 1, lines: ["abcd"], panes: [Self.pane("P", x: 0, width: 4, height: 1)])))
+        await feed.receive(.surface(try Self.surface(revision: 1, lines: ["abcd"], panes: [Self.pane("P", x: 0, width: 4, height: 1)])))
         await engine.stop()
         let after = await updates.drain()
         XCTAssertTrue(after.isEmpty, "\(after)")
@@ -253,9 +292,10 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testRegistrationGoesThroughTheEngineAndUnregistrationFencesWakes() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection()
         let panes = [Self.pane("P", x: 0, width: 4, height: 1)]
-        await engine.receive(try Self.snapshot(revision: 1))
-        await engine.receive(.surface(try Self.surface(revision: 1, lines: ["abcd"], panes: panes)))
+        await feed.receive(try Self.snapshot(revision: 1))
+        await feed.receive(.surface(try Self.surface(revision: 1, lines: ["abcd"], panes: panes)))
         let terminal = try await updates.terminal(for: "P")
         let renderer = try await makeRenderer(engine: engine, paneID: "P", terminal: terminal, columns: 4, rows: 1)
 
@@ -268,7 +308,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await close(renderer)
         // The surface is freed: painting the pane now must not wake it.
         for revision in UInt64(2)...UInt64(20) {
-            await engine.receive(.patch(try Self.patch(
+            await feed.receive(.patch(try Self.patch(
                 base: revision - 1,
                 rows: [HerdrPatchRow(x: 0, y: 0, cells: Self.cells(String(format: "%04d", revision)))],
                 panes: panes
@@ -284,9 +324,10 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testStopWithWorkInFlight() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection()
         let panes = [Self.pane("P", x: 0, width: 4, height: 1)]
-        await engine.receive(try Self.snapshot(revision: 1))
-        await engine.receive(.surface(try Self.surface(revision: 1, lines: ["abcd"], panes: panes)))
+        await feed.receive(try Self.snapshot(revision: 1))
+        await feed.receive(.surface(try Self.surface(revision: 1, lines: ["abcd"], panes: panes)))
         let terminal = try await updates.terminal(for: "P")
         _ = try await updates.nextLayout()
         let renderer = try await makeRenderer(engine: engine, paneID: "P", terminal: terminal, columns: 4, rows: 1)
@@ -299,7 +340,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
             )
         }
         let feeding = Task.detached {
-            for patch in patches { await engine.receive(.patch(patch)) }
+            for patch in patches { await feed.receive(.patch(patch)) }
         }
         let resizing = Task.detached {
             for size in UInt32(10)...UInt32(60) { await engine.setCellSize(widthPx: size, heightPx: size * 2) }
@@ -378,38 +419,8 @@ final class HerdrTerminalEngineTests: XCTestCase {
         }
     }
 
-    /// Each row's text as Ghostty selects it: a word in the row, stretched across `columns` cells.
     private func rows(of renderer: TerminalPaneRenderer, columns: Int, rows: Int) -> [String] {
-        guard let surface = renderer.rawSurface else {
-            XCTFail("renderer has no surface")
-            return []
-        }
-        let cellWidth = Double(measurement.cellMetrics.pixelWidth)
-        let cellHeight = Double(measurement.cellMetrics.pixelHeight)
-        var snapshot = ghostty_terminal_surface_selection_snapshot_s()
-        defer { _ = ghostty_terminal_surface_clear_selection(surface, &snapshot) }
-        return (0..<rows).map { row in
-            let y = (Double(row) + 0.5) * cellHeight
-            var anchored = false
-            for column in 0..<columns where !anchored {
-                _ = ghostty_terminal_surface_select_word(surface, (Double(column) + 0.5) * cellWidth, y, &snapshot)
-                anchored = snapshot.active
-            }
-            guard anchored else { return "" }
-            _ = ghostty_terminal_surface_set_selection_endpoint(
-                surface, GHOSTTY_TERMINAL_SURFACE_SELECTION_ENDPOINT_START, 0.5 * cellWidth, y, &snapshot
-            )
-            _ = ghostty_terminal_surface_set_selection_endpoint(
-                surface, GHOSTTY_TERMINAL_SURFACE_SELECTION_ENDPOINT_END, (Double(columns) - 0.5) * cellWidth, y, &snapshot
-            )
-            var text = ghostty_text_s()
-            guard ghostty_terminal_surface_read_selection(surface, &text) == GHOSTTY_TERMINAL_SURFACE_INPUT_SENT else {
-                return ""
-            }
-            defer { _ = ghostty_terminal_surface_free_text(surface, &text) }
-            let bytes = UnsafeRawBufferPointer(start: text.text, count: Int(text.text_len))
-            return String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespaces)
-        }
+        RendererText.rows(of: renderer, columns: columns, rows: rows)
     }
 
     /// Each row of the area as text without surrounding blanks; nil for a row this check can't predict

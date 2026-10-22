@@ -10,7 +10,14 @@ struct HerdrPaneLayout: Equatable, Sendable {
         let focused: Bool
     }
 
+    /// The tab the surface shows: the snapshot's focused tab.
+    struct Tab: Equatable, Sendable {
+        let tabID: String
+        let label: String
+    }
+
     let bootID: String
+    let tab: Tab?
     let columns: UInt16
     let rows: UInt16
     let panes: [Pane]
@@ -29,8 +36,24 @@ enum HerdrEngineUpdate: Sendable {
     case paneTerminalFailed(paneID: String)
     /// Waking the pane's renderer failed and its registration is dropped, as for a tmux pane.
     case rendererWakeFailed(paneID: String)
-    /// A surface Remux can't index. Nothing more is painted; the owner ends the attachment.
-    case failed(HerdrConnectionError)
+    /// A surface Remux can't index came over `connection`. Nothing more of it is painted; the owner
+    /// ends that connection.
+    case failed(HerdrConnectionError, connection: UInt64)
+}
+
+/// One connection's way into the engine. Once a later connection begins, this one's events are
+/// dropped, so a replaced connection's late frames never reach the panes.
+struct HerdrEngineFeed: Sendable {
+    let engine: HerdrTerminalEngine
+    let connection: UInt64
+
+    func receive(_ snapshot: HerdrSnapshot) async {
+        await engine.receive(snapshot, connection: connection)
+    }
+
+    func receive(_ output: HerdrSurfaceDecoder.Output) async {
+        await engine.receive(output, connection: connection)
+    }
 }
 
 enum HerdrRendererRegistrationError: Error, Equatable {
@@ -41,9 +64,10 @@ enum HerdrRendererRegistrationError: Error, Equatable {
     case rendererWakeFailed
 }
 
-/// Turns one connection's frames into each pane's terminal, off the main thread, as the tmux client
-/// does on its writer queue. It takes the decoder's output in wire order, applies Herdr's presentation
-/// rules, paints every listed pane into its own terminal, and wakes the pane's renderer.
+/// Turns a session's frames into each pane's terminal, off the main thread, as the tmux client does on
+/// its writer queue. It takes the decoder's output in wire order, one connection at a time, applies
+/// Herdr's presentation rules, paints every listed pane into its own terminal, and wakes the pane's
+/// renderer.
 ///
 /// Every method runs to completion without suspending, so one event is fully painted before the next
 /// one, a registration or a stop is taken. The owner learns of terminals and layouts through `updates`;
@@ -74,6 +98,8 @@ actor HerdrTerminalEngine {
 
     private let continuation: AsyncStream<HerdrEngineUpdate>.Continuation
     private var state = State.running
+    /// The connection whose events are painted; zero until the first begins.
+    private var connection: UInt64 = 0
     private var presentation = HerdrPresentation()
     private var panes: [String: Pane] = [:]
     /// Listed panes whose terminal Ghostty couldn't make or paint.
@@ -92,21 +118,32 @@ actor HerdrTerminalEngine {
 
     // MARK: - Frames
 
-    func receive(_ snapshot: HerdrSnapshot) {
-        guard state == .running else { return }
+    /// Herdr's revisions restart with each connection, so the new one starts a new presentation. The
+    /// panes keep their terminals and last paint: the same server boot's next frame is painted as a
+    /// change from it, and until then the last frame stays on screen.
+    func beginConnection() -> HerdrEngineFeed {
+        connection += 1
+        if state == .failed { state = .running }
+        presentation = HerdrPresentation()
+        paintedSurface = nil
+        return HerdrEngineFeed(engine: self, connection: connection)
+    }
+
+    fileprivate func receive(_ snapshot: HerdrSnapshot, connection: UInt64) {
+        guard state == .running, connection == self.connection else { return }
         presentation.receive(snapshot)
         paintPresented()
     }
 
-    func receive(_ output: HerdrSurfaceDecoder.Output) {
-        guard state == .running else { return }
+    fileprivate func receive(_ output: HerdrSurfaceDecoder.Output, connection: UInt64) {
+        guard state == .running, connection == self.connection else { return }
         switch output {
         case .surface(let surface):
             do {
                 try presentation.receive(surface)
             } catch {
                 state = .failed
-                continuation.yield(.failed(.wire(error)))
+                continuation.yield(.failed(.wire(error), connection: connection))
                 return
             }
         case .patch(let patch):
@@ -150,7 +187,7 @@ actor HerdrTerminalEngine {
     }
 
     private func paintPresented() {
-        guard let surface = presentation.presented?.surface else { return }
+        guard let (snapshot, surface) = presentation.presented else { return }
         let presented = PaintedSurface(
             bootID: surface.bootID,
             projectionRevision: surface.projectionRevision,
@@ -174,7 +211,7 @@ actor HerdrTerminalEngine {
         let listed = Set(surface.panes.map(\.paneID))
         panes = panes.filter { listed.contains($0.key) }
         failedPaneIDs.formIntersection(listed)
-        publishLayout(of: surface)
+        publishLayout(of: surface, snapshot: snapshot)
     }
 
     private func paint(_ next: HerdrPanePainter.Painted, paneID: String) {
@@ -243,9 +280,11 @@ actor HerdrTerminalEngine {
         continuation.yield(.paneTerminal(paneID: paneID, terminal: terminal))
     }
 
-    private func publishLayout(of surface: HerdrPaneSurfaceFrame) {
+    private func publishLayout(of surface: HerdrPaneSurfaceFrame, snapshot: HerdrSnapshot) {
+        let tab = snapshot.tabs.first { $0.tabID == snapshot.focusedTabID }
         let next = HerdrPaneLayout(
             bootID: surface.bootID,
+            tab: tab.map { HerdrPaneLayout.Tab(tabID: $0.tabID, label: $0.label) },
             columns: surface.frame.width,
             rows: surface.frame.height,
             panes: surface.panes.map {
