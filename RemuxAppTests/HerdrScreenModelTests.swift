@@ -48,8 +48,9 @@ final class HerdrScreenModelTests: XCTestCase {
         )])
     }
 
-    /// The phone's Ghostty colours go out right after the hello, before any show, and again when the
-    /// theme changes.
+    /// The phone's theme goes out right after the hello, before any show, as Herdr's client reports its
+    /// terminal: light or dark, then the Ghostty colours. It goes out again in full when the theme
+    /// changes.
     func testTheThemeIsReportedBeforeTheFirstShowAndAgainWhenItChanges() async throws {
         let harness = await makeHarness(settings: TerminalSettings(fontSize: nil, theme: .remuxDark))
         let bridge = try await harness.bridge()
@@ -57,22 +58,25 @@ final class HerdrScreenModelTests: XCTestCase {
         harness.setScreenSize()
         harness.model.setSelected(true)
 
-        let writes = try await harness.writes(bridge, count: 7)
-        XCTAssertEqual(writes[1], .theme(.defaultColor(.foreground, HerdrRGB(red: 0xCD, green: 0xD6, blue: 0xF4))))
-        XCTAssertEqual(writes[2], .theme(.defaultColor(.background, HerdrRGB(red: 0x1E, green: 0x1E, blue: 0x2E))))
-        guard case .theme(.paletteColors(let palette)) = writes[3] else {
-            return XCTFail("expected the palette, got \(writes[3])")
+        let writes = try await harness.writes(bridge, count: 8)
+        XCTAssertEqual(writes[1], .theme(.appearance(.dark)))
+        XCTAssertEqual(writes[2], .theme(.defaultColor(.foreground, HerdrRGB(red: 0xCD, green: 0xD6, blue: 0xF4))))
+        XCTAssertEqual(writes[3], .theme(.defaultColor(.background, HerdrRGB(red: 0x1E, green: 0x1E, blue: 0x2E))))
+        guard case .theme(.paletteColors(let palette)) = writes[4] else {
+            return XCTFail("expected the palette, got \(writes[4])")
         }
         XCTAssertEqual(palette.count, 256)
         XCTAssertEqual(palette[1], HerdrRGB(red: 0xF3, green: 0x8B, blue: 0xA8))
         // Ghostty's own colour cube above the 16 the theme sets.
         XCTAssertEqual(palette[196], HerdrRGB(red: 0xFF, green: 0x00, blue: 0x00))
-        XCTAssertTrue(writes[4...].contains { $0.isSurfaceSet }, "\(writes)")
+        XCTAssertTrue(writes[5...].contains { $0.isSurfaceSet }, "\(writes)")
 
         try harness.model.applyTerminalSettings(TerminalSettings(fontSize: nil, theme: .remuxLight))
-        let changed = try await harness.writes(bridge, from: 7, count: 3)
-        XCTAssertEqual(changed[1], .theme(.defaultColor(.background, HerdrRGB(red: 0xEF, green: 0xF1, blue: 0xF5))))
-        XCTAssertEqual(changed[0], .theme(.defaultColor(.foreground, HerdrRGB(red: 0x4C, green: 0x4F, blue: 0x69))))
+        let changed = try await harness.writes(bridge, from: 8, count: 4)
+        XCTAssertEqual(changed[0], .theme(.appearance(.light)))
+        XCTAssertEqual(changed[1], .theme(.defaultColor(.foreground, HerdrRGB(red: 0x4C, green: 0x4F, blue: 0x69))))
+        XCTAssertEqual(changed[2], .theme(.defaultColor(.background, HerdrRGB(red: 0xEF, green: 0xF1, blue: 0xF5))))
+        guard case .theme(.paletteColors) = changed[3] else { return XCTFail("expected the palette, got \(changed[3])") }
     }
 
     // MARK: - Showing
@@ -85,13 +89,13 @@ final class HerdrScreenModelTests: XCTestCase {
         await bridge.serve(try HerdrServerScript.welcome())
         harness.setScreenSize()
         harness.model.setSelected(true)
-        _ = try await harness.writes(bridge, count: 4)
+        _ = try await harness.writes(bridge, count: 5)
         try await Task.sleep(for: .milliseconds(100))
         let beforeSnapshot = await bridge.writtenCount
-        XCTAssertEqual(beforeSnapshot, 4, "nothing is shown before a snapshot")
+        XCTAssertEqual(beforeSnapshot, 5, "nothing is shown before a snapshot")
 
         await bridge.serve(HerdrServerScript.snapshot(revision: 1))
-        let show = try await harness.writes(bridge, from: 4, count: 3)
+        let show = try await harness.writes(bridge, from: 5, count: 3)
         guard case .resize = show[0], case .surfaceSet(let showID, true) = show[1] else {
             return XCTFail("expected a show, got \(show)")
         }
@@ -101,10 +105,10 @@ final class HerdrScreenModelTests: XCTestCase {
         harness.model.handleAppLifecyclePhase(.inactive)
         try await Task.sleep(for: .milliseconds(100))
         let afterInactive = await bridge.writtenCount
-        XCTAssertEqual(afterInactive, 7, "an inactive app stays shown")
+        XCTAssertEqual(afterInactive, 8, "an inactive app stays shown")
 
         harness.model.handleAppLifecyclePhase(.background)
-        let hide = try await harness.writes(bridge, from: 7, count: 2)
+        let hide = try await harness.writes(bridge, from: 8, count: 2)
         XCTAssertEqual(hide[0], .focus(false))
         guard case .surfaceSet(_, false) = hide[1] else { return XCTFail("expected a hide, got \(hide)") }
     }
@@ -130,6 +134,52 @@ final class HerdrScreenModelTests: XCTestCase {
         }
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertFalse(harness.states.contains { $0.disconnectedReason != nil }, "\(harness.states)")
+    }
+
+    /// Calls made together reach Herdr in the order they were made, each in full before the next: a
+    /// resize, a theme change, a hide, a show, and the background's hide.
+    func testABurstOfCallsReachesHerdrInTheOrderTheyWereMade() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge()
+        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        harness.setScreenSize()
+        let model = harness.model
+        model.setSelected(true)
+        var index = 0
+        let show = try await harness.nextSurfaceSet(bridge, from: &index)
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        index += 1
+
+        model.terminalScreenAdapter.prepareInitialViewport(size: CGSize(width: 390, height: 500), scale: 3)
+        try model.applyTerminalSettings(TerminalSettings(fontSize: nil, theme: .remuxLight))
+        model.setSelected(false)
+        model.setSelected(true)
+        model.handleAppLifecyclePhase(.background)
+
+        let measurement = try XCTUnwrap(model.measurement)
+        let resize = ClientWrite.resize(
+            cols: measurement.controlViewport.columns,
+            rows: measurement.controlViewport.rows,
+            cellWidth: measurement.cellMetrics.pixelWidth,
+            cellHeight: measurement.cellMetrics.pixelHeight
+        )
+        let burst = try await harness.writes(bridge, from: index, count: 12)
+        XCTAssertEqual(burst[0], resize)
+        XCTAssertEqual(burst[1], .theme(.appearance(.light)))
+        guard case .theme(.defaultColor(.foreground, _)) = burst[2],
+              case .theme(.defaultColor(.background, _)) = burst[3],
+              case .theme(.paletteColors) = burst[4],
+              case .surfaceSet(_, false) = burst[6],
+              case .surfaceSet(_, true) = burst[8],
+              case .surfaceSet(_, false) = burst[11]
+        else { return XCTFail("out of order: \(burst)") }
+        XCTAssertEqual(burst[5], .focus(false))
+        XCTAssertEqual(burst[7], resize)
+        XCTAssertEqual(burst[9], .focus(true))
+        XCTAssertEqual(burst[10], .focus(false))
+        try await Task.sleep(for: .milliseconds(100))
+        let written = await bridge.writtenCount
+        XCTAssertEqual(written, index + 12)
     }
 
     /// A show Herdr doesn't answer ends the connection, and the failure is reported.

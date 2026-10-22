@@ -39,8 +39,21 @@ final class HerdrScreenModel {
     let sessionInstanceID: UUID
     let terminalScreenAdapter = HerdrTerminalScreenAdapter()
 
+    /// What the model asks of the connection and the engine, in the order it asks.
+    private enum Operation: Sendable {
+        case show(HerdrSurfaceGeometry, request: UInt64)
+        case hide
+        case resize(HerdrSurfaceGeometry)
+        case theme([HerdrHostThemeUpdate])
+        case appActive(Bool)
+    }
+
     /// One connection to the server, from opening its bridge to its end. A reconnect replaces it, and
     /// the panes keep their last frame meanwhile.
+    ///
+    /// Its task opens the connection, then carries out the operations one at a time, in the order they
+    /// were asked for. Herdr takes the newest of a show and a hide, so that order is the session's
+    /// state. No operation waits for Herdr's answer, so a hide goes out while a show is unanswered.
     @MainActor
     private final class Attempt {
         let id: UInt64
@@ -54,16 +67,24 @@ final class HerdrScreenModel {
         var requestedShown = false
         var visibilityRequests: UInt64 = 0
         var ended = false
+        let operations: AsyncStream<Operation>
+        private let operationSink: AsyncStream<Operation>.Continuation
 
         init(id: UInt64) {
             self.id = id
+            (operations, operationSink) = AsyncStream.makeStream()
+        }
+
+        /// Queued while the connection opens, and carried out once it is open.
+        func ask(_ operation: Operation) {
+            guard !ended else { return }
+            operationSink.yield(operation)
+        }
+
+        func finishOperations() {
+            operationSink.finish()
         }
     }
-
-    /// Calls to the connection and the engine go out in the order they're made: each task starts on the
-    /// main actor in order and goes straight to the actor, which takes tasks of one priority in order.
-    /// Herdr takes the newest of a show and a hide, so their order is the session's state.
-    private static let callPriority = TaskPriority.userInitiated
 
     private let openBridge: BridgeOpener
     private let connectionTiming: HerdrConnection.Timing
@@ -144,10 +165,7 @@ final class HerdrScreenModel {
         guard !stopped else { return }
         appPhase = phase
         reconcilePresentationActivity()
-        if let connection = attempt?.connection {
-            let active = phase != .background
-            Task(priority: Self.callPriority) { await connection.setAppActive(active) }
-        }
+        attempt?.ask(.appActive(phase != .background))
         reconcileVisibility()
         didChange()
     }
@@ -167,8 +185,8 @@ final class HerdrScreenModel {
                 surface.renderer.failPresentation(message: Self.configurationFailureMessage)
             }
         }
-        if themeChanged, let connection = attempt?.connection {
-            reportTheme(to: connection)
+        if themeChanged, let themeReport {
+            attempt?.ask(.theme(themeReport))
         }
         if let lastViewport {
             prepareViewport(size: lastViewport.size, scale: lastViewport.scale)
@@ -189,14 +207,7 @@ final class HerdrScreenModel {
         }
         guard let measured, measured != measurement else { return }
         measurement = measured
-        let engine = self.engine
-        let cell = measured.cellMetrics
-        Task(priority: Self.callPriority) {
-            await engine.setCellSize(widthPx: cell.pixelWidth, heightPx: cell.pixelHeight)
-        }
-        if let connection = attempt?.connection, let geometry {
-            Task(priority: Self.callPriority) { await connection.resize(geometry) }
-        }
+        if let geometry { attempt?.ask(.resize(geometry)) }
         resumeSizeWaiter()
         for paneID in Array(surfaces.keys) {
             guard let surface = surfaces[paneID], let metrics = displayMetrics(for: paneID) else { continue }
@@ -224,6 +235,7 @@ final class HerdrScreenModel {
         stopped = true
         resumeSizeWaiter()
         if let attempt {
+            attempt.finishOperations()
             attempt.task?.cancel()
             if let connection = attempt.connection {
                 await connection.close()
@@ -287,7 +299,7 @@ final class HerdrScreenModel {
 
     /// The bridge opens at once; the hello goes once the screen has a size. Herdr's server waits 4 s
     /// for the hello and closes the connection after that, which then ends here as an ordinary dropped
-    /// connection.
+    /// connection. Once the connection is open, the attempt's operations are carried out in order.
     private func run(_ attempt: Attempt) async {
         let transport: any HerdrBridgeTransport
         do {
@@ -305,6 +317,8 @@ final class HerdrScreenModel {
         attempt.transport = transport
         // Whoever retires the attempt closes its bridge.
         guard let size = await screenSize(for: attempt) else { return }
+        // Frames can arrive before `open` returns; the engine paints them at the hello's cell size.
+        await engine.setCellSize(widthPx: size.cellWidthPx, heightPx: size.cellHeightPx)
         let feed = await engine.beginConnection()
         guard isCurrent(attempt) else { return }
         attempt.feed = feed
@@ -334,12 +348,38 @@ final class HerdrScreenModel {
         }
         attempt.transport = nil
         attempt.connection = connection
-        // The app may have changed phase while the connection opened.
-        let appActive = appPhase != .background
-        Task(priority: Self.callPriority) { await connection.setAppActive(appActive) }
-        reportTheme(to: connection)
+        if let themeReport { attempt.ask(.theme(themeReport)) }
         reconcileVisibility()
         didChange()
+        for await operation in attempt.operations {
+            guard isCurrent(attempt) else { break }
+            await perform(operation, on: connection, attemptID: attempt.id)
+        }
+    }
+
+    /// Each operation returns once its messages are queued on the connection; Herdr's answer to a show
+    /// comes back separately.
+    private func perform(_ operation: Operation, on connection: HerdrConnection, attemptID: UInt64) async {
+        switch operation {
+        case .show(let geometry, let request):
+            await connection.sendShow(geometry) { [weak self] result in
+                guard case .failure(let error) = result else { return }
+                Task { @MainActor [weak self] in self?.showFailed(attemptID, request: request, error: error) }
+            }
+        case .hide:
+            // The session is off screen and takes no input either way; a hide Herdr doesn't confirm
+            // leaves only its stale foreground on the server.
+            await connection.sendHide()
+        case .resize(let geometry):
+            await connection.resize(geometry)
+            await engine.setCellSize(widthPx: geometry.cellWidthPx, heightPx: geometry.cellHeightPx)
+        case .theme(let updates):
+            for update in updates {
+                await connection.reportHostTheme(update)
+            }
+        case .appActive(let active):
+            await connection.setAppActive(active)
+        }
     }
 
     /// Frames and snapshots go to the engine from the connection's reader; only what the model acts on
@@ -414,10 +454,11 @@ final class HerdrScreenModel {
 
     private func retire(_ attempt: Attempt) {
         attempt.ended = true
+        attempt.finishOperations()
         attempt.task?.cancel()
         if attempt === self.attempt { resumeSizeWaiter() }
         if let connection = attempt.connection {
-            Task(priority: Self.callPriority) { await connection.close() }
+            Task { await connection.close() }
         } else if let transport = attempt.transport {
             Task { await transport.close(reusable: true) }
         }
@@ -427,50 +468,40 @@ final class HerdrScreenModel {
     /// newest of a show and a hide, so each change is sent at once, even while the last is unanswered.
     private func reconcileVisibility() {
         guard let attempt, isCurrent(attempt), !attempt.ended, attempt.hasSnapshot,
-              let connection = attempt.connection, let geometry
+              attempt.connection != nil, let geometry
         else { return }
         let wanted = isSelected && appPhase != .background
         guard wanted != attempt.requestedShown else { return }
         attempt.requestedShown = wanted
         attempt.visibilityRequests += 1
-        let request = attempt.visibilityRequests
-        if wanted {
-            Task(priority: Self.callPriority) { [weak self] in
-                do {
-                    _ = try await connection.show(geometry)
-                } catch {
-                    self?.showFailed(attempt, request: request, error: error)
-                }
-            }
-        } else {
-            // The session is off screen and takes no input either way; a hide Herdr doesn't confirm
-            // leaves only its stale foreground on the server.
-            Task(priority: Self.callPriority) { try? await connection.hide() }
-        }
+        attempt.ask(wanted ? .show(geometry, request: attempt.visibilityRequests) : .hide)
     }
 
     /// Herdr's client rolls a failed show back and stays on what it showed before; a Remux session
     /// screen has nothing else to show, so the connection ends and the root offers a reconnect.
-    private func showFailed(_ attempt: Attempt, request: UInt64, error: Error) {
-        guard isCurrent(attempt), request == attempt.visibilityRequests else { return }
+    private func showFailed(_ attemptID: UInt64, request: UInt64, error: Error) {
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt),
+              request == attempt.visibilityRequests
+        else { return }
         if case .connectionEnded? = error as? HerdrCommandError { return }
         attempt.requestedShown = false
         end(attempt, Self.disconnectReason(showFailedWith: error))
     }
 
-    /// Herdr stores a client's colours and uses them whenever that client is in front, so one report
-    /// before the first show, and one after each theme change, keeps the server on the phone's colours.
-    /// Light or dark isn't sent: Herdr infers it from the background, which is how Remux's themes
-    /// differ, and an explicit one would outlive the next theme's background.
-    private func reportTheme(to connection: HerdrConnection) {
-        // Without a report Herdr uses another client's colours; nothing else is lost.
-        guard let colors = try? runtime?.terminalColors() else { return }
-        for update in Self.hostTheme(colors) {
-            Task(priority: Self.callPriority) { await connection.reportHostTheme(update) }
-        }
+    /// Herdr stores a client's theme and uses it whenever that client is in front, so one full report
+    /// before the first show, and one after each theme change, keeps the server on the phone's theme.
+    /// Being full, each report also replaces an appearance Herdr would otherwise keep over the next
+    /// background. Without a report Herdr uses another client's colours; nothing else is lost.
+    private var themeReport: [HerdrHostThemeUpdate]? {
+        guard let colors = try? runtime?.terminalColors() else { return nil }
+        return Self.hostTheme(colors, appearance: currentTerminalSettings.theme.isLight ? .light : .dark)
     }
 
-    static func hostTheme(_ colors: GhosttyTerminalColors) -> [HerdrHostThemeUpdate] {
+    /// As Herdr's client reports its terminal: the appearance, then the colours.
+    static func hostTheme(
+        _ colors: GhosttyTerminalColors,
+        appearance: HerdrHostThemeUpdate.Appearance
+    ) -> [HerdrHostThemeUpdate] {
         func rgb(_ color: GhosttyTerminalColors.Color) -> HerdrRGB {
             HerdrRGB(red: color.red, green: color.green, blue: color.blue)
         }
@@ -479,6 +510,7 @@ final class HerdrScreenModel {
             palette[UInt8(index)] = rgb(color)
         }
         return [
+            .appearance(appearance),
             .defaultColor(.foreground, rgb(colors.foreground)),
             .defaultColor(.background, rgb(colors.background)),
             .paletteColors(palette),
