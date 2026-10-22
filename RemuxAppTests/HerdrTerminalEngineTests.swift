@@ -268,7 +268,8 @@ final class HerdrTerminalEngineTests: XCTestCase {
     /// A pane Ghostty couldn't paint stays unpainted for the rest of its connection, and gets a new
     /// terminal from the next connection's first frame.
     func testAFailedPaneGetsANewTerminalFromTheNextConnection() async throws {
-        let engine = makeEngine()
+        let producerFailure = ProducerFailure()
+        let engine = makeEngine(producerFailure: producerFailure)
         let updates = UpdateLog(engine)
         let panes = [Self.pane("P", x: 0, width: 3, height: 1)]
         let first = await engine.beginConnection()
@@ -277,12 +278,21 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let failed = try await updates.terminal(for: "P")
         _ = try await updates.nextLayout()
 
-        await engine.failPaneForTesting("P")
+        producerFailure.isOn = true
+        await first.receive(.patch(try Self.patch(
+            base: 1,
+            rows: [HerdrPatchRow(x: 0, y: 0, cells: Self.cells("two"))],
+            panes: panes
+        )))
         guard case .paneTerminalFailed("P") = try await updates.next() else {
             return XCTFail("expected the pane's failure")
         }
-        await first.receive(try Self.snapshot(revision: 2))
-        await first.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["two"], panes: panes)))
+        producerFailure.isOn = false
+        await first.receive(.patch(try Self.patch(
+            base: 2,
+            rows: [HerdrPatchRow(x: 0, y: 0, cells: Self.cells("six"))],
+            panes: panes
+        )))
 
         let second = await engine.beginConnection()
         await second.receive(try Self.snapshot(revision: 1))
@@ -390,10 +400,16 @@ final class HerdrTerminalEngineTests: XCTestCase {
 
     // MARK: - Fixtures
 
-    private func makeEngine() -> HerdrTerminalEngine {
-        HerdrTerminalEngine(
-            cellWidthPx: measurement.cellMetrics.pixelWidth,
-            cellHeightPx: measurement.cellMetrics.pixelHeight
+    private func makeEngine(producerFailure: ProducerFailure? = nil) -> HerdrTerminalEngine {
+        let cellWidth = measurement.cellMetrics.pixelWidth
+        let cellHeight = measurement.cellMetrics.pixelHeight
+        guard let producerFailure else {
+            return HerdrTerminalEngine(cellWidthPx: cellWidth, cellHeightPx: cellHeight)
+        }
+        return HerdrTerminalEngine(
+            cellWidthPx: cellWidth,
+            cellHeightPx: cellHeight,
+            makeProducer: SwitchableProducer.factory(producerFailure)
         )
     }
 

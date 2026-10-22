@@ -75,18 +75,52 @@ enum HerdrServerScript {
         HerdrWire.frame(try HerdrConnectionTests.frames(HerdrConnectionTests.recording("herdr-01-handshake-all-caps-A"))[0])
     }
 
-    static func snapshot(revision: UInt64, boot: String = "boot", tabLabel: String = "main") -> [UInt8] {
+    /// `panes` and `agents` are the snapshot's JSON entries, made with `snapshotPane` and
+    /// `snapshotAgent`.
+    static func snapshot(
+        revision: UInt64,
+        boot: String = "boot",
+        tabLabel: String = "main",
+        panes: [String] = [],
+        agents: [String] = []
+    ) -> [UInt8] {
         let json = """
         {"boot_id":"\(boot)","revision":\(revision),"focused_workspace_id":"w1","focused_tab_id":"t1",
          "focused_pane_id":null,"workspaces":[],"tabs":[{"tab_id":"t1","workspace_id":"w1","number":1,
          "label":"\(tabLabel)","custom_label":true,"zoomed":false,"focused":true,"agent_status":"idle"}],
-         "panes":[],"agents":[]}
+         "panes":[\(panes.joined(separator: ","))],"agents":[\(agents.joined(separator: ","))]}
         """
         var writer = HerdrWireWriter()
         writer.variant(20)
         writer.string(HerdrControlKind.snapshot)
         writer.string(json)
         return HerdrWire.frame(writer.bytes)
+    }
+
+    static func snapshotPane(_ id: String, label: String? = nil, cwd: String? = nil, foregroundCWD: String? = nil) -> String {
+        """
+        {"pane_id":"\(id)","workspace_id":"w1","tab_id":"t1","label":\(json(label)),"cwd":\(json(cwd)),
+         "foreground_cwd":\(json(foregroundCWD)),"focused":false,"right_click_passthrough":false}
+        """
+    }
+
+    static func snapshotAgent(
+        _ paneID: String,
+        name: String? = nil,
+        title: String? = nil,
+        agent: String? = nil,
+        displayAgent: String? = nil
+    ) -> String {
+        """
+        {"pane_id":"\(paneID)","workspace_id":"w1","tab_id":"t1","name":\(json(name)),
+         "display_agent":\(json(displayAgent)),"agent":\(json(agent)),"title":\(json(title)),
+         "terminal_title":null,"terminal_title_stripped":null,"agent_status":"working","state_change_seq":1,
+         "state_labels":[],"tokens":[],"focused":false}
+        """
+    }
+
+    private static func json(_ value: String?) -> String {
+        value.map { #""\#($0)""# } ?? "null"
     }
 
     /// A full surface of the given lines, all of one width, with every pane's text area on row 0 down.
@@ -223,6 +257,8 @@ enum ClientWrite: Equatable {
 final class HerdrModelHarness {
     actor Bridges {
         private(set) var opened: [FakeBridgeTransport] = []
+        /// When each bridge opened.
+        private(set) var openedAt: [ContinuousClock.Instant] = []
         private var failure: Error?
 
         func failNextOpen(with error: Error) {
@@ -236,6 +272,7 @@ final class HerdrModelHarness {
             }
             let transport = FakeBridgeTransport()
             opened.append(transport)
+            openedAt.append(.now)
             return transport
         }
     }
@@ -251,7 +288,8 @@ final class HerdrModelHarness {
     init(
         settings: TerminalSettings = .default,
         timing: HerdrConnection.Timing = HerdrConnection.Timing(),
-        failingOpenWith openError: Error? = nil
+        failingOpenWith openError: Error? = nil,
+        producerFailure: ProducerFailure? = nil
     ) async {
         let bridges = Bridges()
         let stateLog = StateLog()
@@ -276,7 +314,10 @@ final class HerdrModelHarness {
             sessionInstanceID: UUID(),
             openBridge: { try await bridges.open() },
             onRuntimeStateChange: { stateLog.updates.append($0) },
-            connectionTiming: timing
+            connectionTiming: timing,
+            engine: producerFailure.map {
+                HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1, makeProducer: SwitchableProducer.factory($0))
+            } ?? HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1)
         )
     }
 
@@ -342,5 +383,66 @@ final class HerdrModelHarness {
             )
         }
         return shown
+    }
+}
+
+/// Turns producer failures on and off for every pane producer an engine makes with
+/// `SwitchableProducer.factory`.
+final class ProducerFailure: @unchecked Sendable {
+    private let lock = NSLock()
+    private var on = false
+
+    var isOn: Bool {
+        get { lock.withLock { on } }
+        set { lock.withLock { on = newValue } }
+    }
+}
+
+/// GhosttyKit's pane producer, whose feeds and resizes fail while its `ProducerFailure` is on, as they
+/// do after an allocation failure.
+final class SwitchableProducer: HerdrPaneProducing {
+    private let base: HerdrPaneProducer
+    private let failure: ProducerFailure
+
+    init(columns: UInt16, rows: UInt16, failure: ProducerFailure) throws {
+        base = try HerdrPaneProducer(columns: columns, rows: rows)
+        self.failure = failure
+    }
+
+    static func factory(_ failure: ProducerFailure) -> HerdrTerminalEngine.ProducerFactory {
+        { try SwitchableProducer(columns: $0, rows: $1, failure: failure) }
+    }
+
+    private var failing: Bool { failure.isOn }
+
+    func retainTerminal() throws -> HerdrRetainedTerminal {
+        try base.retainTerminal()
+    }
+
+    func feed(_ bytes: [UInt8]) -> ghostty_terminal_producer_result_e {
+        failing ? GHOSTTY_TERMINAL_PRODUCER_RESULT_SEMANTIC_FAILURE : base.feed(bytes)
+    }
+
+    func resizeAndFeed(
+        columns: UInt16,
+        rows: UInt16,
+        cellWidthPx: UInt32,
+        cellHeightPx: UInt32,
+        bytes: [UInt8]
+    ) -> ghostty_terminal_producer_result_e {
+        failing
+            ? GHOSTTY_TERMINAL_PRODUCER_RESULT_SEMANTIC_FAILURE
+            : base.resizeAndFeed(columns: columns, rows: rows, cellWidthPx: cellWidthPx, cellHeightPx: cellHeightPx, bytes: bytes)
+    }
+
+    func resize(
+        columns: UInt16,
+        rows: UInt16,
+        cellWidthPx: UInt32,
+        cellHeightPx: UInt32
+    ) -> ghostty_terminal_producer_result_e {
+        failing
+            ? GHOSTTY_TERMINAL_PRODUCER_RESULT_SEMANTIC_FAILURE
+            : base.resize(columns: columns, rows: rows, cellWidthPx: cellWidthPx, cellHeightPx: cellHeightPx)
     }
 }

@@ -24,9 +24,28 @@ struct HerdrRendererSurface: Equatable, @unchecked Sendable {
     let handle: ghostty_terminal_surface_t
 }
 
-/// One Herdr pane's terminal producer. Its only caller is the engine, which serializes every call as
-/// GhosttyKit requires.
-final class HerdrPaneProducer {
+/// What the engine needs of a pane's terminal producer. Its only caller is the engine, which
+/// serializes every call as GhosttyKit requires.
+protocol HerdrPaneProducing: AnyObject {
+    func retainTerminal() throws -> HerdrRetainedTerminal
+    func feed(_ bytes: [UInt8]) -> ghostty_terminal_producer_result_e
+    func resizeAndFeed(
+        columns: UInt16,
+        rows: UInt16,
+        cellWidthPx: UInt32,
+        cellHeightPx: UInt32,
+        bytes: [UInt8]
+    ) -> ghostty_terminal_producer_result_e
+    func resize(
+        columns: UInt16,
+        rows: UInt16,
+        cellWidthPx: UInt32,
+        cellHeightPx: UInt32
+    ) -> ghostty_terminal_producer_result_e
+}
+
+/// One Herdr pane's terminal producer, on GhosttyKit.
+final class HerdrPaneProducer: HerdrPaneProducing {
     enum Failure: Error, Equatable {
         case create(ghostty_terminal_producer_result_e)
         case retain(ghostty_terminal_producer_result_e)

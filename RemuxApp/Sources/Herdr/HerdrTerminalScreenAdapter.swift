@@ -119,8 +119,8 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
                 normalFrame: frame,
                 visibleFrame: frame,
                 isFocused: pane.focused,
-                currentCommand: "",
-                currentPath: ""
+                currentCommand: pane.name,
+                currentPath: pane.path
             )
         }
         return GhosttyTerminalViewportPresentationProjection(

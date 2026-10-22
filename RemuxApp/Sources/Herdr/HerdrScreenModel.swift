@@ -67,29 +67,56 @@ final class HerdrScreenModel {
         var requestedShown = false
         var visibilityRequests: UInt64 = 0
         var ended = false
-        let operations: AsyncStream<Operation>
-        private let operationSink: AsyncStream<Operation>.Continuation
+        private var operations: [Operation] = []
+        private var operationWaiter: CheckedContinuation<Void, Never>?
+        private var operationsFinished = false
 
         init(id: UInt64) {
             self.id = id
-            (operations, operationSink) = AsyncStream.makeStream()
         }
 
-        /// Queued while the connection opens, and carried out once it is open.
+        /// Queued while the connection opens, and carried out once it is open. Only the newest size
+        /// matters, as Herdr's client sends only the newest it sampled: a new size replaces every one
+        /// not yet sent. A show queued before it already carries a newer size than those.
         func ask(_ operation: Operation) {
-            guard !ended else { return }
-            operationSink.yield(operation)
+            guard !ended, !operationsFinished else { return }
+            if case .resize = operation {
+                operations.removeAll { if case .resize = $0 { true } else { false } }
+            }
+            operations.append(operation)
+            wake()
+        }
+
+        /// The next operation in the order asked, or nil once the attempt is over. An operation stays
+        /// queued until taken here, so a newer size can still replace it.
+        func nextOperation() async -> Operation? {
+            while true {
+                if operationsFinished { return nil }
+                if !operations.isEmpty { return operations.removeFirst() }
+                await withCheckedContinuation { operationWaiter = $0 }
+            }
         }
 
         func finishOperations() {
-            operationSink.finish()
+            operationsFinished = true
+            operations.removeAll()
+            wake()
+        }
+
+        private func wake() {
+            operationWaiter?.resume()
+            operationWaiter = nil
         }
     }
+
+    /// Herdr's server closes a connection that sends no hello within 4 s of connecting; the bridge is
+    /// closed before that if the screen has no size yet, and opened again once it has one.
+    static let helloDeadline: Duration = .seconds(3)
 
     private let openBridge: BridgeOpener
     private let connectionTiming: HerdrConnection.Timing
     private let onRuntimeStateChange: (TerminalRuntimeStateUpdate) -> Void
-    private let engine = HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1)
+    private let engine: HerdrTerminalEngine
     private var runtime: GhosttyKitRuntime?
     private var currentTerminalSettings: TerminalSettings
     private var reportTracker = TerminalRuntimeStateReportTracker()
@@ -120,13 +147,15 @@ final class HerdrScreenModel {
         sessionInstanceID: UUID,
         openBridge: @escaping BridgeOpener,
         onRuntimeStateChange: @escaping (TerminalRuntimeStateUpdate) -> Void,
-        connectionTiming: HerdrConnection.Timing = HerdrConnection.Timing()
+        connectionTiming: HerdrConnection.Timing = HerdrConnection.Timing(),
+        engine: HerdrTerminalEngine = HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1)
     ) {
         self.target = target
         self.sessionInstanceID = sessionInstanceID
         self.openBridge = openBridge
         self.onRuntimeStateChange = onRuntimeStateChange
         self.connectionTiming = connectionTiming
+        self.engine = engine
         currentTerminalSettings = target.terminalSettings
         terminalScreenAdapter.attach(to: self)
         do {
@@ -300,29 +329,27 @@ final class HerdrScreenModel {
         self.attempt = attempt
         failure = nil
         attempt.task = Task { [weak self] in await self?.run(attempt) }
+        reconcilePresentationActivity()
         didChange()
     }
 
-    /// The bridge opens at once; the hello goes once the screen has a size. Herdr's server waits 4 s
-    /// for the hello and closes the connection after that, which then ends here as an ordinary dropped
-    /// connection. Once the connection is open, the attempt's operations are carried out in order.
+    /// The bridge opens at once, so its setup overlaps the screen's layout, and the hello goes once the
+    /// screen has a size. A bridge still waiting for a size at the hello deadline is closed and opened
+    /// again once the size arrives. Once the connection is open, the attempt's operations are carried
+    /// out in order.
     private func run(_ attempt: Attempt) async {
-        let transport: any HerdrBridgeTransport
-        do {
-            transport = try await openBridge()
-        } catch {
-            // A cancelled opening releases what it claimed.
-            guard isCurrent(attempt) else { return }
-            end(attempt, Self.disconnectReason(openingBridgeFailedWith: error))
-            return
-        }
-        guard isCurrent(attempt) else {
-            await transport.close(reusable: true)
-            return
-        }
-        attempt.transport = transport
         // Whoever retires the attempt closes its bridge.
-        guard let size = await screenSize(for: attempt) else { return }
+        guard var transport = await openTransport(for: attempt) else { return }
+        if await screenSize(for: attempt, until: ContinuousClock.now + Self.helloDeadline) == nil {
+            guard isCurrent(attempt) else { return }
+            attempt.transport = nil
+            await transport.close(reusable: true)
+            guard await screenSize(for: attempt, until: nil) != nil,
+                  let reopened = await openTransport(for: attempt)
+            else { return }
+            transport = reopened
+        }
+        guard let size = geometry else { return }
         // Frames can arrive before `open` returns; the engine paints them at the hello's cell size.
         await engine.setCellSize(widthPx: size.cellWidthPx, heightPx: size.cellHeightPx)
         let feed = await engine.beginConnection()
@@ -356,11 +383,30 @@ final class HerdrScreenModel {
         attempt.connection = connection
         if let themeReport { attempt.ask(.theme(themeReport)) }
         reconcileVisibility()
+        reconcilePresentationActivity()
         didChange()
-        for await operation in attempt.operations {
+        while let operation = await attempt.nextOperation() {
             guard isCurrent(attempt) else { break }
             await perform(operation, on: connection, attemptID: attempt.id)
         }
+    }
+
+    /// The attempt's bridge, or nil when the opening failed, which is reported, or the attempt is over.
+    private func openTransport(for attempt: Attempt) async -> (any HerdrBridgeTransport)? {
+        let transport: any HerdrBridgeTransport
+        do {
+            transport = try await openBridge()
+        } catch {
+            // A cancelled opening releases what it claimed.
+            if isCurrent(attempt) { end(attempt, Self.disconnectReason(openingBridgeFailedWith: error)) }
+            return nil
+        }
+        guard isCurrent(attempt) else {
+            await transport.close(reusable: true)
+            return nil
+        }
+        attempt.transport = transport
+        return transport
     }
 
     /// Each operation returns once its messages are queued on the connection; Herdr's answer to a show
@@ -425,9 +471,20 @@ final class HerdrScreenModel {
         )
     }
 
-    private func screenSize(for attempt: Attempt) async -> HerdrSurfaceGeometry? {
+    /// The screen's size once it has one, or nil when the attempt is over or `deadline` passed first.
+    private func screenSize(
+        for attempt: Attempt,
+        until deadline: ContinuousClock.Instant?
+    ) async -> HerdrSurfaceGeometry? {
+        if let deadline {
+            Task { [weak self] in
+                try? await Task.sleep(until: deadline, clock: .continuous)
+                self?.resumeSizeWaiter()
+            }
+        }
         while isCurrent(attempt) {
             if let geometry { return geometry }
+            if let deadline, ContinuousClock.now >= deadline { return nil }
             await withCheckedContinuation { sizeWaiter = $0 }
         }
         return nil
@@ -455,6 +512,7 @@ final class HerdrScreenModel {
         guard isCurrent(attempt), !attempt.ended else { return }
         failure = reason
         retire(attempt)
+        reconcilePresentationActivity()
         didChange()
     }
 
@@ -551,9 +609,6 @@ final class HerdrScreenModel {
                 }
             }
             reconcilePresentationActivity()
-            #if DEBUG
-            onPanesLaidOutForTesting?()
-            #endif
         case .paneTerminalFailed(let paneID):
             presentationFailures[paneID] = Self.paneFailure
             surfaces[paneID]?.renderer.failPresentation(message: Self.paneFailure.message)
@@ -667,13 +722,16 @@ final class HerdrScreenModel {
         didChange()
     }
 
+    /// Without an open connection the panes show a frozen frame, so none is focused: Herdr's client
+    /// shows no cursor while its session isn't online.
     private func reconcilePresentationActivity() {
         let sceneActive = appPhase == .active
+        let live = failure == nil && isConnectionOpen
         for (paneID, surface) in surfaces {
             let pane = layout?.panes.first { $0.paneID == paneID }
             surface.renderer.setSceneActive(sceneActive)
             surface.renderer.setPresented(pane != nil)
-            surface.renderer.setFocused(pane?.focused == true)
+            surface.renderer.setFocused(live && pane?.focused == true)
         }
     }
 
@@ -718,12 +776,6 @@ final class HerdrScreenModel {
             source: source
         ))
     }
-
-    #if DEBUG
-    var engineForTesting: HerdrTerminalEngine { engine }
-    var rendererCreationsInFlightForTesting: Int { creatingTerminals.count }
-    var onPanesLaidOutForTesting: (() -> Void)?
-    #endif
 
     private static let runtimeStartFailure = TerminalDisconnectReason(
         kind: .runtime,

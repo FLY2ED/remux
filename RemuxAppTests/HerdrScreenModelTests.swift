@@ -1,3 +1,4 @@
+import Combine
 import GhosttyKit
 import UIKit
 import XCTest
@@ -18,9 +19,15 @@ final class HerdrScreenModelTests: XCTestCase {
     private func makeHarness(
         settings: TerminalSettings = .default,
         timing: HerdrConnection.Timing = HerdrConnection.Timing(),
-        failingOpenWith error: Error? = nil
+        failingOpenWith error: Error? = nil,
+        producerFailure: ProducerFailure? = nil
     ) async -> HerdrModelHarness {
-        let harness = await HerdrModelHarness(settings: settings, timing: timing, failingOpenWith: error)
+        let harness = await HerdrModelHarness(
+            settings: settings,
+            timing: timing,
+            failingOpenWith: error,
+            producerFailure: producerFailure
+        )
         harnesses.append(harness)
         return harness
     }
@@ -46,6 +53,35 @@ final class HerdrScreenModelTests: XCTestCase {
             cellHeight: Int(measurement.cellMetrics.pixelHeight),
             surfaceActive: false
         )])
+        let opened = await harness.bridges.opened.count
+        let closed = await bridge.isClosed
+        XCTAssertEqual(opened, 1, "a size in time needs no second bridge")
+        XCTAssertFalse(closed)
+    }
+
+    /// Herdr's server drops a connection that sends no hello within 4 s. A bridge still waiting for the
+    /// screen's size is closed before then, keeping its SSH connection for reuse, and a new one opens
+    /// once the size arrives; the hello goes on it.
+    func testABridgeWaitingTooLongForTheSizeIsClosedAndOpenedAgain() async throws {
+        let harness = await makeHarness()
+        let first = try await harness.bridge(0)
+        let openTimes = await harness.bridges.openedAt
+        let openedAt = try XCTUnwrap(openTimes.first)
+
+        try await harness.waitUntil("the waiting bridge wasn't closed", timeout: .seconds(5)) { await first.isClosed }
+        let waited = ContinuousClock.now - openedAt
+        XCTAssertLessThan(waited, .seconds(4), "closed after Herdr's server would have given up")
+        XCTAssertGreaterThanOrEqual(waited, HerdrScreenModel.helloDeadline)
+        let reusable = await first.closedReusable
+        let firstWrites = await first.writtenCount
+        XCTAssertEqual(reusable, true)
+        XCTAssertEqual(firstWrites, 0)
+        XCTAssertFalse(harness.states.contains { $0.disconnectedReason != nil }, "\(harness.states)")
+
+        harness.setScreenSize()
+        let second = try await harness.bridge(1)
+        let hello = try await harness.writes(second, count: 1)
+        guard case .hello(_, _, _, _, false) = hello[0] else { return XCTFail("expected the hello, got \(hello)") }
     }
 
     /// The phone's theme goes out right after the hello, before any show, as Herdr's client reports its
@@ -240,6 +276,83 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(adapter.topLevelNoun, .tab)
     }
 
+    /// The pane sheet names each pane as Herdr's client does in its lists: the pane's label or its
+    /// agent's name, then the agent's title, then the agent's kind; with the directory of the pane's
+    /// foreground program, else of its shell.
+    func testPanesAreNamedAndPlacedAsHerdrsClientShowsThem() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge()
+        let snapshot = HerdrServerScript.snapshot(
+            revision: 1,
+            panes: [
+                HerdrServerScript.snapshotPane("w1:p1", label: "editor", cwd: "/repo", foregroundCWD: "/repo/src"),
+                HerdrServerScript.snapshotPane("w1:p2", cwd: "/home"),
+                HerdrServerScript.snapshotPane("w1:p3"),
+            ],
+            agents: [
+                HerdrServerScript.snapshotAgent("w1:p1", name: "reviewer", title: "Reviewing"),
+                HerdrServerScript.snapshotAgent("w1:p2", title: "Fixing tests", agent: "claude"),
+                HerdrServerScript.snapshotAgent("w1:p3", agent: "codex"),
+            ]
+        )
+        await bridge.serve(try HerdrServerScript.welcome() + snapshot)
+        await bridge.serve(HerdrServerScript.surface(
+            projection: 1,
+            revision: 1,
+            lines: ["a b c"],
+            panes: [
+                .init(id: "w1:p1", x: 0, width: 1, height: 1, focused: true),
+                .init(id: "w1:p2", x: 2, width: 1, height: 1),
+                .init(id: "w1:p3", x: 4, width: 1, height: 1),
+            ]
+        ))
+        harness.setScreenSize()
+
+        let adapter = harness.model.terminalScreenAdapter
+        try await harness.waitUntil("the panes weren't laid out") {
+            adapter.terminalScreenPresentationProjection.viewport.panes.count == 3
+        }
+        let panes = adapter.terminalScreenPresentationProjection.viewport.panes
+        XCTAssertEqual(panes.map(\.currentCommand), ["editor", "Fixing tests", "codex"])
+        XCTAssertEqual(panes.map(\.currentPath), ["/repo/src", "/home", ""])
+    }
+
+    /// A frame left behind by a lost connection shows no live cursor: the focused pane is unfocused
+    /// while the connection is down, as Herdr's client hides its cursor while its session is offline,
+    /// and focused again once a new connection is open.
+    func testThePaneIsUnfocusedWhileTheConnectionIsDown() async throws {
+        let harness = await makeHarness()
+        let first = try await harness.bridge(0)
+        await first.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        let frame = HerdrServerScript.surface(
+            projection: 1,
+            revision: 1,
+            lines: ["one"],
+            panes: [.init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true)]
+        )
+        await first.serve(frame)
+        harness.setScreenSize()
+        let adapter = harness.model.terminalScreenAdapter
+        try await harness.waitUntil("the pane's renderer wasn't created") {
+            adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID != nil
+        }
+        let surfaceID = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
+        let managed = try XCTUnwrap(adapter.terminalManagedSurfaceLookup.managedSurface(for: surfaceID))
+        try await harness.waitUntil("the pane wasn't focused while connected") { managed.isFocused }
+
+        await first.finishServing()
+        try await harness.waitUntil("the lost connection wasn't reported") {
+            harness.states.last?.disconnectedReason != nil
+        }
+        XCTAssertFalse(managed.isFocused)
+
+        harness.model.reconnect()
+        XCTAssertFalse(managed.isFocused, "nothing is live before the new connection opens")
+        let second = try await harness.bridge(1)
+        await second.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1) + frame)
+        try await harness.waitUntil("the pane wasn't focused again") { managed.isFocused }
+    }
+
     /// While shown, a new screen size goes to Herdr at once; a hidden session gets it with its show.
     func testAResizeIsSentWhileShown() async throws {
         let harness = await makeHarness()
@@ -261,6 +374,39 @@ final class HerdrScreenModelTests: XCTestCase {
             cellWidth: measurement.cellMetrics.pixelWidth,
             cellHeight: measurement.cellMetrics.pixelHeight
         )])
+    }
+
+    /// Only the newest size goes out: sizes changing faster than the queue sends them replace the one
+    /// waiting, while other calls keep their order.
+    func testOnlyTheNewestOfSeveralQueuedSizesIsSent() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge()
+        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        harness.setScreenSize()
+        let model = harness.model
+        model.setSelected(true)
+        var index = 0
+        let show = try await harness.nextSurfaceSet(bridge, from: &index)
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        index += 1
+
+        model.terminalScreenAdapter.prepareInitialViewport(size: CGSize(width: 390, height: 500), scale: 3)
+        try model.applyTerminalSettings(TerminalSettings(fontSize: nil, theme: .remuxLight))
+        model.terminalScreenAdapter.prepareInitialViewport(size: CGSize(width: 390, height: 600), scale: 3)
+        model.terminalScreenAdapter.prepareInitialViewport(size: CGSize(width: 390, height: 700), scale: 3)
+        let newest = try XCTUnwrap(model.measurement)
+
+        let sent = try await harness.writes(bridge, from: index, count: 5)
+        XCTAssertEqual(sent[0], .theme(.appearance(.light)))
+        XCTAssertEqual(sent[4], .resize(
+            cols: newest.controlViewport.columns,
+            rows: newest.controlViewport.rows,
+            cellWidth: newest.cellMetrics.pixelWidth,
+            cellHeight: newest.cellMetrics.pixelHeight
+        ))
+        try await Task.sleep(for: .milliseconds(100))
+        let written = await bridge.writtenCount
+        XCTAssertEqual(written, index + 5, "the older sizes went out too")
     }
 
     // MARK: - Failures
@@ -347,22 +493,27 @@ final class HerdrScreenModelTests: XCTestCase {
             lines: ["abcd efgh"],
             panes: [.init(id: "w1:p1", x: 0, width: 4, height: 1), .init(id: "w1:p2", x: 5, width: 4, height: 1)]
         ))
-        // Renderers are created as the panes are laid out and registered later, through the engine.
+        // Renderers are created as the panes are laid out and admitted later, through the engine: the
+        // screen sees the panes before their renderers. Stop right then.
         let model = harness.model
-        var creationsAtStop: Int?
+        let adapter = model.terminalScreenAdapter
         var stopping: Task<Void, Never>?
-        model.onPanesLaidOutForTesting = {
-            guard creationsAtStop == nil else { return }
-            creationsAtStop = model.rendererCreationsInFlightForTesting
-            stopping = Task { await model.stop() }
+        let watch = adapter.objectWillChange.sink { _ in
+            MainActor.assumeIsolated {
+                guard stopping == nil else { return }
+                let panes = adapter.terminalScreenPresentationProjection.viewport.panes
+                guard panes.count == 2,
+                      panes.allSatisfy({ adapter.terminalManagedSurfaceLookup.managedSurface(for: $0.id) == nil })
+                else { return }
+                stopping = Task { await model.stop() }
+            }
         }
+        defer { watch.cancel() }
         harness.setScreenSize()
         try await harness.waitUntil("the panes weren't laid out") { stopping != nil }
         let reportsBeforeStop = harness.states.count
         await stopping?.value
 
-        XCTAssertEqual(creationsAtStop, 2)
-        XCTAssertEqual(harness.model.rendererCreationsInFlightForTesting, 0)
         XCTAssertNil(harness.model.paneSurface("w1:p1"))
         XCTAssertNil(harness.model.paneSurface("w1:p2"))
         let closed = await bridge.isClosed
@@ -375,7 +526,8 @@ final class HerdrScreenModelTests: XCTestCase {
     /// paint gets a new terminal and renderer from the new connection, and a failed renderer is
     /// replaced over its terminal.
     func testAReconnectPaintsAFailedPaneAgainAndReplacesAFailedRenderer() async throws {
-        let harness = await makeHarness()
+        let producerFailure = ProducerFailure()
+        let harness = await makeHarness(producerFailure: producerFailure)
         let model = harness.model
         let first = try await harness.bridge(0)
         let panes: [HerdrServerScript.Pane] = [
@@ -391,7 +543,13 @@ final class HerdrScreenModelTests: XCTestCase {
         let failedTerminal = try XCTUnwrap(model.paneSurface("w1:p1")?.terminal)
         let failedRenderer = try XCTUnwrap(model.paneSurface("w1:p2")?.renderer)
 
-        await model.engineForTesting.failPaneForTesting("w1:p1")
+        // Ghostty can't apply the first pane's next paint; the second pane's renderer fails.
+        producerFailure.isOn = true
+        await first.serve(HerdrServerScript.surface(projection: 1, revision: 2, lines: ["uno two"], panes: panes))
+        try await harness.waitUntil("the first pane's paint didn't fail") {
+            model.presentation(ofPane: "w1:p1") != .pending
+        }
+        producerFailure.isOn = false
         failedRenderer.reportRendererFailure()
         try await harness.waitUntil("the failures weren't shown") {
             model.presentation(ofPane: "w1:p1") != .pending && model.presentation(ofPane: "w1:p2") != .pending

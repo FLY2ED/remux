@@ -8,6 +8,10 @@ struct HerdrPaneLayout: Equatable, Sendable {
         /// The pane's text area: its terminal's size, and where it sits in the frame.
         let innerRect: HerdrSurfaceRect
         let focused: Bool
+        /// What Herdr's client calls the pane in its lists, from the snapshot; empty without one.
+        var name = ""
+        /// The directory of the pane's foreground program, else of its shell; empty when unknown.
+        var path = ""
     }
 
     /// The tab the surface shows: the snapshot's focused tab.
@@ -87,8 +91,11 @@ actor HerdrTerminalEngine {
         let surfaceRevision: UInt64
     }
 
+    /// Makes a pane's producer for a terminal of the given columns and rows.
+    typealias ProducerFactory = @Sendable (_ columns: UInt16, _ rows: UInt16) throws -> any HerdrPaneProducing
+
     private struct Pane {
-        let producer: HerdrPaneProducer
+        let producer: any HerdrPaneProducing
         /// The terminal handed to the owner; a renderer registers only over this one.
         let terminal: HerdrRetainedTerminal
         /// What the terminal shows: the last paint Ghostty accepted.
@@ -109,11 +116,17 @@ actor HerdrTerminalEngine {
     private var layout: HerdrPaneLayout?
     private var cellWidthPx: UInt32
     private var cellHeightPx: UInt32
+    private let makeProducer: ProducerFactory
 
-    init(cellWidthPx: UInt32, cellHeightPx: UInt32) {
+    init(
+        cellWidthPx: UInt32,
+        cellHeightPx: UInt32,
+        makeProducer: @escaping ProducerFactory = { try HerdrPaneProducer(columns: $0, rows: $1) }
+    ) {
         (updates, continuation) = AsyncStream.makeStream()
         self.cellWidthPx = max(cellWidthPx, 1)
         self.cellHeightPx = max(cellHeightPx, 1)
+        self.makeProducer = makeProducer
     }
 
     // MARK: - Frames
@@ -257,10 +270,10 @@ actor HerdrTerminalEngine {
     }
 
     private func createPane(paneID: String, painted: HerdrPanePainter.Painted) {
-        let producer: HerdrPaneProducer
+        let producer: any HerdrPaneProducing
         let terminal: HerdrRetainedTerminal
         do {
-            producer = try HerdrPaneProducer(columns: painted.area.width, rows: painted.area.height)
+            producer = try makeProducer(painted.area.width, painted.area.height)
             terminal = try producer.retainTerminal()
         } catch {
             fail(paneID: paneID)
@@ -290,12 +303,40 @@ actor HerdrTerminalEngine {
             columns: surface.frame.width,
             rows: surface.frame.height,
             panes: surface.panes.map {
-                HerdrPaneLayout.Pane(paneID: $0.paneID, innerRect: $0.innerRect, focused: $0.focused)
+                HerdrPaneLayout.Pane(
+                    paneID: $0.paneID,
+                    innerRect: $0.innerRect,
+                    focused: $0.focused,
+                    name: Self.name(ofPane: $0.paneID, in: snapshot),
+                    path: Self.path(ofPane: $0.paneID, in: snapshot)
+                )
             }
         )
         guard next != layout else { return }
         layout = next
         continuation.yield(.layout(next))
+    }
+
+    /// As Herdr's client names a pane in its lists: the pane's label or its agent's name, then the
+    /// agent's title, then the agent's kind.
+    private static func name(ofPane paneID: String, in snapshot: HerdrSnapshot) -> String {
+        let pane = snapshot.panes.first { $0.paneID == paneID }
+        let agent = snapshot.agents.first { $0.paneID == paneID }
+        let candidates = [
+            pane?.label,
+            agent?.name,
+            agent?.title,
+            agent?.terminalTitleStripped,
+            agent?.agent,
+            agent?.displayAgent,
+        ]
+        return candidates.lazy.compactMap { $0 }.first { !$0.isEmpty } ?? ""
+    }
+
+    /// As Herdr's client shows a pane's directory: its foreground program's, else its shell's.
+    private static func path(ofPane paneID: String, in snapshot: HerdrSnapshot) -> String {
+        let pane = snapshot.panes.first { $0.paneID == paneID }
+        return [pane?.foregroundCWD, pane?.cwd].lazy.compactMap { $0 }.first { !$0.isEmpty } ?? ""
     }
 
     private func wake(_ pane: inout Pane, paneID: String) {
@@ -340,12 +381,6 @@ actor HerdrTerminalEngine {
         pane.renderer = nil
         panes[paneID] = pane
     }
-
-    #if DEBUG
-    func failPaneForTesting(_ paneID: String) {
-        fail(paneID: paneID)
-    }
-    #endif
 }
 
 /// The lifetime fence for a renderer over a Herdr pane's terminal: registration and unregistration
