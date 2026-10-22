@@ -246,6 +246,43 @@ final class HerdrConnectionTests: XCTestCase {
         _ = try await floor
     }
 
+    /// As Herdr's client, a new size goes to the session on screen, also while its show is being
+    /// answered, and to no hidden session: the next show carries it.
+    func testResizeGoesOnlyToTheSessionOnScreen() async throws {
+        let (connection, transport, _) = try await openedSession(surfaceActive: false)
+        let size = HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 30, rows: 10)
+        await connection.resize(size)
+        try await Task.sleep(for: .milliseconds(30))
+        let writtenWhileHidden = await transport.writtenCount
+        XCTAssertEqual(writtenWhileHidden, 1)
+
+        async let floor = connection.show(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 40, rows: 12))
+        let set = try Self.request(try await transport.written(2))
+        _ = try await transport.written(3)
+        await connection.resize(size)
+        let resizeDuringShow = try await transport.written(4)
+        XCTAssertEqual(resizeDuringShow, HerdrClientMessage.shellResize(size).frame)
+        await transport.serve(Self.reply(id: set.id, json: #"{"type":"client_shell_surface_set","active":true,"projection_revision":3}"#))
+        _ = try await floor
+
+        await connection.resize(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 0, rows: 0))
+        let resizeWhileShown = try await transport.written(5)
+        XCTAssertEqual(resizeWhileShown, HerdrClientMessage.shellResize(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 1, rows: 1)).frame)
+    }
+
+    /// A surface the decoder can't apply ends the connection as a wire failure, as in Herdr's client.
+    func testASurfaceTheDecoderCannotApplyEndsTheConnection() async throws {
+        let (_, transport, events) = try await openedSession(surfaceActive: true)
+        let recorded = try Self.frames(Self.recording("herdr-04-patch-and-delta-A"))
+        let delta = try XCTUnwrap(recorded.first { payload in
+            guard case .control(let kind, _) = try? HerdrServerMessage.decode(payload) else { return false }
+            return kind == HerdrControlKind.surfaceDelta
+        })
+        await transport.serve(HerdrWire.frame(delta))
+        let kinds = await events.waitForEnd().map(\.kind)
+        XCTAssertEqual(kinds, ["snapshot", "ended(\(HerdrConnectionError.wire(.invalidSurfaceUpdate("surface delta without a baseline"))))"])
+    }
+
     /// A show Herdr doesn't acknowledge in time, or acknowledges as inactive, is rolled back as
     /// Herdr's client rolls it back: focus off, then the surface off; input is refused again.
     func testAnUnacknowledgedShowIsRolledBack() async throws {
@@ -1058,11 +1095,8 @@ extension HerdrConnectionEvent {
     var kind: String {
         switch self {
         case .snapshot: return "snapshot"
-        case .surface(.full): return "surface.full"
+        case .surface(.surface): return "surface.full"
         case .surface(.patch): return "surface.patch"
-        case .surface(.reuse): return "surface.reuse"
-        case .surface(.delta): return "surface.delta"
-        case .surface(.scroll): return "surface.scroll"
         case .bell: return "bell"
         case .notification: return "notification"
         case .clipboard: return "clipboard"
