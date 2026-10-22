@@ -42,15 +42,36 @@ final class GhosttyTerminalPresentationProjectorTests: XCTestCase {
 
         XCTAssertEqual(layout.cellSize, CGSize(width: 4, height: 8))
         XCTAssertEqual(layout.canvasSize, CGSize(width: 320, height: 192))
-        XCTAssertEqual(layout.origin, CGPoint(x: 40, y: 54))
+        XCTAssertEqual(layout.origin, CGPoint(x: 40, y: 0))
         XCTAssertEqual(
             layout.frame(for: .init(x: 0, y: 0, columns: 39, rows: 24)),
-            CGRect(x: 40, y: 54, width: 156, height: 192)
+            CGRect(x: 40, y: 0, width: 156, height: 192)
         )
         XCTAssertEqual(
             layout.frame(for: .init(x: 40, y: 0, columns: 40, rows: 24)),
-            CGRect(x: 200, y: 54, width: 160, height: 192)
+            CGRect(x: 200, y: 0, width: 160, height: 192)
         )
+    }
+
+    /// The keyboard closing grows the viewport before the server's taller grid arrives; the
+    /// smaller grid must stay where it is meanwhile.
+    func testCompositeLayoutKeepsAGridThatDoesNotFillTheViewportInPlaceAsTheViewportGrows() throws {
+        let grid = GhosttyTerminalGridSize(columns: 55, rows: 29)
+        let cellMetrics = GhosttyTerminalCellDisplayMetrics(pixelWidth: 24, pixelHeight: 53, contentScale: 3)
+        let keyboardUp = try XCTUnwrap(GhosttyCompositeViewportLayout(
+            bounds: CGRect(x: 0, y: 0, width: 440, height: 520),
+            grid: grid,
+            cellMetrics: cellMetrics
+        ))
+        let keyboardDown = try XCTUnwrap(GhosttyCompositeViewportLayout(
+            bounds: CGRect(x: 0, y: 0, width: 440, height: 806),
+            grid: grid,
+            cellMetrics: cellMetrics
+        ))
+        let pane = GhosttyTerminalGridRect(x: 0, y: 0, columns: 55, rows: 29)
+
+        XCTAssertEqual(keyboardUp.frame(for: pane), keyboardDown.frame(for: pane))
+        XCTAssertEqual(keyboardDown.frame(for: pane).minY, 0)
     }
 
     func testTwoSideBySidePanesShareOneDividerWithTmuxHalfFocusOwnership() throws {

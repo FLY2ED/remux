@@ -451,14 +451,21 @@ private final class GhosttyCompositeViewportContainerView: UIView,
               )
         else { return }
         var changed = false
-        for pane in projection.panes {
-            guard let visibleFrame = pane.visibleFrame,
-                  let container = containersBySurfaceID[pane.id]
-            else { continue }
-            let targetFrame = layout.frame(for: visibleFrame)
-            guard container.frame != targetFrame else { continue }
-            container.frame = targetFrame
-            changed = true
+        // Pane frames are exact cell geometry. A layout pass can run inside another animation,
+        // such as the system keyboard's; animating a pane there leaves a position animation
+        // running that adds its offset to the next authoritative layout. Each moved pane also
+        // lays itself out here, so its own frames stay out of that animation too.
+        UIView.performWithoutAnimation {
+            for pane in projection.panes {
+                guard let visibleFrame = pane.visibleFrame,
+                      let container = containersBySurfaceID[pane.id]
+                else { continue }
+                let targetFrame = layout.frame(for: visibleFrame)
+                guard container.frame != targetFrame else { continue }
+                container.frame = targetFrame
+                container.layoutIfNeeded()
+                changed = true
+            }
         }
         if let startedAt {
             GhosttyRuntimeTrace.perf(
@@ -824,8 +831,11 @@ private final class GhosttyCompositeViewportContainerView: UIView,
             endSelectionHandle.isHidden = true
             return
         }
-        position(startSelectionHandle, surface: surface)
-        position(endSelectionHandle, surface: surface)
+        // Handles sit on the pane's cells, so they move with the pane, never animated.
+        UIView.performWithoutAnimation {
+            position(startSelectionHandle, surface: surface)
+            position(endSelectionHandle, surface: surface)
+        }
     }
 
     private func position(
