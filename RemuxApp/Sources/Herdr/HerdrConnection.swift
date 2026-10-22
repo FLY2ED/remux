@@ -192,12 +192,20 @@ actor HerdrConnection {
     private var writeQueue: [[UInt8]] = []
     private var isWriting = false
 
-    /// A request awaiting its final chunk. After a cancellation nobody waits any more, but the entry
-    /// stays until the reply or the timeout frees the lane.
+    /// A request awaiting its final chunk. After a cancellation, or for a hide sent without waiting,
+    /// nobody waits, but the entry stays until the reply or the timeout frees the lane.
     private struct Pending {
-        var continuation: CheckedContinuation<Data, Error>?
+        var waiter: Waiter?
         var data: [UInt8] = []
         var holdsLane: Bool
+    }
+
+    private enum Waiter {
+        /// A caller awaiting the reply's JSON.
+        case caller(CheckedContinuation<Data, Error>)
+        /// A show sent with `sendShow`: its answer goes to `answered`, after the same rollback as a
+        /// failed `show`.
+        case show(position: UInt64, answered: @Sendable (Result<UInt64, Error>) -> Void)
     }
 
     private var pending: [String: Pending] = [:]
@@ -458,40 +466,76 @@ actor HerdrConnection {
     /// within the activation timeout, the show is rolled back as Herdr's client rolls it back, unless a
     /// newer show or hide was asked for meanwhile: as in Herdr's client, the newest request wins.
     func show(_ geometry: HerdrSurfaceGeometry) async throws -> UInt64 {
-        let size = Self.atLeastOneCell(geometry)
-        let (id, request) = try surfaceSet(active: true)
-        visibilityRequests += 1
-        let position = visibilityRequests
-        isActive = true
+        let show = try prepareShow(geometry)
         do {
             let data = try await reply(
-                to: id,
+                to: show.id,
                 method: Self.surfaceSetMethod,
                 holdsLane: false,
                 timeout: timing.activation,
-                sending: [.shellResize(size), request, .focus(true)]
+                sending: show.messages
             )
             return try Self.acknowledgedRevision(from: data, active: true)
         } catch {
-            if position == visibilityRequests { rollBackShow() }
+            if show.position == visibilityRequests { rollBackShow() }
             throw error
         }
+    }
+
+    /// Sends a show as `show(_:)` does and returns once it is queued, so a caller sending its calls one
+    /// after another can send a hide behind it while it is unanswered. `answered` gets Herdr's answer
+    /// on this connection.
+    func sendShow(_ geometry: HerdrSurfaceGeometry, answered: @escaping @Sendable (Result<UInt64, Error>) -> Void) {
+        let show: (id: String, position: UInt64, messages: [HerdrClientMessage])
+        do {
+            show = try prepareShow(geometry)
+        } catch {
+            answered(.failure(error))
+            return
+        }
+        guard !ended else {
+            resolve(.show(position: show.position, answered: answered), with: .failure(HerdrCommandError.connectionEnded))
+            return
+        }
+        register(show.id, waiter: .show(position: show.position, answered: answered), holdsLane: false,
+                 timeout: timing.activation, method: Self.surfaceSetMethod, sending: show.messages)
+    }
+
+    private func prepareShow(
+        _ geometry: HerdrSurfaceGeometry
+    ) throws -> (id: String, position: UInt64, messages: [HerdrClientMessage]) {
+        let (id, request) = try surfaceSet(active: true)
+        visibilityRequests += 1
+        isActive = true
+        return (id, visibilityRequests, [.shellResize(Self.atLeastOneCell(geometry)), request, .focus(true)])
     }
 
     /// Hides the session. Focus goes first, while still active: deactivation keeps the stored focus,
     /// so without it the next show's focus would be ignored.
     func hide() async throws {
-        let (id, request) = try surfaceSet(active: false)
-        visibilityRequests += 1
-        isActive = false
+        let hide = try prepareHide()
         let data = try await reply(
-            to: id,
+            to: hide.id,
             method: Self.surfaceSetMethod,
             holdsLane: false,
             timeout: timing.activation,
-            sending: [.focus(false), request]
+            sending: hide.messages
         )
         _ = try Self.acknowledgedRevision(from: data, active: false)
+    }
+
+    /// Sends a hide as `hide()` does and returns once it is queued; its answer isn't waited for.
+    func sendHide() {
+        guard let hide = try? prepareHide(), !ended else { return }
+        register(hide.id, waiter: nil, holdsLane: false, timeout: timing.activation,
+                 method: Self.surfaceSetMethod, sending: hide.messages)
+    }
+
+    private func prepareHide() throws -> (id: String, messages: [HerdrClientMessage]) {
+        let (id, request) = try surfaceSet(active: false)
+        visibilityRequests += 1
+        isActive = false
+        return (id, [.focus(false), request])
     }
 
     /// Gives the session on screen a new size, as Herdr's client does whenever its terminal resizes,
@@ -626,8 +670,6 @@ actor HerdrConnection {
         return try await reply(to: id, method: method, holdsLane: true, timeout: timing.command, sending: [message])
     }
 
-    /// Registers the reply for `id`, then queues `messages` in order, all before any other actor work,
-    /// so a step's messages go out together and its reply can't arrive unregistered.
     private func reply(
         to id: String,
         method: String,
@@ -638,15 +680,44 @@ actor HerdrConnection {
         guard !ended else { throw HerdrCommandError.connectionEnded }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                pending[id] = Pending(continuation: continuation, holdsLane: holdsLane)
-                messages.forEach(enqueue)
-                Task {
-                    try? await Task.sleep(for: timeout)
-                    await self.expire(id, method: method)
-                }
+                register(id, waiter: .caller(continuation), holdsLane: holdsLane, timeout: timeout,
+                         method: method, sending: messages)
             }
         } onCancel: {
             Task { await self.stopWaiting(for: id) }
+        }
+    }
+
+    /// Registers the reply for `id`, then queues `messages` in order, all before any other actor work,
+    /// so a step's messages go out together and its reply can't arrive unregistered.
+    private func register(
+        _ id: String,
+        waiter: Waiter?,
+        holdsLane: Bool,
+        timeout: Duration,
+        method: String,
+        sending messages: [HerdrClientMessage]
+    ) {
+        pending[id] = Pending(waiter: waiter, holdsLane: holdsLane)
+        messages.forEach(enqueue)
+        Task {
+            try? await Task.sleep(for: timeout)
+            await self.expire(id, method: method)
+        }
+    }
+
+    private func resolve(_ waiter: Waiter?, with result: Result<Data, Error>) {
+        switch waiter {
+        case .caller(let continuation)?:
+            continuation.resume(with: result)
+        case .show(let position, let answered)?:
+            let floor = result.flatMap { data in
+                Result { try Self.acknowledgedRevision(from: data, active: true) }
+            }
+            if case .failure = floor, position == visibilityRequests { rollBackShow() }
+            answered(floor)
+        case nil:
+            break
         }
     }
 
@@ -654,20 +725,20 @@ actor HerdrConnection {
     /// and the late reply is dropped, as `receive` drops every reply to an unknown request.
     private func expire(_ id: String, method: String) {
         guard let request = pending.removeValue(forKey: id) else { return }
-        request.continuation?.resume(throwing: HerdrCommandError.timedOut(method: method))
+        resolve(request.waiter, with: .failure(HerdrCommandError.timedOut(method: method)))
         if request.holdsLane { releaseLane() }
     }
 
     private func stopWaiting(for id: String) {
-        guard var request = pending[id], let continuation = request.continuation else { return }
-        request.continuation = nil
+        guard var request = pending[id], case .caller(let continuation)? = request.waiter else { return }
+        request.waiter = nil
         pending[id] = request
         continuation.resume(throwing: CancellationError())
     }
 
     private func receive(_ chunk: HerdrResponseChunk) {
         guard var request = pending[chunk.requestID] else { return }
-        if request.continuation != nil {
+        if request.waiter != nil {
             request.data += chunk.data
         }
         guard chunk.isFinal else {
@@ -676,7 +747,7 @@ actor HerdrConnection {
         }
         pending[chunk.requestID] = nil
         if request.holdsLane { releaseLane() }
-        guard let continuation = request.continuation else { return }
+        guard let waiter = request.waiter else { return }
         let data = Data(request.data)
         struct Failure: Decodable {
             struct Body: Decodable {
@@ -687,9 +758,9 @@ actor HerdrConnection {
             let error: Body?
         }
         if let failure = try? JSONDecoder().decode(Failure.self, from: data), let error = failure.error {
-            continuation.resume(throwing: HerdrCommandError.failed(code: error.code, message: error.message))
+            resolve(waiter, with: .failure(HerdrCommandError.failed(code: error.code, message: error.message)))
         } else {
-            continuation.resume(returning: data)
+            resolve(waiter, with: .success(data))
         }
     }
 
@@ -826,10 +897,11 @@ actor HerdrConnection {
         healthTask?.cancel()
         healthTask = nil
         writeQueue.removeAll()
-        for request in pending.values {
-            request.continuation?.resume(throwing: HerdrCommandError.connectionEnded)
-        }
+        let ending = pending.values
         pending.removeAll()
+        for request in ending {
+            resolve(request.waiter, with: .failure(HerdrCommandError.connectionEnded))
+        }
         for waiter in pongWaiters.values {
             waiter.resume(returning: false)
         }
