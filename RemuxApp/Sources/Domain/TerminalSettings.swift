@@ -106,6 +106,16 @@ enum TerminalTheme: String, CaseIterable, Codable, Identifiable, Sendable {
         }
     }
 
+    /// Whether the theme is light, as a terminal tells programs its colour scheme.
+    var isLight: Bool {
+        switch self {
+        case .ghosttyDefault, .remuxDark:
+            false
+        case .remuxLight:
+            true
+        }
+    }
+
     /// Neutral separator used by Remux's phone-sized composite. These colors
     /// deliberately have more contrast than Ghostty's desktop split divider
     /// because a one-pixel line otherwise disappears at mobile scale.
