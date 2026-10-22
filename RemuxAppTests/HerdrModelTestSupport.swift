@@ -97,9 +97,15 @@ enum HerdrServerScript {
         return HerdrWire.frame(writer.bytes)
     }
 
-    static func snapshotPane(_ id: String, label: String? = nil, cwd: String? = nil, foregroundCWD: String? = nil) -> String {
+    static func snapshotPane(
+        _ id: String,
+        tab: String = "t1",
+        label: String? = nil,
+        cwd: String? = nil,
+        foregroundCWD: String? = nil
+    ) -> String {
         """
-        {"pane_id":"\(id)","workspace_id":"w1","tab_id":"t1","label":\(json(label)),"cwd":\(json(cwd)),
+        {"pane_id":"\(id)","workspace_id":"w1","tab_id":"\(tab)","label":\(json(label)),"cwd":\(json(cwd)),
          "foreground_cwd":\(json(foregroundCWD)),"focused":false,"right_click_passthrough":false}
         """
     }
@@ -108,13 +114,15 @@ enum HerdrServerScript {
         _ paneID: String,
         name: String? = nil,
         title: String? = nil,
+        terminalTitleStripped: String? = nil,
         agent: String? = nil,
         displayAgent: String? = nil
     ) -> String {
         """
         {"pane_id":"\(paneID)","workspace_id":"w1","tab_id":"t1","name":\(json(name)),
          "display_agent":\(json(displayAgent)),"agent":\(json(agent)),"title":\(json(title)),
-         "terminal_title":null,"terminal_title_stripped":null,"agent_status":"working","state_change_seq":1,
+         "terminal_title":null,"terminal_title_stripped":\(json(terminalTitleStripped)),"agent_status":"working",
+         "state_change_seq":1,
          "state_labels":[],"tokens":[],"focused":false}
         """
     }

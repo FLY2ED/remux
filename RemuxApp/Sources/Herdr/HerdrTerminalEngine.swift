@@ -8,7 +8,7 @@ struct HerdrPaneLayout: Equatable, Sendable {
         /// The pane's text area: its terminal's size, and where it sits in the frame.
         let innerRect: HerdrSurfaceRect
         let focused: Bool
-        /// The label Herdr puts on the pane's border, from the snapshot; empty without one.
+        /// The pane's name as Herdr's pane navigator lists it, from the snapshot.
         var name = ""
         /// The directory of the pane's foreground program, else of its shell; empty when unknown.
         var path = ""
@@ -317,16 +317,23 @@ actor HerdrTerminalEngine {
         continuation.yield(.layout(next))
     }
 
-    /// The label Herdr puts on the pane's border, in its order: the pane's title, then its manual
-    /// label, then its agent's display name or label. The snapshot carries a title only for an agent's
-    /// pane.
+    /// The pane's name as Herdr's pane navigator lists it within its tab: its manual label or its
+    /// agent's name, else its title, else its agent's kind, else "terminal", numbered by its place
+    /// among the tab's panes when the tab has more than one. The navigator also names the tab and, for
+    /// a one-pane tab, may name the pane after its tab or workspace; those parts are left out, since
+    /// the pane sheet shows one tab. The snapshot carries a title only for an agent's pane.
     private static func name(ofPane paneID: String, in snapshot: HerdrSnapshot) -> String {
         let pane = snapshot.panes.first { $0.paneID == paneID }
         let agent = snapshot.agents.first { $0.paneID == paneID }
-        let candidates = [agent?.title, pane?.label, agent?.displayAgent, agent?.agent]
-        return candidates.lazy
-            .compactMap { $0?.trimmingCharacters(in: .whitespaces) }
-            .first { !$0.isEmpty } ?? ""
+        let name = pane?.label ?? agent?.name
+        let title = agent?.title ?? agent?.terminalTitleStripped
+        let kind = agent?.agent ?? agent?.displayAgent
+        let paneName = name ?? title ?? kind ?? "terminal"
+        let tabPanes = pane.map { pane in snapshot.panes.filter { $0.tabID == pane.tabID } } ?? []
+        guard tabPanes.count > 1, let index = tabPanes.firstIndex(where: { $0.paneID == paneID }) else {
+            return paneName
+        }
+        return "\(paneName) · \(index + 1)"
     }
 
     /// The directory of the pane's foreground program, as tmux's current path is, else of its shell.

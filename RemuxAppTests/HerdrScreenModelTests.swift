@@ -280,48 +280,69 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(adapter.topLevelNoun, .tab)
     }
 
-    /// The pane sheet shows, as for a tmux pane, the folder of the pane's foreground program and what
-    /// runs there: the label Herdr puts on the pane's border, in Herdr's order (the pane's title, then
-    /// its manual label, then its agent's display name or label). A plain pane has neither.
-    func testPanesAreNamedAsHerdrLabelsTheirBorders() async throws {
+    /// The pane sheet shows, as for a tmux pane, the folder of the pane's foreground program, and names
+    /// each pane as Herdr's pane navigator does within a tab: its manual label or agent's name, else
+    /// its title, else its agent's kind, else "terminal", numbered by its place among the tab's panes
+    /// in the snapshot when the tab has more than one.
+    func testPanesAreNamedAsHerdrsPaneNavigatorListsThem() async throws {
         let harness = await makeHarness()
         let bridge = try await harness.bridge()
         let snapshot = HerdrServerScript.snapshot(
             revision: 1,
             panes: [
                 HerdrServerScript.snapshotPane("w1:p1", label: "editor", cwd: "/repo", foregroundCWD: "/repo/src"),
-                HerdrServerScript.snapshotPane("w1:p2", label: "worker", cwd: "/home"),
+                HerdrServerScript.snapshotPane("w1:p2", cwd: "/home"),
+                HerdrServerScript.snapshotPane("w1:q1", tab: "t2"),
                 HerdrServerScript.snapshotPane("w1:p3", cwd: "/srv", foregroundCWD: "/srv/app"),
                 HerdrServerScript.snapshotPane("w1:p4"),
+                HerdrServerScript.snapshotPane("w1:p5"),
+                HerdrServerScript.snapshotPane("w1:p6"),
             ],
             agents: [
+                HerdrServerScript.snapshotAgent("w1:p1", name: "fixer", title: "Fixing tests", agent: "claude"),
+                HerdrServerScript.snapshotAgent("w1:p2", name: "reviewer", title: "Reviewing", agent: "codex"),
                 HerdrServerScript.snapshotAgent(
-                    "w1:p2", name: "fixer", title: "Fixing tests", agent: "claude", displayAgent: "Claude Code"
+                    "w1:p3", title: "Fixing tests", terminalTitleStripped: "claude", displayAgent: "Claude Code"
                 ),
-                HerdrServerScript.snapshotAgent("w1:p3", agent: "codex", displayAgent: "Codex"),
+                HerdrServerScript.snapshotAgent("w1:p4", terminalTitleStripped: "vim notes.md"),
+                HerdrServerScript.snapshotAgent("w1:p5", agent: "codex", displayAgent: "Codex"),
             ]
         )
         await bridge.serve(try HerdrServerScript.welcome() + snapshot)
         await bridge.serve(HerdrServerScript.surface(
             projection: 1,
             revision: 1,
-            lines: ["a b c d"],
-            panes: [
-                .init(id: "w1:p1", x: 0, width: 1, height: 1, focused: true),
-                .init(id: "w1:p2", x: 2, width: 1, height: 1),
-                .init(id: "w1:p3", x: 4, width: 1, height: 1),
-                .init(id: "w1:p4", x: 6, width: 1, height: 1),
-            ]
+            lines: ["a b c d e f"],
+            panes: (0..<6).map { .init(id: "w1:p\($0 + 1)", x: UInt16($0 * 2), width: 1, height: 1, focused: $0 == 0) }
         ))
         harness.setScreenSize()
 
         let adapter = harness.model.terminalScreenAdapter
         try await harness.waitUntil("the panes weren't laid out") {
-            adapter.terminalScreenPresentationProjection.viewport.panes.count == 4
+            adapter.terminalScreenPresentationProjection.viewport.panes.count == 6
         }
-        let panes = adapter.terminalScreenPresentationProjection.viewport.panes
-        XCTAssertEqual(panes.map(\.currentCommand), ["editor", "Fixing tests", "Codex", ""])
-        XCTAssertEqual(panes.map(\.currentPath), ["/repo/src", "/home", "/srv/app", ""])
+        var panes = adapter.terminalScreenPresentationProjection.viewport.panes
+        XCTAssertEqual(panes.map(\.currentCommand), [
+            "editor · 1", "reviewer · 2", "Fixing tests · 3", "vim notes.md · 4", "codex · 5", "terminal · 6",
+        ])
+        XCTAssertEqual(panes.map(\.currentPath), ["/repo/src", "/home", "/srv/app", "", "", ""])
+
+        // A tab's only pane has no number.
+        await bridge.serve(HerdrServerScript.snapshot(
+            revision: 2,
+            panes: [HerdrServerScript.snapshotPane("w1:p6"), HerdrServerScript.snapshotPane("w1:q1", tab: "t2")]
+        ))
+        await bridge.serve(HerdrServerScript.surface(
+            projection: 2,
+            revision: 2,
+            lines: ["a"],
+            panes: [.init(id: "w1:p6", x: 0, width: 1, height: 1, focused: true)]
+        ))
+        try await harness.waitUntil("the tab's only pane wasn't laid out") {
+            adapter.terminalScreenPresentationProjection.viewport.panes.count == 1
+        }
+        panes = adapter.terminalScreenPresentationProjection.viewport.panes
+        XCTAssertEqual(panes.map(\.currentCommand), ["terminal"])
     }
 
     /// A frame left behind by a lost connection shows no live cursor: the focused pane is unfocused
