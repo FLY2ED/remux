@@ -862,6 +862,48 @@ private struct ActiveTerminalSessionView: View {
     }
 }
 
+/// What deleting a server removes, worded for the confirmation that comes before it. Mirrors
+/// `RemuxRootModel.deleteServer`: the server's saved sessions always go; its sign-in goes only when no
+/// other server shares it. Remux only ever detaches from sessions, so they keep running on the server.
+struct ServerDeletionConfirmation: Equatable {
+    let title: String
+    let message: String
+
+    init(server: SavedServer, snapshot: ConnectionLibrarySnapshot) {
+        title = "Delete \u{201C}\(server.displayName)\u{201D}?"
+
+        var sentences: [String] = []
+        let sessionCount = snapshot.workspaces.filter { $0.serverID == server.id }.count
+        switch sessionCount {
+        case 0:
+            break
+        case 1:
+            sentences.append("Its saved session is removed from Remux.")
+        default:
+            sentences.append("Its \(sessionCount) saved sessions are removed from Remux.")
+        }
+
+        let sharesSignIn = snapshot.servers.contains {
+            $0.id != server.id && $0.identityID == server.identityID
+        }
+        if !sharesSignIn {
+            switch snapshot.identity(id: server.identityID)?.authenticationKind {
+            case .privateKey:
+                sentences.append(
+                    "Its private key is deleted from this device. If Remux generated it, there is no other copy."
+                )
+            case .password:
+                sentences.append("Its saved password is deleted.")
+            case .some(.none), nil:
+                break
+            }
+        }
+
+        sentences.append("Sessions on the server keep running.")
+        message = sentences.joined(separator: " ")
+    }
+}
+
 private struct ConnectionLibraryView: View {
     private static let collapsedConnectedSessionCount = 3
     private static let collapsedRecentSessionCount = 5
@@ -889,6 +931,7 @@ private struct ConnectionLibraryView: View {
     @State private var showsAllConnectedSessions = false
     @State private var showsAllRecentSessions = false
     @State private var serverEditMode: EditMode = .inactive
+    @State private var serverPendingDeletion: SavedServer?
 
     var body: some View {
         let sessionProjection = SessionSwitcherProjection(
@@ -911,6 +954,21 @@ private struct ConnectionLibraryView: View {
                 .environment(\.editMode, $serverEditMode)
                 .accessibilityIdentifier("library.list")
             }
+        }
+        .alert(
+            serverPendingDeletion.map { ServerDeletionConfirmation(server: $0, snapshot: snapshot).title } ?? "",
+            isPresented: Binding(
+                get: { serverPendingDeletion != nil },
+                set: { if !$0 { serverPendingDeletion = nil } }
+            ),
+            presenting: serverPendingDeletion
+        ) { server in
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) {
+                onDeleteServer(server.id)
+            }
+        } message: { server in
+            Text(ServerDeletionConfirmation(server: server, snapshot: snapshot).message)
         }
         .libraryHomeGroupedScrollBackground()
         .libraryHomeChrome(theme: terminalSettings.theme)
@@ -1116,14 +1174,14 @@ private struct ConnectionLibraryView: View {
                     }
 
                     Button(role: .destructive) {
-                        onDeleteServer(server.id)
+                        serverPendingDeletion = server
                     } label: {
                         Label("Delete Server", systemImage: "trash")
                     }
                 }
-                .swipeActions(edge: .trailing) {
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     Button("Delete", role: .destructive) {
-                        onDeleteServer(server.id)
+                        serverPendingDeletion = server
                     }
                     .tint(.red)
 
