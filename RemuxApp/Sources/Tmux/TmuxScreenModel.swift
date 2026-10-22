@@ -21,8 +21,6 @@ final class TmuxScreenModel: ObservableObject {
     @Published private(set) var session: TmuxTerminalSession?
     @Published private(set) var startupFailure: String?
 
-    var runtimeConnectionTarget: SessionTarget { target }
-
     /// The viewport the root carries into the replacement model on
     /// reconnect for a sized attach. Prefers the last size reported
     /// with the viewport in its settled shape, so disconnecting while

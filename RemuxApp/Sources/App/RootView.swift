@@ -803,30 +803,20 @@ private struct ActiveTerminalSessionView: View {
         self.onShowLibrary = onShowLibrary
         _previewSession = StateObject(
             wrappedValue: TerminalPreviewSession(
-                client: entry.model.terminalPreviewClient,
-                serverDisplayName: entry.model.target.server.displayName
+                client: entry.runtime.terminalPreviewClient,
+                serverDisplayName: entry.runtime.target.server.displayName
             )
         )
     }
 
     var body: some View {
         ZStack {
-            GhosttySurfaceScreen(
-                model: entry.model.terminalScreenAdapter,
-                presentation: entry.presentation,
-                isSelected: isSelected,
-                composer: composer,
-                isTerminalCovered: isAppSheetPresented || previewSession.isPresented,
-                shortcutStore: shortcutStore,
-                attachmentTransferServiceFactory: entry.attachmentTransferServiceFactory,
-                onPreviewSelection: previewSelectionHandler,
-                onReconnect: onReconnect,
-                onShowSessions: onShowSessions,
-                onShowLibrary: onShowLibrary,
-                onUpdateCredentials: onUpdateCredentials,
-                onEditServer: onEditServer,
-                onTrustHostKey: onTrustHostKey
-            )
+            switch entry.runtime {
+            case .tmux(let model):
+                screen(model.terminalScreenAdapter)
+            case .herdr(let model):
+                screen(model.terminalScreenAdapter)
+            }
 
             if previewSession.isPresented {
                 TerminalPreviewView(
@@ -838,23 +828,36 @@ private struct ActiveTerminalSessionView: View {
         }
     }
 
-    private func openPreview(
-        _ candidate: TerminalPreviewCandidate,
-        from surfaceID: UUID
-    ) {
-        previewSession.open(
-            candidate,
-            resolvingPathWith: entry.model.terminalPreviewPathResolver(
-                for: candidate,
-                from: surfaceID
-            )
+    private func screen<Model: GhosttyTerminalScreenModeling>(_ model: Model) -> some View {
+        GhosttySurfaceScreen(
+            model: model,
+            presentation: entry.presentation,
+            isSelected: isSelected,
+            composer: composer,
+            isTerminalCovered: isAppSheetPresented || previewSession.isPresented,
+            shortcutStore: shortcutStore,
+            attachmentTransferServiceFactory: entry.attachmentTransferServiceFactory,
+            onPreviewSelection: previewSelectionHandler,
+            onReconnect: onReconnect,
+            onShowSessions: onShowSessions,
+            onShowLibrary: onShowLibrary,
+            onUpdateCredentials: onUpdateCredentials,
+            onEditServer: onEditServer,
+            onTrustHostKey: onTrustHostKey
         )
     }
 
+    /// Only a tmux session has previews, which resolve paths through its panes.
     private var previewSelectionHandler: ((UUID, TerminalPreviewCandidate) -> Void)? {
-        guard previewSession.canOpenPreview else { return nil }
-        return { surfaceID, candidate in
-            openPreview(candidate, from: surfaceID)
+        guard case .tmux(let model) = entry.runtime, previewSession.canOpenPreview else { return nil }
+        return { [previewSession] surfaceID, candidate in
+            previewSession.open(
+                candidate,
+                resolvingPathWith: model.terminalPreviewPathResolver(
+                    for: candidate,
+                    from: surfaceID
+                )
+            )
         }
     }
 }
