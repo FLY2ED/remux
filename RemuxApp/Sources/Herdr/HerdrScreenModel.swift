@@ -34,6 +34,11 @@ final class HerdrPaneSurface: TerminalPaneInputSink {
 @MainActor
 final class HerdrScreenModel {
     typealias BridgeOpener = @Sendable () async throws -> any HerdrBridgeTransport
+    typealias RendererFenceFactory = @MainActor (
+        HerdrTerminalEngine,
+        _ paneID: String,
+        HerdrRetainedTerminal
+    ) -> any TerminalPaneRendererFence
 
     let target: SessionTarget
     let sessionInstanceID: UUID
@@ -117,6 +122,7 @@ final class HerdrScreenModel {
     private let connectionTiming: HerdrConnection.Timing
     private let onRuntimeStateChange: (TerminalRuntimeStateUpdate) -> Void
     private let engine: HerdrTerminalEngine
+    private let makeRendererFence: RendererFenceFactory
     private var runtime: GhosttyKitRuntime?
     private var currentTerminalSettings: TerminalSettings
     private var reportTracker = TerminalRuntimeStateReportTracker()
@@ -132,6 +138,8 @@ final class HerdrScreenModel {
     private var appPhase = GhosttyAppLifecyclePhase.active
     private var lastViewport: (size: CGSize, scale: CGFloat)?
     private(set) var measurement: GhosttyTerminalViewportMeasurement?
+    /// When the screen first had a size, which a waiting bridge's hello deadline is held against.
+    private var sizeKnownSince: ContinuousClock.Instant?
 
     private(set) var layout: HerdrPaneLayout?
     private var terminals: [String: HerdrRetainedTerminal] = [:]
@@ -141,6 +149,10 @@ final class HerdrScreenModel {
     /// Ghostty gives a terminal one renderer at a time, so a replacement waits for these to close.
     private var closingTerminals: Set<ObjectIdentifier> = []
     private var creationsDrained: CheckedContinuation<Void, Never>?
+    /// Renderers whose surfaces aren't freed yet. Ghostty requires the app to outlive every surface,
+    /// so a stop releases the runtime only once this is back to zero.
+    private var closingRenderers = 0
+    private var closesDrained: CheckedContinuation<Void, Never>?
 
     init(
         target: SessionTarget,
@@ -148,7 +160,10 @@ final class HerdrScreenModel {
         openBridge: @escaping BridgeOpener,
         onRuntimeStateChange: @escaping (TerminalRuntimeStateUpdate) -> Void,
         connectionTiming: HerdrConnection.Timing = HerdrConnection.Timing(),
-        engine: HerdrTerminalEngine = HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1)
+        engine: HerdrTerminalEngine = HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1),
+        makeRendererFence: @escaping RendererFenceFactory = {
+            HerdrPaneRendererFence(engine: $0, paneID: $1, terminal: $2)
+        }
     ) {
         self.target = target
         self.sessionInstanceID = sessionInstanceID
@@ -156,6 +171,7 @@ final class HerdrScreenModel {
         self.onRuntimeStateChange = onRuntimeStateChange
         self.connectionTiming = connectionTiming
         self.engine = engine
+        self.makeRendererFence = makeRendererFence
         currentTerminalSettings = target.terminalSettings
         terminalScreenAdapter.attach(to: self)
         do {
@@ -184,10 +200,11 @@ final class HerdrScreenModel {
     // MARK: - What the root wants
 
     /// Whether the root shows this session: the selected session, outside Home. A sheet over the
-    /// terminal keeps it shown.
+    /// terminal keeps it shown. Only a selected session's panes are presented to Ghostty.
     func setSelected(_ selected: Bool) {
         guard !stopped, selected != isSelected else { return }
         isSelected = selected
+        reconcilePresentationActivity()
         reconcileVisibility()
     }
 
@@ -237,6 +254,7 @@ final class HerdrScreenModel {
             return
         }
         guard let measured, measured != measurement else { return }
+        if measurement == nil { sizeKnownSince = .now }
         measurement = measured
         if let geometry { attempt?.ask(.resize(geometry)) }
         resumeSizeWaiter()
@@ -264,7 +282,7 @@ final class HerdrScreenModel {
 
     /// Closes the connection, lets the engine finish its event and free the pane producers, waits for
     /// renderers still being created, then closes every renderer, which unregisters it from the engine
-    /// before freeing it.
+    /// before freeing it, and releases the Ghostty app once every renderer closed anywhere is freed.
     func stop() async {
         guard !stopped else { return }
         stopped = true
@@ -284,7 +302,13 @@ final class HerdrScreenModel {
         if !creatingTerminals.isEmpty {
             await withCheckedContinuation { creationsDrained = $0 }
         }
-        await closeAllSurfaces()
+        for surface in surfaces.values {
+            close(surface.renderer)
+        }
+        surfaces.removeAll()
+        if closingRenderers > 0 {
+            await withCheckedContinuation { closesDrained = $0 }
+        }
         terminals.removeAll()
         presentationFailures.removeAll()
         layout = nil
@@ -477,7 +501,9 @@ final class HerdrScreenModel {
         )
     }
 
-    /// The screen's size once it has one, or nil when the attempt is over or `deadline` passed first.
+    /// The screen's size once it has one, or nil when the attempt is over or `deadline` passed before
+    /// the screen first had a size. A size known only after the deadline is too late even if it's known
+    /// before the bridge's opening returns: Herdr's clock may already have run out.
     private func screenSize(
         for attempt: Attempt,
         until deadline: ContinuousClock.Instant?
@@ -492,7 +518,9 @@ final class HerdrScreenModel {
         }
         defer { timer?.cancel() }
         while isCurrent(attempt) {
-            if let geometry { return geometry }
+            if let geometry, let sizeKnownSince, deadline.map({ sizeKnownSince <= $0 }) ?? true {
+                return geometry
+            }
             if let deadline, ContinuousClock.now >= deadline { return nil }
             await withCheckedContinuation { sizeWaiter = $0 }
         }
@@ -651,7 +679,7 @@ final class HerdrScreenModel {
             surfaces.removeValue(forKey: paneID)
             let terminal = ObjectIdentifier(surface.terminal)
             closingTerminals.insert(terminal)
-            surface.renderer.close { [weak self] in
+            close(surface.renderer) { [weak self] in
                 guard let self else { return }
                 closingTerminals.remove(terminal)
                 createRendererIfPossible(paneID)
@@ -673,16 +701,19 @@ final class HerdrScreenModel {
         TerminalPaneRenderer.create(
             app: runtime.appHandle,
             terminal: terminal,
-            fence: HerdrPaneRendererFence(engine: engine, paneID: paneID, terminal: terminal),
+            fence: makeRendererFence(engine, paneID, terminal),
             writeInput: nil,
             baseConfig: runtime.makeTmuxBaseSurfaceConfig(),
             metrics: metrics,
             theme: currentTerminalSettings.theme,
             diagnosticName: "herdr pane=\(paneID)",
             onRendererFailure: { [weak self] in self?.rendererFailed(paneID, terminal: terminal) }
-        ) { [weak self] result in
+        ) { [weak self, runtime] result in
             guard let self else {
-                if case .success(let renderer) = result { renderer.close() }
+                // Nothing waits for this close, so it keeps the Ghostty app alive itself.
+                if case .success(let renderer) = result {
+                    renderer.close { withExtendedLifetime(runtime) {} }
+                }
                 return
             }
             self.rendererCreated(result, paneID: paneID, terminal: terminal)
@@ -710,7 +741,7 @@ final class HerdrScreenModel {
             )
         case .success(let renderer):
             guard isCurrentTerminal, let metrics = displayMetrics(for: paneID) else {
-                renderer.close()
+                close(renderer)
                 return
             }
             surfaces[paneID] = HerdrPaneSurface(paneID: paneID, terminal: terminal, renderer: renderer)
@@ -731,36 +762,42 @@ final class HerdrScreenModel {
         didChange()
     }
 
-    /// Without an open connection the panes show a frozen frame, so none is focused: Herdr's client
-    /// shows no cursor while its session isn't online.
+    /// Only the selected session's panes are presented. Without an open connection the panes show a
+    /// frozen frame, so none is focused: Herdr's client shows no cursor while its session isn't online.
     private func reconcilePresentationActivity() {
         let sceneActive = appPhase == .active
         let live = failure == nil && isConnectionOpen
         for (paneID, surface) in surfaces {
             let pane = layout?.panes.first { $0.paneID == paneID }
             surface.renderer.setSceneActive(sceneActive)
-            surface.renderer.setPresented(pane != nil)
-            surface.renderer.setFocused(live && pane?.focused == true)
+            surface.renderer.setPresented(isSelected && pane != nil)
+            surface.renderer.setFocused(isSelected && live && pane?.focused == true)
         }
     }
 
     private func closeSurface(_ paneID: String) {
-        surfaces.removeValue(forKey: paneID)?.renderer.close()
+        guard let surface = surfaces.removeValue(forKey: paneID) else { return }
+        close(surface.renderer)
     }
 
-    private func closeAllSurfaces() async {
-        let closing = Array(surfaces.values)
-        surfaces.removeAll()
-        guard !closing.isEmpty else { return }
-        await withCheckedContinuation { continuation in
-            var remaining = closing.count
-            for surface in closing {
-                surface.renderer.close {
-                    remaining -= 1
-                    if remaining == 0 { continuation.resume() }
-                }
-            }
+    /// Every renderer is closed here, so a stop can wait for all of them; `completion` runs once the
+    /// renderer's surface is freed.
+    private func close(
+        _ renderer: TerminalPaneRenderer,
+        completion: @escaping @MainActor @Sendable () -> Void = {}
+    ) {
+        closingRenderers += 1
+        renderer.close { [weak self] in
+            completion()
+            self?.rendererClosed()
         }
+    }
+
+    private func rendererClosed() {
+        closingRenderers -= 1
+        guard closingRenderers == 0, let continuation = closesDrained else { return }
+        closesDrained = nil
+        continuation.resume()
     }
 
     private func resumeCreationDrainIfQuiescent() {

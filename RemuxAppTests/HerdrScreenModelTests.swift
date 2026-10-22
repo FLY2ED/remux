@@ -21,14 +21,16 @@ final class HerdrScreenModelTests: XCTestCase {
         timing: HerdrConnection.Timing = HerdrConnection.Timing(),
         failingOpenWith error: Error? = nil,
         bridgeOpeningTakes: Duration = .zero,
-        producerFailure: ProducerFailure? = nil
+        producerFailure: ProducerFailure? = nil,
+        rendererFenceGate: RendererFenceGate? = nil
     ) async -> HerdrModelHarness {
         let harness = await HerdrModelHarness(
             settings: settings,
             timing: timing,
             failingOpenWith: error,
             bridgeOpeningTakes: bridgeOpeningTakes,
-            producerFailure: producerFailure
+            producerFailure: producerFailure,
+            rendererFenceGate: rendererFenceGate
         )
         harnesses.append(harness)
         return harness
@@ -360,6 +362,7 @@ final class HerdrScreenModelTests: XCTestCase {
         )
         await first.serve(frame)
         harness.setScreenSize()
+        harness.model.setSelected(true)
         let adapter = harness.model.terminalScreenAdapter
         try await harness.waitUntil("the pane's renderer wasn't created") {
             adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID != nil
@@ -379,6 +382,140 @@ final class HerdrScreenModelTests: XCTestCase {
         let second = try await harness.bridge(1)
         await second.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1) + frame)
         try await harness.waitUntil("the pane wasn't focused again") { managed.isFocused }
+    }
+
+    /// A size that only arrives after the hello deadline is too late, even while the bridge's opening is
+    /// still under way: Herdr may already have dropped the bridge. It is closed, keeping its SSH
+    /// connection, and another opens; the hello goes on that one.
+    func testASizeArrivingAfterTheDeadlineDuringASlowOpeningOpensAnotherBridge() async throws {
+        let harness = await makeHarness(bridgeOpeningTakes: .seconds(4))
+        try await harness.waitUntil("the opening didn't start") {
+            await harness.bridges.openingsStartedAt.count == 1
+        }
+        let openingStarts = await harness.bridges.openingsStartedAt
+        let openingStarted = try XCTUnwrap(openingStarts.first)
+        try await Task.sleep(until: openingStarted + .milliseconds(3400), clock: .continuous)
+        harness.setScreenSize()
+
+        let first = try await harness.bridge(0)
+        let second = try await harness.bridge(1, timeout: .seconds(6))
+        let hello = try await harness.writes(second, count: 1)
+        guard case .hello = hello[0] else { return XCTFail("expected the hello, got \(hello)") }
+        let firstWrites = await first.writtenCount
+        let reusable = await first.closedReusable
+        XCTAssertEqual(firstWrites, 0)
+        XCTAssertEqual(reusable, true)
+    }
+
+    /// A size known before the bridge's opening started is in time however long the opening takes: the
+    /// hello goes as soon as the bridge is open, and no other bridge opens.
+    func testASizeKnownBeforeASlowOpeningIsInTime() async throws {
+        let harness = await makeHarness(bridgeOpeningTakes: .milliseconds(3500))
+        harness.setScreenSize()
+        let first = try await harness.bridge(0, timeout: .seconds(6))
+        _ = try await harness.writes(first, count: 1)
+
+        harness.model.reconnect()
+        let second = try await harness.bridge(1, timeout: .seconds(6))
+        let hello = try await harness.writes(second, count: 1)
+        guard case .hello = hello[0] else { return XCTFail("expected the hello, got \(hello)") }
+        try await Task.sleep(for: .seconds(1))
+        let opened = await harness.bridges.opened.count
+        let closed = await second.isClosed
+        XCTAssertEqual(opened, 2)
+        XCTAssertFalse(closed)
+    }
+
+    /// Only the selected session's panes are presented and focused: deselecting hides them from Ghostty
+    /// and takes their focus, and selecting the session again brings both back.
+    func testOnlyTheSelectedSessionsPanesArePresentedAndFocused() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge()
+        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        await bridge.serve(HerdrServerScript.surface(
+            projection: 1,
+            revision: 1,
+            lines: ["one"],
+            panes: [.init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true)]
+        ))
+        harness.setScreenSize()
+        harness.model.setSelected(true)
+        let adapter = harness.model.terminalScreenAdapter
+        try await harness.waitUntil("the pane's renderer wasn't created") {
+            adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID != nil
+        }
+        let surfaceID = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
+        let managed = try XCTUnwrap(adapter.terminalManagedSurfaceLookup.managedSurface(for: surfaceID))
+        try await harness.waitUntil("the selected pane wasn't presented and focused") {
+            managed.isVisible && managed.isFocused
+        }
+
+        harness.model.setSelected(false)
+        XCTAssertFalse(managed.isVisible)
+        XCTAssertFalse(managed.isFocused)
+
+        harness.model.setSelected(true)
+        XCTAssertTrue(managed.isVisible)
+        XCTAssertTrue(managed.isFocused)
+    }
+
+    /// Ghostty requires its app to outlive every surface, so a stop releases the runtime only once every
+    /// renderer is freed: one closed because its pane left the layout, one whose creation lands after the
+    /// stop began, and the one the stop closes itself.
+    func testStopReleasesGhosttyOnlyOnceEveryRendererIsFreed() async throws {
+        let gate = RendererFenceGate()
+        let harness = await makeHarness(rendererFenceGate: gate)
+        let bridge = try await harness.bridge()
+        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        let first = HerdrServerScript.Pane(id: "w1:p1", x: 0, width: 3, height: 1, focused: true)
+        await bridge.serve(HerdrServerScript.surface(
+            projection: 1,
+            revision: 1,
+            lines: ["one two"],
+            panes: [first, .init(id: "w1:p2", x: 4, width: 3, height: 1)]
+        ))
+        harness.setScreenSize()
+        let model = harness.model
+        try await harness.waitUntil("the panes' renderers weren't created") {
+            model.paneSurface("w1:p1") != nil && model.paneSurface("w1:p2") != nil
+        }
+
+        gate.holdsCloses = true
+        await bridge.serve(HerdrServerScript.surface(
+            projection: 1,
+            revision: 2,
+            lines: ["one two"],
+            panes: [first]
+        ))
+        try await harness.waitUntil("the pane that left wasn't closed") {
+            model.paneSurface("w1:p2") == nil && gate.heldCloseCount == 1
+        }
+        gate.holdsRegistrations = true
+        await bridge.serve(HerdrServerScript.surface(
+            projection: 1,
+            revision: 3,
+            lines: ["one six"],
+            panes: [first, .init(id: "w1:p3", x: 4, width: 3, height: 1)]
+        ))
+        try await harness.waitUntil("the new pane's renderer wasn't being registered") {
+            gate.heldRegistrationCount == 1
+        }
+
+        let stopped = Task { @MainActor in
+            await model.stop()
+            gate.record("stopped")
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        gate.releaseRegistrations()
+        try await harness.waitUntil("the late renderer wasn't closed") { gate.heldCloseCount == 3 }
+        // The stop's own close completes; the pane that left and the late renderer are still closing.
+        gate.releaseCloses(of: "w1:p1")
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertFalse(gate.log.contains("stopped"), "the stop returned with renderers still closing: \(gate.log)")
+        gate.releaseCloses()
+        await stopped.value
+        XCTAssertEqual(gate.log.last, "stopped")
+        XCTAssertEqual(Set(gate.log.dropLast()), ["closed w1:p1", "closed w1:p2", "closed w1:p3"])
     }
 
     /// While shown, a new screen size goes to Herdr at once; a hidden session gets it with its show.

@@ -259,6 +259,92 @@ enum ClientWrite: Equatable {
     }
 }
 
+/// Holds the model's renderer registrations and closes back while asked to, and logs each close as its
+/// surface is about to be freed, so a test can order closes against a stop.
+@MainActor
+final class RendererFenceGate {
+    var holdsRegistrations = false
+    var holdsCloses = false
+    private(set) var log: [String] = []
+    private var heldRegistrations: [() -> Void] = []
+    private var heldCloses: [(paneID: String, deliver: () -> Void)] = []
+
+    var heldRegistrationCount: Int { heldRegistrations.count }
+    var heldCloseCount: Int { heldCloses.count }
+
+    var factory: HerdrScreenModel.RendererFenceFactory {
+        { [self] engine, paneID, terminal in
+            GatedRendererFence(
+                base: HerdrPaneRendererFence(engine: engine, paneID: paneID, terminal: terminal),
+                paneID: paneID,
+                gate: self
+            )
+        }
+    }
+
+    func record(_ event: String) {
+        log.append(event)
+    }
+
+    func releaseRegistrations() {
+        holdsRegistrations = false
+        let held = heldRegistrations
+        heldRegistrations.removeAll()
+        held.forEach { $0() }
+    }
+
+    /// Lets the held closes of `paneID` complete, or, without one, every held close and those to come.
+    func releaseCloses(of paneID: String? = nil) {
+        if paneID == nil { holdsCloses = false }
+        let released = heldCloses.filter { paneID == nil || $0.paneID == paneID }
+        heldCloses.removeAll { paneID == nil || $0.paneID == paneID }
+        released.forEach { $0.deliver() }
+    }
+
+    fileprivate func passRegistration(_ deliver: @escaping () -> Void) {
+        if holdsRegistrations { heldRegistrations.append(deliver) } else { deliver() }
+    }
+
+    fileprivate func passClose(of paneID: String, _ deliver: @escaping () -> Void) {
+        if holdsCloses { heldCloses.append((paneID, deliver)) } else { deliver() }
+    }
+}
+
+/// Herdr's own fence, with its answers passed through a `RendererFenceGate`.
+@MainActor
+private final class GatedRendererFence: TerminalPaneRendererFence {
+    private let base: HerdrPaneRendererFence
+    private let paneID: String
+    private let gate: RendererFenceGate
+
+    init(base: HerdrPaneRendererFence, paneID: String, gate: RendererFenceGate) {
+        self.base = base
+        self.paneID = paneID
+        self.gate = gate
+    }
+
+    func registerRenderer(
+        _ surface: ghostty_terminal_surface_t,
+        completion: @escaping @MainActor @Sendable (Result<Void, any Error>) -> Void
+    ) {
+        base.registerRenderer(surface) { [gate] result in
+            gate.passRegistration { completion(result) }
+        }
+    }
+
+    func unregisterRenderer(
+        _ surface: ghostty_terminal_surface_t,
+        completion: @escaping @MainActor @Sendable () -> Void
+    ) {
+        base.unregisterRenderer(surface) { [gate, paneID] in
+            gate.passClose(of: paneID) {
+                gate.record("closed \(paneID)")
+                completion()
+            }
+        }
+    }
+}
+
 /// A `HerdrScreenModel` over scripted bridges: each bridge the model opens is a new
 /// `FakeBridgeTransport`, and every state the model reports is kept.
 @MainActor
@@ -304,7 +390,8 @@ final class HerdrModelHarness {
         timing: HerdrConnection.Timing = HerdrConnection.Timing(),
         failingOpenWith openError: Error? = nil,
         bridgeOpeningTakes: Duration = .zero,
-        producerFailure: ProducerFailure? = nil
+        producerFailure: ProducerFailure? = nil,
+        rendererFenceGate: RendererFenceGate? = nil
     ) async {
         let bridges = Bridges(openingTakes: bridgeOpeningTakes)
         let stateLog = StateLog()
@@ -332,15 +419,20 @@ final class HerdrModelHarness {
             connectionTiming: timing,
             engine: producerFailure.map {
                 HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1, makeProducer: SwitchableProducer.factory($0))
-            } ?? HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1)
+            } ?? HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1),
+            makeRendererFence: rendererFenceGate?.factory ?? {
+                HerdrPaneRendererFence(engine: $0, paneID: $1, terminal: $2)
+            }
         )
     }
 
     var states: [TerminalRuntimeState] { stateLog.updates.map(\.state) }
 
-    /// The bridge the model opened `index`th, waiting up to three seconds for it.
-    func bridge(_ index: Int = 0) async throws -> FakeBridgeTransport {
-        try await waitUntil("bridge \(index) wasn't opened") { await self.bridges.opened.count > index }
+    /// The bridge the model opened `index`th, waiting up to `timeout` for it.
+    func bridge(_ index: Int = 0, timeout: Duration = .seconds(3)) async throws -> FakeBridgeTransport {
+        try await waitUntil("bridge \(index) wasn't opened", timeout: timeout) {
+            await self.bridges.opened.count > index
+        }
         return await bridges.opened[index]
     }
 
