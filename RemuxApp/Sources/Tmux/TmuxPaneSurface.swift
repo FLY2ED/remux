@@ -23,12 +23,38 @@ final class TmuxPaneSurface: TerminalPaneInputSink {
         onRendererFailure: @escaping @MainActor (TmuxPaneID) -> Void,
         completion: @escaping @MainActor (Result<TmuxPaneSurface, TerminalPaneRenderer.CreateError>) -> Void
     ) {
+        create(
+            app: app,
+            controller: controller,
+            terminal: terminal,
+            baseConfig: baseConfig,
+            metrics: metrics,
+            theme: theme,
+            onRendererFailure: onRendererFailure,
+            wrapFence: { $0 },
+            completion: completion
+        )
+    }
+
+    /// `wrapFence` stands between the renderer and the controller's fence, where a test can hold an
+    /// unregistration back.
+    static func create(
+        app: ghostty_app_t,
+        controller: TmuxSessionController,
+        terminal: TmuxSessionController.RetainedPaneTerminal,
+        baseConfig: ghostty_terminal_surface_config_s,
+        metrics: GhosttySurfaceDisplayMetrics,
+        theme: TerminalTheme,
+        onRendererFailure: @escaping @MainActor (TmuxPaneID) -> Void,
+        wrapFence: (any TerminalPaneRendererFence) -> any TerminalPaneRendererFence,
+        completion: @escaping @MainActor (Result<TmuxPaneSurface, TerminalPaneRenderer.CreateError>) -> Void
+    ) {
         let paneID = terminal.paneID
         let binding = RendererBinding(controller: controller, paneID: paneID)
         TerminalPaneRenderer.create(
             app: app,
             terminal: terminal,
-            fence: binding,
+            fence: wrapFence(binding),
             writeInput: { [binding] bytes in binding.write(bytes) },
             baseConfig: baseConfig,
             metrics: metrics,
