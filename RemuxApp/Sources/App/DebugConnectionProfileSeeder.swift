@@ -34,6 +34,8 @@ enum DebugConnectionProfileSeeder {
         static let credentialsFile = "REMUX_DEBUG_CREDENTIALS_FILE"
         static let sessionName = "REMUX_DEBUG_TMUX_SESSION"
         static let tmuxExecutablePath = "REMUX_DEBUG_TMUX_EXECUTABLE_PATH"
+        static let herdrSessionName = "REMUX_DEBUG_HERDR_SESSION"
+        static let herdrExecutablePath = "REMUX_DEBUG_HERDR_EXECUTABLE_PATH"
     }
 
     /// A JSON file holding the credential, such as the live UI tests' SSH
@@ -46,12 +48,26 @@ enum DebugConnectionProfileSeeder {
         var privateKeyPassphrase: String?
     }
 
-    /// The tmux session the seeded profile opens, when seeding is requested.
+    /// The session the seeded profile opens, when seeding is requested: the Herdr session when one is
+    /// named, else a tmux session.
+    static func seededSession(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> SessionLocator? {
+        guard environment[Key.enabled] == "1" else { return nil }
+        if let herdrSessionName = environment[Key.herdrSessionName] {
+            return SessionLocator(backend: .herdr, name: herdrSessionName)
+        }
+        return SessionLocator(backend: .tmux, name: environment[Key.sessionName] ?? "base")
+    }
+
+    /// The tmux session the seeded profile opens, when seeding one is requested.
     static func seededSessionName(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> String? {
-        guard environment[Key.enabled] == "1" else { return nil }
-        return environment[Key.sessionName] ?? "base"
+        guard let session = seededSession(environment: environment), session.backend == .tmux else {
+            return nil
+        }
+        return session.name
     }
 
     @discardableResult
@@ -60,7 +76,7 @@ enum DebugConnectionProfileSeeder {
         profileRepository: any ConnectionProfileRepository,
         credentialStore: any SSHCredentialStore
     ) async throws -> Bool {
-        guard let seededSessionName = seededSessionName(environment: environment) else {
+        guard let seededSession = seededSession(environment: environment) else {
             return false
         }
 
@@ -79,8 +95,9 @@ enum DebugConnectionProfileSeeder {
             password: credentials.password ?? "",
             privateKey: credentials.privateKeyPEM,
             privateKeyPassphrase: credentials.privateKeyPassphrase,
-            sessionName: seededSessionName,
-            tmuxExecutablePath: environment[Key.tmuxExecutablePath] ?? ""
+            session: seededSession,
+            tmuxExecutablePath: environment[Key.tmuxExecutablePath] ?? "",
+            herdrExecutablePath: environment[Key.herdrExecutablePath]
         )
 
         switch TmuxConnectionDraftValidator.validate(
@@ -146,8 +163,9 @@ private extension TmuxConnectionDraft {
         password: String,
         privateKey: String?,
         privateKeyPassphrase: String?,
-        sessionName: String,
-        tmuxExecutablePath: String
+        session: SessionLocator,
+        tmuxExecutablePath: String,
+        herdrExecutablePath: String?
     ) {
         self.init()
         self.displayName = displayName
@@ -164,8 +182,10 @@ private extension TmuxConnectionDraft {
         } else {
             self.password = password
         }
-        self.sessionName = sessionName
+        self.backend = session.backend
+        self.sessionName = session.name
         self.tmuxExecutablePath = tmuxExecutablePath
+        self.herdrExecutablePath = herdrExecutablePath
     }
 }
 #endif

@@ -15,6 +15,24 @@ final class RemuxAppUITests: XCTestCase {
         var tmuxExecutablePath: String?
     }
 
+    /// The live Herdr UI test's configuration, a JSON file named by REMUX_LIVE_HERDR_UI_CONFIG (pass it
+    /// to `xcodebuild test` as TEST_RUNNER_REMUX_LIVE_HERDR_UI_CONFIG). The app reads the credential
+    /// from the same file. The Herdr session must already exist.
+    private struct LiveHerdrConfiguration: Decodable {
+        var displayName: String?
+        let host: String
+        var port: String?
+        let username: String
+        let sessionName: String
+        let herdrExecutablePath: String
+        /// The tmux the app's discovery runs on the server, such as a wrapper for a tmux of its own.
+        var tmuxExecutablePath: String?
+        /// The host key Remux shows when it first meets the server, as "<type> <SHA256 fingerprint>".
+        let expectedHostKey: String
+        /// Where each step's screenshot is written as well, when set.
+        var captureDirectory: String?
+    }
+
     private struct LiveSSHCleanupHarnessError: Error, CustomStringConvertible {
         let description: String
     }
@@ -1317,6 +1335,74 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertFalse(primaryRecentRow.exists)
         attachScreenshot(named: "live-session-switcher-discovered-and-recent-resumed")
         app.buttons["terminal.sessions.close"].tap()
+    }
+
+    /// A Herdr session opened from the library on a live server: the tab's panes on screen, the keyboard
+    /// opening and closing over them, and Home and back. Skipped without REMUX_LIVE_HERDR_UI_CONFIG.
+    func testLiveHerdrSessionWhenConfigured() throws {
+        guard let path = ProcessInfo.processInfo.environment["REMUX_LIVE_HERDR_UI_CONFIG"], !path.isEmpty else {
+            throw XCTSkip("Set REMUX_LIVE_HERDR_UI_CONFIG to run the live Herdr UI test.")
+        }
+        let configuration = try JSONDecoder().decode(
+            LiveHerdrConfiguration.self,
+            from: Data(contentsOf: URL(fileURLWithPath: path))
+        )
+        app.launchEnvironment["REMUX_DEBUG_SEED_CONNECTION"] = "1"
+        app.launchEnvironment["REMUX_DEBUG_SERVER_NAME"] = configuration.displayName ?? "Live Herdr"
+        app.launchEnvironment["REMUX_DEBUG_SERVER_HOST"] = configuration.host
+        app.launchEnvironment["REMUX_DEBUG_SERVER_PORT"] = configuration.port ?? "22"
+        app.launchEnvironment["REMUX_DEBUG_SERVER_USERNAME"] = configuration.username
+        app.launchEnvironment["REMUX_DEBUG_CREDENTIALS_FILE"] = path
+        app.launchEnvironment["REMUX_DEBUG_HERDR_SESSION"] = configuration.sessionName
+        app.launchEnvironment["REMUX_DEBUG_HERDR_EXECUTABLE_PATH"] = configuration.herdrExecutablePath
+        if let tmuxExecutablePath = configuration.tmuxExecutablePath {
+            app.launchEnvironment["REMUX_DEBUG_TMUX_EXECUTABLE_PATH"] = tmuxExecutablePath
+        }
+        app.launchEnvironment["REMUX_DEBUG_EPHEMERAL_STORAGE"] = "1"
+        launchedLiveSSHApp = true
+        app.launch()
+
+        openFirstSavedSession()
+        waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
+        assertLiveTerminalScreenshotContainsRenderedContent()
+        captureLiveHerdrStep("1-session", in: configuration)
+
+        // A Herdr screen takes no terminal input yet, so the keyboard comes up with the composer.
+        let composerToggle = app.buttons["terminal.composer.toggle"]
+        XCTAssertTrue(composerToggle.waitForExistence(timeout: 5))
+        composerToggle.tap()
+        let composerField = app.textViews["terminal.composer.field"]
+        XCTAssertTrue(composerField.waitForExistence(timeout: 3))
+        composerField.tap()
+        XCTAssertNotNil(waitForKeyboardPresence(true, label: "herdr keyboard show", timeout: 8))
+        captureLiveHerdrStep("2-keyboard-open", in: configuration)
+        let handle = app.descendants(matching: .any)["terminal.composer.keyboard-dismiss"]
+        XCTAssertTrue(handle.waitForExistence(timeout: 3))
+        let dragStart = handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        dragStart.press(forDuration: 0.05, thenDragTo: dragStart.withOffset(CGVector(dx: 0, dy: 14)))
+        XCTAssertNotNil(waitForKeyboardPresence(false, label: "herdr keyboard hide", timeout: 8))
+        captureLiveHerdrStep("3-keyboard-closed", in: configuration)
+        composerToggle.tap()
+
+        openHomeFromTerminal()
+        captureLiveHerdrStep("4-home", in: configuration)
+        let activeSession = app.descendants(matching: .any)["library.active-session.show"].firstMatch
+        XCTAssertTrue(activeSession.waitForExistence(timeout: 5))
+        activeSession.tap()
+        waitForLiveTerminalReady(timeout: 30, expectedHostKey: configuration.expectedHostKey)
+        assertLiveTerminalScreenshotContainsRenderedContent()
+        captureLiveHerdrStep("5-back", in: configuration)
+    }
+
+    private func captureLiveHerdrStep(_ name: String, in configuration: LiveHerdrConfiguration) {
+        let screenshot = XCUIScreen.main.screenshot()
+        let attachment = XCTAttachment(screenshot: screenshot)
+        attachment.name = "herdr-\(name)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        guard let directory = configuration.captureDirectory else { return }
+        let url = URL(fileURLWithPath: directory).appendingPathComponent("herdr-\(name).png")
+        XCTAssertNoThrow(try screenshot.pngRepresentation.write(to: url))
     }
 
     func testLiveSSHKeyboardResizeTraceWhenConfigured() throws {
@@ -3169,7 +3255,8 @@ final class RemuxAppUITests: XCTestCase {
         }
     }
 
-    private func waitForLiveTerminalReady(timeout: TimeInterval) {
+    /// `expectedHostKey` stands in for the cleanup harness's when the test runs without it.
+    private func waitForLiveTerminalReady(timeout: TimeInterval, expectedHostKey: String? = nil) {
         let deadline = Date().addingTimeInterval(timeout)
         let readyStatus = app.staticTexts["terminal.status.ready"]
         let inheritedReadyStatus = app.staticTexts
@@ -3183,12 +3270,13 @@ final class RemuxAppUITests: XCTestCase {
                 return
             }
 
-            if trustExpectedUnknownLiveHostKeyIfNeeded() {
-                RunLoop.current.run(until: Date().addingTimeInterval(0.5))
-                continue
-            }
-
             if failedStatuses.firstMatch.exists {
+                // The host-key panel is a failed status, so it's checked once one is seen: a check made
+                // before can miss a panel that appears just after it.
+                if trustExpectedUnknownLiveHostKeyIfNeeded(expectedHostKey: expectedHostKey) {
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+                    continue
+                }
                 let messages = failedStatuses.allElementsBoundByIndex
                     .map { $0.label }
                     .filter { !$0.isEmpty }
@@ -3206,10 +3294,10 @@ final class RemuxAppUITests: XCTestCase {
         XCTFail("Timed out waiting for a live SSH terminal to become ready.")
     }
 
-    private func trustExpectedUnknownLiveHostKeyIfNeeded() -> Bool {
+    private func trustExpectedUnknownLiveHostKeyIfNeeded(expectedHostKey: String? = nil) -> Bool {
         let verifyTitle = app.staticTexts["Verify Server"]
         guard verifyTitle.exists else { return false }
-        guard let expectedHostKey = liveCleanupHarnessFieldsIfEnabled()?["expectedHostKey"] else {
+        guard let expectedHostKey = expectedHostKey ?? liveCleanupHarnessFieldsIfEnabled()?["expectedHostKey"] else {
             XCTFail("Live SSH host-key verification requires the cleanup harness's expected host key.")
             return false
         }

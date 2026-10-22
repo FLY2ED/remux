@@ -61,6 +61,11 @@ struct RemuxAppDependencies: Sendable {
         _ trustedHostStore: TrustedHostStore,
         _ sshRootService: RemuxSSHRootService
     ) async throws -> Void
+    private let herdrBridgeOpener: @Sendable (
+        _ target: SessionTarget,
+        _ trustedHostStore: TrustedHostStore,
+        _ sshRootService: RemuxSSHRootService
+    ) async throws -> any HerdrBridgeTransport
     private let debugConnectionSeeder: @Sendable (
         _ profileRepository: any ConnectionProfileRepository,
         _ credentialStore: any SSHCredentialStore
@@ -99,6 +104,11 @@ struct RemuxAppDependencies: Sendable {
             _ trustedHostStore: TrustedHostStore,
             _ sshRootService: RemuxSSHRootService
         ) async throws -> Void = RemuxAppDependencies.liveSSHAccessVerifier,
+        herdrBridgeOpener: @escaping @Sendable (
+            _ target: SessionTarget,
+            _ trustedHostStore: TrustedHostStore,
+            _ sshRootService: RemuxSSHRootService
+        ) async throws -> any HerdrBridgeTransport = RemuxAppDependencies.liveHerdrBridgeOpener,
         debugConnectionSeeder: @escaping @Sendable (
             _ profileRepository: any ConnectionProfileRepository,
             _ credentialStore: any SSHCredentialStore
@@ -116,6 +126,7 @@ struct RemuxAppDependencies: Sendable {
         self.attachmentTransferServiceFactory = attachmentTransferServiceFactory
         self.tmuxSessionDiscoverer = tmuxSessionDiscoverer
         self.sshAccessVerifier = sshAccessVerifier
+        self.herdrBridgeOpener = herdrBridgeOpener
         self.debugConnectionSeeder = debugConnectionSeeder
     }
 
@@ -208,6 +219,11 @@ struct RemuxAppDependencies: Sendable {
     /// requiring tmux or any other multiplexer there.
     func verifySSHAccess(for target: SessionTarget) async throws {
         try await sshAccessVerifier(target, trustedHostStore, sshRootService)
+    }
+
+    /// Opens a bridge to the target's Herdr session.
+    func openHerdrBridge(for target: SessionTarget) async throws -> any HerdrBridgeTransport {
+        try await herdrBridgeOpener(target, trustedHostStore, sshRootService)
     }
 
     func closeIdleSSHConnections(forServerID serverID: SavedServer.ID) {
@@ -359,6 +375,48 @@ struct RemuxAppDependencies: Sendable {
                 throw SSHAccessVerificationError.commandFailed(status: result.exitStatus)
             }
         }
+    }
+
+    /// Claims the server's pooled SSH connection, as a tmux session does, and runs the bridge on it; the
+    /// bridge gives the connection back when it closes. An opening cancelled before the bridge runs gives
+    /// it back at once.
+    private static func liveHerdrBridgeOpener(
+        target: SessionTarget,
+        trustedHostStore: TrustedHostStore,
+        sshRootService: RemuxSSHRootService
+    ) async throws -> any HerdrBridgeTransport {
+        let trace = RemuxTransportStartupTrace(flowID: "session.open.\(target.workspace.id.uuidString)")
+        let preparedRoot = await sshRootService.preparedRoot(
+            for: RemuxSSHRootKey(target: target),
+            configuration: sshRootConfiguration(
+                for: target,
+                trustedHostStore: trustedHostStore,
+                tailscaleSSHCheckChallengeBroker: sshRootService.tailscaleSSHCheckChallengeBroker,
+                connectTimeout: RemuxConnectionTimeouts.terminalSSHConnect
+            ),
+            trace: trace
+        )
+        let claimedRoot: RemuxSSHClaimedRoot
+        do {
+            let sshRoot = try await trace.stage("sshRoot.ready") {
+                try await preparedRoot.sshRoot()
+            }
+            try Task.checkCancellation()
+            claimedRoot = try await preparedRoot.claim(sshRoot, trace: trace)
+        } catch {
+            await preparedRoot.cancelAndCleanup()
+            throw error
+        }
+        guard !Task.isCancelled else {
+            await claimedRoot.release(.reusable)
+            throw CancellationError()
+        }
+        return try await HerdrSSHBridge.open(
+            using: claimedRoot,
+            herdrExecutable: target.server.herdrExecutablePath ?? "herdr",
+            session: target.workspace.sessionName,
+            trace: trace
+        )
     }
 
     /// Connects, verifies the host key and authenticates through a prepared
