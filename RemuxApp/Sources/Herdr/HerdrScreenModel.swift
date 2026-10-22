@@ -111,6 +111,8 @@ final class HerdrScreenModel {
     private var surfaces: [String: HerdrPaneSurface] = [:]
     private var presentationFailures: [String: TerminalDisconnectReason] = [:]
     private var creatingTerminals: Set<ObjectIdentifier> = []
+    /// Ghostty gives a terminal one renderer at a time, so a replacement waits for these to close.
+    private var closingTerminals: Set<ObjectIdentifier> = []
     private var creationsDrained: CheckedContinuation<Void, Never>?
 
     init(
@@ -220,11 +222,15 @@ final class HerdrScreenModel {
     }
 
     /// Ends the current connection, if any, and opens a new one. The panes keep their terminals, so
-    /// the last frame stays on screen until the new connection's first.
+    /// the last frame stays on screen until the new connection's first. Pane failures say to reconnect,
+    /// so a reconnect also tries the failed panes again: a pane Ghostty couldn't paint gets a new
+    /// terminal from the new connection's first frame, and a failed renderer is replaced over its
+    /// terminal now.
     func reconnect() {
         guard !stopped, runtime != nil else { return }
         if let attempt { retire(attempt) }
         startAttempt()
+        retryFailedPanes()
     }
 
     /// Closes the connection, lets the engine finish its event and free the pane producers, waits for
@@ -571,10 +577,31 @@ final class HerdrScreenModel {
         )
     }
 
+    private func retryFailedPanes() {
+        presentationFailures.removeAll()
+        for paneID in Array(terminals.keys) {
+            createRendererIfPossible(paneID)
+        }
+        for (paneID, surface) in surfaces {
+            guard case .failed = surface.renderer.presentation else { continue }
+            surfaces.removeValue(forKey: paneID)
+            let terminal = ObjectIdentifier(surface.terminal)
+            closingTerminals.insert(terminal)
+            surface.renderer.close { [weak self] in
+                guard let self else { return }
+                closingTerminals.remove(terminal)
+                createRendererIfPossible(paneID)
+                didChange()
+            }
+        }
+        didChange()
+    }
+
     private func createRendererIfPossible(_ paneID: String) {
         guard !stopped, let runtime,
               let terminal = terminals[paneID],
               surfaces[paneID]?.terminal !== terminal,
+              !closingTerminals.contains(ObjectIdentifier(terminal)),
               presentationFailures[paneID] == nil,
               let metrics = displayMetrics(for: paneID),
               creatingTerminals.insert(ObjectIdentifier(terminal)).inserted
@@ -693,6 +720,7 @@ final class HerdrScreenModel {
     }
 
     #if DEBUG
+    var engineForTesting: HerdrTerminalEngine { engine }
     var rendererCreationsInFlightForTesting: Int { creatingTerminals.count }
     var onPanesLaidOutForTesting: (() -> Void)?
     #endif

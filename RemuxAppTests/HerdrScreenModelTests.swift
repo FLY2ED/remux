@@ -371,6 +371,52 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(harness.states.count, reportsBeforeStop)
     }
 
+    /// Pane failures say to reconnect, and a reconnect brings both kinds back: a pane Ghostty couldn't
+    /// paint gets a new terminal and renderer from the new connection, and a failed renderer is
+    /// replaced over its terminal.
+    func testAReconnectPaintsAFailedPaneAgainAndReplacesAFailedRenderer() async throws {
+        let harness = await makeHarness()
+        let model = harness.model
+        let first = try await harness.bridge(0)
+        let panes: [HerdrServerScript.Pane] = [
+            .init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true),
+            .init(id: "w1:p2", x: 4, width: 3, height: 1),
+        ]
+        await first.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        await first.serve(HerdrServerScript.surface(projection: 1, revision: 1, lines: ["one two"], panes: panes))
+        harness.setScreenSize()
+        try await harness.waitUntil("the first frame wasn't shown") {
+            harness.shownRows() == ["w1:p1": ["one"], "w1:p2": ["two"]]
+        }
+        let failedTerminal = try XCTUnwrap(model.paneSurface("w1:p1")?.terminal)
+        let failedRenderer = try XCTUnwrap(model.paneSurface("w1:p2")?.renderer)
+
+        await model.engineForTesting.failPaneForTesting("w1:p1")
+        failedRenderer.reportRendererFailure()
+        try await harness.waitUntil("the failures weren't shown") {
+            model.presentation(ofPane: "w1:p1") != .pending && model.presentation(ofPane: "w1:p2") != .pending
+        }
+        guard case .failed = model.presentation(ofPane: "w1:p1"), case .failed = model.presentation(ofPane: "w1:p2") else {
+            return XCTFail("expected both panes to fail")
+        }
+
+        model.reconnect()
+        try await harness.waitUntil("the failed renderer wasn't replaced") {
+            model.paneSurface("w1:p2").map { $0.renderer !== failedRenderer } == true
+        }
+        XCTAssertEqual(harness.shownRows()["w1:p2"], ["two"])
+        XCTAssertEqual(model.presentation(ofPane: "w1:p2"), .pending)
+
+        let second = try await harness.bridge(1)
+        await second.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        await second.serve(HerdrServerScript.surface(projection: 1, revision: 1, lines: ["ONE TWO"], panes: panes))
+        try await harness.waitUntil("the panes weren't painted again") {
+            harness.shownRows() == ["w1:p1": ["ONE"], "w1:p2": ["TWO"]]
+        }
+        XCTAssertFalse(model.paneSurface("w1:p1")?.terminal === failedTerminal)
+        XCTAssertEqual(model.presentation(ofPane: "w1:p1"), .pending)
+    }
+
     /// A reconnect replaces the connection, not the panes: the last frame stays until the new
     /// connection's first, which the same server boot paints into the same terminals.
     func testAReconnectKeepsTheLastFrameUntilTheNewConnectionsFirst() async throws {

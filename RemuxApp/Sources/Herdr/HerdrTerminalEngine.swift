@@ -31,8 +31,8 @@ enum HerdrEngineUpdate: Sendable {
     case paneTerminal(paneID: String, terminal: HerdrRetainedTerminal)
     /// Follows the terminals of the new panes it lists.
     case layout(HerdrPaneLayout)
-    /// Ghostty couldn't make or paint the pane's terminal. It isn't painted again while the pane stays
-    /// in the layout; a terminal it already had keeps its last frame.
+    /// Ghostty couldn't make or paint the pane's terminal. It isn't painted again until the pane leaves
+    /// the layout or a new connection begins; a terminal it already had keeps its last frame.
     case paneTerminalFailed(paneID: String)
     /// Waking the pane's renderer failed and its registration is dropped, as for a tmux pane.
     case rendererWakeFailed(paneID: String)
@@ -102,7 +102,7 @@ actor HerdrTerminalEngine {
     private var connection: UInt64 = 0
     private var presentation = HerdrPresentation()
     private var panes: [String: Pane] = [:]
-    /// Listed panes whose terminal Ghostty couldn't make or paint.
+    /// Listed panes whose terminal Ghostty couldn't make or paint, until the next connection.
     private var failedPaneIDs: Set<String> = []
     private var bootID: String?
     private var paintedSurface: PaintedSurface?
@@ -120,12 +120,14 @@ actor HerdrTerminalEngine {
 
     /// Herdr's revisions restart with each connection, so the new one starts a new presentation. The
     /// panes keep their terminals and last paint: the same server boot's next frame is painted as a
-    /// change from it, and until then the last frame stays on screen.
+    /// change from it, and until then the last frame stays on screen. A pane Ghostty couldn't paint
+    /// gets a new terminal from that frame.
     func beginConnection() -> HerdrEngineFeed {
         connection += 1
         if state == .failed { state = .running }
         presentation = HerdrPresentation()
         paintedSurface = nil
+        failedPaneIDs.removeAll()
         return HerdrEngineFeed(engine: self, connection: connection)
     }
 
@@ -338,6 +340,12 @@ actor HerdrTerminalEngine {
         pane.renderer = nil
         panes[paneID] = pane
     }
+
+    #if DEBUG
+    func failPaneForTesting(_ paneID: String) {
+        fail(paneID: paneID)
+    }
+    #endif
 }
 
 /// The lifetime fence for a renderer over a Herdr pane's terminal: registration and unregistration

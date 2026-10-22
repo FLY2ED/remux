@@ -265,6 +265,37 @@ final class HerdrTerminalEngineTests: XCTestCase {
         XCTAssertEqual(layout.tab, nil)
     }
 
+    /// A pane Ghostty couldn't paint stays unpainted for the rest of its connection, and gets a new
+    /// terminal from the next connection's first frame.
+    func testAFailedPaneGetsANewTerminalFromTheNextConnection() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let panes = [Self.pane("P", x: 0, width: 3, height: 1)]
+        let first = await engine.beginConnection()
+        await first.receive(try Self.snapshot(revision: 1))
+        await first.receive(.surface(try Self.surface(revision: 1, lines: ["one"], panes: panes)))
+        let failed = try await updates.terminal(for: "P")
+        _ = try await updates.nextLayout()
+
+        await engine.failPaneForTesting("P")
+        guard case .paneTerminalFailed("P") = try await updates.next() else {
+            return XCTFail("expected the pane's failure")
+        }
+        await first.receive(try Self.snapshot(revision: 2))
+        await first.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["two"], panes: panes)))
+
+        let second = await engine.beginConnection()
+        await second.receive(try Self.snapshot(revision: 1))
+        await second.receive(.surface(try Self.surface(revision: 1, lines: ["new"], panes: panes)))
+        guard case .paneTerminal("P", let fresh) = try await updates.next() else {
+            return XCTFail("expected a new terminal from the next connection, not an update on the failed one")
+        }
+        XCTAssertFalse(fresh === failed)
+        let renderer = try await makeRenderer(engine: engine, paneID: "P", terminal: fresh, columns: 3, rows: 1)
+        XCTAssertEqual(rows(of: renderer, columns: 3, rows: 1), ["new"])
+        await engine.stop()
+    }
+
     /// A grid Remux can't index ends the engine as a wire failure; nothing after it is painted.
     func testAnUnindexableSurfaceIsAWireFailure() async throws {
         let engine = makeEngine()
