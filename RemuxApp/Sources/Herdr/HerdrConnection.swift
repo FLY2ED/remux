@@ -15,11 +15,12 @@ protocol HerdrBridgeTransport: Sendable {
     func close(reusable: Bool) async
 }
 
-/// What a connection hands to its screen, in wire order.
+/// What a connection hands to its screen, in wire order. Events can arrive before `open` returns.
 enum HerdrConnectionEvent: Sendable {
     case snapshot(HerdrSnapshot)
-    /// For the surface decoder, which must see every surface message in order, also while hidden.
-    case surface(HerdrSurfaceDecoder.Message)
+    /// A full surface or a patch, decoded from every surface message in wire order, also while
+    /// hidden.
+    case surface(HerdrSurfaceDecoder.Output)
     case bell(count: UInt16)
     case notification(HerdrSemanticNotification)
     /// Base64 of a program's OSC 52 clipboard write.
@@ -122,7 +123,9 @@ enum HerdrInputError: Error, Equatable, LocalizedError {
 /// One endpoint connection to a Herdr server (generation 1).
 ///
 /// It sends Remux's hello and checks the welcome, then reads server messages in order and hands them to
-/// its screen, reading again only after the screen has taken them. All writes go through one ordered
+/// its screen, reading again only after the screen has taken them. Surface messages are decoded here,
+/// with the negotiated encodings, as Herdr's client decodes them in its reader, so the decoder sees
+/// every one of them in order from the first. All writes go through one ordered
 /// writer. Commands run one at a time; `client_shell.surface.set` bypasses that lane, because Herdr
 /// answers it even while a command is in flight. Timings and rules follow Herdr's own client unless a
 /// comment gives Remux's reason.
@@ -164,6 +167,7 @@ actor HerdrConnection {
     private let openedAt = ContinuousClock.now
 
     private var splitter: HerdrFrameSplitter
+    private var decoder: HerdrSurfaceDecoder
     private var bootID: String?
     private var isActive = false
     /// Counts shows and hides. Herdr keeps one surface switch per connection and the last request
@@ -268,6 +272,7 @@ actor HerdrConnection {
         self.transport = transport
         self.negotiated = negotiated
         self.splitter = splitter
+        self.decoder = HerdrSurfaceDecoder(deltaNegotiated: negotiated.delta, scrollNegotiated: negotiated.scroll)
         self.isActive = surfaceActive
         self.timing = timing
         self.onEvent = onEvent
@@ -378,7 +383,8 @@ actor HerdrConnection {
     }
 
     /// While the session is hidden, bells, clipboard writes and input refusals are dropped, as in
-    /// Herdr's client; surfaces still go to the decoder.
+    /// Herdr's client; surfaces are still decoded and delivered. A surface the decoder can't apply
+    /// ends the connection, as in Herdr's client.
     private func route(_ message: HerdrServerMessage) async throws {
         heardSinceWelcome = true
         switch message {
@@ -388,11 +394,11 @@ actor HerdrConnection {
                 bootID = snapshot.bootID
                 await onEvent(.snapshot(snapshot))
             case .surfaceReuse(let reuse):
-                await onEvent(.surface(.reuse(reuse)))
+                await onEvent(.surface(try decoder.decode(.reuse(reuse))))
             case .surfaceDelta(let delta):
-                await onEvent(.surface(.delta(delta)))
+                await onEvent(.surface(try decoder.decode(.delta(delta))))
             case .surfaceScroll(let scroll):
-                await onEvent(.surface(.scroll(scroll)))
+                await onEvent(.surface(try decoder.decode(.scroll(scroll))))
             case .healthPong(let data):
                 if outstandingPing?.data == data { outstandingPing = nil }
                 pongWaiters.removeValue(forKey: data)?.resume(returning: true)
@@ -400,9 +406,9 @@ actor HerdrConnection {
                 break
             }
         case .paneSurface(let surface):
-            await onEvent(.surface(.full(surface)))
+            await onEvent(.surface(try decoder.decode(.full(surface))))
         case .paneSurfacePatch(let patch):
-            await onEvent(.surface(.patch(patch)))
+            await onEvent(.surface(try decoder.decode(.patch(patch))))
         case .responseChunk(let chunk):
             receive(chunk)
         case .terminalBell(let count):
@@ -452,12 +458,7 @@ actor HerdrConnection {
     /// within the activation timeout, the show is rolled back as Herdr's client rolls it back, unless a
     /// newer show or hide was asked for meanwhile: as in Herdr's client, the newest request wins.
     func show(_ geometry: HerdrSurfaceGeometry) async throws -> UInt64 {
-        let size = HerdrSurfaceGeometry(
-            cellWidthPx: geometry.cellWidthPx,
-            cellHeightPx: geometry.cellHeightPx,
-            cols: max(geometry.cols, 1),
-            rows: max(geometry.rows, 1)
-        )
+        let size = Self.atLeastOneCell(geometry)
         let (id, request) = try surfaceSet(active: true)
         visibilityRequests += 1
         let position = visibilityRequests
@@ -491,6 +492,23 @@ actor HerdrConnection {
             sending: [.focus(false), request]
         )
         _ = try Self.acknowledgedRevision(from: data, active: false)
+    }
+
+    /// Gives the session on screen a new size, as Herdr's client does whenever its terminal resizes,
+    /// also while a show is still being answered. Herdr's client sends sizes only to the session it
+    /// shows; a hidden one gets its size with the next show, so nothing is sent while hidden.
+    func resize(_ geometry: HerdrSurfaceGeometry) {
+        guard isActive else { return }
+        enqueue(.shellResize(Self.atLeastOneCell(geometry)))
+    }
+
+    private static func atLeastOneCell(_ geometry: HerdrSurfaceGeometry) -> HerdrSurfaceGeometry {
+        HerdrSurfaceGeometry(
+            cellWidthPx: geometry.cellWidthPx,
+            cellHeightPx: geometry.cellHeightPx,
+            cols: max(geometry.cols, 1),
+            rows: max(geometry.rows, 1)
+        )
     }
 
     private func rollBackShow() {
