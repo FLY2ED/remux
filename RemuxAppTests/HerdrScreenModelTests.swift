@@ -518,9 +518,9 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(Set(gate.log.dropLast()), ["closed w1:p1", "closed w1:p2", "closed w1:p3"])
     }
 
-    /// The panes take no input yet, so a session ready on screen still offers no keyboard: the screen is
-    /// told input is unavailable, as for a session whose input is down, and keys aren't typed into a
-    /// sink that drops them.
+    /// The panes take no input yet, so a session ready on screen still offers no keyboard: both of the
+    /// screen's projections say input is unavailable, as for a session whose input is down, and keys
+    /// aren't typed into a sink that drops them.
     func testAReadySessionOffersNoInput() async throws {
         let harness = await makeHarness()
         let bridge = try await harness.bridge()
@@ -545,9 +545,12 @@ final class HerdrScreenModelTests: XCTestCase {
         defer { window.isHidden = true }
 
         try await harness.waitUntil("the session wasn't ready") { harness.states.last == .connected }
-        let interaction = harness.model.terminalScreenAdapter.terminalInteractionProjection
-        XCTAssertTrue(interaction.hasFocusedSurface)
-        XCTAssertFalse(interaction.isInputAvailable)
+        let adapter = harness.model.terminalScreenAdapter
+        // The screen reads input availability from both projections.
+        for interaction in [adapter.terminalInteractionProjection, adapter.terminalScreenPresentationProjection.interaction] {
+            XCTAssertTrue(interaction.hasFocusedSurface)
+            XCTAssertFalse(interaction.isInputAvailable)
+        }
     }
 
     /// While shown, a new screen size goes to Herdr at once; a hidden session gets it with its show.

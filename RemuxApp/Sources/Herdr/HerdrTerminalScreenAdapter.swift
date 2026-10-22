@@ -152,8 +152,9 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
 
     func setViewportStabilityHint(stable: Bool) {}
 
+    /// The session reads as ready once its focused pane is presented, so the root sees it connect.
     var terminalScreenPresentationProjection: GhosttyTerminalScreenPresentationProjection {
-        GhosttyTerminalPresentationProjector.terminalScreenPresentationProjection(
+        let projection = GhosttyTerminalPresentationProjector.terminalScreenPresentationProjection(
             phase: runtimePhase,
             transportWritable: model?.isConnectionOpen ?? false,
             commandFailureMessage: nil,
@@ -164,11 +165,22 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
             viewportProjection: viewportProjection,
             selectedPanePresentation: model?.presentation(ofPane: focusedPaneID) ?? .pending
         )
+        return GhosttyTerminalScreenPresentationProjection(
+            readiness: projection.readiness,
+            interaction: interaction,
+            viewport: projection.viewport,
+            statusOverlay: projection.statusOverlay
+        )
     }
 
-    /// The panes take no input yet, so the screen offers them no keyboard, as for a session whose
-    /// input is down: keys typed there would be dropped.
     var terminalInteractionProjection: GhosttyTerminalInteractionProjection {
+        interaction
+    }
+
+    /// What the screen may do with the session, for both projections it reads. The panes take no input
+    /// yet, so the screen offers them no keyboard, as for a session whose input is down: keys typed
+    /// there would be dropped.
+    private var interaction: GhosttyTerminalInteractionProjection {
         let projection = GhosttyTerminalPresentationProjector.terminalInteractionProjection(
             phase: runtimePhase,
             presentedSurfaceID: presentedSurfaceID,
