@@ -27,6 +27,8 @@ enum HerdrConnectionEvent: Sendable {
     case clipboard(base64: String)
     /// Herdr refused an input message (a paste over its limit); the connection stays.
     case inputRefused(message: String)
+    /// Whether the focused pane asks for every key as an escape code.
+    case keyboardReportAll(Bool)
     /// The connection ended; nothing follows.
     case ended(HerdrConnectionError)
 }
@@ -390,8 +392,9 @@ actor HerdrConnection {
         }
     }
 
-    /// While the session is hidden, bells, clipboard writes and input refusals are dropped, as in
-    /// Herdr's client; surfaces are still decoded and delivered. A surface the decoder can't apply
+    /// While the session is hidden, bells, clipboard writes, input refusals and the focused pane's
+    /// keyboard mode are dropped, as in Herdr's client; Herdr sends the keyboard mode again when the
+    /// session is shown. Surfaces are still decoded and delivered. A surface the decoder can't apply
     /// ends the connection, as in Herdr's client.
     private func route(_ message: HerdrServerMessage) async throws {
         heardSinceWelcome = true
@@ -427,11 +430,13 @@ actor HerdrConnection {
             if isActive { await onEvent(.clipboard(base64: base64)) }
         case .clientShellError(let message):
             if isActive { await onEvent(.inputRefused(message: message)) }
+        case .keyboardReportAll(let enabled):
+            if isActive { await onEvent(.keyboardReportAll(enabled)) }
         case .serverShutdown(let reason):
             throw HerdrConnectionError.serverShutdown(reason: reason)
-        case .mouseCapture, .keyboardReportAll, .windowTitle, .reloadSoundConfig, .notify, .unused:
-            // Remux reads mouse state from each pane's surface flags, encodes no keys itself, shows no
-            // outer title and plays no terminal sounds.
+        case .mouseCapture, .windowTitle, .reloadSoundConfig, .notify, .unused:
+            // Remux reads mouse state from each pane's surface flags, shows no outer title and plays
+            // no terminal sounds.
             break
         }
     }

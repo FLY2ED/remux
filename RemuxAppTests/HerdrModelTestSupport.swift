@@ -81,12 +81,13 @@ enum HerdrServerScript {
         revision: UInt64,
         boot: String = "boot",
         tabLabel: String = "main",
+        focusedPane: String? = "w1:p1",
         panes: [String] = [],
         agents: [String] = []
     ) -> [UInt8] {
         let json = """
         {"boot_id":"\(boot)","revision":\(revision),"focused_workspace_id":"w1","focused_tab_id":"t1",
-         "focused_pane_id":null,"workspaces":[],"tabs":[{"tab_id":"t1","workspace_id":"w1","number":1,
+         "focused_pane_id":\(json(focusedPane)),"workspaces":[],"tabs":[{"tab_id":"t1","workspace_id":"w1","number":1,
          "label":"\(tabLabel)","custom_label":true,"zoomed":false,"focused":true,"agent_status":"idle"}],
          "panes":[\(panes.joined(separator: ","))],"agents":[\(agents.joined(separator: ","))]}
         """
@@ -185,6 +186,20 @@ enum HerdrServerScript {
         return HerdrWire.frame(writer.bytes)
     }
 
+    static func keyboardReportAll(_ enabled: Bool) -> [UInt8] {
+        var writer = HerdrWireWriter()
+        writer.variant(17)
+        writer.bool(enabled)
+        return HerdrWire.frame(writer.bytes)
+    }
+
+    static func inputRefused(_ message: String) -> [UInt8] {
+        var writer = HerdrWireWriter()
+        writer.variant(15)
+        writer.string(message)
+        return HerdrWire.frame(writer.bytes)
+    }
+
     static func surfaceSetReply(id: String, active: Bool) -> [UInt8] {
         HerdrConnectionTests.reply(
             id: id,
@@ -200,6 +215,9 @@ enum ClientWrite: Equatable {
     case surfaceSet(id: String, active: Bool)
     case theme(HerdrHostThemeUpdate)
     case focus(Bool)
+    /// A pane input message, as framed.
+    case paneInput([UInt8])
+    case paneFocus(id: String, paneID: String)
     case other(tag: UInt32, kind: String)
 
     var isSurfaceSet: Bool {
@@ -227,8 +245,18 @@ enum ClientWrite: Equatable {
             let cellWidth = try reader.u32()
             let cellHeight = try reader.u32()
             return .resize(cols: try reader.u16(), rows: try reader.u16(), cellWidth: cellWidth, cellHeight: cellHeight)
+        case 13:
+            return .paneInput(frame)
         case 15:
             let request = try HerdrConnectionTests.request(frame)
+            if request.method == HerdrScreenModel.paneFocusMethod {
+                _ = try reader.string()
+                let json = try XCTUnwrap(
+                    JSONSerialization.jsonObject(with: Data(try reader.string().utf8)) as? [String: Any]
+                )
+                let params = try XCTUnwrap(json["params"] as? [String: String])
+                return .paneFocus(id: request.id, paneID: try XCTUnwrap(params["pane_id"]))
+            }
             guard request.method == HerdrConnection.surfaceSetMethod else {
                 return .other(tag: tag, kind: request.method)
             }

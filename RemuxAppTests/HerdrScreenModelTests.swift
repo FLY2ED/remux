@@ -8,8 +8,13 @@ import XCTest
 @MainActor
 final class HerdrScreenModelTests: XCTestCase {
     private var harnesses: [HerdrModelHarness] = []
+    private var windows: [UIWindow] = []
 
     override func tearDown() async throws {
+        for window in windows {
+            window.isHidden = true
+        }
+        windows.removeAll()
         for harness in harnesses {
             await harness.model.stop()
         }
@@ -518,10 +523,9 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(Set(gate.log.dropLast()), ["closed w1:p1", "closed w1:p2", "closed w1:p3"])
     }
 
-    /// The panes take no input yet, so a session ready on screen still offers no keyboard: both of the
-    /// screen's projections say input is unavailable, as for a session whose input is down, and keys
-    /// aren't typed into a sink that drops them.
-    func testAReadySessionOffersNoInput() async throws {
+    /// A session ready on screen offers the keyboard: both of the screen's projections say input is
+    /// available.
+    func testAReadySessionOffersInput() async throws {
         let harness = await makeHarness()
         let bridge = try await harness.bridge()
         await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
@@ -536,21 +540,17 @@ final class HerdrScreenModelTests: XCTestCase {
         try await harness.waitUntil("the pane's renderer wasn't created") {
             harness.model.paneSurface("w1:p1") != nil
         }
-        let renderer = try XCTUnwrap(harness.model.paneSurface("w1:p1")).renderer
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 600))
-        let viewController = UIViewController()
-        window.rootViewController = viewController
-        viewController.view.addSubview(renderer.view)
-        window.isHidden = false
-        defer { window.isHidden = true }
+        showInWindow(harness, panes: ["w1:p1"])
 
         try await harness.waitUntil("the session wasn't ready") { harness.states.last == .connected }
         let adapter = harness.model.terminalScreenAdapter
         // The screen reads input availability from both projections.
         for interaction in [adapter.terminalInteractionProjection, adapter.terminalScreenPresentationProjection.interaction] {
             XCTAssertTrue(interaction.hasFocusedSurface)
-            XCTAssertFalse(interaction.isInputAvailable)
+            XCTAssertTrue(interaction.isInputAvailable)
         }
+        // The composer's Send waits for an awaited submit.
+        XCTAssertFalse(adapter.acceptsComposerMessages)
     }
 
     /// While shown, a new screen size goes to Herdr at once; a hidden session gets it with its show.
@@ -773,6 +773,243 @@ final class HerdrScreenModelTests: XCTestCase {
         }
         XCTAssertFalse(model.paneSurface("w1:p1")?.terminal === failedTerminal)
         XCTAssertEqual(model.presentation(ofPane: "w1:p1"), .pending)
+    }
+
+    // MARK: - Input
+
+    /// Typing, keys and a paste go to the snapshot's focused pane in the order they were typed. A key's
+    /// release isn't sent.
+    func testInputGoesToTheFocusedPaneInOrder() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        XCTAssertTrue(adapter.terminalInteractionProjection.isInputAvailable)
+
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("l\u{03}"), .accepted)
+        XCTAssertEqual(adapter.sendKeyEventToFocusedSurface(GhosttySurfaceKeyEvent(keyCode: .enter)), .accepted)
+        XCTAssertEqual(
+            adapter.sendKeyEventToFocusedSurface(GhosttySurfaceKeyEvent(action: .release, keyCode: .enter)),
+            .accepted
+        )
+        XCTAssertEqual(adapter.sendPasteToFocusedSurface("a\nb"), .accepted)
+
+        var sent: [[UInt8]] = []
+        for _ in 0..<3 {
+            sent.append(try await nextWrite(session.bridge, from: &index, paneInput))
+        }
+        XCTAssertEqual(sent, [
+            frame("w1:p1", [typed("l"), .key(HerdrKeyEvent(code: .character("c"), modifiers: .control, tracksRelease: true))]),
+            frame("w1:p1", [.key(HerdrKeyEvent(code: .enter, tracksRelease: true))]),
+            frame("w1:p1", [.paste("a\nb")]),
+        ])
+        try await Task.sleep(for: .milliseconds(100))
+        let written = await session.bridge.writtenCount
+        XCTAssertEqual(written, index, "the release was sent")
+    }
+
+    /// Input is offered only while the session is shown; typed while hidden, nothing is sent.
+    func testInputIsOfferedOnlyWhileShown() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge()
+        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        await bridge.serve(HerdrServerScript.surface(
+            projection: 1,
+            revision: 1,
+            lines: ["one"],
+            panes: [.init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true)]
+        ))
+        harness.setScreenSize()
+        let adapter = harness.model.terminalScreenAdapter
+        try await harness.waitUntil("the pane's renderer wasn't created") { harness.model.paneSurface("w1:p1") != nil }
+        showInWindow(harness, panes: ["w1:p1"])
+        XCTAssertFalse(adapter.terminalInteractionProjection.isInputAvailable)
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("x"), .transportUnavailable)
+
+        harness.model.setSelected(true)
+        var index = 0
+        let show = try await harness.nextSurfaceSet(bridge, from: &index)
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        try await harness.waitUntil("input wasn't offered once shown") {
+            adapter.terminalInteractionProjection.isInputAvailable
+        }
+
+        harness.model.setSelected(false)
+        XCTAssertFalse(adapter.terminalInteractionProjection.isInputAvailable)
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("x"), .transportUnavailable)
+        let hide = try await harness.nextSurfaceSet(bridge, from: &index)
+        XCTAssertFalse(hide.active)
+        try await Task.sleep(for: .milliseconds(100))
+        let written = await bridge.writtenCount
+        XCTAssertEqual(written, index, "input typed while hidden was sent")
+    }
+
+    /// The snapshot's focused pane takes the keys and the highlight, as in Herdr's client, also while a
+    /// frame still marks another pane; both follow the next snapshot.
+    func testTheSnapshotsFocusedPaneTakesKeysAndTheHighlight() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness, focusedPane: "w1:p2")
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let panes = adapter.terminalScreenPresentationProjection.viewport.panes
+        XCTAssertEqual(panes.count, 2)
+        XCTAssertEqual(panes.filter(\.isFocused).map(\.id), [panes[1].id])
+        XCTAssertEqual(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID, panes[1].id)
+
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("x"), .accepted)
+        let first = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(first, frame("w1:p2", [typed("x")]))
+
+        await session.bridge.serve(HerdrServerScript.snapshot(revision: 2, focusedPane: "w1:p1"))
+        try await harness.waitUntil("the highlight didn't follow the snapshot") {
+            adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID == panes[0].id
+        }
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("y"), .accepted)
+        let second = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(second, frame("w1:p1", [typed("y")]))
+    }
+
+    /// A tap on another pane asks Herdr to focus it, as Herdr's client does. Taps made before Herdr
+    /// answers wait, and only the newest is sent; a tap on the focused pane sends nothing.
+    func testATapAsksHerdrToFocusThePane() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let ids = adapter.terminalScreenPresentationProjection.viewport.panes.map(\.id)
+        XCTAssertEqual(ids.count, 2)
+
+        XCTAssertEqual(adapter.focusPane(ids[0]), .queued)
+        XCTAssertEqual(adapter.focusPane(ids[1]), .queued)
+        let first = try await nextWrite(session.bridge, from: &index, paneFocus)
+        XCTAssertEqual(first.paneID, "w1:p2")
+
+        XCTAssertEqual(adapter.focusPane(ids[1]), .queued)
+        XCTAssertEqual(adapter.focusPane(ids[0]), .queued)
+        try await Task.sleep(for: .milliseconds(100))
+        let waiting = await session.bridge.writtenCount
+        XCTAssertEqual(waiting, index, "a tap was sent before Herdr answered the last one")
+
+        await session.bridge.serve(HerdrConnectionTests.reply(id: first.id, json: #"{"type":"ok"}"#))
+        let second = try await nextWrite(session.bridge, from: &index, paneFocus)
+        XCTAssertEqual(second.paneID, "w1:p1")
+        await session.bridge.serve(HerdrConnectionTests.reply(id: second.id, json: #"{"type":"ok"}"#))
+        try await Task.sleep(for: .milliseconds(100))
+        let answered = await session.bridge.writtenCount
+        XCTAssertEqual(answered, index, "an older waiting tap was sent")
+    }
+
+    /// Once Herdr reports that the focused pane asks for every key, non-ASCII text goes to it as a commit.
+    func testAReportAllPaneGetsNonASCIITextAsACommit() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+
+        // The model takes events in wire order, so once it has the snapshot it has the keyboard mode.
+        await session.bridge.serve(
+            HerdrServerScript.keyboardReportAll(true) + HerdrServerScript.snapshot(revision: 2, focusedPane: "w1:p2")
+        )
+        try await harness.waitUntil("the snapshot wasn't taken") { harness.model.focusedPaneID == "w1:p2" }
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("日a"), .accepted)
+        let sent = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(sent, frame("w1:p2", [.text("日"), typed("a")]))
+    }
+
+    /// A paste over Herdr's byte limit isn't sent, and input Herdr refuses shows Herdr's failure
+    /// notice.
+    func testInputThatCantGoThroughShowsAFailureNotice() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+
+        let tooLarge = String(repeating: "a", count: HerdrConnection.maxInputBytes + 1)
+        XCTAssertEqual(adapter.sendPasteToFocusedSurface(tooLarge), .surfaceRejected)
+        XCTAssertEqual(adapter.commandFailureEvent?.message, "Herdr: input failed")
+        let firstToken = adapter.commandFailureEvent?.token
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("x"), .accepted)
+        let sent = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(sent, frame("w1:p1", [typed("x")]), "the oversized paste was sent")
+
+        await session.bridge.serve(HerdrServerScript.inputRefused("Paste rejected"))
+        try await harness.waitUntil("the refusal wasn't shown") { adapter.commandFailureEvent?.token != firstToken }
+        XCTAssertEqual(adapter.commandFailureEvent?.message, "Herdr: input failed")
+    }
+
+    /// A session shown with panes `w1:p1` and `w1:p2`, its snapshot focusing `focusedPane`; returns its
+    /// bridge and the index of the first write after the show.
+    private func shownSession(
+        _ harness: HerdrModelHarness,
+        focusedPane: String = "w1:p1"
+    ) async throws -> (bridge: FakeBridgeTransport, next: Int) {
+        let bridge = try await harness.bridge()
+        await bridge.serve(
+            try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1, focusedPane: focusedPane)
+        )
+        await bridge.serve(HerdrServerScript.surface(
+            projection: 1,
+            revision: 1,
+            lines: ["one two"],
+            panes: [
+                .init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true),
+                .init(id: "w1:p2", x: 4, width: 3, height: 1),
+            ]
+        ))
+        harness.setScreenSize()
+        harness.model.setSelected(true)
+        var index = 0
+        let show = try await harness.nextSurfaceSet(bridge, from: &index)
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        try await harness.waitUntil("the panes' renderers weren't created") {
+            harness.model.paneSurface("w1:p1") != nil && harness.model.paneSurface("w1:p2") != nil
+        }
+        showInWindow(harness, panes: ["w1:p1", "w1:p2"])
+        try await harness.waitUntil("input wasn't offered") { harness.model.isInputAvailable }
+        return (bridge, index)
+    }
+
+    /// A pane is ready once its renderer has drawn into a window, as on the screen.
+    private func showInWindow(_ harness: HerdrModelHarness, panes: [String]) {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 600))
+        let viewController = UIViewController()
+        window.rootViewController = viewController
+        for paneID in panes {
+            if let view = harness.model.paneSurface(paneID)?.renderer.view {
+                viewController.view.addSubview(view)
+            }
+        }
+        window.isHidden = false
+        windows.append(window)
+    }
+
+    /// The next write from `index` on that `match` takes, skipping others; `index` moves past it.
+    private func nextWrite<Value>(
+        _ bridge: FakeBridgeTransport,
+        from index: inout Int,
+        _ match: (ClientWrite) -> Value?
+    ) async throws -> Value {
+        while true {
+            let write = try ClientWrite.decode(try await bridge.written(index))
+            index += 1
+            if let value = match(write) { return value }
+        }
+    }
+
+    private func paneInput(_ write: ClientWrite) -> [UInt8]? {
+        if case .paneInput(let frame) = write { frame } else { nil }
+    }
+
+    private func paneFocus(_ write: ClientWrite) -> (id: String, paneID: String)? {
+        if case .paneFocus(let id, let paneID) = write { (id, paneID) } else { nil }
+    }
+
+    private func frame(_ paneID: String, _ events: [HerdrInputEvent]) -> [UInt8] {
+        HerdrClientMessage.paneInput(paneID: paneID, events: events).frame
+    }
+
+    private func typed(_ character: Unicode.Scalar) -> HerdrInputEvent {
+        .key(HerdrKeyEvent(code: .character(character), generatedText: String(character)))
     }
 
     /// A reconnect replaces the connection, not the panes: the last frame stays until the new

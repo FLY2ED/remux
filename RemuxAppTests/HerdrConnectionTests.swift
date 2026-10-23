@@ -54,7 +54,7 @@ final class HerdrConnectionTests: XCTestCase {
         XCTAssertEqual(first, HerdrClientMessage.hello(hello).frame)
 
         let kinds = await events.waitForEnd().map(\.kind)
-        XCTAssertEqual(kinds, ["snapshot", "surface.full", "ended(serverShutdown)"])
+        XCTAssertEqual(kinds, ["snapshot", "keyboardReportAll(false)", "surface.full", "ended(serverShutdown)"])
     }
 
     func testARejectedHelloFailsWithTheServersCode() async throws {
@@ -1101,6 +1101,7 @@ extension HerdrConnectionEvent {
         case .notification: return "notification"
         case .clipboard: return "clipboard"
         case .inputRefused: return "inputRefused"
+        case .keyboardReportAll(let enabled): return "keyboardReportAll(\(enabled))"
         case .ended(let error):
             switch error {
             case .serverShutdown: return "ended(serverShutdown)"

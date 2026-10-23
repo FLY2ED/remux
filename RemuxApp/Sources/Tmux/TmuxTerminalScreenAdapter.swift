@@ -89,9 +89,9 @@ final class TmuxTerminalScreenAdapter: ObservableObject {
     private var didAdoptZoomMarks = false
     private var multipaneZoomDefault = TmuxMultipaneZoomDefaultPolicy()
 
-    private var commandFailureMessage: String?
-    private(set) var commandFailureEvent: GhosttyTerminalCommandFailureEvent?
-    private var commandFailureToken: UInt64 = 0
+    private lazy var commandFailure = GhosttyTerminalCommandFailureNotice { [weak self] in
+        self?.objectWillChange.send()
+    }
 
     private var subscriptions: [AnyCancellable] = []
 
@@ -456,22 +456,7 @@ final class TmuxTerminalScreenAdapter: ObservableObject {
     // MARK: Command failures
 
     private func presentCommandFailure(for request: TmuxSessionController.Request) {
-        commandFailureToken &+= 1
-        let message = "tmux: \(Self.failureLabel(for: request)) failed"
-        commandFailureMessage = message
-        commandFailureEvent = GhosttyTerminalCommandFailureEvent(
-            token: commandFailureToken,
-            message: message
-        )
-        objectWillChange.send()
-
-        let token = commandFailureToken
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(4))
-            guard let self, self.commandFailureToken == token else { return }
-            self.commandFailureMessage = nil
-            self.objectWillChange.send()
-        }
+        commandFailure.present("tmux: \(Self.failureLabel(for: request)) failed")
     }
 
     private static func failureLabel(for request: TmuxSessionController.Request) -> String {
@@ -505,7 +490,7 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         GhosttyTerminalPresentationProjector.terminalScreenPresentationProjection(
             phase: runtimePhase,
             transportWritable: isTransportWritable,
-            commandFailureMessage: commandFailureMessage,
+            commandFailureMessage: commandFailure.message,
             debugStatus: stateTraceLabel,
             registryDebugSummary: "tmux session stack",
             presentedSurfaceID: activeManagedSurface?.id,
@@ -528,6 +513,10 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         GhosttyManagedSurfaceLookup { [weak self] id in
             self?.managedSurface(for: id)
         }
+    }
+
+    var commandFailureEvent: GhosttyTerminalCommandFailureEvent? {
+        commandFailure.event
     }
 
     var stateTraceLabel: String {
@@ -584,6 +573,10 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         guard session?.presentation(for: effectiveFocusedPaneID) == .ready else { return .surfaceRejected }
         return nil
     }
+
+    var holdsTmuxPrefixKey: Bool { true }
+
+    var acceptsComposerMessages: Bool { true }
 
     func sendInputToFocusedSurface(_ text: String) -> FocusedTerminalInputSubmissionResult {
         if let preflight = preflightFocusedInput() { return preflight }

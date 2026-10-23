@@ -9,10 +9,14 @@ extension GhosttyTopLevelNoun {
 /// Presents a `HerdrScreenModel`'s tab through the `GhosttyTerminalScreenModeling` boundary so
 /// `GhosttySurfaceScreen` renders it: one top-level for the tab, one leaf for each pane with a text
 /// area, laid out on the tab's cell grid. The model owns all state; this maps it to the screen's
-/// projections and stable ids. Input and topology actions aren't offered.
+/// projections and stable ids, and passes typing and pane focus to it. Other topology actions aren't
+/// offered.
 @MainActor
 final class HerdrTerminalScreenAdapter: ObservableObject {
     private weak var model: HerdrScreenModel?
+    private lazy var commandFailure = GhosttyTerminalCommandFailureNotice { [weak self] in
+        self?.objectWillChange.send()
+    }
     /// Pane and tab ids belong to one server boot, so the ids made for them do too.
     private var identityBootID: String?
     private var paneSurfaceIDs: [String: UUID] = [:]
@@ -21,6 +25,10 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
 
     func attach(to model: HerdrScreenModel) {
         self.model = model
+    }
+
+    func presentFailure(_ label: String) {
+        commandFailure.present("Herdr: \(label) failed")
     }
 
     func invalidate() {
@@ -72,8 +80,12 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
         model?.layout?.panes.filter(\.hasTextArea) ?? []
     }
 
+    /// The model's focused pane, once it is laid out.
     private var focusedPaneID: String? {
-        shownPanes.first(where: \.focused)?.paneID
+        guard let paneID = model?.focusedPaneID, shownPanes.contains(where: { $0.paneID == paneID }) else {
+            return nil
+        }
+        return paneID
     }
 
     /// The focused pane, once its renderer exists.
@@ -118,7 +130,7 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
                 id: surfaceID(forPane: pane.paneID, in: layout),
                 normalFrame: frame,
                 visibleFrame: frame,
-                isFocused: pane.focused,
+                isFocused: pane.paneID == focusedPaneID,
                 currentCommand: pane.name,
                 currentPath: pane.path
             )
@@ -157,7 +169,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         let projection = GhosttyTerminalPresentationProjector.terminalScreenPresentationProjection(
             phase: runtimePhase,
             transportWritable: model?.isConnectionOpen ?? false,
-            commandFailureMessage: nil,
+            commandFailureMessage: commandFailure.message,
             debugStatus: stateTraceLabel,
             registryDebugSummary: "herdr session",
             presentedSurfaceID: presentedSurfaceID,
@@ -177,9 +189,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         interaction
     }
 
-    /// What the screen may do with the session, for both projections it reads. The panes take no input
-    /// yet, so the screen offers them no keyboard, as for a session whose input is down: keys typed
-    /// there would be dropped.
+    /// What the screen may do with the session, for both projections it reads.
     private var interaction: GhosttyTerminalInteractionProjection {
         let projection = GhosttyTerminalPresentationProjector.terminalInteractionProjection(
             phase: runtimePhase,
@@ -188,7 +198,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
             selectedPanePresentation: model?.presentation(ofPane: focusedPaneID) ?? .pending
         )
         return GhosttyTerminalInteractionProjection(
-            isInputAvailable: false,
+            isInputAvailable: model?.isInputAvailable ?? false,
             hasFocusedSurface: projection.hasFocusedSurface,
             selectedActiveLeafID: projection.selectedActiveLeafID,
             selectedWindowIndex: projection.selectedWindowIndex,
@@ -204,7 +214,9 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         }
     }
 
-    var commandFailureEvent: GhosttyTerminalCommandFailureEvent? { nil }
+    var commandFailureEvent: GhosttyTerminalCommandFailureEvent? {
+        commandFailure.event
+    }
 
     var stateTraceLabel: String {
         model?.stateTraceLabel ?? "released"
@@ -212,16 +224,24 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
 
     // MARK: Input
 
+    /// Herdr panes get Ctrl+B at once; Herdr's own keybindings aren't offered on the phone.
+    var holdsTmuxPrefixKey: Bool { false }
+
+    /// A composed message needs an awaited paste and Enter, which Herdr input doesn't have.
+    var acceptsComposerMessages: Bool { false }
+
     func sendInputToFocusedSurface(_ text: String) -> FocusedTerminalInputSubmissionResult {
-        .surfaceRejected
+        model?.sendText(text) ?? .transportUnavailable
     }
 
     func sendPasteToFocusedSurface(_ text: String) -> FocusedTerminalInputSubmissionResult {
-        .surfaceRejected
+        model?.sendPaste(text) ?? .transportUnavailable
     }
 
+    /// Herdr's client sends input only to the focused pane.
     func sendPaste(_ text: String, to surfaceID: UUID) -> FocusedTerminalInputSubmissionResult {
-        .surfaceRejected
+        guard isFocusedPane(surfaceID) else { return .noFocusedSurface }
+        return sendPasteToFocusedSurface(text)
     }
 
     func sendPasteAwaitingCommandCompletion(_ text: String, to surfaceID: UUID) async -> Bool {
@@ -229,7 +249,8 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func sendKeyEvent(_ event: GhosttySurfaceKeyEvent, to surfaceID: UUID) -> FocusedTerminalInputSubmissionResult {
-        .surfaceRejected
+        guard isFocusedPane(surfaceID) else { return .noFocusedSurface }
+        return sendKeyEventToFocusedSurface(event)
     }
 
     func sendKeyEventAwaitingCommandCompletion(_ event: GhosttySurfaceKeyEvent, to surfaceID: UUID) async -> Bool {
@@ -237,7 +258,12 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func sendKeyEventToFocusedSurface(_ event: GhosttySurfaceKeyEvent) -> FocusedTerminalInputSubmissionResult {
-        .surfaceRejected
+        model?.sendKey(event) ?? .transportUnavailable
+    }
+
+    private func isFocusedPane(_ surfaceID: UUID) -> Bool {
+        guard let paneID = paneID(for: surfaceID) else { return false }
+        return paneID == focusedPaneID
     }
 
     func isMouseCaptured(for surfaceID: UUID) -> Bool {
@@ -275,7 +301,10 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     func refreshPaneMetadata(inTopLevel id: UUID) {}
 
     func focusPane(_ id: UUID) -> GhosttyTerminalActionOutcome {
-        .missingTarget(.pane(id))
+        guard let paneID = paneID(for: id), model?.focusPane(paneID) == true else {
+            return .missingTarget(.pane(id))
+        }
+        return .queued
     }
 
     func focusTopLevel(_ id: UUID) -> GhosttyTerminalActionOutcome {

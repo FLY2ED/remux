@@ -25,6 +25,32 @@ struct GhosttyTerminalCommandFailureEvent: Equatable {
     let message: String
 }
 
+/// A failed command: an event the screen reacts to once, and a message the status overlay shows for a
+/// few seconds, until a newer failure replaces it.
+@MainActor
+final class GhosttyTerminalCommandFailureNotice {
+    private(set) var event: GhosttyTerminalCommandFailureEvent?
+    private(set) var message: String?
+    private let onChange: () -> Void
+
+    init(onChange: @escaping () -> Void) {
+        self.onChange = onChange
+    }
+
+    func present(_ message: String) {
+        let token = (event?.token ?? 0) &+ 1
+        event = GhosttyTerminalCommandFailureEvent(token: token, message: message)
+        self.message = message
+        onChange()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard let self, self.event?.token == token else { return }
+            self.message = nil
+            self.onChange()
+        }
+    }
+}
+
 enum GhosttyAppLifecyclePhase: Equatable {
     case active
     case inactive
@@ -64,6 +90,13 @@ extension GhosttyTerminalRenderingModeling {
 
 @MainActor
 protocol GhosttyTerminalInputModeling: ObservableObject {
+    /// tmux's prefix key (Ctrl+B) is held briefly so Ctrl+B [ can open tmux's copy mode.
+    var holdsTmuxPrefixKey: Bool { get }
+
+    /// The composer can send a message, through `sendPasteAwaitingCommandCompletion` and
+    /// `sendKeyEventAwaitingCommandCompletion`.
+    var acceptsComposerMessages: Bool { get }
+
     @discardableResult
     func sendInputToFocusedSurface(_ text: String) -> FocusedTerminalInputSubmissionResult
 

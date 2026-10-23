@@ -7,7 +7,6 @@ struct HerdrPaneLayout: Equatable, Sendable {
         let paneID: String
         /// The pane's text area: its terminal's size, and where it sits in the frame.
         let innerRect: HerdrSurfaceRect
-        let focused: Bool
         /// The pane's name as Herdr's pane navigator lists it, from the snapshot.
         var name = ""
         /// The directory of the pane's foreground program, else of its shell; empty when unknown.
@@ -306,7 +305,6 @@ actor HerdrTerminalEngine {
                 HerdrPaneLayout.Pane(
                     paneID: $0.paneID,
                     innerRect: $0.innerRect,
-                    focused: $0.focused,
                     name: Self.name(ofPane: $0.paneID, in: snapshot),
                     path: Self.path(ofPane: $0.paneID, in: snapshot)
                 )

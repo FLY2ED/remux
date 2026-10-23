@@ -51,6 +51,7 @@ final class HerdrScreenModel {
         case resize(HerdrSurfaceGeometry)
         case theme([HerdrHostThemeUpdate])
         case appActive(Bool)
+        case input(paneID: String, events: [HerdrInputEvent])
     }
 
     /// One connection to the server, from opening its bridge to its end. A reconnect replaces it, and
@@ -72,6 +73,12 @@ final class HerdrScreenModel {
         var requestedShown = false
         var visibilityRequests: UInt64 = 0
         var ended = false
+        /// Whether the focused pane asks for every key as an escape code.
+        var reportsAllKeys = false
+        /// A `pane.focus` waits for Herdr's answer. Taps meanwhile wait for it, and only the newest is
+        /// sent, so the last pane tapped ends up focused.
+        var focusInFlight = false
+        var waitingFocus: String?
         private var operations: [Operation] = []
         private var operationWaiter: CheckedContinuation<Void, Never>?
         private var operationsFinished = false
@@ -142,6 +149,9 @@ final class HerdrScreenModel {
     private var sizeKnownSince: ContinuousClock.Instant?
 
     private(set) var layout: HerdrPaneLayout?
+    /// The pane keys go to and the screen highlights: the newest snapshot's focused pane, as in
+    /// Herdr's client. A pane can be focused before its first frame arrives.
+    private(set) var focusedPaneID: String?
     private var terminals: [String: HerdrRetainedTerminal] = [:]
     private var surfaces: [String: HerdrPaneSurface] = [:]
     private var presentationFailures: [String: TerminalDisconnectReason] = [:]
@@ -350,6 +360,116 @@ final class HerdrScreenModel {
         return surfaces[paneID]?.renderer.presentation ?? .pending
     }
 
+    // MARK: - Input
+
+    /// Input goes out while the session is shown on an open connection and its focused pane shows a
+    /// frame: Herdr's client drops input before its first snapshot, and the server drops input on a
+    /// hidden surface.
+    var isInputAvailable: Bool {
+        inputTarget != nil
+    }
+
+    private var inputTarget: (attempt: Attempt, paneID: String)? {
+        guard let attempt, isCurrent(attempt), !attempt.ended, attempt.connection != nil,
+              attempt.requestedShown, let paneID = focusedPaneID,
+              presentation(ofPane: paneID) == .ready
+        else { return nil }
+        return (attempt, paneID)
+    }
+
+    func sendText(_ text: String) -> FocusedTerminalInputSubmissionResult {
+        guard !text.isEmpty else { return .empty }
+        guard let target = inputTarget else { return .transportUnavailable }
+        return send(
+            HerdrInputTranslator.events(forText: text, reportsAllKeys: target.attempt.reportsAllKeys),
+            to: target
+        )
+    }
+
+    func sendPaste(_ text: String) -> FocusedTerminalInputSubmissionResult {
+        guard !text.isEmpty else { return .empty }
+        guard let target = inputTarget else { return .transportUnavailable }
+        return send([.paste(text)], to: target)
+    }
+
+    /// A release is accepted without being sent: Herdr's client sends none from a plain terminal.
+    func sendKey(_ key: GhosttySurfaceKeyEvent) -> FocusedTerminalInputSubmissionResult {
+        guard let target = inputTarget else { return .transportUnavailable }
+        guard let event = HerdrInputTranslator.event(for: key) else {
+            return key.action == .release ? .accepted : .surfaceRejected
+        }
+        return send([event], to: target)
+    }
+
+    /// Input is accepted once queued behind the session's earlier operations; Herdr doesn't
+    /// acknowledge input. Input over Herdr's byte limit isn't sent: Herdr would close the connection,
+    /// or refuse a paste.
+    private func send(
+        _ events: [HerdrInputEvent],
+        to target: (attempt: Attempt, paneID: String)
+    ) -> FocusedTerminalInputSubmissionResult {
+        let messages = HerdrInputTranslator.messages(events)
+        do {
+            try messages.forEach(HerdrConnection.checkLimits)
+        } catch {
+            terminalScreenAdapter.presentFailure(Self.inputFailureLabel)
+            return .surfaceRejected
+        }
+        for message in messages {
+            target.attempt.ask(.input(paneID: target.paneID, events: message))
+        }
+        return .accepted
+    }
+
+    /// Asks Herdr to focus the pane, as Herdr's client does on a click; keys follow the snapshot that
+    /// reports the new focus. Returns false when the session can't take input.
+    func focusPane(_ paneID: String) -> Bool {
+        guard let attempt, isCurrent(attempt), !attempt.ended, let connection = attempt.connection,
+              attempt.requestedShown
+        else { return false }
+        if attempt.focusInFlight {
+            attempt.waitingFocus = paneID
+        } else if paneID != focusedPaneID {
+            requestFocus(paneID, attempt: attempt, connection: connection)
+        }
+        return true
+    }
+
+    private func requestFocus(_ paneID: String, attempt: Attempt, connection: HerdrConnection) {
+        attempt.focusInFlight = true
+        Task { [weak self] in
+            var failure: Error?
+            do {
+                _ = try await connection.command(Self.paneFocusMethod, params: ["pane_id": paneID])
+            } catch {
+                failure = error
+            }
+            self?.focusAnswered(attempt: attempt, connection: connection, failure: failure)
+        }
+    }
+
+    private func focusAnswered(attempt: Attempt, connection: HerdrConnection, failure: Error?) {
+        attempt.focusInFlight = false
+        guard isCurrent(attempt), !attempt.ended else { return }
+        if let failure, (failure as? HerdrCommandError) != .connectionEnded {
+            terminalScreenAdapter.presentFailure(Self.focusFailureLabel)
+        }
+        if let next = attempt.waitingFocus {
+            attempt.waitingFocus = nil
+            requestFocus(next, attempt: attempt, connection: connection)
+        }
+    }
+
+    private func inputFailed(_ attemptID: UInt64) {
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt), !attempt.ended else { return }
+        terminalScreenAdapter.presentFailure(Self.inputFailureLabel)
+    }
+
+    private func keyboardReportAllChanged(_ attemptID: UInt64, _ enabled: Bool) {
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt) else { return }
+        attempt.reportsAllKeys = enabled
+    }
+
     // MARK: - Connection
 
     private func startAttempt() {
@@ -466,6 +586,14 @@ final class HerdrScreenModel {
             }
         case .appActive(let active):
             await connection.setAppActive(active)
+        case .input(let paneID, let events):
+            do {
+                try await connection.send(events, toPane: paneID)
+            } catch HerdrInputError.connectionEnded {
+                // The connection's end is reported when the reader sees it.
+            } catch {
+                inputFailed(attemptID)
+            }
         }
     }
 
@@ -481,12 +609,16 @@ final class HerdrScreenModel {
             switch event {
             case .snapshot(let snapshot):
                 await feed.receive(snapshot)
-                Task { @MainActor in model.snapshotArrived(attemptID) }
+                Task { @MainActor in model.snapshotArrived(attemptID, focusedPaneID: snapshot.focusedPaneID) }
             case .surface(let output):
                 await feed.receive(output)
             case .ended(let error):
                 await model.connectionEnded(attemptID, error)
-            case .bell, .notification, .clipboard, .inputRefused:
+            case .inputRefused:
+                Task { @MainActor in model.inputFailed(attemptID) }
+            case .keyboardReportAll(let enabled):
+                Task { @MainActor in model.keyboardReportAllChanged(attemptID, enabled) }
+            case .bell, .notification, .clipboard:
                 break
             }
         }
@@ -537,8 +669,14 @@ final class HerdrScreenModel {
         sizeWaiter = nil
     }
 
-    private func snapshotArrived(_ attemptID: UInt64) {
-        guard let attempt, attempt.id == attemptID, isCurrent(attempt), !attempt.hasSnapshot else { return }
+    private func snapshotArrived(_ attemptID: UInt64, focusedPaneID: String?) {
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt) else { return }
+        if focusedPaneID != self.focusedPaneID {
+            self.focusedPaneID = focusedPaneID
+            reconcilePresentationActivity()
+            didChange()
+        }
+        guard !attempt.hasSnapshot else { return }
         attempt.hasSnapshot = true
         reconcileVisibility()
     }
@@ -581,6 +719,8 @@ final class HerdrScreenModel {
         attempt.requestedShown = wanted
         attempt.visibilityRequests += 1
         attempt.ask(wanted ? .show(geometry, request: attempt.visibilityRequests) : .hide)
+        // Input is offered only while the session is shown.
+        didChange()
     }
 
     /// Herdr's client rolls a failed show back and stays on what it showed before; a Remux session
@@ -773,10 +913,10 @@ final class HerdrScreenModel {
         let sceneActive = appPhase == .active
         let live = failure == nil && isConnectionOpen
         for (paneID, surface) in surfaces {
-            let pane = layout?.panes.first { $0.paneID == paneID }
+            let inLayout = layout?.panes.contains { $0.paneID == paneID } == true
             surface.renderer.setSceneActive(sceneActive)
-            surface.renderer.setPresented(isSelected && pane != nil)
-            surface.renderer.setFocused(isSelected && live && pane?.focused == true)
+            surface.renderer.setPresented(isSelected && inLayout)
+            surface.renderer.setFocused(isSelected && live && inLayout && paneID == focusedPaneID)
         }
     }
 
@@ -842,6 +982,10 @@ final class HerdrScreenModel {
         kind: .runtime,
         message: "Terminal pane could not be painted. Reconnect to try again."
     )
+
+    nonisolated static let paneFocusMethod = "pane.focus"
+    private static let inputFailureLabel = "input"
+    private static let focusFailureLabel = "select pane"
 
     private static let rendererFailureMessage = "Terminal renderer is unavailable. Reconnect to try again."
     private static let configurationFailureMessage =
