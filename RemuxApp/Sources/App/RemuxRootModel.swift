@@ -543,15 +543,25 @@ final class RemuxRootModel: ObservableObject {
         currentSetupID = UUID()
         editServerTrustSnapshot = nil
         cancelLibrarySSHPrewarm()
+        let backend = lastUsedBackend(on: serverID)
         let workspace = SavedWorkspace(
             serverID: serverID,
-            sessionName: ""
+            backend: backend,
+            sessionName: backend.defaultSessionName
         )
         connectionSetup = ConnectionSetupState(
             draft: TmuxConnectionDraft(server: server, workspace: workspace),
             mode: .newWorkspace(serverID)
         )
         return true
+    }
+
+    /// A new session starts on the kind most recently opened on its server, else tmux.
+    private func lastUsedBackend(on serverID: SavedServer.ID) -> SessionBackend {
+        library.workspaces
+            .filter { $0.serverID == serverID }
+            .max { $0.lastOpenedAt < $1.lastOpenedAt }?
+            .backend ?? .tmux
     }
 
     func beginEditServer(serverID: SavedServer.ID) async {

@@ -2082,6 +2082,41 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertEqual(setup.mode, .newWorkspace(server.id))
     }
 
+    /// A new session starts on the kind last opened on its server, and a Herdr one on Herdr's default
+    /// name.
+    func testBeginNewWorkspaceStartsOnTheServersLastUsedKind() async throws {
+        let passwordBackedServer = makePasswordBackedServer()
+        let server = passwordBackedServer.server
+        let other = SavedServer(displayName: "Other", host: "other.example.com", username: "demo", identityID: UUID())
+        let harness = makeHarness(
+            servers: [server, other],
+            workspaces: [
+                SavedWorkspace(serverID: server.id, sessionName: "build", lastOpenedAt: Date(timeIntervalSince1970: 100)),
+                SavedWorkspace(
+                    serverID: server.id,
+                    backend: .herdr,
+                    sessionName: "agents",
+                    lastOpenedAt: Date(timeIntervalSince1970: 200)
+                ),
+                SavedWorkspace(serverID: other.id, sessionName: "main", lastOpenedAt: Date(timeIntervalSince1970: 300)),
+            ],
+            identities: [passwordBackedServer.identity]
+        )
+        await harness.model.load()
+        await harness.model.showLibrary()
+
+        XCTAssertTrue(harness.model.beginNewWorkspace(for: server.id))
+        let herdr = try XCTUnwrap(harness.model.connectionSetup?.draft)
+        XCTAssertEqual(herdr.backend, .herdr)
+        XCTAssertEqual(herdr.sessionName, "default")
+        harness.model.cancelSetup()
+
+        XCTAssertTrue(harness.model.beginNewWorkspace(for: other.id))
+        let tmux = try XCTUnwrap(harness.model.connectionSetup?.draft)
+        XCTAssertEqual(tmux.backend, .tmux)
+        XCTAssertEqual(tmux.sessionName, "")
+    }
+
     func testBeginNewWorkspaceReportsFailureWhileAnotherSetupOwnsTheModel() async throws {
         let passwordBackedServer = makePasswordBackedServer()
         let harness = makeHarness(

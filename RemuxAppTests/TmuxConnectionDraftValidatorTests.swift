@@ -25,19 +25,19 @@ final class TmuxConnectionDraftValidatorTests: XCTestCase {
     }
 
     func testTmuxExecutablePathProblem() {
-        XCTAssertNil(TmuxConnectionDraftValidator.tmuxExecutablePathProblem(""))
-        XCTAssertNil(TmuxConnectionDraftValidator.tmuxExecutablePathProblem("   "))
-        XCTAssertNil(TmuxConnectionDraftValidator.tmuxExecutablePathProblem(" /opt/homebrew/bin/tmux "))
+        XCTAssertNil(TmuxConnectionDraftValidator.executablePathProblem(""))
+        XCTAssertNil(TmuxConnectionDraftValidator.executablePathProblem("   "))
+        XCTAssertNil(TmuxConnectionDraftValidator.executablePathProblem(" /opt/homebrew/bin/tmux "))
         XCTAssertEqual(
-            TmuxConnectionDraftValidator.tmuxExecutablePathProblem("tmux"),
+            TmuxConnectionDraftValidator.executablePathProblem("tmux"),
             "Enter an absolute path beginning with /."
         )
         XCTAssertEqual(
-            TmuxConnectionDraftValidator.tmuxExecutablePathProblem("~/bin/tmux"),
+            TmuxConnectionDraftValidator.executablePathProblem("~/bin/tmux"),
             "Enter an absolute path beginning with /."
         )
         XCTAssertEqual(
-            TmuxConnectionDraftValidator.tmuxExecutablePathProblem("/usr/bin/\ntmux"),
+            TmuxConnectionDraftValidator.executablePathProblem("/usr/bin/\ntmux"),
             "Executable path contains invalid characters."
         )
 
@@ -50,6 +50,91 @@ final class TmuxConnectionDraftValidatorTests: XCTestCase {
             return XCTFail("expected an invalid server draft")
         }
         XCTAssertEqual(validation.tmuxExecutablePath, "Enter an absolute path beginning with /.")
+    }
+
+    /// Herdr's own rule (`session::validate_name`), with its rejected cases from `invalid_names_are_rejected`.
+    func testHerdrSessionNameProblem() {
+        for name in ["default", "work.2_x-Y", String(repeating: "a", count: 64)] {
+            XCTAssertNil(TmuxConnectionDraftValidator.herdrSessionNameProblem(name), name)
+        }
+        XCTAssertEqual(TmuxConnectionDraftValidator.herdrSessionNameProblem(""), "Herdr session name is required.")
+        XCTAssertEqual(
+            TmuxConnectionDraftValidator.herdrSessionNameProblem(String(repeating: "a", count: 65)),
+            "Use 64 characters or fewer."
+        )
+        for name in [".", ".."] {
+            XCTAssertEqual(
+                TmuxConnectionDraftValidator.herdrSessionNameProblem(name),
+                "A Herdr session can't be named . or ..",
+                name
+            )
+        }
+        for name in ["../prod", "work session", "café", "a/b"] {
+            XCTAssertEqual(
+                TmuxConnectionDraftValidator.herdrSessionNameProblem(name),
+                "Use only letters, numbers, ., _ and -.",
+                name
+            )
+        }
+    }
+
+    /// A Herdr session is checked by Herdr's rule; a tmux one only needs a name.
+    func testWorkspaceNameIsCheckedByItsKindsRule() {
+        let serverID = UUID()
+        var draft = validServerDraft()
+        draft.sessionName = "work session"
+        guard case .valid = TmuxConnectionDraftValidator.validateWorkspace(
+            draft,
+            serverID: serverID,
+            existingWorkspaceID: nil
+        ) else {
+            return XCTFail("a tmux name with a space should be valid")
+        }
+
+        draft.backend = .herdr
+        guard case .invalid(let validation) = TmuxConnectionDraftValidator.validateWorkspace(
+            draft,
+            serverID: serverID,
+            existingWorkspaceID: nil
+        ) else {
+            return XCTFail("a Herdr name with a space should be invalid")
+        }
+        XCTAssertEqual(validation.sessionName, "Use only letters, numbers, ., _ and -.")
+
+        draft.sessionName = "default"
+        guard case .valid(let submission) = TmuxConnectionDraftValidator.validateWorkspace(
+            draft,
+            serverID: serverID,
+            existingWorkspaceID: nil
+        ) else {
+            return XCTFail("Herdr's default name should be valid")
+        }
+        XCTAssertEqual(submission.workspace.backend, .herdr)
+    }
+
+    /// The Herdr path follows the tmux path's rule, and empty means automatic.
+    func testHerdrExecutablePathIsCheckedAndTrimmed() {
+        var draft = validServerDraft()
+        draft.herdrExecutablePath = "~/.cargo/bin/herdr"
+        guard case .invalid(let validation) = TmuxConnectionDraftValidator.validateServer(
+            draft,
+            existingServerID: nil
+        ) else {
+            return XCTFail("a relative Herdr path should be invalid")
+        }
+        XCTAssertEqual(validation.herdrExecutablePath, "Enter an absolute path beginning with /.")
+
+        draft.herdrExecutablePath = "  /home/demo/.cargo/bin/herdr  "
+        guard case .valid(let server) = TmuxConnectionDraftValidator.validateServer(draft, existingServerID: nil) else {
+            return XCTFail("an absolute Herdr path should be valid")
+        }
+        XCTAssertEqual(server.herdrExecutablePath, "/home/demo/.cargo/bin/herdr")
+
+        draft.herdrExecutablePath = "   "
+        guard case .valid(let automatic) = TmuxConnectionDraftValidator.validateServer(draft, existingServerID: nil) else {
+            return XCTFail("an empty Herdr path should be valid")
+        }
+        XCTAssertNil(automatic.herdrExecutablePath)
     }
 
     func testDraftFromSavedServerUsesSavedServerID() {
