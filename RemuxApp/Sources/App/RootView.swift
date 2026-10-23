@@ -118,6 +118,7 @@ private struct RemuxWorkspaceShell: View {
             activeTerminalLayer
             routeLayer
         }
+        .preferredColorScheme(shownTerminalColorScheme)
         .onAppear {
             model.handleAppLifecyclePhase(
                 RemuxAppLifecycleProjection(scenePhase: scenePhase).appLifecyclePhase
@@ -425,6 +426,9 @@ private struct RemuxWorkspaceShell: View {
             setupSessionID: setupSessionID,
             isActionInProgress: model.isSetupActionInProgress,
             showsServerSummaryForNewSession: showsServerSummaryForNewSession,
+            hasExecutableProblem: setup.mode.existingServerID.flatMap {
+                model.tmuxSessionDiscoveryStates[$0]?.executableProblem
+            } != nil,
             isClosing: isClosing,
             onChange: model.updateDraft,
             onConnect: onSave,
@@ -488,6 +492,15 @@ private struct RemuxWorkspaceShell: View {
         }
 
         return id
+    }
+
+    /// Only the terminal on screen sets the window's appearance. Terminals stay
+    /// alive behind Home, which follows the system appearance.
+    private var shownTerminalColorScheme: ColorScheme? {
+        guard let selectedTerminalID else { return nil }
+        return model.activeTerminalScreenEntries
+            .first { $0.id == selectedTerminalID }?
+            .presentation.terminalTheme.terminalChromeColorScheme
     }
 
     private var visibleTerminalID: SavedWorkspace.ID? {
@@ -1413,8 +1426,7 @@ private struct ServerDetailView: View {
             guard discoveryState.phase == .idle else { return }
             await onRefreshSessions(server.id)
         }
-        .navigationTitle(server.displayName)
-        .navigationSubtitleIfAvailable(server.displayAddress)
+        .navigationTitle(server.displayName, withSubtitle: server.displayAddress)
         .navigationBarTitleDisplayMode(.inline)
         .accessibilityIdentifier("library.server.detail")
         .toolbar {
@@ -2210,6 +2222,9 @@ struct ConnectionSetupView: View {
     let setupSessionID: UUID?
     let isActionInProgress: Bool
     let showsServerSummaryForNewSession: Bool
+    /// tmux wasn't found or can't be run on this server, so Advanced starts
+    /// open on the path that fixes it.
+    let hasExecutableProblem: Bool
     /// The sheet is closing, so the secure fields show empty. iOS offers to
     /// save the password in a secure field that is still filled when its
     /// sheet closes, and Remux keeps server secrets in its own Keychain only.
@@ -2241,6 +2256,7 @@ struct ConnectionSetupView: View {
     @State private var publicKeyCopyMessage: String?
     @State private var publicKeyInstallRequest: SSHPublicKeyInstallRequest?
     @State private var publicKeyInstallConfirmation: SSHPublicKeyInstallConfirmation?
+    @State private var isAdvancedExpanded = false
     @FocusState private var focusedField: Field?
 
     var body: some View {
@@ -2284,6 +2300,7 @@ struct ConnectionSetupView: View {
                         keyPath: \.username,
                         field: .username,
                         validationMessage: validation.username,
+                        submitLabel: nextField(after: .username) == nil ? .go : .next,
                         accessibilityIdentifier: "connection.username"
                     )
 
@@ -2330,7 +2347,7 @@ struct ConnectionSetupView: View {
 
             if showsEditableServerFields {
                 Section {
-                    DisclosureGroup("Advanced") {
+                    DisclosureGroup("Advanced", isExpanded: $isAdvancedExpanded) {
                         tmuxExecutableInputRow()
                     }
                 }
@@ -2348,6 +2365,16 @@ struct ConnectionSetupView: View {
         })
         .disabled(isActionInProgress)
         .connectionSetupChrome(usesLibraryChrome: showsEditableServerFields)
+        .onAppear {
+            if hasExecutableProblem {
+                isAdvancedExpanded = true
+            }
+        }
+        .onChange(of: validation.tmuxExecutablePath) { _, message in
+            if message != nil {
+                isAdvancedExpanded = true
+            }
+        }
         .scrollDismissesKeyboard(.interactively)
         .navigationTitle(navigationTitle)
         .navigationBarTitleDisplayMode(.inline)
@@ -2438,23 +2465,26 @@ struct ConnectionSetupView: View {
                 switch draft.authenticationKind {
                 case .password:
                     return .password
-                case .privateKey:
+                case .privateKey where shouldShowPrivateKeyPassphrase:
                     return .privateKeyPassphrase
-                case .none:
+                case .privateKey, .none:
                     break
                 }
             }
-            if showsEditableServerFields { return .tmuxExecutablePath }
-            if showsSessionFields { return .sessionName }
-            return nil
+            return fieldAfterAuthentication
         case .password, .privateKeyPassphrase:
-            if showsEditableServerFields { return .tmuxExecutablePath }
-            return showsSessionFields ? .sessionName : nil
+            return fieldAfterAuthentication
         case .tmuxExecutablePath:
             return showsSessionFields ? .sessionName : nil
         case .sessionName:
             return nil
         }
+    }
+
+    /// The path field is hidden while Advanced is collapsed, so Next skips it.
+    private var fieldAfterAuthentication: Field? {
+        if showsEditableServerFields && isAdvancedExpanded { return .tmuxExecutablePath }
+        return showsSessionFields ? .sessionName : nil
     }
 
     private func submitIfPossible() {
@@ -3292,12 +3322,26 @@ private extension View {
         }
     }
 
+    /// Before iOS 26, the subtitle goes in a two-line title view.
     @ViewBuilder
-    func navigationSubtitleIfAvailable(_ subtitle: String) -> some View {
+    func navigationTitle(_ title: String, withSubtitle subtitle: String) -> some View {
         if #available(iOS 26.0, *) {
-            navigationSubtitle(subtitle)
+            navigationTitle(title)
+                .navigationSubtitle(subtitle)
         } else {
-            self
+            navigationTitle(title)
+                .toolbar {
+                    ToolbarItem(placement: .principal) {
+                        VStack(spacing: 0) {
+                            Text(title)
+                                .font(.headline)
+                            Text(subtitle)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                }
         }
     }
 }

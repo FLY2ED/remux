@@ -529,6 +529,7 @@ final class RemuxRootModelTests: XCTestCase {
                 setupSessionID: UUID(),
                 isActionInProgress: isActionInProgress,
                 showsServerSummaryForNewSession: false,
+                hasExecutableProblem: false,
                 isClosing: isClosing,
                 onChange: { _ in },
                 onConnect: {},

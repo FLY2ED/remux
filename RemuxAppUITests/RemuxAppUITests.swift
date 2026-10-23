@@ -136,6 +136,48 @@ final class RemuxAppUITests: XCTestCase {
         assertNoPasswordSaveOffer(after: "Save")
     }
 
+    /// Return on the last field shown saves the server. The tmux path is
+    /// hidden in the collapsed Advanced group, so Return skips it.
+    func testReturnOnPasswordSavesServer() {
+        launchSimulatorApp()
+        openConnectionSetup()
+        fillConnectionForm()
+        let enabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"),
+            object: app.buttons["connection.save"]
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 5), .completed)
+
+        app.secureTextFields["connection.password"].typeText("\n")
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["library.server.detail"].waitForExistence(timeout: 5),
+            "Return on the password should save the server."
+        )
+    }
+
+    /// Terminals stay alive behind Home. Home follows the system appearance,
+    /// not the theme of the terminal it covers.
+    func testHomeFollowsSystemAppearanceAfterDarkTerminal() {
+        XCUIDevice.shared.appearance = .light
+        launchSeededSimulatorTerminal()
+        XCTAssertLessThan(
+            averageLuminance(app.screenshot()) ?? 1,
+            0.5,
+            "The terminal should show its default dark theme."
+        )
+
+        openHomeFromTerminal()
+
+        let deadline = Date().addingTimeInterval(3)
+        var luminance = averageLuminance(app.screenshot()) ?? 0
+        while luminance <= 0.5, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            luminance = averageLuminance(app.screenshot()) ?? 0
+        }
+        XCTAssertGreaterThan(luminance, 0.5, "Home should be light, like the system.")
+    }
+
     func testToolbarKeysUpdateRetainedSimulatorTerminalAndFirstSlotOpensShortcuts() {
         launchSeededSimulatorTerminal()
 
@@ -1141,6 +1183,14 @@ final class RemuxAppUITests: XCTestCase {
             tmuxMissingRow().waitForExistence(timeout: 5),
             "The server page should say tmux is missing."
         )
+
+        tmuxMissingRow().tap()
+        XCTAssertTrue(app.textFields["connection.name"].waitForExistence(timeout: 5))
+        let executable = app.textFields["connection.tmux-executable"]
+        for _ in 0..<4 where !executable.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(executable.isHittable, "The row should lead to the tmux path.")
     }
 
     func testEditServerChecksSessionsAgain() {
@@ -1163,16 +1213,14 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertTrue(edit.waitForExistence(timeout: 2))
         edit.tap()
         XCTAssertTrue(app.textFields["connection.name"].waitForExistence(timeout: 5))
-        let advanced = app.buttons["Advanced"]
-        for _ in 0..<4 where !advanced.isHittable {
-            app.swipeUp()
-        }
-        advanced.tap()
         let executable = app.textFields["connection.tmux-executable"]
-        XCTAssertTrue(executable.waitForExistence(timeout: 2))
-        for _ in 0..<2 where !executable.isHittable {
+        for _ in 0..<4 where !executable.isHittable {
             app.swipeUp()
         }
+        XCTAssertTrue(
+            executable.isHittable,
+            "With tmux missing, Edit Server should open Advanced on the tmux path."
+        )
         tapFormField(executable)
         typeTextAndConfirm("/usr/local/bin/tmux", into: executable)
         app.buttons["connection.save"].tap()
@@ -3835,6 +3883,25 @@ final class RemuxAppUITests: XCTestCase {
             distinctColors: colorCounts.count,
             nonBackgroundPixels: pixelCount - dominantCount
         )
+    }
+
+    /// Mean luminance of a screenshot, from 0 (black) to 1 (white).
+    private func averageLuminance(_ screenshot: XCUIScreenshot) -> Double? {
+        guard let cgImage = screenshot.image.cgImage,
+              let snapshot = renderedPixels(
+                  cgImage: cgImage,
+                  crop: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height)
+              )
+        else {
+            return nil
+        }
+        var total = 0.0
+        for offset in stride(from: 0, to: snapshot.pixels.count, by: 4) {
+            total += 0.2126 * Double(snapshot.pixels[offset])
+                + 0.7152 * Double(snapshot.pixels[offset + 1])
+                + 0.0722 * Double(snapshot.pixels[offset + 2])
+        }
+        return total / Double(snapshot.width * snapshot.height) / 255
     }
 
     private func renderedPixels(
