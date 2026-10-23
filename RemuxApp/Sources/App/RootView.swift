@@ -2554,7 +2554,9 @@ struct ConnectionSetupView: View {
     private var advancedExpansion: Binding<Bool> {
         Binding(
             get: { isAdvancedShown },
-            set: { isAdvancedExpanded = $0 }
+            // A collapse is ignored while the path's problem holds Advanced open, so correcting the
+            // path doesn't close it mid-edit.
+            set: { isAdvancedExpanded = $0 || tmuxExecutablePathMessage != nil }
         )
     }
 

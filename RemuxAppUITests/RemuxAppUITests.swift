@@ -181,6 +181,15 @@ final class RemuxAppUITests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(1))
         XCTAssertTrue(executable.exists, "Advanced should stay open while the path is invalid.")
         XCTAssertTrue(problem.exists)
+
+        // Correcting the path keeps Advanced open, also while the field is briefly empty.
+        executable.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        executable.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: "~/bin/tmux".count))
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        XCTAssertTrue(executable.exists, "Advanced closed while the path was being corrected.")
+        typeTextAndConfirm("/usr/local/bin/tmux", into: executable)
+        XCTAssertFalse(problem.exists)
+        XCTAssertTrue(app.buttons["connection.save"].isEnabled)
     }
 
     /// Terminals stay alive behind Home. Home follows the system appearance,
