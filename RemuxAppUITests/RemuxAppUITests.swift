@@ -1163,8 +1163,14 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertTrue(edit.waitForExistence(timeout: 2))
         edit.tap()
         XCTAssertTrue(app.textFields["connection.name"].waitForExistence(timeout: 5))
+        let advanced = app.buttons["Advanced"]
+        for _ in 0..<4 where !advanced.isHittable {
+            app.swipeUp()
+        }
+        advanced.tap()
         let executable = app.textFields["connection.tmux-executable"]
-        for _ in 0..<4 where !executable.isHittable {
+        XCTAssertTrue(executable.waitForExistence(timeout: 2))
+        for _ in 0..<2 where !executable.isHittable {
             app.swipeUp()
         }
         tapFormField(executable)
@@ -1193,7 +1199,7 @@ final class RemuxAppUITests: XCTestCase {
             .matching(identifier: "library.server.available.failure")
             .matching(NSPredicate(
                 format: "label CONTAINS %@",
-                "Install tmux on this server or update Executable Path."
+                "tmux wasn't found"
             ))
             .firstMatch
     }

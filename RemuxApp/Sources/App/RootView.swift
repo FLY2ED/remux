@@ -306,7 +306,6 @@ private struct RemuxWorkspaceShell: View {
             .presentationDragIndicator(.visible)
             .remuxSheetPresentationBackground()
             .ghosttyTerminalChromePresentation(
-                model.terminalSettings.theme.terminalChromeColorScheme,
                 chromeStyle: model.terminalSettings.theme.terminalChromeStyle
             )
             .alert(
@@ -424,7 +423,6 @@ private struct RemuxWorkspaceShell: View {
             validation: setup.validation,
             mode: setup.mode,
             setupSessionID: setupSessionID,
-            terminalTheme: model.terminalSettings.theme,
             isActionInProgress: model.isSetupActionInProgress,
             showsServerSummaryForNewSession: showsServerSummaryForNewSession,
             isClosing: isClosing,
@@ -904,8 +902,8 @@ private struct ConnectionLibraryView: View {
             } else {
                 List {
                     activeSessionsSection
-                    serversSection(sessionProjection: sessionProjection)
                     recentSessionsSection
+                    serversSection(sessionProjection: sessionProjection)
                 }
                 .listStyle(.insetGrouped)
                 .environment(\.editMode, $serverEditMode)
@@ -913,13 +911,12 @@ private struct ConnectionLibraryView: View {
             }
         }
         .libraryHomeGroupedScrollBackground()
-        .libraryHomeChrome(theme: terminalSettings.theme)
         .task(id: terminalRendererWarmupID) {
             try? await Task.sleep(for: .milliseconds(150))
             guard !Task.isCancelled else { return }
             GhosttyKitRuntime.prewarmTerminalRenderer(terminalSettings: terminalSettings)
         }
-        .navigationTitle("Remux")
+        .navigationTitle("Home")
         .onChange(of: snapshot.servers.count) { _, count in
             if count < 2 { serverEditMode = .inactive }
         }
@@ -1098,7 +1095,7 @@ private struct ConnectionLibraryView: View {
                             showsServerSummary: true
                         )
                     } label: {
-                        Label("New Session", systemImage: "plus.square.on.square")
+                        Label("New Session", systemImage: "plus")
                     }
 
                     if let latest {
@@ -1161,7 +1158,6 @@ private struct ConnectionLibraryView: View {
                     }
                     .font(.subheadline)
                     .textCase(nil)
-                    .tint(LibraryHomePalette.controlAccent)
                     .accessibilityLabel(serverEditMode.isEditing ? "Done Reordering Servers" : "Reorder Servers")
                     .accessibilityIdentifier("library.servers.edit")
                 }
@@ -1235,8 +1231,7 @@ private struct ConnectionLibraryView: View {
             onConnectAvailableSession: onConnectAvailableSession,
             onRefreshSessions: onRefreshServerSessions,
             onTrustHostKey: onTrustDiscoveryHostKey,
-            onDeleteWorkspace: onDeleteWorkspace,
-            terminalTheme: terminalSettings.theme
+            onDeleteWorkspace: onDeleteWorkspace
         )
     }
 
@@ -1269,13 +1264,9 @@ private extension View {
     }
 
     @ViewBuilder
-    func connectionSetupChrome(
-        usesLibraryChrome: Bool,
-        theme: TerminalTheme
-    ) -> some View {
+    func connectionSetupChrome(usesLibraryChrome: Bool) -> some View {
         if usesLibraryChrome {
             remuxAppGroupedScrollBackground()
-                .remuxAppChrome(theme: theme)
         } else {
             scrollContentBackground(.hidden)
         }
@@ -1314,51 +1305,21 @@ private struct ServerDetailView: View {
     let onRefreshSessions: (SavedServer.ID) async -> Void
     let onTrustHostKey: (SSHHostKeyTrustChallenge) -> Void
     let onDeleteWorkspace: (SavedWorkspace.ID) -> Void
-    let terminalTheme: TerminalTheme
 
     @State private var isReviewingHostKey = false
     @State private var showsAllWorkspaces = false
 
     var body: some View {
         List {
-            Section("Connection") {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Address")
-
-                    Text(server.displayAddress)
-                        .font(.footnote.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
+            if discoveryState.phase == .failed {
+                Section {
+                    serverProblemRow
                 }
-                .padding(.vertical, 1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityElement(children: .combine)
-
-                LabeledContent("Sessions") {
-                    Text(
-                        serverSummary(
-                            sessionCount: workspaces.count,
-                            connectedSessionCount: activeSessions.filter {
-                                TerminalRuntimeStateProjection.isRootVisibleConnected($0.runtimeState)
-                            }.count,
-                            latestWorkspace: nil
-                        )
-                    )
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
+                .libraryHomeListRowSurface()
             }
-            .libraryHomeListRowSurface()
 
             Section("Sessions") {
-                if workspaces.isEmpty {
-                    Text("No Sessions Added to Remux")
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
+                if workspaces.isEmpty && availableSessionNames.isEmpty {
                     Button {
                         onAddWorkspace(server.id)
                     } label: {
@@ -1366,55 +1327,85 @@ private struct ServerDetailView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .accessibilityIdentifier("library.server.new-session.empty")
-                } else {
-                    ForEach(visibleWorkspaces) { workspace in
-                        Button {
-                            onConnect(workspace.id)
-                        } label: {
-                            SessionLibraryRow(
-                                server: server,
-                                workspace: workspace,
-                                runtimeState: activeSession(for: workspace.id)?.runtimeState,
-                                subtitleMode: .lastOpenedOnly
-                            )
-                            .accessibilityIdentifier("library.session.resume")
-                        }
-                        .buttonStyle(.plain)
-                        .swipeActions(edge: .trailing) {
-                            Button("Edit") {
-                                onEditWorkspace(server.id, workspace.id)
-                            }
-                            .tint(LibraryHomePalette.controlAccent)
+                }
 
-                            Button("Delete", role: .destructive) {
-                                onDeleteWorkspace(workspace.id)
-                            }
-                            .tint(.red)
-                        }
+                ForEach(visibleWorkspaces) { workspace in
+                    Button {
+                        onConnect(workspace.id)
+                    } label: {
+                        SessionLibraryRow(
+                            server: server,
+                            workspace: workspace,
+                            runtimeState: activeSession(for: workspace.id)?.runtimeState,
+                            subtitleMode: .lastOpenedOnly
+                        )
+                        .accessibilityIdentifier("library.session.resume")
                     }
+                    .buttonStyle(.plain)
+                    .swipeActions(edge: .trailing) {
+                        Button("Edit") {
+                            onEditWorkspace(server.id, workspace.id)
+                        }
+                        .tint(LibraryHomePalette.controlAccent)
 
-                    if workspaces.count > Self.collapsedWorkspaceCount {
-                        Button {
-                            withAnimation(.snappy) {
-                                showsAllWorkspaces.toggle()
-                            }
-                        } label: {
-                            DisclosureRowLabel(
-                                title: showsAllWorkspaces ? "Show fewer" : "Show more",
-                                systemImage: showsAllWorkspaces ? "chevron.up" : "chevron.down"
-                            )
+                        Button("Delete", role: .destructive) {
+                            onDeleteWorkspace(workspace.id)
                         }
-                        .accessibilityIdentifier("library.server.sessions.toggle")
+                        .tint(.red)
                     }
+                }
+
+                if workspaces.count > Self.collapsedWorkspaceCount {
+                    Button {
+                        withAnimation(.snappy) {
+                            showsAllWorkspaces.toggle()
+                        }
+                    } label: {
+                        DisclosureRowLabel(
+                            title: showsAllWorkspaces ? "Show fewer" : "Show more",
+                            systemImage: showsAllWorkspaces ? "chevron.up" : "chevron.down"
+                        )
+                    }
+                    .accessibilityIdentifier("library.server.sessions.toggle")
+                }
+
+                ForEach(inlineAvailableSessionNames, id: \.self) { sessionName in
+                    Button {
+                        onConnectAvailableSession(server.id, sessionName)
+                    } label: {
+                        AvailableServerSessionRow(sessionName: sessionName)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("library.server.available.session")
+                }
+
+                if discoveryState.isLoading || discoveryState.phase == .idle {
+                    HStack(spacing: 12) {
+                        ProgressView()
+                        Text("Checking the server…")
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityIdentifier("library.server.available.loading")
+                }
+
+                if availableSessionNames.count > Self.maximumInlineAvailableSessionCount {
+                    NavigationLink {
+                        ServerAvailableSessionsView(
+                            sessionNames: availableSessionNames,
+                            onSelect: { sessionName in
+                                onConnectAvailableSession(server.id, sessionName)
+                            }
+                        )
+                    } label: {
+                        Text("Show All")
+                    }
+                    .accessibilityIdentifier("library.server.available.view-all")
                 }
             }
             .libraryHomeListRowSurface()
-
-            availableSessionsSection
         }
         .listStyle(.insetGrouped)
         .libraryHomeGroupedScrollBackground()
-        .libraryHomeChrome(theme: terminalTheme)
         .refreshable {
             await onRefreshSessions(server.id)
         }
@@ -1423,10 +1414,11 @@ private struct ServerDetailView: View {
             await onRefreshSessions(server.id)
         }
         .navigationTitle(server.displayName)
+        .navigationSubtitleIfAvailable(server.displayAddress)
         .navigationBarTitleDisplayMode(.inline)
         .accessibilityIdentifier("library.server.detail")
         .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
+            ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     onEditServer(server.id)
                 } label: {
@@ -1434,7 +1426,11 @@ private struct ServerDetailView: View {
                 }
                 .accessibilityLabel("Edit Server")
                 .accessibilityIdentifier("library.server.edit")
-
+            }
+            if #available(iOS 26.0, *) {
+                ToolbarSpacer(.fixed, placement: .topBarTrailing)
+            }
+            ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     onAddWorkspace(server.id)
                 } label: {
@@ -1477,92 +1473,72 @@ private struct ServerDetailView: View {
         Array(availableSessionNames.prefix(Self.maximumInlineAvailableSessionCount))
     }
 
-    @ViewBuilder
-    private var availableSessionsSection: some View {
-        Section {
-            if discoveryState.isLoading || discoveryState.phase == .idle {
-                HStack(spacing: 12) {
-                    ProgressView()
-                    Text("Checking sessions…")
+    /// One row, like Settings' "needs attention" rows: tapping it goes to the fix. Pulling down checks again.
+    private var serverProblemRow: some View {
+        Button {
+            if discoveryState.hostKeyChallenge != nil {
+                isReviewingHostKey = true
+            } else if discoveryState.executableProblem != nil {
+                onEditServer(server.id)
+            } else {
+                Task { await onRefreshSessions(server.id) }
+            }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.orange)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(serverProblemTitle)
+                        .font(.headline)
+                    Text(serverProblemDetail)
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
-                .accessibilityIdentifier("library.server.available.loading")
-            }
 
-            if discoveryState.phase == .failed {
-                discoveryFailureRow
-            }
+                Spacer(minLength: 8)
 
-            ForEach(inlineAvailableSessionNames, id: \.self) { sessionName in
-                Button {
-                    onConnectAvailableSession(server.id, sessionName)
-                } label: {
-                    AvailableServerSessionRow(sessionName: sessionName)
+                if discoveryState.hostKeyChallenge != nil || discoveryState.executableProblem != nil {
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("library.server.available.session")
             }
-
-            if availableSessionNames.count > Self.maximumInlineAvailableSessionCount {
-                NavigationLink {
-                    ServerAvailableSessionsView(
-                        sessionNames: availableSessionNames,
-                        terminalTheme: terminalTheme,
-                        onSelect: { sessionName in
-                            onConnectAvailableSession(server.id, sessionName)
-                        }
-                    )
-                } label: {
-                    DisclosureRowLabel(
-                        title: "View all \(availableSessionNames.count)",
-                        systemImage: "magnifyingglass"
-                    )
-                }
-                .accessibilityIdentifier("library.server.available.view-all")
-            } else if discoveryState.phase == .loaded,
-                      availableSessionNames.isEmpty {
-                Text("No other sessions found")
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("library.server.available.empty")
-            }
-        } header: {
-            LibraryHomeSectionHeader("Available on Server")
-        } footer: {
-            if !availableSessionNames.isEmpty {
-                Text("Select a session to add it to Remux.")
-            }
+            .padding(.vertical, 2)
+            .contentShape(Rectangle())
         }
-        .libraryHomeListRowSurface()
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("library.server.available.failure")
     }
 
-    private var discoveryFailureTitle: String {
+    private var serverProblemTitle: String {
         if discoveryState.hostKeyChallenge != nil {
-            return "Trust the SSH host key to check sessions"
+            return "Check this server's host key"
         }
-        return discoveryState.executableProblem?.message ?? "Couldn’t check sessions"
+        switch discoveryState.executableProblem {
+        case .notFound:
+            return "tmux wasn't found"
+        case .notExecutable:
+            return "tmux can't be run"
+        case nil:
+            return "Couldn't check sessions"
+        }
     }
 
-    private var discoveryFailureRow: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label(discoveryFailureTitle, systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("library.server.available.failure")
-
-            if discoveryState.hostKeyChallenge != nil {
-                Button("Review SSH Host Key") {
-                    isReviewingHostKey = true
-                }
-                .accessibilityIdentifier("library.server.available.review-host-key")
-            } else {
-                Button("Retry") {
-                    Task { await onRefreshSessions(server.id) }
-                }
-                .accessibilityIdentifier("library.server.available.retry")
-            }
+    private var serverProblemDetail: String {
+        if discoveryState.hostKeyChallenge != nil {
+            return "Review it before Remux connects."
         }
-        .padding(.vertical, 2)
+        switch discoveryState.executableProblem {
+        case .notFound:
+            return "Set the path to tmux, or install it on \(server.displayName)."
+        case .notExecutable:
+            return "Check its path and permissions."
+        case nil:
+            return "Pull down to try again."
+        }
     }
-
 }
 
 private func sshHostKeyTrustMessage(for challenge: SSHHostKeyTrustChallenge) -> String {
@@ -1589,12 +1565,21 @@ private struct AvailableServerSessionRow: View {
                     in: RoundedRectangle(cornerRadius: 7)
                 )
 
-            Text(sessionName)
-                .font(.headline)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(sessionName)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("On the server")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
 
             Spacer(minLength: 8)
+
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1608,7 +1593,6 @@ private struct AvailableServerSessionRow: View {
 
 private struct ServerAvailableSessionsView: View {
     let sessionNames: [String]
-    let terminalTheme: TerminalTheme
     let onSelect: (String) -> Void
 
     @State private var query = ""
@@ -1635,7 +1619,6 @@ private struct ServerAvailableSessionsView: View {
         }
         .listStyle(.insetGrouped)
         .libraryHomeGroupedScrollBackground()
-        .libraryHomeChrome(theme: terminalTheme)
         .navigationTitle("Available Sessions")
         .navigationBarTitleDisplayMode(.inline)
         .searchable(text: $query, prompt: "Search sessions")
@@ -1672,7 +1655,7 @@ private struct LibraryEmptyState: View {
                 Image(systemName: "server.rack")
             }
         } description: {
-            Text("Add an SSH server to start using tmux sessions from this phone.")
+            Text("Add a server to start a session.")
         } actions: {
             LibraryEmptyAddServerButton(action: onAddServer)
         }
@@ -1700,16 +1683,9 @@ private struct LibraryEmptyAddServerButton: View {
 private extension View {
     @ViewBuilder
     func libraryEmptyPrimaryAction() -> some View {
-        if #available(iOS 26.0, *) {
-            self
-                .buttonStyle(.glass)
-                .tint(LibraryHomePalette.controlAccent)
-        } else {
-            self
-                .buttonStyle(.borderedProminent)
-                .buttonBorderShape(.capsule)
-                .tint(LibraryHomePalette.controlAccent)
-        }
+        self
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.capsule)
     }
 }
 
@@ -1798,8 +1774,10 @@ private struct SessionLibraryRow: View {
     private var subtitle: some View {
         switch subtitleMode {
         case .serverAndLastOpened:
-            HStack(spacing: 6) {
+            HStack(spacing: 4) {
                 Text(server.displayName)
+                Text("·")
+                    .accessibilityHidden(true)
                 SessionLastOpenedText(date: workspace.lastOpenedAt)
             }
             .font(.footnote)
@@ -1834,17 +1812,11 @@ private struct ServerLibraryRow: View {
                     .font(.headline)
                     .lineLimit(1)
 
-                Text(server.displayAddress)
-                    .font(.footnote.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .textSelection(.enabled)
-
                 Text(
-                    serverSummary(
+                    server.displayAddress + " · " + serverSummary(
                         sessionCount: sessionCount,
                         connectedSessionCount: connectedSessionCount,
-                        latestWorkspace: latestWorkspace
+                        latestWorkspace: nil
                     )
                 )
                 .font(.footnote)
@@ -1950,10 +1922,7 @@ private struct TerminalSettingsView: View {
 
             Section("Keyboard") {
                 NavigationLink {
-                    TerminalToolbarKeysSettingsView(
-                        toolbarKeys: toolbarKeysBinding,
-                        theme: settings.theme
-                    )
+                    TerminalToolbarKeysSettingsView(toolbarKeys: toolbarKeysBinding)
                 } label: {
                     Label {
                         LabeledContent("Toolbar Keys") {
@@ -1968,10 +1937,7 @@ private struct TerminalSettingsView: View {
                 .accessibilityValue(settings.toolbarKeys.summary)
 
                 NavigationLink {
-                    ShortcutsSettingsView(
-                        store: shortcutStore,
-                        theme: settings.theme
-                    )
+                    ShortcutsSettingsView(store: shortcutStore)
                 } label: {
                     Label("Shortcuts", systemImage: "keyboard")
                 }
@@ -1998,7 +1964,6 @@ private struct TerminalSettingsView: View {
             .libraryHomeListRowSurface()
         }
         .libraryHomeGroupedScrollBackground()
-        .libraryHomeChrome(theme: settings.theme)
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
         .accessibilityIdentifier("settings.form")
@@ -2074,7 +2039,6 @@ private struct TerminalSettingsView: View {
 
 private struct TerminalToolbarKeysSettingsView: View {
     @Binding var toolbarKeys: TerminalToolbarKeys
-    let theme: TerminalTheme
 
     var body: some View {
         Form {
@@ -2115,7 +2079,6 @@ private struct TerminalToolbarKeysSettingsView: View {
             }
         }
         .libraryHomeGroupedScrollBackground()
-        .libraryHomeChrome(theme: theme)
         .navigationTitle("Toolbar Keys")
         .navigationBarTitleDisplayMode(.inline)
         .accessibilityIdentifier("settings.toolbar-keys.form")
@@ -2245,7 +2208,6 @@ struct ConnectionSetupView: View {
     let validation: TmuxConnectionDraftValidation
     let mode: RemuxRootModel.SetupMode
     let setupSessionID: UUID?
-    let terminalTheme: TerminalTheme
     let isActionInProgress: Bool
     let showsServerSummaryForNewSession: Bool
     /// The sheet is closing, so the secure fields show empty. iOS offers to
@@ -2302,7 +2264,6 @@ struct ConnectionSetupView: View {
                         keyPath: \.host,
                         field: .host,
                         validationMessage: validation.host,
-                        textStyle: .monospaced,
                         keyboardType: .URL,
                         accessibilityIdentifier: "connection.host"
                     )
@@ -2313,7 +2274,6 @@ struct ConnectionSetupView: View {
                         keyPath: \.port,
                         field: .port,
                         validationMessage: validation.port,
-                        textStyle: .monospaced,
                         keyboardType: .numberPad,
                         accessibilityIdentifier: "connection.port"
                     )
@@ -2324,7 +2284,6 @@ struct ConnectionSetupView: View {
                         keyPath: \.username,
                         field: .username,
                         validationMessage: validation.username,
-                        textStyle: .monospaced,
                         accessibilityIdentifier: "connection.username"
                     )
 
@@ -2371,9 +2330,9 @@ struct ConnectionSetupView: View {
 
             if showsEditableServerFields {
                 Section {
-                    tmuxExecutableInputRow()
-                } header: {
-                    Text("tmux")
+                    DisclosureGroup("Advanced") {
+                        tmuxExecutableInputRow()
+                    }
                 }
                 .connectionSetupListRowSurface(usesLibraryChrome: showsEditableServerFields)
             } else if showsSessionFields {
@@ -2388,10 +2347,7 @@ struct ConnectionSetupView: View {
             }
         })
         .disabled(isActionInProgress)
-        .connectionSetupChrome(
-            usesLibraryChrome: showsEditableServerFields,
-            theme: terminalTheme
-        )
+        .connectionSetupChrome(usesLibraryChrome: showsEditableServerFields)
         .scrollDismissesKeyboard(.interactively)
         .navigationTitle(navigationTitle)
         .navigationBarTitleDisplayMode(.inline)
@@ -2407,7 +2363,7 @@ struct ConnectionSetupView: View {
                         Text(primaryActionTitle)
                     }
                 }
-                .fontWeight(.semibold)
+                .prominentConfirmationStyle()
                 .disabled(!canSubmit || isActionInProgress)
                 .accessibilityIdentifier("connection.save")
             }
@@ -2633,7 +2589,7 @@ struct ConnectionSetupView: View {
         case .newServer:
             nil
         case .editServer:
-            "Updates the saved endpoint for future connections."
+            "Changes apply the next time you connect."
         case .newWorkspace, .editWorkspace:
             nil
         }
@@ -2709,7 +2665,6 @@ struct ConnectionSetupView: View {
             keyPath: \.tmuxExecutablePath,
             field: .tmuxExecutablePath,
             validationMessage: validation.tmuxExecutablePath,
-            textStyle: .monospaced,
             keyboardType: .URL,
             submitLabel: .go,
             accessibilityIdentifier: "connection.tmux-executable"
@@ -2723,7 +2678,6 @@ struct ConnectionSetupView: View {
             keyPath: \.sessionName,
             field: .sessionName,
             validationMessage: validation.sessionName,
-            textStyle: .monospaced,
             submitLabel: .go,
             accessibilityIdentifier: "connection.session"
         )
@@ -3324,5 +3278,26 @@ private struct FailureView: View {
                 .multilineTextAlignment(.center)
         }
         .padding()
+    }
+}
+
+private extension View {
+    /// The form's key action uses the prominent style iOS 26 gives confirmation buttons.
+    @ViewBuilder
+    func prominentConfirmationStyle() -> some View {
+        if #available(iOS 26.0, *) {
+            buttonStyle(.glassProminent)
+        } else {
+            fontWeight(.semibold)
+        }
+    }
+
+    @ViewBuilder
+    func navigationSubtitleIfAvailable(_ subtitle: String) -> some View {
+        if #available(iOS 26.0, *) {
+            navigationSubtitle(subtitle)
+        } else {
+            self
+        }
     }
 }

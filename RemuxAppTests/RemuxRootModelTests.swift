@@ -527,7 +527,6 @@ final class RemuxRootModelTests: XCTestCase {
                 validation: .empty,
                 mode: .newServer,
                 setupSessionID: UUID(),
-                terminalTheme: .remuxDark,
                 isActionInProgress: isActionInProgress,
                 showsServerSummaryForNewSession: false,
                 isClosing: isClosing,
