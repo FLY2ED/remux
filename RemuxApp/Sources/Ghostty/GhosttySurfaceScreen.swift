@@ -544,10 +544,7 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
                     )
             }
             .sheet(isPresented: $isShortcutsSettingsPresented) {
-                ShortcutsSettingsSheet(
-                    store: shortcutStore,
-                    theme: presentation.terminalTheme
-                )
+                ShortcutsSettingsSheet(store: shortcutStore)
                     .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
                     .remuxSheetPresentationBackground()
@@ -557,10 +554,7 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
                     )
             }
             .sheet(item: $shortcutEditorRequest) { request in
-                ShortcutEditorSheet(
-                    request: request,
-                    theme: presentation.terminalTheme
-                ) { shortcut, favorite in
+                ShortcutEditorSheet(request: request) { shortcut, favorite in
                     shortcutStore.update {
                         $0.upsertShortcut(shortcut)
                         if favorite {
@@ -658,7 +652,6 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
             }
 #endif
         }
-        .preferredColorScheme(presentation.terminalTheme.terminalChromeColorScheme)
         .environment(\.ghosttyTerminalChromeStyle, presentation.terminalTheme.terminalChromeStyle)
         .onAppear {
             GhosttyRuntimeTrace.flowEvent(

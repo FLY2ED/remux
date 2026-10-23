@@ -24,6 +24,34 @@ final class TmuxConnectionDraftValidatorTests: XCTestCase {
         XCTAssertEqual(secondServer.serverID, expectedID)
     }
 
+    func testTmuxExecutablePathProblem() {
+        XCTAssertNil(TmuxConnectionDraftValidator.tmuxExecutablePathProblem(""))
+        XCTAssertNil(TmuxConnectionDraftValidator.tmuxExecutablePathProblem("   "))
+        XCTAssertNil(TmuxConnectionDraftValidator.tmuxExecutablePathProblem(" /opt/homebrew/bin/tmux "))
+        XCTAssertEqual(
+            TmuxConnectionDraftValidator.tmuxExecutablePathProblem("tmux"),
+            "Enter an absolute path beginning with /."
+        )
+        XCTAssertEqual(
+            TmuxConnectionDraftValidator.tmuxExecutablePathProblem("~/bin/tmux"),
+            "Enter an absolute path beginning with /."
+        )
+        XCTAssertEqual(
+            TmuxConnectionDraftValidator.tmuxExecutablePathProblem("/usr/bin/\ntmux"),
+            "Executable path contains invalid characters."
+        )
+
+        var draft = validServerDraft()
+        draft.tmuxExecutablePath = "~/bin/tmux"
+        guard case .invalid(let validation) = TmuxConnectionDraftValidator.validateServer(
+            draft,
+            existingServerID: nil
+        ) else {
+            return XCTFail("expected an invalid server draft")
+        }
+        XCTAssertEqual(validation.tmuxExecutablePath, "Enter an absolute path beginning with /.")
+    }
+
     func testDraftFromSavedServerUsesSavedServerID() {
         let server = SavedServer(
             displayName: "Host",

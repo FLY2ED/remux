@@ -6,7 +6,6 @@ enum RemuxAppPalette {
     static let rowSurface = Color(uiColor: .remuxAppRowSurface)
     static let separator = Color(uiColor: .remuxAppSeparator)
     static let sectionHeader = Color(uiColor: .remuxAppSectionHeader)
-    static let toolbarTint = Color(uiColor: .remuxAppToolbarTint)
     static let controlAccent = Color(uiColor: .remuxAppControlAccent)
     static let rowIconForeground = Color(uiColor: .remuxAppRowIconForeground)
     static let rowIconSurface = Color(uiColor: .remuxAppRowIconSurface)
@@ -14,32 +13,10 @@ enum RemuxAppPalette {
 
 typealias LibraryHomePalette = RemuxAppPalette
 
-extension TerminalTheme {
-    var remuxAppColorScheme: ColorScheme {
-        switch self {
-        case .remuxLight:
-            .light
-        case .ghosttyDefault, .remuxDark:
-            .dark
-        }
-    }
-
-    var libraryColorScheme: ColorScheme {
-        remuxAppColorScheme
-    }
-}
-
 extension View {
     func remuxAppListRowSurface() -> some View {
         listRowBackground(RemuxAppPalette.rowSurface)
             .listRowSeparatorTint(RemuxAppPalette.separator)
-    }
-
-    func remuxAppChrome(theme: TerminalTheme) -> some View {
-        preferredColorScheme(theme.remuxAppColorScheme)
-            .tint(RemuxAppPalette.toolbarTint)
-            .toolbarBackground(RemuxAppPalette.background, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
     }
 
     func remuxAppGroupedScrollBackground() -> some View {
@@ -58,10 +35,6 @@ extension View {
 
     func libraryHomeListRowSurface() -> some View {
         remuxAppListRowSurface()
-    }
-
-    func libraryHomeChrome(theme: TerminalTheme) -> some View {
-        remuxAppChrome(theme: theme)
     }
 
     func libraryHomeGroupedScrollBackground() -> some View {
@@ -103,15 +76,6 @@ private extension UIColor {
             UIColor(red: 0.72, green: 0.74, blue: 0.80, alpha: 1.0)
         default:
             .secondaryLabel
-        }
-    }
-
-    static let remuxAppToolbarTint = UIColor { traits in
-        switch traits.userInterfaceStyle {
-        case .dark:
-            UIColor(red: 0.91, green: 0.93, blue: 0.98, alpha: 1.0)
-        default:
-            .label
         }
     }
 
