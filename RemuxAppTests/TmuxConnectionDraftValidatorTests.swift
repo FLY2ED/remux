@@ -72,7 +72,7 @@ final class TmuxConnectionDraftValidatorTests: XCTestCase {
         for name in ["../prod", "work session", "café", "a/b"] {
             XCTAssertEqual(
                 TmuxConnectionDraftValidator.herdrSessionNameProblem(name),
-                "Use only letters, numbers, ., _ and -.",
+                "Use only letters, numbers, dots, underscores and hyphens.",
                 name
             )
         }
@@ -99,7 +99,7 @@ final class TmuxConnectionDraftValidatorTests: XCTestCase {
         ) else {
             return XCTFail("a Herdr name with a space should be invalid")
         }
-        XCTAssertEqual(validation.sessionName, "Use only letters, numbers, ., _ and -.")
+        XCTAssertEqual(validation.sessionName, "Use only letters, numbers, dots, underscores and hyphens.")
 
         draft.sessionName = "default"
         guard case .valid(let submission) = TmuxConnectionDraftValidator.validateWorkspace(

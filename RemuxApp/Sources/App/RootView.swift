@@ -2756,7 +2756,7 @@ struct ConnectionSetupView: View {
             case .tmux:
                 "Names a tmux session on this server. Reuse a name to attach to an existing session."
             case .herdr:
-                "Letters, numbers, ., _ and -, up to 64. Opens the Herdr session with this name, and starts it if it isn't running."
+                "Letters, numbers, dots, underscores and hyphens, up to 64 characters. Opens the Herdr session with this name, and starts it if it isn't running."
             }
         case .editWorkspace:
             "Renaming applies the next time you connect."

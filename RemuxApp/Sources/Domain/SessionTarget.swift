@@ -744,7 +744,7 @@ enum TmuxConnectionDraftValidator {
                 || (UInt8(ascii: "a")...UInt8(ascii: "z")).contains(byte)
                 || byte == UInt8(ascii: ".") || byte == UInt8(ascii: "_") || byte == UInt8(ascii: "-")
         }
-        return allowed ? nil : "Use only letters, numbers, ., _ and -."
+        return allowed ? nil : "Use only letters, numbers, dots, underscores and hyphens."
     }
 
     static func validateWorkspace(

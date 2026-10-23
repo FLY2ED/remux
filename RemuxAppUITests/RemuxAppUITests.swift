@@ -1298,13 +1298,13 @@ final class RemuxAppUITests: XCTestCase {
         tapFormField(name)
         name.typeText(" two")
         XCTAssertTrue(
-            app.staticTexts["Use only letters, numbers, ., _ and -."].waitForExistence(timeout: 2),
+            app.staticTexts["Use only letters, numbers, dots, underscores and hyphens."].waitForExistence(timeout: 2),
             "A Herdr name with a space should show Herdr's rule."
         )
         app.buttons["Done"].firstMatch.tap()
 
         kind.buttons["tmux"].tap()
-        XCTAssertFalse(app.staticTexts["Use only letters, numbers, ., _ and -."].exists)
+        XCTAssertFalse(app.staticTexts["Use only letters, numbers, dots, underscores and hyphens."].exists)
         XCTAssertEqual(name.value as? String, "default two")
     }
 
