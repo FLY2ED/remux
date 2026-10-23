@@ -200,71 +200,66 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
     }
 
     private var sessionList: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            TerminalSelectionSheetContextLabel(text: sessionCountSummary)
-                .padding(.horizontal, 16)
-
-            List {
-                Section {
-                    ForEach(projection.activeSessions) { session in
-                        activeSessionRow(session)
-                    }
-                } header: {
-                    SessionSwitcherSectionHeader(title: "Active")
+        List {
+            Section {
+                ForEach(projection.activeSessions) { session in
+                    activeSessionRow(session)
                 }
+            } header: {
+                SessionSwitcherSectionHeader(title: "Active")
+            }
 
-                if !projection.recentSessions.isEmpty {
-                    Section {
-                        ForEach(visibleRecentSessions) { session in
-                            recentSessionRow(session)
-                        }
+            if !projection.recentSessions.isEmpty {
+                Section {
+                    ForEach(visibleRecentSessions) { session in
+                        recentSessionRow(session)
+                    }
 
-                        if projection.recentSessions.count > Self.collapsedRecentSessionCount {
-                            Button {
-                                withAnimation(.snappy) {
-                                    showsAllRecentSessions.toggle()
-                                }
-                            } label: {
-                                DisclosureRowLabel(
-                                    title: showsAllRecentSessions
-                                        ? "Show fewer"
-                                        : "Show more",
-                                    systemImage: showsAllRecentSessions
-                                        ? "chevron.up"
-                                        : "chevron.down"
-                                )
+                    if projection.recentSessions.count > Self.collapsedRecentSessionCount {
+                        Button {
+                            withAnimation(.snappy) {
+                                showsAllRecentSessions.toggle()
                             }
-                            .buttonStyle(.plain)
-                            .sessionSwitcherListRow(
-                                accessibilityIdentifier: "terminal.sessions.recent-toggle"
+                        } label: {
+                            DisclosureRowLabel(
+                                title: showsAllRecentSessions
+                                    ? "Show fewer"
+                                    : "Show more",
+                                systemImage: showsAllRecentSessions
+                                    ? "chevron.up"
+                                    : "chevron.down"
                             )
                         }
-                    } header: {
-                        SessionSwitcherSectionHeader(title: "Recent")
+                        .buttonStyle(.plain)
+                        .sessionSwitcherListRow(
+                            accessibilityIdentifier: "terminal.sessions.recent-toggle"
+                        )
                     }
-                }
-
-                if !servers.isEmpty {
-                    Section {
-                        discoveryStatusRows
-                        ForEach(projection.inlineAvailableSessions) { session in
-                            availableSessionRow(session)
-                        }
-                        if projection.hiddenAvailableSessionCount > 0 {
-                            availableSessionsBrowserRow
-                        }
-                    } header: {
-                        availableSessionsHeader
-                    }
+                } header: {
+                    SessionSwitcherSectionHeader(title: "Recent")
                 }
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .animation(.snappy, value: projection.activeSessions.map(\.id))
-            .animation(.snappy, value: projection.availableSessions.map(\.id))
-            .animation(.snappy, value: projection.recentSessions.map(\.id))
-            .accessibilityIdentifier("terminal.sessions.list")
+
+            if !servers.isEmpty {
+                Section {
+                    discoveryStatusRows
+                    ForEach(projection.inlineAvailableSessions) { session in
+                        availableSessionRow(session)
+                    }
+                    if projection.hiddenAvailableSessionCount > 0 {
+                        availableSessionsBrowserRow
+                    }
+                } header: {
+                    availableSessionsHeader
+                }
+            }
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .animation(.snappy, value: projection.activeSessions.map(\.id))
+        .animation(.snappy, value: projection.availableSessions.map(\.id))
+        .animation(.snappy, value: projection.recentSessions.map(\.id))
+        .accessibilityIdentifier("terminal.sessions.list")
         .safeAreaInset(edge: .bottom, spacing: 0) {
             TerminalSelectionSheetActionButton(
                 title: "New Session…",
@@ -321,13 +316,6 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
             .accessibilityLabel(isRefreshing ? "Refreshing Available Sessions" : "Refresh Available Sessions")
             .accessibilityIdentifier("terminal.sessions.refresh")
         }
-    }
-
-    private var sessionCountSummary: String {
-        let count = projection.activeSessions.count
-            + projection.availableSessions.count
-            + projection.recentSessions.count
-        return count == 1 ? "1 session" : "\(count) sessions"
     }
 
     private var visibleRecentSessions: [RecentSessionSwitcherItem] {

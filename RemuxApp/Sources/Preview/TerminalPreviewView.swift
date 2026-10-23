@@ -45,7 +45,6 @@ struct TerminalPreviewView: View {
                 .toolbarBackground(.visible, for: .navigationBar)
         }
         .tint(.primary)
-        .preferredColorScheme(terminalTheme.terminalChromeColorScheme)
         .environment(\.ghosttyTerminalChromeStyle, terminalTheme.terminalChromeStyle)
     }
 

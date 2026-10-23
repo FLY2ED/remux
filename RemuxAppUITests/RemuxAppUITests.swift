@@ -136,6 +136,84 @@ final class RemuxAppUITests: XCTestCase {
         assertNoPasswordSaveOffer(after: "Save")
     }
 
+    /// Return on the last field shown saves the server. The tmux path is
+    /// hidden in the collapsed Advanced group, so Return skips it.
+    func testReturnOnPasswordSavesServer() {
+        launchSimulatorApp()
+        openConnectionSetup()
+        fillConnectionForm()
+        let enabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"),
+            object: app.buttons["connection.save"]
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 5), .completed)
+
+        app.secureTextFields["connection.password"].typeText("\n")
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["library.server.detail"].waitForExistence(timeout: 5),
+            "Return on the password should save the server."
+        )
+    }
+
+    /// Save stays disabled while the tmux path is invalid, so the path's
+    /// problem shows as it is typed and Advanced can't be collapsed over it.
+    func testInvalidTmuxPathKeepsAdvancedOpen() {
+        launchSimulatorApp()
+        openConnectionSetup()
+        fillConnectionForm()
+
+        let advanced = app.buttons["Advanced"]
+        for _ in 0..<4 where !advanced.isHittable {
+            app.swipeUp()
+        }
+        advanced.tap()
+        let executable = app.textFields["connection.tmux-executable"]
+        XCTAssertTrue(executable.waitForExistence(timeout: 2))
+        tapFormField(executable)
+        typeTextAndConfirm("~/bin/tmux", into: executable)
+        let problem = app.staticTexts["Enter an absolute path beginning with /."]
+        XCTAssertTrue(problem.waitForExistence(timeout: 2), "The path's problem should show as it is typed.")
+        XCTAssertFalse(app.buttons["connection.save"].isEnabled)
+
+        app.buttons["Done"].firstMatch.tap()
+        advanced.tap()
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        XCTAssertTrue(executable.exists, "Advanced should stay open while the path is invalid.")
+        XCTAssertTrue(problem.exists)
+
+        // Correcting the path keeps Advanced open, also while the field is briefly empty.
+        executable.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        executable.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: "~/bin/tmux".count))
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        XCTAssertTrue(executable.exists, "Advanced closed while the path was being corrected.")
+        typeTextAndConfirm("/usr/local/bin/tmux", into: executable)
+        XCTAssertFalse(problem.exists)
+        XCTAssertTrue(app.buttons["connection.save"].isEnabled)
+    }
+
+    /// Terminals stay alive behind Home. Home follows the system appearance,
+    /// not the theme of the terminal it covers.
+    func testHomeFollowsSystemAppearanceAfterDarkTerminal() {
+        XCUIDevice.shared.appearance = .light
+        launchSeededSimulatorTerminal()
+        XCTAssertLessThan(
+            averageLuminance(app.screenshot()) ?? 1,
+            0.5,
+            "The terminal should show its default dark theme."
+        )
+
+        openHomeFromTerminal()
+
+        let deadline = Date().addingTimeInterval(3)
+        var luminance = averageLuminance(app.screenshot()) ?? 0
+        while luminance <= 0.5, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            luminance = averageLuminance(app.screenshot()) ?? 0
+        }
+        XCTAssertGreaterThan(luminance, 0.5, "Home should be light, like the system.")
+    }
+
     func testToolbarKeysUpdateRetainedSimulatorTerminalAndFirstSlotOpensShortcuts() {
         launchSeededSimulatorTerminal()
 
@@ -1141,6 +1219,14 @@ final class RemuxAppUITests: XCTestCase {
             tmuxMissingRow().waitForExistence(timeout: 5),
             "The server page should say tmux is missing."
         )
+
+        tmuxMissingRow().tap()
+        XCTAssertTrue(app.textFields["connection.name"].waitForExistence(timeout: 5))
+        let executable = app.textFields["connection.tmux-executable"]
+        for _ in 0..<4 where !executable.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(executable.isHittable, "The row should lead to the tmux path.")
     }
 
     func testDeleteServerAsksFirst() {
@@ -1206,6 +1292,10 @@ final class RemuxAppUITests: XCTestCase {
         for _ in 0..<4 where !executable.isHittable {
             app.swipeUp()
         }
+        XCTAssertTrue(
+            executable.isHittable,
+            "With tmux missing, Edit Server should open Advanced on the tmux path."
+        )
         tapFormField(executable)
         typeTextAndConfirm("/usr/local/bin/tmux", into: executable)
         app.buttons["connection.save"].tap()
@@ -1232,7 +1322,7 @@ final class RemuxAppUITests: XCTestCase {
             .matching(identifier: "library.server.available.failure")
             .matching(NSPredicate(
                 format: "label CONTAINS %@",
-                "Install tmux on this server or update Executable Path."
+                "tmux wasn't found"
             ))
             .firstMatch
     }
@@ -3868,6 +3958,25 @@ final class RemuxAppUITests: XCTestCase {
             distinctColors: colorCounts.count,
             nonBackgroundPixels: pixelCount - dominantCount
         )
+    }
+
+    /// Mean luminance of a screenshot, from 0 (black) to 1 (white).
+    private func averageLuminance(_ screenshot: XCUIScreenshot) -> Double? {
+        guard let cgImage = screenshot.image.cgImage,
+              let snapshot = renderedPixels(
+                  cgImage: cgImage,
+                  crop: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height)
+              )
+        else {
+            return nil
+        }
+        var total = 0.0
+        for offset in stride(from: 0, to: snapshot.pixels.count, by: 4) {
+            total += 0.2126 * Double(snapshot.pixels[offset])
+                + 0.7152 * Double(snapshot.pixels[offset + 1])
+                + 0.0722 * Double(snapshot.pixels[offset + 2])
+        }
+        return total / Double(snapshot.width * snapshot.height) / 255
     }
 
     private func renderedPixels(
