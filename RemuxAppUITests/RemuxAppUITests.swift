@@ -156,6 +156,33 @@ final class RemuxAppUITests: XCTestCase {
         )
     }
 
+    /// Save stays disabled while the tmux path is invalid, so the path's
+    /// problem shows as it is typed and Advanced can't be collapsed over it.
+    func testInvalidTmuxPathKeepsAdvancedOpen() {
+        launchSimulatorApp()
+        openConnectionSetup()
+        fillConnectionForm()
+
+        let advanced = app.buttons["Advanced"]
+        for _ in 0..<4 where !advanced.isHittable {
+            app.swipeUp()
+        }
+        advanced.tap()
+        let executable = app.textFields["connection.tmux-executable"]
+        XCTAssertTrue(executable.waitForExistence(timeout: 2))
+        tapFormField(executable)
+        typeTextAndConfirm("~/bin/tmux", into: executable)
+        let problem = app.staticTexts["Enter an absolute path beginning with /."]
+        XCTAssertTrue(problem.waitForExistence(timeout: 2), "The path's problem should show as it is typed.")
+        XCTAssertFalse(app.buttons["connection.save"].isEnabled)
+
+        app.buttons["Done"].firstMatch.tap()
+        advanced.tap()
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        XCTAssertTrue(executable.exists, "Advanced should stay open while the path is invalid.")
+        XCTAssertTrue(problem.exists)
+    }
+
     /// Terminals stay alive behind Home. Home follows the system appearance,
     /// not the theme of the terminal it covers.
     func testHomeFollowsSystemAppearanceAfterDarkTerminal() {

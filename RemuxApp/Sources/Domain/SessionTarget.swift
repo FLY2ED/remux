@@ -612,6 +612,19 @@ enum TmuxConnectionDraftValidator {
         return .invalid(validation)
     }
 
+    /// Why the tmux path can't be used, or nil when it is empty (automatic) or usable.
+    static func tmuxExecutablePathProblem(_ path: String) -> String? {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if !trimmed.hasPrefix("/") {
+            return "Enter an absolute path beginning with /."
+        }
+        if trimmed.contains("\n") || trimmed.contains("\r") || trimmed.contains("\0") {
+            return "Executable path contains invalid characters."
+        }
+        return nil
+    }
+
     static func validateServer(
         _ draft: TmuxConnectionDraft,
         existingServerID: SavedServer.ID?
@@ -647,15 +660,7 @@ enum TmuxConnectionDraftValidator {
             validation.username = "Username is required."
         }
 
-        if let tmuxExecutablePath {
-            if !tmuxExecutablePath.hasPrefix("/") {
-                validation.tmuxExecutablePath = "Enter an absolute path beginning with /."
-            } else if tmuxExecutablePath.contains("\n") ||
-                        tmuxExecutablePath.contains("\r") ||
-                        tmuxExecutablePath.contains("\0") {
-                validation.tmuxExecutablePath = "Executable path contains invalid characters."
-            }
-        }
+        validation.tmuxExecutablePath = tmuxExecutablePathProblem(draft.tmuxExecutablePath)
 
         let credential: ValidatedTmuxServerDraft.Credential
         switch draft.authenticationKind {

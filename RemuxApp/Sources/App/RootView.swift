@@ -2405,7 +2405,7 @@ struct ConnectionSetupView: View {
 
             if showsEditableServerFields {
                 Section {
-                    DisclosureGroup("Advanced", isExpanded: $isAdvancedExpanded) {
+                    DisclosureGroup("Advanced", isExpanded: advancedExpansion) {
                         tmuxExecutableInputRow()
                     }
                 }
@@ -2425,11 +2425,6 @@ struct ConnectionSetupView: View {
         .connectionSetupChrome(usesLibraryChrome: showsEditableServerFields)
         .onAppear {
             if hasExecutableProblem {
-                isAdvancedExpanded = true
-            }
-        }
-        .onChange(of: validation.tmuxExecutablePath) { _, message in
-            if message != nil {
                 isAdvancedExpanded = true
             }
         }
@@ -2541,8 +2536,26 @@ struct ConnectionSetupView: View {
 
     /// The path field is hidden while Advanced is collapsed, so Next skips it.
     private var fieldAfterAuthentication: Field? {
-        if showsEditableServerFields && isAdvancedExpanded { return .tmuxExecutablePath }
+        if showsEditableServerFields && isAdvancedShown { return .tmuxExecutablePath }
         return showsSessionFields ? .sessionName : nil
+    }
+
+    /// Save stays disabled while the path is invalid, so the path is checked as
+    /// it is typed and Advanced can't hide the problem.
+    private var tmuxExecutablePathMessage: String? {
+        validation.tmuxExecutablePath
+            ?? TmuxConnectionDraftValidator.tmuxExecutablePathProblem(draft.tmuxExecutablePath)
+    }
+
+    private var isAdvancedShown: Bool {
+        isAdvancedExpanded || tmuxExecutablePathMessage != nil
+    }
+
+    private var advancedExpansion: Binding<Bool> {
+        Binding(
+            get: { isAdvancedShown },
+            set: { isAdvancedExpanded = $0 }
+        )
     }
 
     private func submitIfPossible() {
@@ -2752,7 +2765,7 @@ struct ConnectionSetupView: View {
             placeholder: "/absolute/path/to/tmux",
             keyPath: \.tmuxExecutablePath,
             field: .tmuxExecutablePath,
-            validationMessage: validation.tmuxExecutablePath,
+            validationMessage: tmuxExecutablePathMessage,
             keyboardType: .URL,
             submitLabel: .go,
             accessibilityIdentifier: "connection.tmux-executable"
