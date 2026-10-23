@@ -221,7 +221,8 @@ struct GhosttyComposeBar: View {
     // dictation updates re-render only this subtree, not the terminal
     // screen that hosts it.
     @ObservedObject var composer: GhosttyComposerModel
-    let isTerminalInputAvailable: Bool
+    /// The terminal can take a composed message now.
+    let canSubmit: Bool
 
     let wantsKeyboardFocus: Bool
     let isSoftwareKeyboardVisible: Bool
@@ -272,7 +273,7 @@ struct GhosttyComposeBar: View {
             return .sending
         }
         return .composing(
-            canSend: isTerminalInputAvailable
+            canSend: canSubmit
                 && composer.hasContent
                 && composer.areAttachmentsReady
         )

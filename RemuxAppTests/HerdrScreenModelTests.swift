@@ -549,6 +549,8 @@ final class HerdrScreenModelTests: XCTestCase {
             XCTAssertTrue(interaction.hasFocusedSurface)
             XCTAssertTrue(interaction.isInputAvailable)
         }
+        // The composer's Send waits for an awaited submit.
+        XCTAssertFalse(adapter.acceptsComposerMessages)
     }
 
     /// While shown, a new screen size goes to Herdr at once; a hidden session gets it with its show.

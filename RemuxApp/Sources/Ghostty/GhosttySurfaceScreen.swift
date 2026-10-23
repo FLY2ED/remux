@@ -713,7 +713,7 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
         if isSelected {
             GhosttyComposeBar(
                 composer: composer,
-                isTerminalInputAvailable: isTerminalInputAvailable,
+                canSubmit: isComposerSubmissionAvailable,
                 wantsKeyboardFocus: inputCoordinator.keyboardMode == .system
                     && inputCoordinator.keyboardOwner == .composer,
                 isSoftwareKeyboardVisible: inputCoordinator.keyboardMode == .system
@@ -743,6 +743,10 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
 
     private var isTerminalInputAvailable: Bool {
         model.terminalInteractionProjection.isInputAvailable
+    }
+
+    private var isComposerSubmissionAvailable: Bool {
+        isTerminalInputAvailable && model.acceptsComposerMessages
     }
 
     private var isTerminalViewportFrozen: Bool {
@@ -1595,7 +1599,7 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
 
     private func submitComposer() {
         let interaction = model.terminalInteractionProjection
-        guard interaction.isInputAvailable,
+        guard isComposerSubmissionAvailable,
               let surfaceID = interaction.selectedActiveLeafID else {
             composer.statusMessage = "Couldn’t send. Message kept."
             return

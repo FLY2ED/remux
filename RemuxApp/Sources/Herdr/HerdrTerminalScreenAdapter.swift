@@ -227,6 +227,9 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     /// Herdr panes get Ctrl+B at once; Herdr's own keybindings aren't offered on the phone.
     var holdsTmuxPrefixKey: Bool { false }
 
+    /// A composed message needs an awaited paste and Enter, which Herdr input doesn't have.
+    var acceptsComposerMessages: Bool { false }
+
     func sendInputToFocusedSurface(_ text: String) -> FocusedTerminalInputSubmissionResult {
         model?.sendText(text) ?? .transportUnavailable
     }
