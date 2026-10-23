@@ -12,8 +12,9 @@ struct HerdrLiveConfiguration: Decodable {
     let privateKeyPEM: String
     /// The host's key as an OpenSSH public key line, trusted for these tests only.
     let hostKey: String
-    /// The official Herdr v0.9.3 release binary on the host. Its digest is checked before use.
-    let herdrBinary: String
+    /// The official Herdr release binaries on the host, by version ("0.9.3", "0.9.5"). A binary's
+    /// digest is checked before use.
+    let herdrBinaries: [String: String]
 
     static func load() throws -> HerdrLiveConfiguration {
         guard let path = ProcessInfo.processInfo.environment["REMUX_LIVE_HERDR_CONFIG"], !path.isEmpty else {
@@ -36,12 +37,20 @@ struct HerdrLiveError: Error, CustomStringConvertible {
 /// `<root>/config/herdr/sessions/<session>/herdr-client.sock`, and a socket path longer than
 /// `sun_path` (104 bytes on macOS) keeps the server from starting.
 final class HerdrLiveFixture: @unchecked Sendable {
-    /// The official v0.9.3 release assets, by `uname -sm`.
+    /// The official release assets' digests, as GitHub lists them, by version and `uname -sm`.
     static let releaseDigests = [
-        "Darwin arm64": "5173a3e0ae42d5d1ab7ebfa5d5e6329f7c3d23f8e1a3677c7ce3231da2884157",
-        "Darwin x86_64": "db62d548ff3e832b087a96b1894a08d26be3905f1830309cd556783f215d4054",
-        "Linux aarch64": "4de7aa3e25678812e92960de64f7c2aaa1bca1f0f80a3c5e559837e231e1f5c0",
-        "Linux x86_64": "18a8dc65f1c2fa485884344356dea1cfd911c6f06cf46fa78e193f4087f4dba7",
+        "0.9.3": [
+            "Darwin arm64": "5173a3e0ae42d5d1ab7ebfa5d5e6329f7c3d23f8e1a3677c7ce3231da2884157",
+            "Darwin x86_64": "db62d548ff3e832b087a96b1894a08d26be3905f1830309cd556783f215d4054",
+            "Linux aarch64": "4de7aa3e25678812e92960de64f7c2aaa1bca1f0f80a3c5e559837e231e1f5c0",
+            "Linux x86_64": "18a8dc65f1c2fa485884344356dea1cfd911c6f06cf46fa78e193f4087f4dba7",
+        ],
+        "0.9.5": [
+            "Darwin arm64": "fb77c2232a05a8035421382c894392f4174e4e38a18e48af3dd0290157c3a7e2",
+            "Darwin x86_64": "5fb0a908ec7f6745e3e245738b06bfad56c46391c391ab3c0955fbead01f1369",
+            "Linux aarch64": "17d7536f2da50859523680ef279dffcac8e4a235f4e46fe8da6c2ec44141897c",
+            "Linux x86_64": "14d9e8bc8b4a9e0118d77c32266f76d461f09b40342eb23752960bd89f59929d",
+        ],
     ]
 
     let configuration: HerdrLiveConfiguration
@@ -60,13 +69,22 @@ final class HerdrLiveFixture: @unchecked Sendable {
             .appendingPathComponent("HerdrLiveFixture-\(id)")
     }
 
-    /// Creates the folder and the wrapper. The caller owns the fixture and must `tearDown()` it. A
-    /// failed setup leaves nothing on the host: the script creates the folder only if it doesn't exist
-    /// and removes it again when a later step fails.
-    static func start(_ configuration: HerdrLiveConfiguration) async throws -> HerdrLiveFixture {
+    /// Creates the folder and the wrapper for Herdr `version`. The caller owns the fixture and must
+    /// `tearDown()` it. A failed setup leaves nothing on the host: the script creates the folder only if
+    /// it doesn't exist and removes it again when a later step fails.
+    static func start(
+        _ configuration: HerdrLiveConfiguration,
+        version: String = "0.9.3"
+    ) async throws -> HerdrLiveFixture {
+        guard let binary = configuration.herdrBinaries[version], let digests = releaseDigests[version] else {
+            throw XCTSkip("Add Herdr \(version) to herdrBinaries to run this live Herdr test.")
+        }
         let fixture = HerdrLiveFixture(configuration: configuration)
         do {
-            let setup = try await fixture.runScript(setupScript, arguments: [fixture.root, configuration.herdrBinary])
+            let setup = try await fixture.runScript(
+                setupScript(version: version, digests: digests),
+                arguments: [fixture.root, binary]
+            )
             guard setup.exitStatus == 0 else {
                 throw HerdrLiveError(
                     description: "The live Herdr fixture could not start: \(String(decoding: setup.stderr, as: UTF8.self))"
@@ -91,6 +109,11 @@ final class HerdrLiveFixture: @unchecked Sendable {
             stdin: nil,
             trace: trace
         )
+    }
+
+    /// Runs `script` with `/bin/sh` on the live host, with `arguments` as its positional parameters.
+    func run(_ script: String, arguments: [String] = []) async throws -> RemuxSSHExecResult {
+        try await runScript(script, arguments: arguments)
     }
 
     /// Stops this fixture's server and removes its folder, and returns what went wrong, if anything. A
@@ -173,8 +196,8 @@ final class HerdrLiveFixture: @unchecked Sendable {
     /// config turns off Herdr's update checks and gives panes a plain non-login `/bin/sh` with a `$ `
     /// prompt, so pane output doesn't depend on the host's shell setup. The wrapper starts in the
     /// isolated HOME, because the server opens its first pane in the directory it starts from.
-    private static var setupScript: String {
-        let digestCases = releaseDigests
+    private static func setupScript(version: String, digests: [String: String]) -> String {
+        let digestCases = digests
             .sorted { $0.key < $1.key }
             .map { #""\#($0.key)") want=\#($0.value) ;;"# }
             .joined(separator: " ")
@@ -185,7 +208,7 @@ final class HerdrLiveFixture: @unchecked Sendable {
         case "$binary" in *"'"*) echo "the Herdr binary path can't contain a single quote" >&2; exit 5 ;; esac
         case "$(uname -sm)" in \#(digestCases) *) echo "no pinned Herdr digest for $(uname -sm)" >&2; exit 3 ;; esac
         if command -v sha256sum > /dev/null 2>&1; then have=$(sha256sum "$binary" | cut -d " " -f 1); else have=$(shasum -a 256 "$binary" | cut -d " " -f 1); fi
-        [ "$have" = "$want" ] || { echo "$binary is not the official Herdr v0.9.3 release" >&2; exit 4; }
+        [ "$have" = "$want" ] || { echo "$binary is not the official Herdr v\#(version) release" >&2; exit 4; }
         umask 077
         mkdir "$root"
         trap 'rm -rf -- "$root"' EXIT

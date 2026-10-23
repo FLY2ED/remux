@@ -1506,6 +1506,7 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
     private func sendTerminalText(_ text: String) -> Bool {
         terminalInputController.performTextInput(
             text,
+            holdsTmuxPrefix: model.holdsTmuxPrefixKey,
             submit: submitTerminalText(_:),
             schedulePrefixFlush: scheduleTmuxPrefixInputFlush(token:),
             enterCopyMode: {

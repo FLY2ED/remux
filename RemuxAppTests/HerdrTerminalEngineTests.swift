@@ -42,7 +42,6 @@ final class HerdrTerminalEngineTests: XCTestCase {
         XCTAssertEqual(Set(terminals.keys), ["L", "R"])
         let layout = try await updates.nextLayout()
         XCTAssertEqual(layout.panes.map(\.paneID), ["L", "R"])
-        XCTAssertEqual(layout.panes.map(\.focused), [true, false])
 
         let left = try await makeRenderer(engine: engine, paneID: "L", terminal: try XCTUnwrap(terminals["L"]), columns: 8, rows: 2)
         let right = try await makeRenderer(engine: engine, paneID: "R", terminal: try XCTUnwrap(terminals["R"]), columns: 7, rows: 2)

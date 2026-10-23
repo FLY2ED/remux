@@ -648,6 +648,17 @@ final class GhosttyTerminalInputCoordinatorTests: XCTestCase {
         )
     }
 
+    func testInputControllerSubmitsPrefixAtOnceWithoutTmuxPrefixHold() {
+        var controller = GhosttyTerminalInputController()
+
+        XCTAssertEqual(
+            controller.receiveText(GhosttyTmuxPrefixInputBuffer.defaultPrefixInput, holdsTmuxPrefix: false),
+            .submit(GhosttyTmuxPrefixInputBuffer.defaultPrefixInput)
+        )
+        XCTAssertEqual(controller.receiveText("[", holdsTmuxPrefix: false), .submit("["))
+        XCTAssertNil(controller.flushPendingTmuxPrefixInput())
+    }
+
     func testInputControllerMatchingPrefixFlushSubmitsPrefixOnce() {
         var controller = GhosttyTerminalInputController()
         XCTAssertEqual(

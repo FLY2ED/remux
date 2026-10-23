@@ -1101,6 +1101,7 @@ extension HerdrConnectionEvent {
         case .notification: return "notification"
         case .clipboard: return "clipboard"
         case .inputRefused: return "inputRefused"
+        case .keyboardReportAll(let enabled): return "keyboardReportAll(\(enabled))"
         case .ended(let error):
             switch error {
             case .serverShutdown: return "ended(serverShutdown)"
