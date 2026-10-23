@@ -296,7 +296,7 @@ final class TmuxTerminalSessionShutdownDrainTests: XCTestCase {
         fixture.surface.renderer.setSceneActive(true)
         try await Task.sleep(for: .milliseconds(2100))
         XCTAssertTrue(results.isEmpty, "an unselected window must not consume the first-frame deadline")
-        XCTAssertEqual(fixture.surface.renderer.presentation, .pending)
+        XCTAssertEqual(fixture.surface.renderer.presentation, .awaitingFrame)
         fixture.surface.renderer.suppressReplacementPublicationForTesting = false
         fixture.surface.renderer.setPresented(true)
         try await waitUntil { !results.isEmpty }
@@ -364,6 +364,24 @@ final class TmuxTerminalSessionShutdownDrainTests: XCTestCase {
         XCTAssertNotNil(preview)
         XCTAssertEqual(fixture.surface.renderer.presentation, .pending)
         XCTAssertFalse(managed.rendererIsAvailable)
+        await fixture.session.shutdown()
+    }
+
+    /// A session the root doesn't show keeps its pane live but draws nothing; showing it draws the
+    /// active pane.
+    func testASessionThatIsNotShownDrawsNoPane() async throws {
+        let fixture = try await makeNativeFixture(attach: false)
+        defer { fixture.window.isHidden = true }
+        fixture.session.setSelected(false)
+        fixture.window.rootViewController?.view.addSubview(fixture.surface.renderer.view)
+        fixture.window.isHidden = false
+
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(fixture.surface.renderer.presentation, .awaitingFrame)
+        XCTAssertEqual(fixture.session.presentation(for: 0), .awaitingFrame)
+
+        fixture.session.setSelected(true)
+        try await waitUntil { fixture.surface.renderer.presentation == .ready }
         await fixture.session.shutdown()
     }
 

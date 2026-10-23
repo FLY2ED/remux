@@ -172,7 +172,8 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
             presentedSurfaceID: presentedSurfaceID,
             snapshot: topologySnapshot,
             viewportProjection: viewportProjection,
-            selectedPanePresentation: model?.presentation(ofPane: focusedPaneID) ?? .pending
+            selectedPanePresentation: model?.presentation(ofPane: focusedPaneID) ?? .pending,
+            isShown: model?.isSelected ?? false
         )
         return GhosttyTerminalScreenPresentationProjection(
             readiness: projection.readiness,

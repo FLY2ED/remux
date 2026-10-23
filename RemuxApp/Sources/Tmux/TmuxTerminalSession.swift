@@ -4,7 +4,7 @@ import GhosttyKit
 
 /// MainActor owner of one control attachment and one retained renderer surface
 /// for every live pane. Active-window visibility and focus are projections of
-/// authoritative tmux topology.
+/// authoritative tmux topology, drawn only while the root shows the session.
 @MainActor
 final class TmuxTerminalSession: ObservableObject {
     @Published private(set) var state: TmuxSessionController.SessionState = .detached(nil)
@@ -58,6 +58,9 @@ final class TmuxTerminalSession: ObservableObject {
         presentationDidChange()
     }
     private var isAppActive = true
+    /// Whether the root shows this session. A session that isn't shown stays attached and keeps its
+    /// terminals current; it only stops drawing.
+    private(set) var isSelected = true
     private var didStartLink = false
     private var linkIsActive = false
     private var isShutDown = false
@@ -447,6 +450,7 @@ final class TmuxTerminalSession: ObservableObject {
         let activeWindow: TmuxSessionController.WindowInfo? = {
             guard !isShutDown,
                   isAppActive,
+                  isSelected,
                   state == .ready,
                   let topology,
                   let activeWindowID = topology.activeWindowID
@@ -499,6 +503,12 @@ final class TmuxTerminalSession: ObservableObject {
 
     func setAppActive(_ active: Bool) {
         isAppActive = active
+        reconcilePresentationActivity()
+    }
+
+    func setSelected(_ selected: Bool) {
+        guard selected != isSelected else { return }
+        isSelected = selected
         reconcilePresentationActivity()
     }
 

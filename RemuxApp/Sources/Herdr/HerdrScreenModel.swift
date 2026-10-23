@@ -141,7 +141,7 @@ final class HerdrScreenModel {
     private var attemptCount: UInt64 = 0
     private var sizeWaiter: CheckedContinuation<Void, Never>?
 
-    private var isSelected = false
+    private(set) var isSelected = false
     private var appPhase = GhosttyAppLifecyclePhase.active
     private var lastViewport: (size: CGSize, scale: CGFloat)?
     private(set) var measurement: GhosttyTerminalViewportMeasurement?
