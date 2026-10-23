@@ -1193,6 +1193,45 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertTrue(executable.isHittable, "The row should lead to the tmux path.")
     }
 
+    func testDeleteServerAsksFirst() {
+        app.launchEnvironment.merge(
+            [
+                "REMUX_UI_TESTING": "1",
+                "REMUX_DEBUG_SEED_CONNECTION": "1",
+                "REMUX_DEBUG_SERVER_HOST": "example.com",
+                "REMUX_DEBUG_SERVER_USERNAME": "tester",
+                "REMUX_DEBUG_SERVER_PASSWORD": "password",
+            ],
+            uniquingKeysWith: { _, new in new }
+        )
+        app.launch()
+
+        let server = app.descendants(matching: .any).matching(identifier: "library.server.row").firstMatch
+        XCTAssertTrue(server.waitForExistence(timeout: 5))
+        let alert = app.alerts.firstMatch
+
+        server.swipeLeft()
+        let delete = app.buttons["Delete"]
+        XCTAssertTrue(delete.waitForExistence(timeout: 2))
+        delete.tap()
+        XCTAssertTrue(alert.waitForExistence(timeout: 2), "Deleting a server should ask first.")
+        XCTAssertTrue(server.exists, "The server should stay until the deletion is confirmed.")
+
+        alert.buttons["Cancel"].tap()
+        XCTAssertTrue(waitForElementToDisappear(alert, timeout: 2))
+        XCTAssertTrue(server.exists, "Cancelling should keep the server.")
+
+        server.swipeLeft()
+        XCTAssertTrue(delete.waitForExistence(timeout: 2))
+        delete.tap()
+        XCTAssertTrue(alert.waitForExistence(timeout: 2))
+        alert.buttons["Delete"].tap()
+        XCTAssertTrue(
+            app.buttons["library.empty.add-server"].waitForExistence(timeout: 5),
+            "Confirming should delete the only server."
+        )
+    }
+
     func testEditServerChecksSessionsAgain() {
         app.launchEnvironment.merge(
             [
