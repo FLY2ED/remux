@@ -724,6 +724,17 @@ final class SSHPublicKeyLiveTestServer: @unchecked Sendable {
         authenticationDelegate.resumeAuthentication()
     }
 
+    func failSuspendedAuthentication() {
+        authenticationDelegate.failSuspendedAuthentication()
+    }
+
+    /// Closes every client connection from the server's side, as a server restart would.
+    func closeClientConnections() {
+        for channel in connections.all {
+            channel.close(promise: nil)
+        }
+    }
+
     func waitForClosedRootCount(_ count: Int) async -> Bool {
         let deadline = ContinuousClock.now + .seconds(2)
         while ContinuousClock.now < deadline {
@@ -791,12 +802,19 @@ private final class SSHPublicKeyLiveAuthenticationDelegate:
     }
 
     func resumeAuthentication() {
-        let responsePromise = lock.withLock {
+        takeSuspendedResponsePromise()?.succeed(.success)
+    }
+
+    func failSuspendedAuthentication() {
+        takeSuspendedResponsePromise()?.succeed(.failure)
+    }
+
+    private func takeSuspendedResponsePromise() -> EventLoopPromise<NIOSSHUserAuthenticationOutcome>? {
+        lock.withLock {
             let responsePromise = suspendedResponsePromise
             suspendedResponsePromise = nil
             return responsePromise
         }
-        responsePromise?.succeed(.success)
     }
 }
 

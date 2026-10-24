@@ -319,11 +319,60 @@ fileprivate final class RemuxSSHRootLease: @unchecked Sendable {
     }
 }
 
+/// One authentication of an SSH root. The attempt records its own outcome as it finishes, so whoever holds it
+/// can tell at once whether its result is in, before the pool's observer of the same attempt has run.
+struct RemuxSSHRootAttempt: Sendable {
+    private enum Outcome: Sendable {
+        case pending
+        case authenticated(RemuxSSHRoot)
+        case failed
+    }
+
+    let task: Task<RemuxSSHRoot, Error>
+    private let outcome: NIOLockedValueBox<Outcome>
+
+    init(authenticate: @escaping @Sendable () async throws -> RemuxSSHRoot) {
+        let outcome = NIOLockedValueBox(Outcome.pending)
+        self.outcome = outcome
+        task = Task.detached(priority: .userInitiated) {
+            do {
+                let root = try await authenticate()
+                outcome.withLockedValue { $0 = .authenticated(root) }
+                return root
+            } catch {
+                outcome.withLockedValue { $0 = .failed }
+                throw error
+            }
+        }
+    }
+
+    var isFinished: Bool {
+        outcome.withLockedValue { outcome in
+            if case .pending = outcome { return false }
+            return true
+        }
+    }
+
+    /// Whether the attempt can no longer serve anyone: it failed, or the root it made has closed since.
+    var isSpent: Bool {
+        outcome.withLockedValue { outcome in
+            switch outcome {
+            case .pending:
+                return false
+            case .failed:
+                return true
+            case .authenticated(let root):
+                return !root.rootChannel.isActive
+            }
+        }
+    }
+}
+
 struct RemuxSSHPreparedRoot {
     let trace: RemuxTransportStartupTrace
     private let ownership: RemuxSSHPreparedRootOwnership
     private let cancelAuthenticationOnClose: Bool
-    private let task: Task<RemuxSSHRoot, Error>
+    private let attempt: RemuxSSHRootAttempt
 
     fileprivate static func pooled(
         trace: RemuxTransportStartupTrace,
@@ -331,7 +380,7 @@ struct RemuxSSHPreparedRoot {
         key: RemuxSSHRootKey,
         generation: UUID,
         reservationID: UUID,
-        task: Task<RemuxSSHRoot, Error>
+        attempt: RemuxSSHRootAttempt
     ) -> RemuxSSHPreparedRoot {
         RemuxSSHPreparedRoot(
             trace: trace,
@@ -342,7 +391,7 @@ struct RemuxSSHPreparedRoot {
                 reservationID: reservationID
             ),
             cancelAuthenticationOnClose: false,
-            task: task
+            attempt: attempt
         )
     }
 
@@ -354,12 +403,17 @@ struct RemuxSSHPreparedRoot {
             trace: trace,
             ownership: .dedicated,
             cancelAuthenticationOnClose: true,
-            task: authenticationTask(configuration: configuration, trace: trace)
+            attempt: authenticationAttempt(configuration: configuration, trace: trace)
         )
     }
 
+    /// Whether the root's authentication had its result when this was read.
+    var isFinished: Bool {
+        attempt.isFinished
+    }
+
     func sshRoot() async throws -> RemuxSSHRoot {
-        try await task.value
+        try await attempt.task.value
     }
 
     func claim(
@@ -405,9 +459,9 @@ struct RemuxSSHPreparedRoot {
 
         guard cancelAuthenticationOnClose else { return }
 
-        task.cancel()
+        attempt.task.cancel()
         do {
-            let sshRoot = try await task.value
+            let sshRoot = try await attempt.task.value
             await sshRoot.close()
         } catch is CancellationError {
             GhosttyRuntimeTrace.latency("transport.prepare.cleanup cancelled")
@@ -461,7 +515,7 @@ actor RemuxSSHRootService {
 
     private struct Entry {
         let generation: UUID
-        let task: Task<RemuxSSHRoot, Error>
+        let attempt: RemuxSSHRootAttempt
         var activeLeaseCount: Int
         var reservationIDs: Set<UUID>
         var idleCloseTask: Task<Void, Never>?
@@ -481,7 +535,7 @@ actor RemuxSSHRootService {
 
     private struct EntrySnapshot: Sendable {
         let generation: UUID
-        let task: Task<RemuxSSHRoot, Error>
+        let attempt: RemuxSSHRootAttempt
         let didReuse: Bool
         let readiness: RemuxSSHRootReadiness
         let reservationID: UUID?
@@ -550,7 +604,7 @@ actor RemuxSSHRootService {
 
         Task {
             do {
-                _ = try await snapshot.task.value
+                _ = try await snapshot.attempt.task.value
                 trace.event(
                     "sshRoot.prewarm.ready",
                     fields: poolTraceFields(key: key, reason: reason, readiness: .ready)
@@ -612,7 +666,7 @@ actor RemuxSSHRootService {
             key: key,
             generation: snapshot.generation,
             reservationID: reservationID,
-            task: snapshot.task
+            attempt: snapshot.attempt
         )
     }
 
@@ -665,11 +719,11 @@ actor RemuxSSHRootService {
         entries.removeValue(forKey: key)
 
         guard entry.activeLeaseCount > 0 else {
-            closeEntryTask(entry.task, reason: "child_channel_close_failed")
+            closeEntryTask(entry.attempt.task, reason: "child_channel_close_failed")
             return
         }
         retiredEntries[generation] = RetiredEntry(
-            task: entry.task,
+            task: entry.attempt.task,
             activeLeaseCount: entry.activeLeaseCount
         )
     }
@@ -731,7 +785,7 @@ actor RemuxSSHRootService {
                 return .close
             }
             retiredEntries[generation] = RetiredEntry(
-                task: entry.task,
+                task: entry.attempt.task,
                 activeLeaseCount: remaining
             )
             return .retained
@@ -765,7 +819,7 @@ actor RemuxSSHRootService {
         for (key, entry) in closing {
             entry.idleCloseTask?.cancel()
             entries.removeValue(forKey: key)
-            closeEntryTask(entry.task, reason: "server_profile_changed")
+            closeEntryTask(entry.attempt.task, reason: "server_profile_changed")
         }
     }
 
@@ -774,10 +828,11 @@ actor RemuxSSHRootService {
         configuration: RemuxSSHRootConfiguration,
         trace: RemuxTransportStartupTrace
     ) -> EntrySnapshot {
+        removeEntryIfSpent(for: key)
         if let existing = entries[key] {
             return EntrySnapshot(
                 generation: existing.generation,
-                task: existing.task,
+                attempt: existing.attempt,
                 didReuse: true,
                 readiness: existing.readiness,
                 reservationID: nil
@@ -785,21 +840,21 @@ actor RemuxSSHRootService {
         }
 
         let generation = UUID()
-        let task = makeAuthenticationTask(configuration: configuration, trace: trace)
+        let attempt = makeAuthenticationAttempt(configuration: configuration, trace: trace)
         entries[key] = Entry(
             generation: generation,
-            task: task,
+            attempt: attempt,
             activeLeaseCount: 0,
             reservationIDs: [],
             idleCloseTask: nil,
             readiness: .connecting
         )
 
-        observeAuthenticationResult(task, for: key, generation: generation)
+        observeAuthenticationResult(attempt.task, for: key, generation: generation)
 
         return EntrySnapshot(
             generation: generation,
-            task: task,
+            attempt: attempt,
             didReuse: false,
             readiness: .connecting,
             reservationID: nil
@@ -812,6 +867,7 @@ actor RemuxSSHRootService {
         trace: RemuxTransportStartupTrace
     ) -> EntrySnapshot? {
         let reservationID = UUID()
+        removeEntryIfSpent(for: key)
         if entries[key] != nil {
             return reserveExistingEntry(
                 for: key,
@@ -820,21 +876,21 @@ actor RemuxSSHRootService {
         }
 
         let generation = UUID()
-        let task = makeAuthenticationTask(configuration: configuration, trace: trace)
+        let attempt = makeAuthenticationAttempt(configuration: configuration, trace: trace)
         entries[key] = Entry(
             generation: generation,
-            task: task,
+            attempt: attempt,
             activeLeaseCount: 0,
             reservationIDs: [reservationID],
             idleCloseTask: nil,
             readiness: .connecting
         )
 
-        observeAuthenticationResult(task, for: key, generation: generation)
+        observeAuthenticationResult(attempt.task, for: key, generation: generation)
 
         return EntrySnapshot(
             generation: generation,
-            task: task,
+            attempt: attempt,
             didReuse: false,
             readiness: .connecting,
             reservationID: reservationID
@@ -858,7 +914,7 @@ actor RemuxSSHRootService {
         entries[key] = existing
         return EntrySnapshot(
             generation: existing.generation,
-            task: existing.task,
+            attempt: existing.attempt,
             didReuse: true,
             readiness: existing.readiness,
             reservationID: reservationID
@@ -872,11 +928,18 @@ actor RemuxSSHRootService {
         RemuxSSHPreparedRoot.dedicated(configuration: configuration, trace: trace)
     }
 
-    private nonisolated func makeAuthenticationTask(
+    private nonisolated func makeAuthenticationAttempt(
         configuration: RemuxSSHRootConfiguration,
         trace: RemuxTransportStartupTrace
-    ) -> Task<RemuxSSHRoot, Error> {
-        RemuxSSHPreparedRoot.authenticationTask(configuration: configuration, trace: trace)
+    ) -> RemuxSSHRootAttempt {
+        RemuxSSHPreparedRoot.authenticationAttempt(configuration: configuration, trace: trace)
+    }
+
+    /// An entry whose attempt failed or whose root has closed is never handed to anyone: it goes before a
+    /// lookup, even when the observer that removes it has not run yet. Its leases drain as a retired root.
+    private func removeEntryIfSpent(for key: RemuxSSHRootKey) {
+        guard let entry = entries[key], entry.attempt.isSpent else { return }
+        rootChannelClosed(for: key, generation: entry.generation)
     }
 
     private func observeAuthenticationResult(
@@ -928,7 +991,7 @@ actor RemuxSSHRootService {
 
         guard entry.activeLeaseCount > 0 else { return }
         retiredEntries[generation] = RetiredEntry(
-            task: entry.task,
+            task: entry.attempt.task,
             activeLeaseCount: entry.activeLeaseCount
         )
     }
@@ -963,7 +1026,7 @@ actor RemuxSSHRootService {
 
         entry.idleCloseTask?.cancel()
         entries.removeValue(forKey: key)
-        closeEntryTask(entry.task, reason: "idle_timeout")
+        closeEntryTask(entry.attempt.task, reason: "idle_timeout")
     }
 
 #if DEBUG
@@ -973,7 +1036,7 @@ actor RemuxSSHRootService {
 
         for entry in closing {
             entry.idleCloseTask?.cancel()
-            closeEntryTask(entry.task, reason: "testing_cleanup")
+            closeEntryTask(entry.attempt.task, reason: "testing_cleanup")
         }
 
         let retired = Array(retiredEntries.values)
@@ -990,12 +1053,15 @@ actor RemuxSSHRootService {
         readiness: RemuxSSHRootReadiness = .ready,
         activeLeaseCount: Int = 0,
         reservationID: UUID? = nil,
-        idleCloseScheduled: Bool = false
+        idleCloseScheduled: Bool = false,
+        attempt: RemuxSSHRootAttempt? = nil
     ) -> UUID {
         entries[key]?.idleCloseTask?.cancel()
         entries[key] = Entry(
             generation: generation,
-            task: Task<RemuxSSHRoot, Error> {
+            // By default the entry's attempt stays in progress until the pool cancels it.
+            attempt: attempt ?? RemuxSSHRootAttempt {
+                try await Task.sleep(for: .seconds(86_400))
                 throw CancellationError()
             },
             activeLeaseCount: activeLeaseCount,
@@ -1140,11 +1206,11 @@ actor RemuxSSHRootService {
 }
 
 private extension RemuxSSHPreparedRoot {
-    static func authenticationTask(
+    static func authenticationAttempt(
         configuration: RemuxSSHRootConfiguration,
         trace: RemuxTransportStartupTrace
-    ) -> Task<RemuxSSHRoot, Error> {
-        Task.detached(priority: .userInitiated) {
+    ) -> RemuxSSHRootAttempt {
+        RemuxSSHRootAttempt {
             try await RemuxSSHRootBootstrap.authenticate(
                 using: configuration,
                 trace: trace
