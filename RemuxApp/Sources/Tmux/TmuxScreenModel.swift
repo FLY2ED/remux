@@ -269,6 +269,10 @@ final class TmuxScreenModel: ObservableObject {
         if stable { lastStableClientSize = lastSubmittedClientSize }
     }
 
+    func setSelected(_ selected: Bool) {
+        session?.setSelected(selected)
+    }
+
     func handleAppLifecyclePhase(_ phase: GhosttyAppLifecyclePhase) {
         // Presentation discontinuity handling lives in the renderer
         // (visibility-resume full damage); here we gate drawing.

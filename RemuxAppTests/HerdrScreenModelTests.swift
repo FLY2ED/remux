@@ -587,6 +587,37 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(callbacks, 0)
     }
 
+    /// A session the root doesn't show draws nothing, so it reads as connected once its focused pane is
+    /// live, without input. Showing it draws the pane and offers input.
+    func testASessionThatIsNotShownIsConnectedBeforeItsPaneDraws() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge()
+        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        await bridge.serve(HerdrServerScript.surface(
+            projection: 1,
+            revision: 1,
+            lines: ["one"],
+            panes: [.init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true)]
+        ))
+        harness.setScreenSize()
+        try await harness.waitUntil("the pane's renderer wasn't created") {
+            harness.model.paneSurface("w1:p1") != nil
+        }
+        showInWindow(harness, panes: ["w1:p1"])
+
+        try await harness.waitUntil("the hidden session wasn't connected") { harness.states.last == .connected }
+        XCTAssertEqual(harness.model.presentation(ofPane: "w1:p1"), .awaitingFrame)
+        let adapter = harness.model.terminalScreenAdapter
+        XCTAssertFalse(adapter.terminalInteractionProjection.isInputAvailable)
+
+        harness.model.setSelected(true)
+        try await harness.waitUntil("the shown pane didn't draw") {
+            harness.model.presentation(ofPane: "w1:p1") == .ready
+        }
+        XCTAssertEqual(harness.states.last, .connected)
+        XCTAssertTrue(adapter.terminalInteractionProjection.isInputAvailable)
+    }
+
     /// While shown, a new screen size goes to Herdr at once; a hidden session gets it with its show.
     func testAResizeIsSentWhileShown() async throws {
         let harness = await makeHarness()

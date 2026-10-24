@@ -79,8 +79,8 @@ final class TerminalPaneRenderer {
     var presentation: TerminalPanePresentation {
         if let presentationFailure { return .failed(presentationFailure) }
         guard !isClosing, rendererIsAvailable, renderer != nil,
-              view.window != nil, hasPublishedFrame else { return .pending }
-        return .ready
+              view.window != nil else { return .pending }
+        return hasPublishedFrame ? .ready : .awaitingFrame
     }
 
     private var acceptsInput: Bool {

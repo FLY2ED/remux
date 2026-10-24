@@ -133,11 +133,12 @@ enum TerminalRuntime {
         }
     }
 
-    /// Whether the root shows this session. A Herdr session is shown and hidden on the server; a tmux
-    /// session stays attached either way, and its screen claims the viewport once selected.
+    /// Whether the root shows this session; only a shown session draws. A Herdr session is also shown
+    /// and hidden on the server; a tmux session stays attached either way, and its screen claims the
+    /// viewport once selected.
     func setSelected(_ selected: Bool) {
         switch self {
-        case .tmux: break
+        case .tmux(let model): model.setSelected(selected)
         case .herdr(let model): model.setSelected(selected)
         }
     }

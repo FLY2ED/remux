@@ -500,7 +500,8 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
             presentedSurfaceID: activeManagedSurface?.id,
             snapshot: topologySnapshot,
             viewportProjection: terminalViewportPresentationProjection,
-            selectedPanePresentation: session?.presentation(for: effectiveFocusedPaneID) ?? .pending
+            selectedPanePresentation: session?.presentation(for: effectiveFocusedPaneID) ?? .pending,
+            isShown: session?.isSelected ?? false
         )
     }
 
