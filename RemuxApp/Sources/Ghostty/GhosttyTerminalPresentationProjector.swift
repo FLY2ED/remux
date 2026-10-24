@@ -3,6 +3,9 @@ import Foundation
 /// Presentation is established by the pane owner, never inferred from topology.
 enum TerminalPanePresentation: Equatable, Sendable {
     case pending
+    /// The pane's terminal and renderer are live, but it hasn't published a frame: a pane draws only
+    /// while its session is shown.
+    case awaitingFrame
     case ready
     case failed(TerminalDisconnectReason)
 }
@@ -13,13 +16,16 @@ struct TerminalReadinessSnapshot: Equatable, Sendable {
     let topLevelCount: Int
     let selectedActiveLeafID: UUID?
     let selectedPanePresentation: TerminalPanePresentation
+    /// Whether the root shows the session.
+    let isShown: Bool
 
     init(
         phase: GhosttyTerminalRuntimePhase,
         transportWritable: Bool,
         topLevelCount: Int,
         selectedActiveLeafID: UUID?,
-        selectedPanePresentation: TerminalPanePresentation = .pending
+        selectedPanePresentation: TerminalPanePresentation = .pending,
+        isShown: Bool = true
     ) {
         precondition(topLevelCount >= 0, "topLevelCount must be non-negative")
         self.phase = phase
@@ -27,6 +33,7 @@ struct TerminalReadinessSnapshot: Equatable, Sendable {
         self.topLevelCount = topLevelCount
         self.selectedActiveLeafID = selectedActiveLeafID
         self.selectedPanePresentation = selectedPanePresentation
+        self.isShown = isShown
     }
 
     var hasFocusedSurface: Bool {
@@ -40,14 +47,16 @@ enum TerminalReadinessProjector {
         transportWritable: Bool,
         topLevelCount: Int,
         selectedActiveLeafID: UUID?,
-        selectedPanePresentation: TerminalPanePresentation = .pending
+        selectedPanePresentation: TerminalPanePresentation = .pending,
+        isShown: Bool = true
     ) -> TerminalReadinessSnapshot {
         TerminalReadinessSnapshot(
             phase: phase,
             transportWritable: transportWritable,
             topLevelCount: topLevelCount,
             selectedActiveLeafID: selectedActiveLeafID,
-            selectedPanePresentation: selectedPanePresentation
+            selectedPanePresentation: selectedPanePresentation,
+            isShown: isShown
         )
     }
 
@@ -59,7 +68,7 @@ enum TerminalReadinessProjector {
             if case .failed(let reason) = snapshot.selectedPanePresentation {
                 return .disconnected(reason)
             }
-            return isTerminalStatusReady(snapshot, commandFailureMessage: nil) ? .connected : .connecting
+            return isConnected(snapshot) ? .connected : .connecting
         case .failed(let message, let reason):
             return .disconnected(
                 reason ?? TerminalDisconnectReason(kind: .unknown, message: message)
@@ -130,6 +139,21 @@ enum TerminalReadinessProjector {
     ) -> Bool {
         canSubmitInput(snapshot) && snapshot.topLevelCount > 0
             && commandFailureMessage == nil
+    }
+
+    /// The session on screen is connected once its focused pane can take input. A session that isn't
+    /// shown draws nothing, so its focused pane only has to be live.
+    private static func isConnected(_ snapshot: TerminalReadinessSnapshot) -> Bool {
+        if snapshot.isShown {
+            return isTerminalStatusReady(snapshot, commandFailureMessage: nil)
+        }
+        let paneIsLive = snapshot.selectedPanePresentation == .ready
+            || snapshot.selectedPanePresentation == .awaitingFrame
+        return canSubmitInput(
+            phase: snapshot.phase,
+            transportWritable: snapshot.transportWritable,
+            hasFocusedSurface: snapshot.hasFocusedSurface && paneIsLive
+        ) && snapshot.topLevelCount > 0
     }
 
     static func shouldTraceTerminalReady(_ snapshot: TerminalReadinessSnapshot) -> Bool {
@@ -504,14 +528,16 @@ enum GhosttyTerminalPresentationProjector {
         presentedSurfaceID: UUID?,
         snapshot: GhosttyRuntimeSurfaceTopologySnapshot,
         viewportProjection: GhosttyTerminalViewportPresentationProjection,
-        selectedPanePresentation: TerminalPanePresentation = .pending
+        selectedPanePresentation: TerminalPanePresentation = .pending,
+        isShown: Bool = true
     ) -> GhosttyTerminalScreenPresentationProjection {
         let readiness = TerminalReadinessProjector.snapshot(
             phase: phase,
             transportWritable: transportWritable,
             topLevelCount: snapshot.topLevels.count,
             selectedActiveLeafID: presentedSurfaceID,
-            selectedPanePresentation: selectedPanePresentation
+            selectedPanePresentation: selectedPanePresentation,
+            isShown: isShown
         )
 
         return GhosttyTerminalScreenPresentationProjection(

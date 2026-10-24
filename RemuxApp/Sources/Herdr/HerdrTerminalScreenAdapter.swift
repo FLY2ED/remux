@@ -17,8 +17,9 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
     private lazy var commandFailure = GhosttyTerminalCommandFailureNotice { [weak self] in
         self?.objectWillChange.send()
     }
-    /// Pane and tab ids belong to one server boot, so the ids made for them do too.
-    private var identityBootID: String?
+    /// One id per Herdr pane and tab id for the model's life, as tmux's are per pane. A pane's screen
+    /// surface takes its id when its renderer is admitted, so a pane whose terminal is replaced, by a
+    /// renderer failure or a new server boot, stays the same leaf with a new surface.
     private var paneSurfaceIDs: [String: UUID] = [:]
     private var paneIDsBySurfaceID: [UUID: String] = [:]
     private var tabSurfaceIDs: [String: UUID] = [:]
@@ -41,8 +42,7 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
 
     // MARK: Identity
 
-    private func surfaceID(forPane paneID: String, in layout: HerdrPaneLayout) -> UUID {
-        resetIdentitiesIfNewBoot(layout.bootID)
+    private func surfaceID(forPane paneID: String) -> UUID {
         if let id = paneSurfaceIDs[paneID] { return id }
         let id = UUID()
         paneSurfaceIDs[paneID] = id
@@ -51,20 +51,11 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
     }
 
     private func topLevelID(for layout: HerdrPaneLayout) -> UUID {
-        resetIdentitiesIfNewBoot(layout.bootID)
         let tabID = layout.tab?.tabID ?? ""
         if let id = tabSurfaceIDs[tabID] { return id }
         let id = UUID()
         tabSurfaceIDs[tabID] = id
         return id
-    }
-
-    private func resetIdentitiesIfNewBoot(_ bootID: String) {
-        guard bootID != identityBootID else { return }
-        identityBootID = bootID
-        paneSurfaceIDs.removeAll()
-        paneIDsBySurfaceID.removeAll()
-        tabSurfaceIDs.removeAll()
     }
 
     private func paneID(for surfaceID: UUID) -> String? {
@@ -90,10 +81,8 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
 
     /// The focused pane, once its renderer exists.
     private var presentedSurfaceID: UUID? {
-        guard let model, let layout = model.layout, let paneID = focusedPaneID,
-              model.paneSurface(paneID) != nil
-        else { return nil }
-        return surfaceID(forPane: paneID, in: layout)
+        guard let model, let paneID = focusedPaneID, model.paneSurface(paneID) != nil else { return nil }
+        return surfaceID(forPane: paneID)
     }
 
     private var topologySnapshot: GhosttyRuntimeSurfaceTopologySnapshot {
@@ -102,8 +91,8 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
         let tab = GhosttyTopLevelSurface(
             id: id,
             name: layout.tab?.label ?? "",
-            leafIDs: shownPanes.map { surfaceID(forPane: $0.paneID, in: layout) },
-            focusedLeafID: focusedPaneID.map { surfaceID(forPane: $0, in: layout) }
+            leafIDs: shownPanes.map { surfaceID(forPane: $0.paneID) },
+            focusedLeafID: focusedPaneID.map { surfaceID(forPane: $0) }
         )
         return GhosttyRuntimeSurfaceTopologySnapshot(topLevels: [tab], selectedTopLevelID: id)
     }
@@ -127,7 +116,7 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
                 rows: UInt32(pane.innerRect.height)
             )
             return GhosttyTerminalViewportPresentationProjection.Pane(
-                id: surfaceID(forPane: pane.paneID, in: layout),
+                id: surfaceID(forPane: pane.paneID),
                 normalFrame: frame,
                 visibleFrame: frame,
                 isFocused: pane.paneID == focusedPaneID,
@@ -149,9 +138,17 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
         model?.runtimePhase ?? .failed(message: "terminal session unavailable", reason: nil)
     }
 
+    // MARK: Screen surfaces
+
+    /// The model makes a pane's screen surface when it admits the pane's renderer, so a lookup only
+    /// reads.
+    func makeScreenSurface(for surface: HerdrPaneSurface) {
+        _ = surface.screenSurface(id: surfaceID(forPane: surface.paneID))
+    }
+
     private func managedSurface(for id: UUID) -> GhosttyManagedSurface? {
-        guard let paneID = paneID(for: id), let surface = model?.paneSurface(paneID) else { return nil }
-        return surface.screenSurface(id: id)
+        guard let paneID = paneID(for: id) else { return nil }
+        return model?.paneSurface(paneID)?.renderer.managedSurface
     }
 }
 
@@ -175,7 +172,8 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
             presentedSurfaceID: presentedSurfaceID,
             snapshot: topologySnapshot,
             viewportProjection: viewportProjection,
-            selectedPanePresentation: model?.presentation(ofPane: focusedPaneID) ?? .pending
+            selectedPanePresentation: model?.presentation(ofPane: focusedPaneID) ?? .pending,
+            isShown: model?.isSelected ?? false
         )
         return GhosttyTerminalScreenPresentationProjection(
             readiness: projection.readiness,

@@ -143,8 +143,10 @@ actor HerdrConnection {
         var pingAfterSilence: Duration = .seconds(5)
         var unansweredPing: Duration = .seconds(10)
         var firstSnapshot: Duration = .seconds(60)
-        /// How often health is checked; adds at most this much to the rules above.
-        var healthTick: Duration = .seconds(1)
+        /// Health is checked when one of the limits above is due. While the screen takes messages
+        /// nothing is read, so that time isn't silence and no limit runs; the check looks again this
+        /// soon after, which bounds how late a first-snapshot limit that passed meanwhile is found.
+        var deliveryRecheck: Duration = .seconds(1)
         /// Herdr's command timeout.
         var command: Duration = .seconds(60)
         /// Herdr's activation timeout, for `surface.set`.
@@ -840,7 +842,7 @@ actor HerdrConnection {
 
     private func expireWhenSilent(_ data: String, sentAt: ContinuousClock.Instant) async {
         while pongWaiters[data] != nil {
-            try? await Task.sleep(for: timing.healthTick)
+            try? await Task.sleep(until: aliveCheckDue(sentAt: sentAt), clock: .continuous)
             if delivering { continue }
             let now = ContinuousClock.now
             let noSnapshotInTime = bootID == nil && now - openedAt >= timing.firstSnapshot
@@ -851,9 +853,19 @@ actor HerdrConnection {
         }
     }
 
+    /// When the alive check can next give up, found as `nextHealthCheck` finds its time: before the
+    /// server has sent anything, bytes that come later start the reply's limit no earlier than now.
+    private func aliveCheckDue(sentAt: ContinuousClock.Instant) -> ContinuousClock.Instant {
+        let now = ContinuousClock.now
+        if delivering { return now + timing.deliveryRecheck }
+        var due = (heardSinceWelcome ? max(sentAt, lastProgress) : now) + timing.unansweredPing
+        if bootID == nil { due = min(due, openedAt + timing.firstSnapshot) }
+        return due
+    }
+
     private func monitorHealth() async {
         while appActive, !ended, !Task.isCancelled {
-            try? await Task.sleep(for: timing.healthTick)
+            try? await Task.sleep(until: nextHealthCheck(), clock: .continuous)
             guard appActive, !ended, !Task.isCancelled else { return }
             if delivering { continue }
             let now = ContinuousClock.now
@@ -861,10 +873,11 @@ actor HerdrConnection {
                 await end(.unresponsive)
                 return
             }
+            if let ping = outstandingPing, lastProgress > ping.sentAt {
+                outstandingPing = nil
+            }
             if let ping = outstandingPing {
-                if lastProgress > ping.sentAt {
-                    outstandingPing = nil
-                } else if heardSinceWelcome, now - ping.sentAt >= timing.unansweredPing {
+                if heardSinceWelcome, now - ping.sentAt >= timing.unansweredPing {
                     await end(.unresponsive)
                     return
                 }
@@ -874,6 +887,24 @@ actor HerdrConnection {
                 enqueue(.healthPing(data: data))
             }
         }
+    }
+
+    /// The earliest time a health limit can be due, so the check sleeps until then instead of waking on
+    /// a schedule. Bytes that arrive meanwhile only move the limits later, which the check finds when it
+    /// wakes: an unanswered ping is answered by bytes that come later, and the next ping is due a
+    /// silence after them, so the check looks again no later than that.
+    private func nextHealthCheck() -> ContinuousClock.Instant {
+        let now = ContinuousClock.now
+        if delivering { return now + timing.deliveryRecheck }
+        var due: ContinuousClock.Instant
+        if let ping = outstandingPing, lastProgress <= ping.sentAt {
+            due = now + timing.pingAfterSilence
+            if heardSinceWelcome { due = min(due, ping.sentAt + timing.unansweredPing) }
+        } else {
+            due = lastProgress + timing.pingAfterSilence
+        }
+        if bootID == nil { due = min(due, openedAt + timing.firstSnapshot) }
+        return due
     }
 
     // MARK: - Ending

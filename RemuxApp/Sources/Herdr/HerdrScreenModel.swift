@@ -141,7 +141,7 @@ final class HerdrScreenModel {
     private var attemptCount: UInt64 = 0
     private var sizeWaiter: CheckedContinuation<Void, Never>?
 
-    private var isSelected = false
+    private(set) var isSelected = false
     private var appPhase = GhosttyAppLifecyclePhase.active
     private var lastViewport: (size: CGSize, scale: CGFloat)?
     private(set) var measurement: GhosttyTerminalViewportMeasurement?
@@ -889,7 +889,9 @@ final class HerdrScreenModel {
                 close(renderer)
                 return
             }
-            surfaces[paneID] = HerdrPaneSurface(paneID: paneID, terminal: terminal, renderer: renderer)
+            let surface = HerdrPaneSurface(paneID: paneID, terminal: terminal, renderer: renderer)
+            surfaces[paneID] = surface
+            terminalScreenAdapter.makeScreenSurface(for: surface)
             renderer.onPresentationChange = { [weak self] in self?.didChange() }
             // Settings and the pane's size may have changed while the renderer was being registered.
             if !renderer.applyTerminalConfiguration(theme: currentTerminalSettings.theme)

@@ -101,6 +101,29 @@ final class HerdrLiveConnectionTests: XCTestCase {
         _ = try await live.log.snapshot(timeout: .seconds(15)) { $0.focusedPaneID == other }
     }
 
+    // MARK: - Health
+
+    /// Herdr's health rule against a real server, with short limits: a quiet connection is pinged after
+    /// each silence, Herdr answers every ping, and the connection stays up.
+    func testAQuietConnectionIsPingedAndStaysUp() async throws {
+        var timing = HerdrConnection.Timing()
+        timing.pingAfterSilence = .milliseconds(500)
+        timing.unansweredPing = .seconds(2)
+        var counter: HerdrLivePingCounter?
+        let live = try await openLive(version: "0.9.3", timing: timing) { bridge in
+            let wrapped = HerdrLivePingCounter(bridge)
+            counter = wrapped
+            return wrapped
+        }
+        let pings = try XCTUnwrap(counter)
+        let before = await pings.count
+        try await Task.sleep(for: .seconds(6))
+        let sent = await pings.count - before
+        XCTAssertGreaterThanOrEqual(sent, 5, "too few health pings for six seconds of a quiet connection")
+        let ended = await live.log.endReason
+        XCTAssertNil(ended, "the connection ended: \(String(describing: ended))")
+    }
+
     private func checkTypedInputReachesTheProgram(version: String) async throws {
         let live = try await openLive(version: version)
         let dump = try await startDump(in: live)
@@ -170,8 +193,13 @@ final class HerdrLiveConnectionTests: XCTestCase {
         let paneID: String
     }
 
-    /// A shown connection to a fresh isolated server for Herdr `version`, and its first pane.
-    private func openLive(version: String) async throws -> Live {
+    /// A shown connection to a fresh isolated server for Herdr `version`, and its first pane. `through`
+    /// can put a transport between the connection and the bridge.
+    private func openLive(
+        version: String,
+        timing: HerdrConnection.Timing = HerdrConnection.Timing(),
+        through wrap: (any HerdrBridgeTransport) -> any HerdrBridgeTransport = { $0 }
+    ) async throws -> Live {
         let fixture = try await HerdrLiveFixture.start(try HerdrLiveConfiguration.load(), version: version)
         addTeardownBlock {
             for problem in await fixture.tearDown() {
@@ -187,9 +215,10 @@ final class HerdrLiveConnectionTests: XCTestCase {
             trace: trace
         )
         let connection = try await HerdrConnection.open(
-            transport: bridge,
+            transport: wrap(bridge),
             hello: HerdrHello(cellWidthPx: 9, cellHeightPx: 18, cols: 80, rows: 24, surfaceActive: true),
             appActive: true,
+            timing: timing,
             onEvent: { await log.append($0) }
         )
         // Teardown blocks run last first, so the connection closes before the fixture stops Herdr.
@@ -239,6 +268,32 @@ struct HerdrLiveDump {
     private func contents() async throws -> [UInt8] {
         let result = try await fixture.run(#"cat -- "$(printf %b "$1")" 2>/dev/null || true"#, arguments: [path])
         return Array(result.stdout)
+    }
+}
+
+/// Passes a bridge through and counts the health pings written to it.
+actor HerdrLivePingCounter: HerdrBridgeTransport {
+    private let bridge: any HerdrBridgeTransport
+    private(set) var count = 0
+
+    init(_ bridge: any HerdrBridgeTransport) {
+        self.bridge = bridge
+    }
+
+    func read() async throws -> [UInt8]? {
+        try await bridge.read()
+    }
+
+    func write(_ bytes: [UInt8]) async throws {
+        var reader = HerdrWireReader(Array(bytes.dropFirst(4)))
+        if (try? reader.variant()) == 20, (try? reader.string()) == HerdrControlKind.healthPing {
+            count += 1
+        }
+        try await bridge.write(bytes)
+    }
+
+    func close(reusable: Bool) async {
+        await bridge.close(reusable: reusable)
     }
 }
 

@@ -7,7 +7,7 @@ final class GhosttyTerminalPresentationProjectorTests: XCTestCase {
     func testTopologyAndSurfaceIdentityCannotDeclarePresentationSuccess() {
         let paneID = UUID()
         let failure = TerminalDisconnectReason(kind: .runtime, message: "first frame failed")
-        for presentation in [TerminalPanePresentation.pending, .failed(failure), .ready] {
+        for presentation in [TerminalPanePresentation.pending, .awaitingFrame, .failed(failure), .ready] {
             let snapshot = TerminalReadinessProjector.snapshot(
                 phase: .running, transportWritable: true, topLevelCount: 1,
                 selectedActiveLeafID: paneID, selectedPanePresentation: presentation
@@ -15,7 +15,7 @@ final class GhosttyTerminalPresentationProjectorTests: XCTestCase {
             XCTAssertEqual(TerminalReadinessProjector.uiTestInputReady(snapshot), presentation == .ready)
             XCTAssertEqual(TerminalReadinessProjector.isTerminalStatusReady(snapshot, commandFailureMessage: nil), presentation == .ready)
             let expected: TerminalRuntimeState = switch presentation {
-            case .pending: .connecting
+            case .pending, .awaitingFrame: .connecting
             case .ready: .connected
             case .failed(let reason): .disconnected(reason)
             }
@@ -26,6 +26,59 @@ final class GhosttyTerminalPresentationProjectorTests: XCTestCase {
                     debugStatus: "", registryDebugSummary: ""
                 ), .failed(message: failure.message, reason: failure))
             }
+        }
+    }
+
+    /// A session the root doesn't show draws nothing, so it reads as connected once its focused pane is
+    /// live. Typing and the screen's own readiness still wait for a drawn frame.
+    func testASessionThatIsNotShownIsConnectedWithoutADrawnFrame() {
+        let paneID = UUID()
+        let failure = TerminalDisconnectReason(kind: .runtime, message: "renderer failed")
+        let cases: [(TerminalPanePresentation, isShown: Bool, TerminalRuntimeState)] = [
+            (.awaitingFrame, false, .connected),
+            (.ready, false, .connected),
+            (.pending, false, .connecting),
+            (.failed(failure), false, .disconnected(failure)),
+            (.awaitingFrame, true, .connecting),
+            (.ready, true, .connected),
+        ]
+        for (presentation, isShown, expected) in cases {
+            let snapshot = TerminalReadinessProjector.snapshot(
+                phase: .running, transportWritable: true, topLevelCount: 1,
+                selectedActiveLeafID: paneID, selectedPanePresentation: presentation, isShown: isShown
+            )
+            XCTAssertEqual(
+                TerminalReadinessProjector.runtimeState(snapshot), expected,
+                "\(presentation), shown: \(isShown)"
+            )
+            XCTAssertEqual(TerminalReadinessProjector.canSubmitInput(snapshot), presentation == .ready)
+            XCTAssertEqual(
+                TerminalReadinessProjector.isTerminalStatusReady(snapshot, commandFailureMessage: nil),
+                presentation == .ready
+            )
+        }
+
+        // Not shown still needs a writable transport, a focused pane and a window.
+        let unready = [
+            TerminalReadinessProjector.snapshot(
+                phase: .running, transportWritable: false, topLevelCount: 1,
+                selectedActiveLeafID: paneID, selectedPanePresentation: .awaitingFrame, isShown: false
+            ),
+            TerminalReadinessProjector.snapshot(
+                phase: .running, transportWritable: true, topLevelCount: 1,
+                selectedActiveLeafID: nil, selectedPanePresentation: .awaitingFrame, isShown: false
+            ),
+            TerminalReadinessProjector.snapshot(
+                phase: .running, transportWritable: true, topLevelCount: 0,
+                selectedActiveLeafID: paneID, selectedPanePresentation: .awaitingFrame, isShown: false
+            ),
+            TerminalReadinessProjector.snapshot(
+                phase: .starting, transportWritable: true, topLevelCount: 1,
+                selectedActiveLeafID: paneID, selectedPanePresentation: .awaitingFrame, isShown: false
+            ),
+        ]
+        for snapshot in unready {
+            XCTAssertEqual(TerminalReadinessProjector.runtimeState(snapshot), .connecting)
         }
     }
 
