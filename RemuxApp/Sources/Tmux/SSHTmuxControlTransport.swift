@@ -518,6 +518,10 @@ actor SSHTmuxControlTransport: TmuxControlTransport, TmuxControlTransportLivenes
                 await current.cancelAndCleanup()
                 throw SSHTmuxControlTransportError.closed
             }
+            guard !Task.isCancelled else {
+                await current.cancelAndCleanup()
+                throw CancellationError()
+            }
             preparedRoot = current
             return try await claim(current)
         }
