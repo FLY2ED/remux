@@ -1500,22 +1500,30 @@ final class SSHTmuxControlTransportTests: XCTestCase {
     /// A lookup never hands out an attempt that already failed, even before the pool's own observer of that attempt
     /// has removed it.
     func testSSHRootServiceLookupReplacesAFailedAttemptAtOnce() async throws {
+        let server = try await SSHPublicKeyLiveTestServer.start(username: "remux", suspendAuthentication: true)
+        defer { server.stop() }
+        let loopback = makeLoopbackSession(port: server.port)
+        try loopback.trustedHostStore.trustHostKey(loopback.challenge(for: server))
         let pool = RemuxSSHRootService()
         addTeardownBlock { await pool.closeAllConnectionsForTesting() }
-        let key = makeSSHRootKey()
         let failed = RemuxSSHRootAttempt { throw SSHTmuxControlTransportError.closed }
         _ = try? await failed.task.value
-        let generation = await pool.insertEntryForTesting(for: key, readiness: .connecting, attempt: failed)
+        let generation = await pool.insertEntryForTesting(for: loopback.key, readiness: .connecting, attempt: failed)
 
         let prepared = await pool.preparedRoot(
-            for: key,
-            configuration: makeRefusedRootConfiguration(),
+            for: loopback.key,
+            configuration: makeLoopbackConfiguration(loopback).sshRootConfiguration,
             trace: RemuxTransportStartupTrace(flowID: nil)
         )
 
-        let entry = await pool.snapshot().entry(for: key)
+        // The server holds the replacement's authentication, so it is still the pool's entry.
+        let entry = await pool.snapshot().entry(for: loopback.key)
         XCTAssertNotNil(entry)
         XCTAssertNotEqual(entry?.generation, generation, "the lookup reused the failed attempt")
+        XCTAssertFalse(prepared.isFinished)
+        let isSuspended = await server.waitForSuspendedAuthentication()
+        XCTAssertTrue(isSuspended)
+        server.failSuspendedAuthentication()
         await prepared.cancelAndCleanup()
     }
 
@@ -1665,18 +1673,19 @@ final class SSHTmuxControlTransportTests: XCTestCase {
         _ loopback: LoopbackSession,
         pool: RemuxSSHRootService
     ) -> SSHTmuxControlTransport {
-        SSHTmuxControlTransport(
-            configuration: SSHTmuxControlConfiguration(
-                host: loopback.server.host,
-                port: loopback.server.port,
-                authenticationMethod: { .passwordBased(username: "remux", password: "pw") },
-                hostKeyValidator: loopback.trustedHostStore.validator(for: loopback.server),
-                connectTimeout: .seconds(5),
-                controlNoResponseTimeout: .milliseconds(300),
-                sessionName: "base",
-                sshRootKey: loopback.key
-            ),
-            sshRootService: pool
+        SSHTmuxControlTransport(configuration: makeLoopbackConfiguration(loopback), sshRootService: pool)
+    }
+
+    private func makeLoopbackConfiguration(_ loopback: LoopbackSession) -> SSHTmuxControlConfiguration {
+        SSHTmuxControlConfiguration(
+            host: loopback.server.host,
+            port: loopback.server.port,
+            authenticationMethod: { .passwordBased(username: "remux", password: "pw") },
+            hostKeyValidator: loopback.trustedHostStore.validator(for: loopback.server),
+            connectTimeout: .seconds(5),
+            controlNoResponseTimeout: .milliseconds(300),
+            sessionName: "base",
+            sshRootKey: loopback.key
         )
     }
 
