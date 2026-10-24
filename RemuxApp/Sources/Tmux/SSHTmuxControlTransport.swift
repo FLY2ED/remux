@@ -271,7 +271,13 @@ actor SSHTmuxControlTransport: TmuxControlTransport, TmuxControlTransportLivenes
     func prepare() async {
         guard !isClosed, preparedRoot == nil, connection == nil, !hasStarted else { return }
 
-        preparedRoot = await makePreparedRoot()
+        let prepared = await makePreparedRoot()
+        // start() or close() can run while the root is being prepared; a root they no longer want is let go.
+        guard !isClosed, preparedRoot == nil, connection == nil, !hasStarted else {
+            await prepared.cancelAndCleanup()
+            return
+        }
+        preparedRoot = prepared
     }
 
     func start(initialViewport: TmuxControlViewport?) async throws {
@@ -288,29 +294,21 @@ actor SSHTmuxControlTransport: TmuxControlTransport, TmuxControlTransportLivenes
             preparedRoot = existingPreparedRoot
         } else {
             preparedRoot = await makePreparedRoot()
+            guard !isClosed else {
+                await preparedRoot.cancelAndCleanup()
+                throw SSHTmuxControlTransportError.closed
+            }
         }
         self.preparedRoot = preparedRoot
         let startupTrace = preparedRoot.trace
         var startedConnection: SSHTmuxControlConnection?
         let establishedConnection: SSHTmuxControlConnection
         do {
-            let sshRoot = try await startupTrace.stage("sshRoot.ready") {
-                try await preparedRoot.sshRoot()
-            }
-            self.preparedRoot = nil
-            guard !isClosed else { throw SSHTmuxControlTransportError.closed }
+            let claimedConnection = try await claimStartupRoot(startingWith: preparedRoot)
             let startupViewport = initialViewport ?? configuration.initialViewport
             GhosttyRuntimeTrace.tmuxViewport(
                 "startup.attach session=\(configuration.sessionName) viewport=\(GhosttyRuntimeTrace.viewportDescription(startupViewport)) initialProvided=\(initialViewport != nil)"
             )
-            let claimedConnection = try await preparedRoot.claim(
-                sshRoot,
-                trace: startupTrace
-            )
-            guard !isClosed else {
-                await claimedConnection.release(.reusable)
-                throw SSHTmuxControlTransportError.closed
-            }
             establishedConnection = try await SSHTmuxControlBootstrap.openControlSession(
                 using: claimedConnection,
                 viewport: startupViewport,
@@ -423,6 +421,12 @@ actor SSHTmuxControlTransport: TmuxControlTransport, TmuxControlTransportLivenes
         return connection.isControlChannelActive
     }
 
+#if DEBUG
+    var hasStartedForTesting: Bool {
+        hasStarted
+    }
+#endif
+
     func close(disposition: TmuxControlTransportCloseDisposition) async {
         let activeConnection = connection
         let pendingPreparedRoot = preparedRoot
@@ -494,6 +498,58 @@ actor SSHTmuxControlTransport: TmuxControlTransport, TmuxControlTransportLivenes
         case .stalePreparedRoot:
             return SSHTmuxControlTransportError.stalePreparedConnection
         }
+    }
+
+    /// The root the session starts on. A prepared root whose authentication had already finished when the session
+    /// opened may be out of date: the server, the network or the trusted host key can have changed since. If it
+    /// can't be claimed, it is let go and one current attempt from the pool decides. A root still authenticating
+    /// when the session opened is the session's own attempt, and its failure stands.
+    private func claimStartupRoot(
+        startingWith prepared: RemuxSSHPreparedRoot
+    ) async throws -> RemuxSSHClaimedRoot {
+        let wasFinished = prepared.isFinished
+        do {
+            return try await claim(prepared)
+        } catch {
+            guard wasFinished, !isClosed, !Task.isCancelled, !(error is CancellationError) else { throw error }
+            prepared.trace.event("preparedRoot.replaced", fields: ["error": String(describing: error)])
+            let current = await makePreparedRoot()
+            guard !isClosed else {
+                await current.cancelAndCleanup()
+                throw SSHTmuxControlTransportError.closed
+            }
+            guard !Task.isCancelled else {
+                await current.cancelAndCleanup()
+                throw CancellationError()
+            }
+            preparedRoot = current
+            return try await claim(current)
+        }
+    }
+
+    /// While `prepared` is authenticating it is `preparedRoot`, so a close() meanwhile lets go of it.
+    private func claim(_ prepared: RemuxSSHPreparedRoot) async throws -> RemuxSSHClaimedRoot {
+        let sshRoot: RemuxSSHRoot
+        do {
+            sshRoot = try await prepared.trace.stage("sshRoot.ready") {
+                try await prepared.sshRoot()
+            }
+        } catch {
+            preparedRoot = nil
+            throw error
+        }
+        preparedRoot = nil
+        guard !isClosed else { throw SSHTmuxControlTransportError.closed }
+        guard sshRoot.rootChannel.isActive else {
+            await prepared.cancelAndCleanup()
+            throw RemuxSSHRootServiceError.stalePreparedRoot
+        }
+        let claimedConnection = try await prepared.claim(sshRoot, trace: prepared.trace)
+        guard !isClosed else {
+            await claimedConnection.release(.reusable)
+            throw SSHTmuxControlTransportError.closed
+        }
+        return claimedConnection
     }
 
     private func makePreparedRoot() async -> RemuxSSHPreparedRoot {

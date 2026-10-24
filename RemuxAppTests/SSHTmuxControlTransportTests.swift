@@ -1497,6 +1497,236 @@ final class SSHTmuxControlTransportTests: XCTestCase {
         }
     }
 
+    /// A lookup never hands out an attempt that already failed, even before the pool's own observer of that attempt
+    /// has removed it.
+    func testSSHRootServiceLookupReplacesAFailedAttemptAtOnce() async throws {
+        let server = try await SSHPublicKeyLiveTestServer.start(username: "remux", suspendAuthentication: true)
+        defer { server.stop() }
+        let loopback = makeLoopbackSession(port: server.port)
+        try loopback.trustedHostStore.trustHostKey(loopback.challenge(for: server))
+        let pool = RemuxSSHRootService()
+        addTeardownBlock { await pool.closeAllConnectionsForTesting() }
+        let failed = RemuxSSHRootAttempt { throw SSHTmuxControlTransportError.closed }
+        _ = try? await failed.task.value
+        let generation = await pool.insertEntryForTesting(for: loopback.key, readiness: .connecting, attempt: failed)
+
+        let prepared = await pool.preparedRoot(
+            for: loopback.key,
+            configuration: makeLoopbackConfiguration(loopback).sshRootConfiguration,
+            trace: RemuxTransportStartupTrace(flowID: nil)
+        )
+
+        // The server holds the replacement's authentication, so it is still the pool's entry.
+        let entry = await pool.snapshot().entry(for: loopback.key)
+        XCTAssertNotNil(entry)
+        XCTAssertNotEqual(entry?.generation, generation, "the lookup reused the failed attempt")
+        XCTAssertFalse(prepared.isFinished)
+        let isSuspended = await server.waitForSuspendedAuthentication()
+        XCTAssertTrue(isSuspended)
+        server.failSuspendedAuthentication()
+        await prepared.cancelAndCleanup()
+    }
+
+    /// An attempt still in progress is the current one: a lookup joins it instead of starting another.
+    func testSSHRootServiceLookupJoinsAnAttemptInProgress() async {
+        let pool = RemuxSSHRootService()
+        addTeardownBlock { await pool.closeAllConnectionsForTesting() }
+        let key = makeSSHRootKey()
+        let generation = await pool.insertEntryForTesting(for: key, readiness: .connecting)
+
+        let prepared = await pool.preparedRoot(
+            for: key,
+            configuration: makeRefusedRootConfiguration(),
+            trace: RemuxTransportStartupTrace(flowID: nil)
+        )
+
+        let joinedGeneration = await pool.snapshot().entry(for: key)?.generation
+        XCTAssertEqual(joinedGeneration, generation)
+        XCTAssertFalse(prepared.isFinished)
+        await prepared.cancelAndCleanup()
+    }
+
+    /// The prepared connection failed on the host key before the user trusted it. Opening the session makes one
+    /// current attempt, which gets as far as starting tmux, instead of replaying that failure.
+    func testStartRetriesAPreparationThatFailedBeforeTheHostKeyWasTrusted() async throws {
+        let server = try await SSHPublicKeyLiveTestServer.start(username: "remux")
+        defer { server.stop() }
+        let loopback = makeLoopbackSession(port: server.port)
+        let pool = RemuxSSHRootService()
+        addTeardownBlock { await pool.closeAllConnectionsForTesting() }
+        let transport = makeLoopbackTransport(loopback, pool: pool)
+
+        await transport.prepare()
+        try await waitUntilPoolForgets(loopback.key, in: pool)
+        try loopback.trustedHostStore.trustHostKey(loopback.challenge(for: server))
+
+        do {
+            try await transport.start(initialViewport: nil)
+            XCTFail("the test server doesn't run tmux, so start should fail after the exec")
+        } catch {
+            XCTAssertNil(error as? TrustedHostStoreError, "start replayed the failure from before the trust: \(error)")
+        }
+        await transport.close(disposition: .invalidated)
+        XCTAssertEqual(server.recordedRoots.opened.count, 2)
+        XCTAssertEqual(server.recordedRoots.execRequestCount, 1)
+    }
+
+    /// A preparation still authenticating when the session opened is the session's own attempt: its failure is
+    /// shown, with no second attempt.
+    func testStartKeepsTheFailureOfAPreparationStillInProgress() async throws {
+        let server = try await SSHPublicKeyLiveTestServer.start(username: "remux", suspendAuthentication: true)
+        defer { server.stop() }
+        let loopback = makeLoopbackSession(port: server.port)
+        try loopback.trustedHostStore.trustHostKey(loopback.challenge(for: server))
+        let pool = RemuxSSHRootService()
+        addTeardownBlock { await pool.closeAllConnectionsForTesting() }
+        let transport = makeLoopbackTransport(loopback, pool: pool)
+
+        await transport.prepare()
+        let isSuspended = await server.waitForSuspendedAuthentication()
+        XCTAssertTrue(isSuspended)
+        let start = Task { try await transport.start(initialViewport: nil) }
+        try await waitUntil("start adopted the preparation") { await transport.hasStartedForTesting }
+        server.failSuspendedAuthentication()
+
+        do {
+            try await start.value
+            XCTFail("the authentication was refused, so start should fail")
+        } catch {}
+        await transport.close(disposition: .invalidated)
+        XCTAssertEqual(server.recordedRoots.opened.count, 1)
+    }
+
+    /// The prepared connection authenticated, then the server closed it before the session opened. Opening the
+    /// session makes one current attempt instead of failing on the closed connection.
+    func testStartReplacesAPreparedConnectionThatClosedBeforeTheOpen() async throws {
+        let server = try await SSHPublicKeyLiveTestServer.start(username: "remux")
+        defer { server.stop() }
+        let loopback = makeLoopbackSession(port: server.port)
+        try loopback.trustedHostStore.trustHostKey(loopback.challenge(for: server))
+        let pool = RemuxSSHRootService()
+        addTeardownBlock { await pool.closeAllConnectionsForTesting() }
+        let transport = makeLoopbackTransport(loopback, pool: pool)
+
+        await transport.prepare()
+        try await waitUntil("the preparation authenticated") {
+            await pool.snapshot().entry(for: loopback.key)?.readiness == .ready
+        }
+        server.closeClientConnections()
+        try await waitUntilPoolForgets(loopback.key, in: pool)
+
+        do {
+            try await transport.start(initialViewport: nil)
+            XCTFail("the test server doesn't run tmux, so start should fail after the exec")
+        } catch {
+            XCTAssertNotEqual(error as? SSHTmuxControlTransportError, .stalePreparedConnection)
+        }
+        await transport.close(disposition: .invalidated)
+        XCTAssertEqual(server.recordedRoots.opened.count, 2)
+        XCTAssertEqual(server.recordedRoots.execRequestCount, 1)
+    }
+
+    private struct LoopbackSession {
+        let server: SavedServer
+        let trustedHostStore: TrustedHostStore
+        let key: RemuxSSHRootKey
+
+        func challenge(for testServer: SSHPublicKeyLiveTestServer) -> SSHHostKeyTrustChallenge {
+            SSHHostKeyTrustChallenge(
+                kind: .unknown,
+                serverID: server.id,
+                host: server.host,
+                trustedKeyType: nil,
+                trustedOpenSSHPublicKey: nil,
+                receivedKeyType: testServer.hostKeyType,
+                receivedOpenSSHPublicKey: testServer.openSSHPublicKey
+            )
+        }
+    }
+
+    private func makeLoopbackSession(port: Int) -> LoopbackSession {
+        let id = UUID()
+        let server = SavedServer(
+            id: id,
+            displayName: "loopback",
+            host: "127.0.0.1",
+            port: port,
+            username: "remux",
+            identityID: id
+        )
+        let trustedHostRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SSHTmuxControlTransportTests-\(id)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: trustedHostRoot) }
+        let target = SessionTarget(
+            server: server,
+            workspace: SavedWorkspace(serverID: id, sessionName: "base"),
+            sshAuth: makePasswordAuth(server: server, password: "pw")
+        )
+        return LoopbackSession(
+            server: server,
+            trustedHostStore: TrustedHostStore(rootURL: trustedHostRoot),
+            key: RemuxSSHRootKey(target: target)
+        )
+    }
+
+    private func makeLoopbackTransport(
+        _ loopback: LoopbackSession,
+        pool: RemuxSSHRootService
+    ) -> SSHTmuxControlTransport {
+        SSHTmuxControlTransport(configuration: makeLoopbackConfiguration(loopback), sshRootService: pool)
+    }
+
+    private func makeLoopbackConfiguration(_ loopback: LoopbackSession) -> SSHTmuxControlConfiguration {
+        SSHTmuxControlConfiguration(
+            host: loopback.server.host,
+            port: loopback.server.port,
+            authenticationMethod: { .passwordBased(username: "remux", password: "pw") },
+            hostKeyValidator: loopback.trustedHostStore.validator(for: loopback.server),
+            connectTimeout: .seconds(5),
+            controlNoResponseTimeout: .milliseconds(300),
+            sessionName: "base",
+            sshRootKey: loopback.key
+        )
+    }
+
+    /// Nothing listens on port 1, so an attempt there fails right away.
+    private func makeRefusedRootConfiguration() -> RemuxSSHRootConfiguration {
+        let server = SavedServer(displayName: "refused", host: "127.0.0.1", port: 1, username: "tester")
+        let trustedHostStore = TrustedHostStore(
+            rootURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        )
+        return RemuxSSHRootConfiguration(
+            host: server.host,
+            port: server.port,
+            authenticationMethod: { .passwordBased(username: "tester", password: "pw") },
+            hostKeyValidator: trustedHostStore.validator(for: server),
+            connectTimeout: .seconds(2)
+        )
+    }
+
+    /// The pool drops an entry once its observer has seen the attempt fail or the root close.
+    private func waitUntilPoolForgets(_ key: RemuxSSHRootKey, in pool: RemuxSSHRootService) async throws {
+        try await waitUntil("the pool still has the entry") {
+            await pool.snapshot().entry(for: key) == nil
+        }
+    }
+
+    private func waitUntil(
+        _ message: String,
+        timeout: Duration = .seconds(5),
+        condition: () async -> Bool
+    ) async throws {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while !(await condition()) {
+            guard ContinuousClock.now < deadline else {
+                XCTFail(message)
+                return
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
     private func makeSSHRootKey(
         serverID: SavedServer.ID = UUID(),
         host: String = "server.example.com",
