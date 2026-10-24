@@ -10,7 +10,7 @@ final class HerdrConnectionTests: XCTestCase {
         pingAfterSilence: .seconds(60),
         unansweredPing: .seconds(60),
         firstSnapshot: .seconds(60),
-        healthTick: .milliseconds(10),
+        deliveryRecheck: .milliseconds(10),
         command: .seconds(10),
         activation: .seconds(10)
     )
@@ -22,6 +22,7 @@ final class HerdrConnectionTests: XCTestCase {
         pingAfterSilence: Duration = .seconds(60),
         unansweredPing: Duration = .seconds(60),
         firstSnapshot: Duration = .seconds(60),
+        deliveryRecheck: Duration = .milliseconds(10),
         command: Duration = .seconds(10),
         activation: Duration = .seconds(10)
     ) -> HerdrConnection.Timing {
@@ -30,7 +31,7 @@ final class HerdrConnectionTests: XCTestCase {
             pingAfterSilence: pingAfterSilence,
             unansweredPing: unansweredPing,
             firstSnapshot: firstSnapshot,
-            healthTick: .milliseconds(10),
+            deliveryRecheck: deliveryRecheck,
             command: command,
             activation: activation
         )
@@ -545,6 +546,45 @@ final class HerdrConnectionTests: XCTestCase {
         await events.waitForCount(2)
         let ended = await events.hasEnded
         XCTAssertFalse(ended)
+        await connection.setAppActive(false)
+    }
+
+    /// The health check wakes when a limit is due, not on a schedule: with the re-check while the screen
+    /// takes messages at a minute, the ping goes out after the silence and the connection fails at the
+    /// reply limit.
+    func testHealthLimitsAreKeptWithoutAPeriodicCheck() async throws {
+        let (connection, transport, events) = try await openedSession(
+            surfaceActive: true,
+            timing: timing(pingAfterSilence: .milliseconds(50), unansweredPing: .milliseconds(100), deliveryRecheck: .seconds(60))
+        )
+        let reads = await transport.waitForReads(2)
+        XCTAssertEqual(reads, 2, "the reader is waiting again, so the snapshot has been taken")
+        await connection.setAppActive(true)
+        let ping = try Self.control(try await transport.written(1))
+        XCTAssertEqual(ping.kind, HerdrControlKind.healthPing)
+        let deadline = ContinuousClock.now + .seconds(2)
+        while await events.hasEnded == false, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let kinds = await events.events.map(\.kind)
+        XCTAssertEqual(kinds.last, "ended(unresponsive)")
+    }
+
+    /// Bytes that answer a ping restart the silence, so the next ping goes out a silence after them,
+    /// long before the reply limit the check was also waiting for.
+    func testTheNextPingFollowsTheBytesThatAnsweredThePreviousOne() async throws {
+        let (connection, transport, _) = try await openedSession(
+            surfaceActive: true,
+            timing: timing(pingAfterSilence: .milliseconds(100), deliveryRecheck: .seconds(60))
+        )
+        _ = await transport.waitForReads(2)
+        await connection.setAppActive(true)
+        let first = try Self.control(try await transport.written(1))
+        // Part of a message: read, but nothing for the screen to take.
+        await transport.serve(Array(HerdrWire.frame([9, 1]).prefix(3)))
+        let second = try Self.control(try await transport.written(2))
+        XCTAssertEqual(second.kind, HerdrControlKind.healthPing)
+        XCTAssertNotEqual(second.data, first.data)
         await connection.setAppActive(false)
     }
 
