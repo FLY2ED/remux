@@ -174,7 +174,7 @@ private struct RemuxWorkspaceShell: View {
                 projection: SessionSwitcherProjection(
                     snapshot: model.library,
                     activeSessions: model.activeSessions,
-                    discoveryStates: model.tmuxSessionDiscoveryStates,
+                    discoveries: model.sessionDiscoveries,
                     selectedSessionID: selectedTerminalID
                 ),
                 servers: model.library.servers,
@@ -184,12 +184,9 @@ private struct RemuxWorkspaceShell: View {
                     traceSessionOpenTap(workspaceID)
                     Task { await model.connect(to: workspaceID) }
                 },
-                onResumeAvailableSession: { serverID, sessionName in
+                onResumeAvailableSession: { serverID, locator in
                     Task {
-                        await model.connectToDiscoveredSession(
-                            named: sessionName,
-                            on: serverID
-                        )
+                        await model.connectToDiscoveredSession(locator, on: serverID)
                     }
                 },
                 onDisconnectSession: model.disconnectActiveSession,
@@ -208,8 +205,8 @@ private struct RemuxWorkspaceShell: View {
                         }
                     }
                 },
-                onRefresh: model.refreshTmuxSessions,
-                discoveryStates: model.tmuxSessionDiscoveryStates
+                onRefresh: model.refreshSessions,
+                discoveries: model.sessionDiscoveries
             )
             .remuxSheetPresentationBackground()
             .ghosttyTerminalChromePresentation(
@@ -426,9 +423,14 @@ private struct RemuxWorkspaceShell: View {
             setupSessionID: setupSessionID,
             isActionInProgress: model.isSetupActionInProgress,
             showsServerSummaryForNewSession: showsServerSummaryForNewSession,
-            hasExecutableProblem: setup.mode.existingServerID.flatMap {
-                model.tmuxSessionDiscoveryStates[$0]?.executableProblem
-            } != nil,
+            backendProblems: setup.mode.existingServerID.map {
+                model.discoveryNotices(for: $0).backendProblems
+            } ?? [:],
+            opensAdvanced: setup.mode.existingServerID.map { serverID in
+                model.discoveryNotices(for: serverID).showsBackendProblem(
+                    savedBackends: Set(model.library.workspaces(for: serverID).map(\.backend))
+                )
+            } ?? false,
             isClosing: isClosing,
             onChange: model.updateDraft,
             onConnect: onSave,
@@ -579,7 +581,7 @@ private struct RemuxWorkspaceShell: View {
             ConnectionLibraryView(
                 snapshot: model.library,
                 activeSessions: model.activeSessions,
-                discoveryStates: model.tmuxSessionDiscoveryStates,
+                discoveries: model.sessionDiscoveries,
                 terminalSettings: terminalSettingsBinding,
                 shortcutStore: shortcutStore,
                 presentedServerID: $presentedServerID,
@@ -598,18 +600,15 @@ private struct RemuxWorkspaceShell: View {
                     traceSessionOpenTap(workspaceID)
                     Task { await model.connect(to: workspaceID) }
                 },
-                onConnectAvailableSession: { serverID, sessionName in
+                onConnectAvailableSession: { serverID, locator in
                     Task {
-                        await model.connectToDiscoveredSession(
-                            named: sessionName,
-                            on: serverID
-                        )
+                        await model.connectToDiscoveredSession(locator, on: serverID)
                     }
                 },
                 onRefreshServerSessions: { serverID in
-                    await model.refreshTmuxSessionsAndWait(for: serverID)
+                    await model.refreshSessionsAndWait(for: serverID)
                 },
-                onTrustDiscoveryHostKey: model.trustTmuxSessionDiscoveryHostKey,
+                onTrustDiscoveryHostKey: model.trustSessionDiscoveryHostKey,
                 onShowActiveSession: { workspaceID in
                     GhosttyRuntimeTrace.flowBegin(
                         sessionShowFlowID(workspaceID),
@@ -921,7 +920,7 @@ private struct ConnectionLibraryView: View {
 
     let snapshot: ConnectionLibrarySnapshot
     let activeSessions: [ActiveTerminalSession]
-    let discoveryStates: [SavedServer.ID: TmuxSessionDiscoveryState]
+    let discoveries: [SavedServer.ID: ServerSessionDiscovery]
     @Binding var terminalSettings: TerminalSettings
     let shortcutStore: ShortcutStore
     @Binding var presentedServerID: SavedServer.ID?
@@ -930,7 +929,7 @@ private struct ConnectionLibraryView: View {
     let onEditServer: (SavedServer.ID) -> Void
     let onEditWorkspace: (SavedServer.ID, SavedWorkspace.ID) -> Void
     let onConnect: (SavedWorkspace.ID) -> Void
-    let onConnectAvailableSession: (SavedServer.ID, String) -> Void
+    let onConnectAvailableSession: (SavedServer.ID, SessionLocator) -> Void
     let onRefreshServerSessions: (SavedServer.ID) async -> Void
     let onTrustDiscoveryHostKey: (SSHHostKeyTrustChallenge) -> Void
     let onShowActiveSession: (SavedWorkspace.ID) -> Void
@@ -948,7 +947,7 @@ private struct ConnectionLibraryView: View {
         let sessionProjection = SessionSwitcherProjection(
             snapshot: snapshot,
             activeSessions: activeSessions,
-            discoveryStates: discoveryStates,
+            discoveries: discoveries,
             selectedSessionID: nil
         )
 
@@ -1018,7 +1017,7 @@ private struct ConnectionLibraryView: View {
                let server = snapshot.server(id: presentedServerID) {
                 serverDetail(
                     for: server,
-                    availableSessionNames: sessionProjection.availableSessionNames(on: server.id)
+                    availableSessions: sessionProjection.availableSessions(on: server.id)
                 )
             }
         }
@@ -1147,7 +1146,7 @@ private struct ConnectionLibraryView: View {
                 NavigationLink {
                     serverDetail(
                         for: server,
-                        availableSessionNames: sessionProjection.availableSessionNames(on: server.id)
+                        availableSessions: sessionProjection.availableSessions(on: server.id)
                     )
                 } label: {
                     ServerLibraryRow(
@@ -1251,9 +1250,9 @@ private struct ConnectionLibraryView: View {
 
     private var recentWorkspaces: [SavedWorkspace] {
         snapshot.recentWorkspaces(excluding: activeWorkspaceIDs).filter {
-            TmuxSessionReconciliation.includesSavedWorkspace(
+            SessionReconciliation.includesSavedWorkspace(
                 $0,
-                discoveryStates: discoveryStates
+                discoveries: discoveries
             )
         }
     }
@@ -1273,23 +1272,24 @@ private struct ConnectionLibraryView: View {
     private func visibleWorkspaces(for serverID: SavedServer.ID) -> [SavedWorkspace] {
         snapshot.workspaces(for: serverID).filter { workspace in
             activeWorkspaceIDs.contains(workspace.id)
-                || TmuxSessionReconciliation.includesSavedWorkspace(
+                || SessionReconciliation.includesSavedWorkspace(
                     workspace,
-                    discoveryStates: discoveryStates
+                    discoveries: discoveries
                 )
         }
     }
 
     private func serverDetail(
         for server: SavedServer,
-        availableSessionNames: [String]
+        availableSessions: [AvailableSessionSwitcherItem]
     ) -> some View {
         ServerDetailView(
             server: server,
             workspaces: visibleWorkspaces(for: server.id),
             activeSessions: activeSessions.filter { $0.target.server.id == server.id },
-            discoveryState: discoveryStates[server.id] ?? .idle,
-            availableSessionNames: availableSessionNames,
+            discovery: discoveries[server.id] ?? .idle,
+            notices: (discoveries[server.id] ?? .idle).notices,
+            availableSessions: availableSessions,
             onAddWorkspace: { serverID in
                 beginNewWorkspace(
                     for: serverID,
@@ -1366,13 +1366,14 @@ private struct ServerDetailView: View {
     let server: SavedServer
     let workspaces: [SavedWorkspace]
     let activeSessions: [ActiveTerminalSession]
-    let discoveryState: TmuxSessionDiscoveryState
-    let availableSessionNames: [String]
+    let discovery: ServerSessionDiscovery
+    let notices: ServerDiscoveryNotices
+    let availableSessions: [AvailableSessionSwitcherItem]
     let onAddWorkspace: (SavedServer.ID) -> Void
     let onEditServer: (SavedServer.ID) -> Void
     let onEditWorkspace: (SavedServer.ID, SavedWorkspace.ID) -> Void
     let onConnect: (SavedWorkspace.ID) -> Void
-    let onConnectAvailableSession: (SavedServer.ID, String) -> Void
+    let onConnectAvailableSession: (SavedServer.ID, SessionLocator) -> Void
     let onRefreshSessions: (SavedServer.ID) async -> Void
     let onTrustHostKey: (SSHHostKeyTrustChallenge) -> Void
     let onDeleteWorkspace: (SavedWorkspace.ID) -> Void
@@ -1382,15 +1383,23 @@ private struct ServerDetailView: View {
 
     var body: some View {
         List {
-            if discoveryState.phase == .failed {
+            if let challenge = notices.hostKey {
                 Section {
-                    serverProblemRow
+                    hostKeyRow(challenge)
                 }
                 .libraryHomeListRowSurface()
             }
 
             Section("Sessions") {
-                if workspaces.isEmpty && availableSessionNames.isEmpty {
+                if notices.isNeitherBackendInstalled {
+                    Text("Neither tmux nor Herdr is installed on this server.")
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("library.server.no-backend")
+                    Button("Set Paths") {
+                        onEditServer(server.id)
+                    }
+                    .accessibilityIdentifier("library.server.set-paths")
+                } else if workspaces.isEmpty && availableSessions.isEmpty {
                     Button {
                         onAddWorkspace(server.id)
                     } label: {
@@ -1401,14 +1410,20 @@ private struct ServerDetailView: View {
                 }
 
                 ForEach(visibleWorkspaces) { workspace in
+                    let problem = notices.backendProblems[workspace.backend]
                     Button {
-                        onConnect(workspace.id)
+                        if problem?.isFixedByPath == true {
+                            onEditServer(server.id)
+                        } else {
+                            onConnect(workspace.id)
+                        }
                     } label: {
                         SessionLibraryRow(
                             server: server,
                             workspace: workspace,
                             runtimeState: activeSession(for: workspace.id)?.runtimeState,
-                            subtitleMode: .lastOpenedOnly
+                            subtitleMode: .lastOpenedOnly,
+                            problem: problem
                         )
                         .accessibilityIdentifier("library.session.resume")
                     }
@@ -1440,31 +1455,36 @@ private struct ServerDetailView: View {
                     .accessibilityIdentifier("library.server.sessions.toggle")
                 }
 
-                ForEach(inlineAvailableSessionNames, id: \.self) { sessionName in
+                ForEach(inlineAvailableSessions) { session in
                     Button {
-                        onConnectAvailableSession(server.id, sessionName)
+                        onConnectAvailableSession(server.id, session.id.locator)
                     } label: {
-                        AvailableServerSessionRow(sessionName: sessionName)
+                        AvailableServerSessionRow(session: session)
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("library.server.available.session")
                 }
 
-                if discoveryState.isLoading || discoveryState.phase == .idle {
+                if discovery.isLoading || discovery.isIdle {
                     HStack(spacing: 12) {
                         ProgressView()
                         Text("Checking the server…")
                             .foregroundStyle(.secondary)
                     }
                     .accessibilityIdentifier("library.server.available.loading")
+                } else if notices.isUnreachable {
+                    Text("Couldn't reach \(server.displayName), so its other sessions aren't listed. Pull down to try again.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("library.server.unreachable")
                 }
 
-                if availableSessionNames.count > Self.maximumInlineAvailableSessionCount {
+                if availableSessions.count > Self.maximumInlineAvailableSessionCount {
                     NavigationLink {
                         ServerAvailableSessionsView(
-                            sessionNames: availableSessionNames,
-                            onSelect: { sessionName in
-                                onConnectAvailableSession(server.id, sessionName)
+                            sessions: availableSessions,
+                            onSelect: { locator in
+                                onConnectAvailableSession(server.id, locator)
                             }
                         )
                     } label: {
@@ -1481,7 +1501,7 @@ private struct ServerDetailView: View {
             await onRefreshSessions(server.id)
         }
         .task(id: server.id) {
-            guard discoveryState.phase == .idle else { return }
+            guard discovery.isIdle else { return }
             await onRefreshSessions(server.id)
         }
         .navigationTitle(server.displayName, withSubtitle: server.displayAddress)
@@ -1513,7 +1533,7 @@ private struct ServerDetailView: View {
         .alert(
             "Trust This Server?",
             isPresented: $isReviewingHostKey,
-            presenting: discoveryState.hostKeyChallenge
+            presenting: discovery.hostKeyChallenge
         ) { challenge in
             Button("Cancel", role: .cancel) {}
             if challenge.receivedKeyFingerprint != nil {
@@ -1539,75 +1559,43 @@ private struct ServerDetailView: View {
         return Array(workspaces.prefix(Self.collapsedWorkspaceCount))
     }
 
-    private var inlineAvailableSessionNames: [String] {
-        Array(availableSessionNames.prefix(Self.maximumInlineAvailableSessionCount))
+    private var inlineAvailableSessions: [AvailableSessionSwitcherItem] {
+        Array(availableSessions.prefix(Self.maximumInlineAvailableSessionCount))
     }
 
-    /// One row, like Settings' "needs attention" rows: tapping it goes to the fix. Pulling down checks again.
-    private var serverProblemRow: some View {
-        Button {
-            if discoveryState.hostKeyChallenge != nil {
-                isReviewingHostKey = true
-            } else if discoveryState.executableProblem != nil {
-                onEditServer(server.id)
-            } else {
-                Task { await onRefreshSessions(server.id) }
-            }
+    /// At the top: nothing on the server can be checked until the key is reviewed. A key seen for the first
+    /// time is routine; only a changed key, which can mean someone is in the middle, is red.
+    private func hostKeyRow(_ challenge: SSHHostKeyTrustChallenge) -> some View {
+        let isChanged = challenge.kind == .changed
+        return Button {
+            isReviewingHostKey = true
         } label: {
             HStack(spacing: 12) {
-                Image(systemName: "exclamationmark.triangle.fill")
+                Image(systemName: isChanged ? "exclamationmark.triangle.fill" : "checkmark.shield")
                     .font(.title3)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(isChanged ? Color.red : Color.secondary)
+                    .frame(width: 30)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(serverProblemTitle)
+                    Text(isChanged ? "Host key changed" : "Verify this server")
                         .font(.headline)
-                    Text(serverProblemDetail)
+                        .foregroundStyle(isChanged ? Color.red : LibraryHomePalette.controlAccent)
+                    Text(isChanged ? "Remux won't connect until you review it." : "First connection. Check its host key.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
 
                 Spacer(minLength: 8)
 
-                if discoveryState.hostKeyChallenge != nil || discoveryState.executableProblem != nil {
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                }
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
             }
             .padding(.vertical, 2)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityIdentifier("library.server.available.failure")
-    }
-
-    private var serverProblemTitle: String {
-        if discoveryState.hostKeyChallenge != nil {
-            return "Check this server's host key"
-        }
-        switch discoveryState.executableProblem {
-        case .notFound:
-            return "tmux wasn't found"
-        case .notExecutable:
-            return "tmux can't be run"
-        case nil:
-            return "Couldn't check sessions"
-        }
-    }
-
-    private var serverProblemDetail: String {
-        if discoveryState.hostKeyChallenge != nil {
-            return "Review it before Remux connects."
-        }
-        switch discoveryState.executableProblem {
-        case .notFound:
-            return "Set the path to tmux, or install it on \(server.displayName)."
-        case .notExecutable:
-            return "Check its path and permissions."
-        case nil:
-            return "Pull down to try again."
-        }
+        .accessibilityIdentifier("library.server.host-key")
     }
 }
 
@@ -1622,25 +1610,27 @@ private func sshHostKeyTrustMessage(for challenge: SSHHostKeyTrustChallenge) -> 
 }
 
 private struct AvailableServerSessionRow: View {
-    let sessionName: String
+    let session: AvailableSessionSwitcherItem
+
+    private var sessionName: String {
+        session.id.locator.name
+    }
+
+    /// The logo tells tmux from Herdr; a Herdr session can be listed while stopped.
+    private var detail: String {
+        session.isRunning ? "On the server" : "Stopped"
+    }
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "terminal")
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(LibraryHomePalette.rowIconForeground)
-                .frame(width: 30, height: 30)
-                .background(
-                    LibraryHomePalette.rowIconSurface,
-                    in: RoundedRectangle(cornerRadius: 7)
-                )
+            SessionBackendLogo(backend: session.id.locator.backend)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(sessionName)
                     .font(.headline)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text("On the server")
+                Text(detail)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -1655,32 +1645,32 @@ private struct AvailableServerSessionRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(sessionName)
+        .accessibilityLabel("\(sessionName), \(session.id.locator.backend.displayName), \(detail)")
         .accessibilityHint("Add this session to Remux")
         .accessibilityAddTraits(.isButton)
     }
 }
 
 private struct ServerAvailableSessionsView: View {
-    let sessionNames: [String]
-    let onSelect: (String) -> Void
+    let sessions: [AvailableSessionSwitcherItem]
+    let onSelect: (SessionLocator) -> Void
 
     @State private var query = ""
 
     var body: some View {
         List {
             Section {
-                ForEach(filteredSessionNames, id: \.self) { sessionName in
+                ForEach(filteredSessions) { session in
                     Button {
-                        onSelect(sessionName)
+                        onSelect(session.id.locator)
                     } label: {
-                        AvailableServerSessionRow(sessionName: sessionName)
+                        AvailableServerSessionRow(session: session)
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("library.server.available.result")
                 }
 
-                if filteredSessionNames.isEmpty {
+                if filteredSessions.isEmpty {
                     ContentUnavailableView.search(text: query)
                         .listRowSeparator(.hidden)
                 }
@@ -1694,10 +1684,10 @@ private struct ServerAvailableSessionsView: View {
         .searchable(text: $query, prompt: "Search sessions")
     }
 
-    private var filteredSessionNames: [String] {
-        guard !query.isEmpty else { return sessionNames }
-        return sessionNames.filter {
-            $0.localizedCaseInsensitiveContains(query)
+    private var filteredSessions: [AvailableSessionSwitcherItem] {
+        guard !query.isEmpty else { return sessions }
+        return sessions.filter {
+            $0.id.locator.name.localizedCaseInsensitiveContains(query)
         }
     }
 }
@@ -1805,16 +1795,12 @@ private struct SessionLibraryRow: View {
     let workspace: SavedWorkspace
     let runtimeState: TerminalRuntimeState?
     let subtitleMode: SubtitleMode
-    var iconForeground: Color = LibraryHomePalette.rowIconForeground
-    var iconBackground: Color = LibraryHomePalette.rowIconSurface
+    /// What the server's last check found wrong with this session's backend.
+    var problem: SessionDiscoveryProblem?
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "terminal")
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(iconForeground)
-                .frame(width: 30, height: 30)
-                .background(iconBackground, in: RoundedRectangle(cornerRadius: 7))
+            SessionBackendLogo(backend: workspace.backend)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(workspace.sessionName)
@@ -1842,6 +1828,18 @@ private struct SessionLibraryRow: View {
 
     @ViewBuilder
     private var subtitle: some View {
+        if let problem {
+            Text(problem.sessionRowLine(for: workspace.backend))
+                .font(.footnote)
+                .foregroundStyle(.orange)
+                .lineLimit(1)
+        } else {
+            lastOpenedSubtitle
+        }
+    }
+
+    @ViewBuilder
+    private var lastOpenedSubtitle: some View {
         switch subtitleMode {
         case .serverAndLastOpened:
             HStack(spacing: 4) {
@@ -2280,9 +2278,12 @@ struct ConnectionSetupView: View {
     let setupSessionID: UUID?
     let isActionInProgress: Bool
     let showsServerSummaryForNewSession: Bool
-    /// tmux wasn't found or can't be run on this server, so Advanced starts
-    /// open on the path that fixes it.
-    let hasExecutableProblem: Bool
+    /// What the server's last check found wrong with each backend: each path says it, and New Session says
+    /// it for the kind chosen.
+    let backendProblems: [SessionBackend: SessionDiscoveryProblem]
+    /// Advanced starts open, on the paths, when the server page shows a backend's problem. A backend missing
+    /// from a server where none of its sessions is saved leaves it closed.
+    let opensAdvanced: Bool
     /// The sheet is closing, so the secure fields show empty. iOS offers to
     /// save the password in a secure field that is still filled when its
     /// sheet closes, and Remux keeps server secrets in its own Keychain only.
@@ -2438,7 +2439,7 @@ struct ConnectionSetupView: View {
         .disabled(isActionInProgress)
         .connectionSetupChrome(usesLibraryChrome: showsEditableServerFields)
         .onAppear {
-            if hasExecutableProblem {
+            if opensAdvanced {
                 isAdvancedExpanded = true
             }
         }
@@ -2752,16 +2753,18 @@ struct ConnectionSetupView: View {
     private var sessionSectionFooter: String {
         switch mode {
         case .newWorkspace:
-            switch draft.backend {
+            let naming = switch draft.backend {
             case .tmux:
                 "Names a tmux session on this server. Reuse a name to attach to an existing session."
             case .herdr:
                 "Letters, numbers, dots, underscores and hyphens, up to 64 characters. Opens the Herdr session with this name, and starts it if it isn't running."
             }
+            guard let problem = backendProblems[draft.backend] else { return naming }
+            return Self.newSessionNote(problem, backend: draft.backend) + "\n\n" + naming
         case .editWorkspace:
-            "Renaming applies the next time you connect."
+            return "Renaming applies the next time you connect."
         case .newServer, .editServer:
-            ""
+            return ""
         }
     }
 
@@ -2790,6 +2793,7 @@ struct ConnectionSetupView: View {
         autocorrectionDisabled: Bool = true,
         keyboardType: UIKeyboardType = .default,
         submitLabel: SubmitLabel = .next,
+        note: String? = nil,
         accessibilityIdentifier: String
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -2809,6 +2813,11 @@ struct ConnectionSetupView: View {
                 .accessibilityIdentifier(accessibilityIdentifier)
 
             fieldValidationMessage(validationMessage)
+            if validationMessage == nil, let note {
+                Text(note)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(.vertical, 6)
         .contentShape(Rectangle())
@@ -2825,6 +2834,7 @@ struct ConnectionSetupView: View {
             field: .tmuxExecutablePath,
             validationMessage: tmuxExecutablePathMessage,
             keyboardType: .URL,
+            note: backendProblems[.tmux].map(Self.executablePathNote),
             accessibilityIdentifier: "connection.tmux-executable"
         )
     }
@@ -2838,6 +2848,7 @@ struct ConnectionSetupView: View {
             validationMessage: herdrExecutablePathMessage,
             keyboardType: .URL,
             submitLabel: .go,
+            note: backendProblems[.herdr].map(Self.executablePathNote),
             accessibilityIdentifier: "connection.herdr-executable"
         )
     }
@@ -3369,6 +3380,31 @@ struct ConnectionSetupView: View {
         UIPasteboard.general.string = publicKeyLine
         publicKeyCopyMessage = "Public key copied"
         Haptic.tap()
+    }
+
+    /// Under a backend's path in Edit Server: what the server's last check found there.
+    static func executablePathNote(_ problem: SessionDiscoveryProblem) -> String {
+        switch problem {
+        case .notFound:
+            "Not found on this server."
+        case .notExecutable:
+            "Found, but it can't be run. Check its permissions."
+        case .unsupportedVersion(let version):
+            "Herdr \(version) is installed. Remux needs \(HerdrVersion.minimumSupported) or later."
+        }
+    }
+
+    /// Under New Session's kind, for a kind the server's last check found a problem with. Starting stays
+    /// possible: the check may be out of date.
+    static func newSessionNote(_ problem: SessionDiscoveryProblem, backend: SessionBackend) -> String {
+        switch problem {
+        case .notFound:
+            "\(backend.displayName) isn't installed on this server. Set its path in Edit Server."
+        case .notExecutable:
+            "\(backend.displayName) can't be run on this server. Check its path in Edit Server."
+        case .unsupportedVersion(let version):
+            "Herdr \(version) on this server is too old. Remux needs \(HerdrVersion.minimumSupported) or later."
+        }
     }
 
     @ViewBuilder

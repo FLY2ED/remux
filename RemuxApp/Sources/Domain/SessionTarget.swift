@@ -145,6 +145,13 @@ enum SessionBackend: String, Codable, Sendable {
     case tmux
     case herdr
 
+    var displayName: String {
+        switch self {
+        case .tmux: "tmux"
+        case .herdr: "Herdr"
+        }
+    }
+
     /// The name a new session starts with: Herdr's own default, and none for tmux.
     var defaultSessionName: String {
         switch self {
@@ -159,6 +166,13 @@ enum SessionBackend: String, Codable, Sendable {
 struct SessionLocator: Hashable, Sendable {
     let backend: SessionBackend
     let name: String
+}
+
+/// A session a backend's discovery listed on a server.
+struct DiscoveredSession: Equatable, Sendable {
+    let name: String
+    /// tmux lists only running sessions. Herdr lists stopped ones too, and opening one starts it.
+    let isRunning: Bool
 }
 
 struct SavedWorkspace: Identifiable, Equatable, Codable, Sendable {

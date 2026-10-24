@@ -35,6 +35,8 @@ targets:
         buildPhase: resources
       - path: RemuxApp/Resources/install_authorized_key.sh
         buildPhase: resources
+      - path: RemuxApp/Resources/ThirdPartyNotices.txt
+        buildPhase: resources
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: Remux

@@ -24,20 +24,43 @@ final class HerdrSessionDiscoveryTests: XCTestCase {
         )
 
         XCTAssertEqual(sessions, [
-            HerdrDiscoveredSession(name: "default", isRunning: false),
-            HerdrDiscoveredSession(name: "probe", isRunning: true),
+            DiscoveredSession(name: "default", isRunning: false),
+            DiscoveredSession(name: "probe", isRunning: true),
         ])
     }
 
-    func testMissingHerdrHasNoSessions() throws {
-        let sessions = try HerdrSessionDiscovery.sessions(
-            from: result(
-                exitStatus: 127,
-                stderr: "\(HerdrRemoteCommand.notFoundMarker): herdr\n"
+    /// A missing Herdr is an error, not an empty list, so the app can tell it apart from a Herdr without
+    /// sessions; it reads as "not found".
+    func testMissingHerdrIsNotFound() {
+        let stderr = "\(HerdrRemoteCommand.notFoundMarker): herdr\n"
+
+        XCTAssertThrowsError(
+            try HerdrSessionDiscovery.sessions(from: result(exitStatus: 127, stderr: stderr))
+        ) { error in
+            XCTAssertEqual(error as? HerdrSessionDiscoveryError, .remoteExit(status: 127, stderr: stderr))
+            XCTAssertEqual(SessionDiscoveryProblem(error, backend: .herdr), .notFound)
+        }
+    }
+
+    func testHerdrProblemsReadFromItsErrors() {
+        let notExecutable = HerdrSessionDiscoveryError.remoteExit(
+            status: 126,
+            stderr: "\(HerdrRemoteCommand.notExecutableMarker): /opt/herdr\n"
+        )
+        let old = HerdrSessionDiscoveryError.unsupportedVersion(HerdrVersion(major: 0, minor: 9, patch: 2))
+
+        XCTAssertEqual(SessionDiscoveryProblem(notExecutable, backend: .herdr), .notExecutable)
+        XCTAssertEqual(
+            SessionDiscoveryProblem(old, backend: .herdr),
+            .unsupportedVersion(HerdrVersion(major: 0, minor: 9, patch: 2))
+        )
+        XCTAssertNil(SessionDiscoveryProblem(HerdrSessionDiscoveryError.incompleteOutput, backend: .herdr))
+        XCTAssertNil(
+            SessionDiscoveryProblem(
+                HerdrSessionDiscoveryError.remoteExit(status: 127, stderr: "sh: something else failed\n"),
+                backend: .herdr
             )
         )
-
-        XCTAssertEqual(sessions, [])
     }
 
     func testHerdrThatCannotRunIsAnError() {
