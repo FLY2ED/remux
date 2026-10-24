@@ -2305,6 +2305,7 @@ struct ConnectionSetupView: View {
         case port
         case username
         case tmuxExecutablePath
+        case herdrExecutablePath
         case password
         case privateKeyPassphrase
         case sessionName
@@ -2407,11 +2408,24 @@ struct ConnectionSetupView: View {
                 Section {
                     DisclosureGroup("Advanced", isExpanded: advancedExpansion) {
                         tmuxExecutableInputRow()
+                        herdrExecutableInputRow()
+                    }
+                } footer: {
+                    if isAdvancedShown {
+                        Text("Leave a path empty to find it automatically.")
                     }
                 }
                 .connectionSetupListRowSurface(usesLibraryChrome: showsEditableServerFields)
             } else if showsSessionFields {
                 Section {
+                    if case .newWorkspace = mode {
+                        Picker("Kind", selection: backendBinding) {
+                            Text("tmux").tag(SessionBackend.tmux)
+                            Text("Herdr").tag(SessionBackend.herdr)
+                        }
+                        .pickerStyle(.segmented)
+                        .accessibilityIdentifier("connection.session.kind")
+                    }
                     sessionNameInputRow(title: "Name")
                 } header: {
                     Text("Session")
@@ -2528,6 +2542,8 @@ struct ConnectionSetupView: View {
         case .password, .privateKeyPassphrase:
             return fieldAfterAuthentication
         case .tmuxExecutablePath:
+            return .herdrExecutablePath
+        case .herdrExecutablePath:
             return showsSessionFields ? .sessionName : nil
         case .sessionName:
             return nil
@@ -2540,23 +2556,58 @@ struct ConnectionSetupView: View {
         return showsSessionFields ? .sessionName : nil
     }
 
-    /// Save stays disabled while the path is invalid, so the path is checked as
-    /// it is typed and Advanced can't hide the problem.
+    /// Save stays disabled while a path is invalid, so the paths are checked as
+    /// they are typed and Advanced can't hide a problem.
     private var tmuxExecutablePathMessage: String? {
         validation.tmuxExecutablePath
-            ?? TmuxConnectionDraftValidator.tmuxExecutablePathProblem(draft.tmuxExecutablePath)
+            ?? TmuxConnectionDraftValidator.executablePathProblem(draft.tmuxExecutablePath)
+    }
+
+    private var herdrExecutablePathMessage: String? {
+        validation.herdrExecutablePath
+            ?? TmuxConnectionDraftValidator.executablePathProblem(draft.herdrExecutablePath)
+    }
+
+    /// Save stays disabled while the name is invalid, so a Herdr name is checked by Herdr's rule as it
+    /// is typed.
+    private var sessionNameMessage: String? {
+        if let message = validation.sessionName { return message }
+        let name = draft.sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard draft.backend == .herdr, !name.isEmpty else { return nil }
+        return TmuxConnectionDraftValidator.herdrSessionNameProblem(name)
+    }
+
+    private var hasExecutablePathProblem: Bool {
+        tmuxExecutablePathMessage != nil || herdrExecutablePathMessage != nil
     }
 
     private var isAdvancedShown: Bool {
-        isAdvancedExpanded || tmuxExecutablePathMessage != nil
+        isAdvancedExpanded || hasExecutablePathProblem
     }
 
     private var advancedExpansion: Binding<Bool> {
         Binding(
             get: { isAdvancedShown },
-            // A collapse is ignored while the path's problem holds Advanced open, so correcting the
+            // A collapse is ignored while a path's problem holds Advanced open, so correcting the
             // path doesn't close it mid-edit.
-            set: { isAdvancedExpanded = $0 || tmuxExecutablePathMessage != nil }
+            set: { isAdvancedExpanded = $0 || hasExecutablePathProblem }
+        )
+    }
+
+    /// Choosing Herdr fills in Herdr's default name when the field is empty, and choosing tmux takes it
+    /// out again if it is still there.
+    private var backendBinding: Binding<SessionBackend> {
+        Binding(
+            get: { draft.backend },
+            set: { backend in
+                onChange { draft in
+                    let name = draft.sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if name.isEmpty || name == draft.backend.defaultSessionName {
+                        draft.sessionName = backend.defaultSessionName
+                    }
+                    draft.backend = backend
+                }
+            }
         )
     }
 
@@ -2701,7 +2752,12 @@ struct ConnectionSetupView: View {
     private var sessionSectionFooter: String {
         switch mode {
         case .newWorkspace:
-            "Names a tmux session on this server. Reuse a name to attach to an existing session."
+            switch draft.backend {
+            case .tmux:
+                "Names a tmux session on this server. Reuse a name to attach to an existing session."
+            case .herdr:
+                "Letters, numbers, dots, underscores and hyphens, up to 64 characters. Opens the Herdr session with this name, and starts it if it isn't running."
+            }
         case .editWorkspace:
             "Renaming applies the next time you connect."
         case .newServer, .editServer:
@@ -2763,24 +2819,36 @@ struct ConnectionSetupView: View {
 
     private func tmuxExecutableInputRow() -> some View {
         textInputRow(
-            title: "Executable Path (Optional)",
-            placeholder: "/absolute/path/to/tmux",
+            title: "tmux Executable Path",
+            placeholder: "Automatic",
             keyPath: \.tmuxExecutablePath,
             field: .tmuxExecutablePath,
             validationMessage: tmuxExecutablePathMessage,
             keyboardType: .URL,
-            submitLabel: .go,
             accessibilityIdentifier: "connection.tmux-executable"
+        )
+    }
+
+    private func herdrExecutableInputRow() -> some View {
+        textInputRow(
+            title: "Herdr Executable Path",
+            placeholder: "Automatic",
+            keyPath: \.herdrExecutablePath,
+            field: .herdrExecutablePath,
+            validationMessage: herdrExecutablePathMessage,
+            keyboardType: .URL,
+            submitLabel: .go,
+            accessibilityIdentifier: "connection.herdr-executable"
         )
     }
 
     private func sessionNameInputRow(title: String) -> some View {
         textInputRow(
             title: title,
-            placeholder: "e.g. main, work",
+            placeholder: draft.backend == .herdr ? SessionBackend.herdr.defaultSessionName : "e.g. main, work",
             keyPath: \.sessionName,
             field: .sessionName,
-            validationMessage: validation.sessionName,
+            validationMessage: sessionNameMessage,
             submitLabel: .go,
             accessibilityIdentifier: "connection.session"
         )

@@ -1268,6 +1268,46 @@ final class RemuxAppUITests: XCTestCase {
         )
     }
 
+    /// New Session offers tmux and Herdr. Herdr starts on its default name and checks names by Herdr's rule;
+    /// going back to tmux takes the default name out again.
+    func testNewSessionOffersHerdrWithItsDefaultName() {
+        app.launchEnvironment.merge(
+            [
+                "REMUX_UI_TESTING": "1",
+                "REMUX_DEBUG_SEED_CONNECTION": "1",
+                "REMUX_DEBUG_SERVER_HOST": "example.com",
+                "REMUX_DEBUG_SERVER_USERNAME": "tester",
+                "REMUX_DEBUG_SERVER_PASSWORD": "password",
+            ],
+            uniquingKeysWith: { _, new in new }
+        )
+        app.launch()
+        openFirstServerDetail()
+        let newSession = app.buttons["library.server.new-session.toolbar"]
+        XCTAssertTrue(newSession.waitForExistence(timeout: 5))
+        newSession.tap()
+
+        let name = app.textFields["connection.session"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        let kind = app.segmentedControls["connection.session.kind"]
+        XCTAssertTrue(kind.waitForExistence(timeout: 2))
+        kind.buttons["Herdr"].tap()
+        let filled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "default"), object: name)
+        XCTAssertEqual(XCTWaiter.wait(for: [filled], timeout: 2), .completed, "Herdr should start on its default name.")
+
+        tapFormField(name)
+        name.typeText(" two")
+        XCTAssertTrue(
+            app.staticTexts["Use only letters, numbers, dots, underscores and hyphens."].waitForExistence(timeout: 2),
+            "A Herdr name with a space should show Herdr's rule."
+        )
+        app.buttons["Done"].firstMatch.tap()
+
+        kind.buttons["tmux"].tap()
+        XCTAssertFalse(app.staticTexts["Use only letters, numbers, dots, underscores and hyphens."].exists)
+        XCTAssertEqual(name.value as? String, "default two")
+    }
+
     func testEditServerChecksSessionsAgain() {
         app.launchEnvironment.merge(
             [

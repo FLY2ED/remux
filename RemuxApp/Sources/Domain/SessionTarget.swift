@@ -144,6 +144,14 @@ struct SavedServer: Identifiable, Equatable, Codable, Sendable {
 enum SessionBackend: String, Codable, Sendable {
     case tmux
     case herdr
+
+    /// The name a new session starts with: Herdr's own default, and none for tmux.
+    var defaultSessionName: String {
+        switch self {
+        case .tmux: ""
+        case .herdr: "default"
+        }
+    }
 }
 
 /// Names a session on a server. Session names are only unique per backend, so
@@ -433,9 +441,7 @@ struct TmuxConnectionDraft: Equatable, Sendable {
     var port: String = "22"
     var username: String = ""
     var tmuxExecutablePath: String = ""
-    // No form field edits this; it is carried so saving an edited server
-    // keeps it.
-    var herdrExecutablePath: String?
+    var herdrExecutablePath: String = ""
     var authenticationKind: SSHAuthenticationKind = .password
     var password: String = ""
     var privateKeyPEM: String = ""
@@ -455,7 +461,7 @@ struct TmuxConnectionDraft: Equatable, Sendable {
         self.port = String(server.port)
         self.username = server.username
         self.tmuxExecutablePath = server.tmuxExecutablePath ?? ""
-        self.herdrExecutablePath = server.herdrExecutablePath
+        self.herdrExecutablePath = server.herdrExecutablePath ?? ""
         self.backend = workspace.backend
         self.sessionName = workspace.sessionName
     }
@@ -487,6 +493,7 @@ struct TmuxConnectionDraftValidation: Equatable, Sendable {
     var port: String?
     var username: String?
     var tmuxExecutablePath: String?
+    var herdrExecutablePath: String?
     var password: String?
     var privateKey: String?
     var privateKeyPassphrase: String?
@@ -500,6 +507,7 @@ struct TmuxConnectionDraftValidation: Equatable, Sendable {
             port == nil &&
             username == nil &&
             tmuxExecutablePath == nil &&
+            herdrExecutablePath == nil &&
             password == nil &&
             privateKey == nil &&
             privateKeyPassphrase == nil &&
@@ -612,8 +620,8 @@ enum TmuxConnectionDraftValidator {
         return .invalid(validation)
     }
 
-    /// Why the tmux path can't be used, or nil when it is empty (automatic) or usable.
-    static func tmuxExecutablePathProblem(_ path: String) -> String? {
+    /// Why an executable path can't be used, or nil when it is empty (automatic) or usable.
+    static func executablePathProblem(_ path: String) -> String? {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         if !trimmed.hasPrefix("/") {
@@ -660,7 +668,10 @@ enum TmuxConnectionDraftValidator {
             validation.username = "Username is required."
         }
 
-        validation.tmuxExecutablePath = tmuxExecutablePathProblem(draft.tmuxExecutablePath)
+        validation.tmuxExecutablePath = executablePathProblem(draft.tmuxExecutablePath)
+        validation.herdrExecutablePath = executablePathProblem(draft.herdrExecutablePath)
+        let trimmedHerdrExecutablePath = draft.herdrExecutablePath
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         let credential: ValidatedTmuxServerDraft.Credential
         switch draft.authenticationKind {
@@ -710,10 +721,30 @@ enum TmuxConnectionDraftValidator {
                 port: port,
                 username: username,
                 tmuxExecutablePath: tmuxExecutablePath,
-                herdrExecutablePath: draft.herdrExecutablePath,
+                herdrExecutablePath: trimmedHerdrExecutablePath.isEmpty ? nil : trimmedHerdrExecutablePath,
                 credential: credential
             )
         )
+    }
+
+    /// Herdr's own rule for session names (`session::validate_name`), or nil for a usable name.
+    static func herdrSessionNameProblem(_ name: String) -> String? {
+        if name.isEmpty {
+            return "Herdr session name is required."
+        }
+        if name.utf8.count > 64 {
+            return "Use 64 characters or fewer."
+        }
+        if name == "." || name == ".." {
+            return "A Herdr session can't be named . or .."
+        }
+        let allowed = name.utf8.allSatisfy { byte in
+            (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte)
+                || (UInt8(ascii: "A")...UInt8(ascii: "Z")).contains(byte)
+                || (UInt8(ascii: "a")...UInt8(ascii: "z")).contains(byte)
+                || byte == UInt8(ascii: ".") || byte == UInt8(ascii: "_") || byte == UInt8(ascii: "-")
+        }
+        return allowed ? nil : "Use only letters, numbers, dots, underscores and hyphens."
     }
 
     static func validateWorkspace(
@@ -724,8 +755,13 @@ enum TmuxConnectionDraftValidator {
         var validation = TmuxConnectionDraftValidation.empty
         let sessionName = draft.sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if sessionName.isEmpty {
-            validation.sessionName = "tmux session name is required."
+        switch draft.backend {
+        case .tmux:
+            if sessionName.isEmpty {
+                validation.sessionName = "tmux session name is required."
+            }
+        case .herdr:
+            validation.sessionName = herdrSessionNameProblem(sessionName)
         }
 
         guard validation.isValid else {
@@ -753,6 +789,7 @@ private extension TmuxConnectionDraftValidation {
         port = port ?? other.port
         username = username ?? other.username
         tmuxExecutablePath = tmuxExecutablePath ?? other.tmuxExecutablePath
+        herdrExecutablePath = herdrExecutablePath ?? other.herdrExecutablePath
         password = password ?? other.password
         privateKey = privateKey ?? other.privateKey
         privateKeyPassphrase = privateKeyPassphrase ?? other.privateKeyPassphrase

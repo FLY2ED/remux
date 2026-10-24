@@ -185,7 +185,7 @@ private extension TmuxConnectionDraft {
         self.backend = session.backend
         self.sessionName = session.name
         self.tmuxExecutablePath = tmuxExecutablePath
-        self.herdrExecutablePath = herdrExecutablePath
+        self.herdrExecutablePath = herdrExecutablePath ?? ""
     }
 }
 #endif
