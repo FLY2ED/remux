@@ -1501,7 +1501,7 @@ private struct ServerDetailView: View {
             await onRefreshSessions(server.id)
         }
         .task(id: server.id) {
-            guard discovery.isIdle else { return }
+            guard discovery.hasIdleBackend else { return }
             await onRefreshSessions(server.id)
         }
         .navigationTitle(server.displayName, withSubtitle: server.displayAddress)
@@ -1829,10 +1829,11 @@ private struct SessionLibraryRow: View {
     @ViewBuilder
     private var subtitle: some View {
         if let problem {
+            // Wraps rather than truncates: beside a session's state, "Set path" would be cut off.
             Text(problem.sessionRowLine(for: workspace.backend))
                 .font(.footnote)
                 .foregroundStyle(.orange)
-                .lineLimit(1)
+                .lineLimit(2)
         } else {
             lastOpenedSubtitle
         }

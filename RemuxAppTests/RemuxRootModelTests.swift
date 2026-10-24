@@ -569,6 +569,54 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertEqual(discoveryCount, 2)
     }
 
+    /// Opening a tmux session cancels its server's refresh, which may have listed tmux's sessions but not yet
+    /// Herdr's. Once the session connects the server is checked again, so Herdr's sessions show without a
+    /// manual refresh.
+    func testConnectedSessionChecksTheBackendACancelledRefreshLeftUnlisted() async throws {
+        let pair = makePasswordBackedServer()
+        let workspace = SavedWorkspace(serverID: pair.server.id, sessionName: "main")
+        let herdrDiscoverer = FirstSuspendingTmuxSessionDiscoverer(laterNames: ["agents"])
+        let harness = makeHarness(
+            servers: [pair.server],
+            workspaces: [workspace],
+            identities: [pair.identity],
+            tmuxSessionDiscoverer: { _, _, _ in ["main"] },
+            herdrSessionDiscoverer: { target, _, _ in
+                await herdrDiscoverer.discover(target).map { DiscoveredSession(name: $0, isRunning: true) }
+            }
+        )
+        try await harness.credentialHelper.savePassword("secret", for: pair.server.id)
+        await harness.model.load()
+        await herdrDiscoverer.waitForFirstCall()
+        let tmuxListed = await waitUntil {
+            harness.model.sessionDiscovery(for: pair.server.id).tmux.phase == .loaded
+        }
+        XCTAssertTrue(tmuxListed)
+
+        await harness.model.connect(to: workspace.id)
+        let cancelled = harness.model.sessionDiscovery(for: pair.server.id)
+        XCTAssertEqual(cancelled.tmux.phase, .loaded)
+        XCTAssertEqual(cancelled.herdr, .idle)
+        XCTAssertFalse(cancelled.isIdle)
+        XCTAssertTrue(cancelled.hasIdleBackend)
+
+        let instanceID = try XCTUnwrap(harness.model.activeSessions.first?.instanceID)
+        _ = harness.model.handleTerminalRuntimeStateUpdate(
+            TerminalRuntimeStateUpdate(
+                workspaceID: workspace.id,
+                instanceID: instanceID,
+                state: .connected,
+                source: .readiness
+            )
+        )
+
+        let herdrListed = await waitUntil {
+            harness.model.sessionDiscovery(for: pair.server.id).herdr.sessionNames == ["agents"]
+        }
+        XCTAssertTrue(herdrListed)
+        await herdrDiscoverer.resumeFirst(with: [])
+    }
+
     func testCancelledCurrentTmuxRefreshReturnsToIdleAndCanRetry() async throws {
         let pair = makePasswordBackedServer()
         let discoverer = RecordingTmuxSessionDiscoverer(

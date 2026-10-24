@@ -470,7 +470,7 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
     }
 
     private var hasUndiscoveredServer: Bool {
-        servers.contains { (discoveries[$0.id] ?? .idle).isIdle }
+        servers.contains { (discoveries[$0.id] ?? .idle).hasIdleBackend }
     }
 
     @ViewBuilder

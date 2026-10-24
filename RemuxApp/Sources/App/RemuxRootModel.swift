@@ -363,6 +363,13 @@ struct ServerSessionDiscovery: Equatable {
         tmux.phase == .idle && herdr.phase == .idle
     }
 
+    /// A backend whose sessions haven't been listed: discovery hasn't run for it, or a cancelled refresh ended
+    /// before its first result. A refresh cancelled between the two results leaves one backend listed and the
+    /// other idle.
+    var hasIdleBackend: Bool {
+        tmux.phase == .idle || herdr.phase == .idle
+    }
+
     func mapping(_ transform: (SessionDiscoveryState) -> SessionDiscoveryState) -> Self {
         Self(tmux: transform(tmux), herdr: transform(herdr))
     }
@@ -1754,7 +1761,7 @@ final class RemuxRootModel: ObservableObject {
                 discovery[backend] = discovery[backend]
                     .confirmingExistingSession(named: session.target.workspace.sessionName)
                 sessionDiscoveries[serverID] = discovery
-                if previousPhase == .idle || previousPhase == .failed {
+                if previousPhase == .failed || discovery.hasIdleBackend {
                     refreshSessions(for: serverID)
                 }
             }
