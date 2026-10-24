@@ -370,13 +370,14 @@ final class TerminalPaneRenderer {
 
     var rawSurface: ghostty_terminal_surface_t? { renderer?.handle }
 
+    /// The pane's managed surface, made once by its backend: when Herdr admits the renderer, or when
+    /// tmux first shows the pane's window. An existing one is returned as it is.
     func screenSurface(id: UUID, inputSink: any TerminalPaneInputSink) -> GhosttyManagedSurface {
         if let managedSurface {
             precondition(
                 managedSurface.id == id,
                 "managed surface identity must remain stable for one pane"
             )
-            if renderer != nil { managedSurface.refreshInteractionState() }
             return managedSurface
         }
         guard let renderer else {
@@ -929,6 +930,8 @@ final class TerminalPaneRenderer {
             return false
         }
         appliedDisplayMetrics = metrics
+        // Selection geometry is in surface pixels.
+        managedSurface?.notifyLocalSelectionGeometryChanged()
         return true
     }
 

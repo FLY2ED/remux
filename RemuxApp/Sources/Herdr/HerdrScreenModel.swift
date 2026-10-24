@@ -889,7 +889,9 @@ final class HerdrScreenModel {
                 close(renderer)
                 return
             }
-            surfaces[paneID] = HerdrPaneSurface(paneID: paneID, terminal: terminal, renderer: renderer)
+            let surface = HerdrPaneSurface(paneID: paneID, terminal: terminal, renderer: renderer)
+            surfaces[paneID] = surface
+            terminalScreenAdapter.makeScreenSurface(for: surface)
             renderer.onPresentationChange = { [weak self] in self?.didChange() }
             // Settings and the pane's size may have changed while the renderer was being registered.
             if !renderer.applyTerminalConfiguration(theme: currentTerminalSettings.theme)

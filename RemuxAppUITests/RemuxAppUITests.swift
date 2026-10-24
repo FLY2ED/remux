@@ -1496,6 +1496,14 @@ final class RemuxAppUITests: XCTestCase {
         assertLiveTerminalScreenshotContainsRenderedContent()
         captureLiveHerdrStep("1-session", in: configuration)
 
+        // A long-press selects the word under the finger and offers Copy, as on a tmux pane.
+        let terminal = app.otherElements["terminal.screen"].firstMatch
+        terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.12, dy: 0.03)).press(forDuration: 0.70)
+        XCTAssertTrue(waitForCopyMenuItem(timeout: 5).exists, "A long-press on a Herdr pane should select a word.")
+        XCTAssertEqual(app.state, .runningForeground)
+        captureLiveHerdrStep("1b-selection", in: configuration)
+        terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.5)).tap()
+
         // A Herdr screen takes no terminal input yet, so the keyboard comes up with the composer.
         let composerToggle = app.buttons["terminal.composer.toggle"]
         XCTAssertTrue(composerToggle.waitForExistence(timeout: 5))

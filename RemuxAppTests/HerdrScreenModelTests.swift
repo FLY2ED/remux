@@ -553,6 +553,40 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertFalse(adapter.acceptsComposerMessages)
     }
 
+    /// A pane's screen surface is made when its renderer is admitted, so the screen's lookups only read:
+    /// it looks a surface up from inside that surface's own callbacks, such as a selection's.
+    func testAPanesSurfaceIsMadeWhenItsRendererIsAdmittedSoLookupsOnlyRead() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge()
+        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        await bridge.serve(HerdrServerScript.surface(
+            projection: 1,
+            revision: 1,
+            lines: ["left 1"],
+            panes: [.init(id: "w1:p1", x: 0, width: 6, height: 1, focused: true)]
+        ))
+        harness.setScreenSize()
+        try await harness.waitUntil("the pane's renderer wasn't created") {
+            harness.model.paneSurface("w1:p1") != nil
+        }
+
+        let adapter = harness.model.terminalScreenAdapter
+        let managed = try XCTUnwrap(harness.model.paneSurface("w1:p1")?.renderer.managedSurface)
+        let id = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
+        XCTAssertEqual(managed.id, id)
+        let lookup = adapter.terminalManagedSurfaceLookup
+        var callbacks = 0
+        managed.onLocalSelectionGeometryChange = {
+            callbacks += 1
+            // Bounded, so a lookup that notifies fails here instead of overflowing the stack.
+            if callbacks <= 3 { _ = lookup.managedSurface(for: id) }
+        }
+        managed.onScrollStateChange = { callbacks += 1 }
+
+        XCTAssertTrue(lookup.managedSurface(for: id) === managed)
+        XCTAssertEqual(callbacks, 0)
+    }
+
     /// While shown, a new screen size goes to Herdr at once; a hidden session gets it with its show.
     func testAResizeIsSentWhileShown() async throws {
         let harness = await makeHarness()
@@ -1039,5 +1073,132 @@ final class HerdrScreenModelTests: XCTestCase {
         }
         XCTAssertTrue(harness.model.paneSurface("w1:p1")?.renderer === renderer)
         XCTAssertFalse(harness.model.isDisconnected)
+    }
+
+    /// A restarted server paints its panes into new terminals. A pane it names as before stays the same
+    /// leaf, as when a pane's terminal is replaced: its old surface leaves the screen when its renderer
+    /// closes, and the leaf finds the new renderer's surface once that is admitted, here after the new
+    /// boot's layout.
+    func testAPaneOfARestartedServerStaysTheSameLeafWithANewSurface() async throws {
+        let gate = RendererFenceGate()
+        let harness = await makeHarness(rendererFenceGate: gate)
+        let first = try await harness.bridge(0)
+        let panes: [HerdrServerScript.Pane] = [.init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true)]
+        await first.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1, boot: "boot-1"))
+        await first.serve(HerdrServerScript.surface(
+            boot: "boot-1", projection: 1, revision: 1, lines: ["one"], panes: panes
+        ))
+        harness.setScreenSize()
+        try await harness.waitUntil("the first frame wasn't shown") {
+            harness.shownRows() == ["w1:p1": ["one"]]
+        }
+        let adapter = harness.model.terminalScreenAdapter
+        let lookup = adapter.terminalManagedSurfaceLookup
+        let id = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
+        let firstSurface = try XCTUnwrap(lookup.managedSurface(for: id))
+        let container = GhosttyPaneScrollContainerView()
+        _ = container.update(
+            surface: firstSurface,
+            displayScale: 2,
+            submitRouteForwardedMouseScroll: nil,
+            submitRouteForwardedMousePosition: nil
+        )
+        XCTAssertNotNil(firstSurface.view.superview)
+
+        gate.holdsRegistrations = true
+        harness.model.reconnect()
+        let second = try await harness.bridge(1)
+        await second.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1, boot: "boot-2"))
+        await second.serve(HerdrServerScript.surface(
+            boot: "boot-2", projection: 1, revision: 1, lines: ["two"], panes: panes
+        ))
+        try await harness.waitUntil("the new boot's renderer wasn't waiting on its registration") {
+            harness.model.layout?.bootID == "boot-2" && gate.heldRegistrationCount == 1
+        }
+        XCTAssertNil(lookup.managedSurface(for: id))
+        XCTAssertNil(firstSurface.view.superview)
+        XCTAssertNil(firstSurface.onScrollStateChange)
+
+        gate.releaseRegistrations()
+        try await harness.waitUntil("the restarted server's frame wasn't shown") {
+            harness.shownRows() == ["w1:p1": ["two"]]
+        }
+        XCTAssertEqual(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID, id)
+        let secondSurface = try XCTUnwrap(lookup.managedSurface(for: id))
+        XCTAssertFalse(secondSurface === firstSurface)
+        XCTAssertEqual(secondSurface.id, id)
+        _ = container.update(
+            surface: secondSurface,
+            displayScale: 2,
+            submitRouteForwardedMouseScroll: nil,
+            submitRouteForwardedMousePosition: nil
+        )
+        XCTAssertNotNil(secondSurface.view.superview)
+        XCTAssertNotNil(secondSurface.onScrollStateChange)
+    }
+
+    /// When Ghostty can't paint a restarted server's pane into its new terminal, the pane keeps its old
+    /// surface, failed: the screen still finds it under the pane's leaf, and nothing can be typed.
+    func testAPaneOfARestartedServerWhoseNewTerminalFailsKeepsItsOldSurfaceFailed() async throws {
+        let producerFailure = ProducerFailure()
+        let harness = await makeHarness(producerFailure: producerFailure)
+        let first = try await harness.bridge(0)
+        let panes: [HerdrServerScript.Pane] = [.init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true)]
+        await first.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1, boot: "boot-1"))
+        await first.serve(HerdrServerScript.surface(
+            boot: "boot-1", projection: 1, revision: 1, lines: ["one"], panes: panes
+        ))
+        harness.setScreenSize()
+        try await harness.waitUntil("the first frame wasn't shown") {
+            harness.shownRows() == ["w1:p1": ["one"]]
+        }
+        let model = harness.model
+        let adapter = model.terminalScreenAdapter
+        let id = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
+        let oldSurface = try XCTUnwrap(adapter.terminalManagedSurfaceLookup.managedSurface(for: id))
+
+        producerFailure.isOn = true
+        model.reconnect()
+        let second = try await harness.bridge(1)
+        await second.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1, boot: "boot-2"))
+        await second.serve(HerdrServerScript.surface(
+            boot: "boot-2", projection: 1, revision: 1, lines: ["two"], panes: panes
+        ))
+        try await harness.waitUntil("the new boot's pane didn't fail") {
+            guard model.layout?.bootID == "boot-2", case .failed = model.presentation(ofPane: "w1:p1") else {
+                return false
+            }
+            return true
+        }
+
+        let shownID = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
+        XCTAssertEqual(shownID, id)
+        XCTAssertTrue(adapter.terminalManagedSurfaceLookup.managedSurface(for: shownID) === oldSurface)
+        XCTAssertFalse(model.isInputAvailable)
+    }
+
+    /// A hidden session's renderer gets its screen surface when admitted, hidden and unfocused, and its
+    /// pane stays pending: being made early neither shows the pane nor takes input.
+    func testAHiddenSessionsPaneGetsItsSurfaceHiddenAndStaysPending() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge()
+        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        await bridge.serve(HerdrServerScript.surface(
+            projection: 1,
+            revision: 1,
+            lines: ["left 1"],
+            panes: [.init(id: "w1:p1", x: 0, width: 6, height: 1, focused: true)]
+        ))
+        harness.setScreenSize()
+        try await harness.waitUntil("the pane's renderer wasn't created") {
+            harness.model.paneSurface("w1:p1") != nil
+        }
+
+        let managed = try XCTUnwrap(harness.model.paneSurface("w1:p1")?.renderer.managedSurface)
+        XCTAssertFalse(managed.isVisible)
+        XCTAssertFalse(managed.isFocused)
+        XCTAssertFalse(managed.rendererIsAvailable)
+        XCTAssertEqual(harness.model.presentation(ofPane: "w1:p1"), .pending)
+        XCTAssertFalse(harness.model.isInputAvailable)
     }
 }
