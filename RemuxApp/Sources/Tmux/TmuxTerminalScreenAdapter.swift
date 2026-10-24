@@ -430,7 +430,11 @@ final class TmuxTerminalScreenAdapter: ObservableObject {
         let surfaceID = identities.surfaceID(for: paneID)
         let wasAlreadyWrapped = paneSurface.renderer.managedSurface != nil
         let managed = paneSurface.screenSurface(id: surfaceID)
-        if !wasAlreadyWrapped {
+        if wasAlreadyWrapped {
+            // Output reaches a pane of a hidden window without refreshing its scroll state: tmux
+            // refreshes only the active pane as output arrives.
+            managed.refreshInteractionState()
+        } else {
             GhosttyRuntimeTrace.flowEventIfActive(
                 GhosttyRuntimeTrace.paneSwitchFlow,
                 event: "presentation.managedSurface.ready",
