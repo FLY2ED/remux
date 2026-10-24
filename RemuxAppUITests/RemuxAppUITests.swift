@@ -1649,6 +1649,14 @@ final class RemuxAppUITests: XCTestCase {
 
         openHomeFromTerminal()
         captureLiveHerdrStep("4-home", in: configuration)
+
+        // The server page lists both backends' sessions once each backend has answered.
+        openFirstServerDetail()
+        let checking = app.descendants(matching: .any)["library.server.available.loading"]
+        XCTAssertTrue(checking.waitForNonExistence(timeout: 20), "Both backends should finish checking the server.")
+        captureLiveHerdrStep("4b-server-page", in: configuration)
+        app.navigationBars.buttons.firstMatch.tap()
+
         let activeSession = app.descendants(matching: .any)["library.active-session.show"].firstMatch
         XCTAssertTrue(activeSession.waitForExistence(timeout: 5))
         activeSession.tap()

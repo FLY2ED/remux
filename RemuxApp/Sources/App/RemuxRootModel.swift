@@ -2262,6 +2262,8 @@ final class RemuxRootModel: ObservableObject {
             sshAuth: sshAuth
         )
         let dependencies = dependencies
+        // Each child awaits before building its tuple: optimized Swift 6.3 and 6.4 builds return the wrong first
+        // element from a tuple expression that contains the `await`.
         await withTaskGroup(of: (SessionBackend, Result<[DiscoveredSession], Error>).self) { group in
             group.addTask {
                 do {
@@ -2273,7 +2275,8 @@ final class RemuxRootModel: ObservableObject {
             }
             group.addTask {
                 do {
-                    return (.herdr, .success(try await dependencies.discoverHerdrSessions(for: discoveryTarget)))
+                    let sessions = try await dependencies.discoverHerdrSessions(for: discoveryTarget)
+                    return (.herdr, .success(sessions))
                 } catch {
                     return (.herdr, .failure(error))
                 }
