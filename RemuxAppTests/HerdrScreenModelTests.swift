@@ -1002,8 +1002,9 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(adapter.commandFailureEvent?.message, "Herdr: input failed")
     }
 
-    /// A session shown with panes `w1:p1` and `w1:p2`, its snapshot focusing `focusedPane`; returns its
-    /// bridge and the index of the first write after the show.
+    /// A session shown with panes `w1:p1` and `w1:p2`, both drawn, its snapshot focusing `focusedPane`;
+    /// returns its bridge and the index of the first write after the show. A test that moves the focus
+    /// types into the other pane, which takes input only once it has drawn.
     private func shownSession(
         _ harness: HerdrModelHarness,
         focusedPane: String = "w1:p1"
@@ -1029,7 +1030,11 @@ final class HerdrScreenModelTests: XCTestCase {
         try await harness.waitUntil("the panes' renderers weren't created") {
             harness.model.paneSurface("w1:p1") != nil && harness.model.paneSurface("w1:p2") != nil
         }
-        showInWindow(harness, panes: ["w1:p1", "w1:p2"])
+        let panes = ["w1:p1", "w1:p2"]
+        showInWindow(harness, panes: panes)
+        try await harness.waitUntil("the panes didn't draw") {
+            panes.allSatisfy { harness.model.presentation(ofPane: $0) == .ready }
+        }
         try await harness.waitUntil("input wasn't offered") { harness.model.isInputAvailable }
         return (bridge, index)
     }
