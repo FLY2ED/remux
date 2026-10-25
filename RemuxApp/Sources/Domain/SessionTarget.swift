@@ -499,6 +499,27 @@ struct TmuxConnectionDraft: Equatable, Sendable {
             break
         }
     }
+
+    /// Whether the server's last check of `backend`, made with `server`'s saved settings, is about what this
+    /// draft names: the same account at the same address and the same executable path. The sign-in method
+    /// doesn't change what is installed for the account, so it doesn't count.
+    func checksSameExecutable(as server: SavedServer, for backend: SessionBackend) -> Bool {
+        let savedPath: String?
+        let draftPath: String
+        switch backend {
+        case .tmux:
+            savedPath = server.tmuxExecutablePath
+            draftPath = tmuxExecutablePath
+        case .herdr:
+            savedPath = server.herdrExecutablePath
+            draftPath = herdrExecutablePath
+        }
+        let path = draftPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        return host.trimmingCharacters(in: .whitespacesAndNewlines) == server.host
+            && Int(port) == server.port
+            && username.trimmingCharacters(in: .whitespacesAndNewlines) == server.username
+            && (path.isEmpty ? nil : path) == savedPath
+    }
 }
 
 struct TmuxConnectionDraftValidation: Equatable, Sendable {

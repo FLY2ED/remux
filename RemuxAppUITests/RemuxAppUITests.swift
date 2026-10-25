@@ -179,15 +179,23 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertTrue(problem.waitForExistence(timeout: 2), "The path's problem should show as it is typed.")
         XCTAssertFalse(app.buttons["connection.save"].isEnabled)
 
-        app.buttons["Done"].firstMatch.tap()
         advanced.tap()
         RunLoop.current.run(until: Date().addingTimeInterval(1))
         XCTAssertTrue(executable.exists, "Advanced should stay open while the path is invalid.")
         XCTAssertTrue(problem.exists)
 
-        // Correcting the path keeps Advanced open, also while the field is briefly empty.
-        executable.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
-        executable.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: "~/bin/tmux".count))
+        // Correcting the path keeps Advanced open, also while the field is briefly empty. The field's
+        // clear button empties it back to Automatic.
+        tapFormField(executable)
+        let clear = app.buttons["connection.tmux-executable.clear"]
+        XCTAssertTrue(clear.waitForExistence(timeout: 2), "A filled, focused path should offer its clear button.")
+        clear.tap()
+        let emptied = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == '' OR value == 'Automatic'"),
+            object: executable
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [emptied], timeout: 2), .completed, "Clear should empty the path.")
+        XCTAssertFalse(clear.exists, "An empty path has nothing to clear.")
         RunLoop.current.run(until: Date().addingTimeInterval(1))
         XCTAssertTrue(executable.exists, "Advanced closed while the path was being corrected.")
         typeTextAndConfirm("/usr/local/bin/tmux", into: executable)
@@ -1392,7 +1400,6 @@ final class RemuxAppUITests: XCTestCase {
             app.staticTexts["Use only letters, numbers, dots, underscores and hyphens."].waitForExistence(timeout: 2),
             "A Herdr name with a space should show Herdr's rule."
         )
-        app.buttons["Done"].firstMatch.tap()
 
         kind.buttons["tmux"].tap()
         XCTAssertFalse(app.staticTexts["Use only letters, numbers, dots, underscores and hyphens."].exists)
@@ -1428,8 +1435,17 @@ final class RemuxAppUITests: XCTestCase {
             executable.isHittable,
             "With tmux missing, Edit Server should open Advanced on the tmux path."
         )
+        let note = app.staticTexts["connection.tmux-executable.note"]
+        XCTAssertEqual(note.label, "Not found on this server.")
         tapFormField(executable)
+        XCTAssertTrue(waitForSoftwareKeyboardOnScreen(timeout: 3))
+        XCTAssertTrue(waitForElementToSettle(executable))
+        XCTAssertTrue(executable.isHittable, "The focused path should sit above the keyboard.")
         typeTextAndConfirm("/usr/local/bin/tmux", into: executable)
+        XCTAssertTrue(
+            waitForElementToDisappear(note, timeout: 2),
+            "The check was of Automatic, not of the path typed, so its note goes."
+        )
         app.buttons["connection.save"].tap()
         XCTAssertTrue(
             waitForElementToDisappear(app.textFields["connection.name"], timeout: 5),
@@ -4199,18 +4215,17 @@ final class RemuxAppUITests: XCTestCase {
         typeTextThenReturn("demo", into: app.textFields["connection.username"])
     }
 
-    /// Taps a server form field once a tap can reach it. With the keyboard up,
-    /// a field can sit right at the keyboard's top edge, where the tap lands on
-    /// the keyboard toolbar. A field scrolled off the top is scrolled back by
-    /// the tap itself, which then arrives while the form is still moving and
-    /// only stops the scroll. Either way the field never gets focus.
+    /// Taps a server form field once a tap can reach it. A field scrolled out of
+    /// view is scrolled back by the tap itself, which then arrives while the form
+    /// is still moving and only stops the scroll, so the form is scrolled toward
+    /// the field first and the field left to settle.
     private func tapFormField(_ field: XCUIElement) {
-        if isSoftwareKeyboardOnScreen(app.keyboards.firstMatch) {
-            app.buttons["Done"].firstMatch.tap()
-            XCTAssertNotNil(waitForKeyboardPresence(false, label: "server form keyboard hidden"))
-        }
         if !field.isHittable {
-            app.swipeDown()
+            if field.frame.maxY < app.frame.midY {
+                app.swipeDown()
+            } else {
+                app.swipeUp()
+            }
         }
         XCTAssertTrue(waitForElementToSettle(field), "\(field) kept moving.")
         field.tap()
