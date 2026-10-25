@@ -102,6 +102,18 @@ final class RemoteProgramCommandTests: XCTestCase {
         XCTAssertEqual(RemoteProgramFailure(exitStatus: 1, stderr: "\nremux-ready:1\n"), .failed(""))
     }
 
+    /// A program that ran can exit 126 or 127 itself, here a wrapper whose own command is missing: it ran, so
+    /// its path isn't what failed.
+    func testAProgramThatExits127ItselfRan() {
+        XCTAssertEqual(
+            RemoteProgramFailure(
+                exitStatus: 127,
+                stderr: "\nremux-ready:1\n/opt/tools/tmux: line 2: exec: tmux-real: not found\n"
+            ),
+            .failed("/opt/tools/tmux: line 2: exec: tmux-real: not found")
+        )
+    }
+
     /// On a pty, the startup files' output, both copies of the marker and the shell's error arrive in one
     /// stream, with carriage returns.
     func testAPtyStreamIsReadAfterTheMarker() {

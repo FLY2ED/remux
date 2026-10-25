@@ -148,10 +148,9 @@ enum RemoteProgramFailure: Error, Equatable, Sendable {
             return
         }
         guard let message = RemoteProgramCommand.programMessage(in: stderr) else { return nil }
-        // A shell that can't start a command exits 126, or 127 when the file it names, or its `#!`
-        // interpreter, is missing. macOS's /bin/sh, bash 3.2, exits 1 when `exec` can't start it, so its
-        // own line, which starts with its name, says so too.
-        let isShellsOwnLine = message.hasPrefix("\(RemoteProgramCommand.shellName): ")
-        self = exitStatus == 126 || exitStatus == 127 || isShellsOwnLine ? .couldNotStart(message) : .failed(message)
+        // A shell that can't start the program says so in a line that starts with its name. Its exit status
+        // doesn't tell: dash, bash 5 and busybox exit 126 or 127, macOS's /bin/sh (bash 3.2) exits 1 from a failed
+        // `exec`, and a program that ran can exit 126 or 127 itself.
+        self = message.hasPrefix("\(RemoteProgramCommand.shellName): ") ? .couldNotStart(message) : .failed(message)
     }
 }
