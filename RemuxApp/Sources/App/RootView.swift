@@ -1754,11 +1754,7 @@ private struct ActiveSessionLibraryRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "dot.radiowaves.left.and.right")
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(LibraryHomePalette.rowIconForeground)
-                .frame(width: 30, height: 30)
-                .background(LibraryHomePalette.rowIconSurface, in: RoundedRectangle(cornerRadius: 7))
+            SessionBackendLogo(backend: session.target.workspace.backend)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(session.target.workspace.sessionName)
