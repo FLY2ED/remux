@@ -729,6 +729,24 @@ final class HerdrScreenModelTests: XCTestCase {
         )
     }
 
+    /// The live bridge opens, then its first read reports Herdr missing: the session shows Herdr Unavailable,
+    /// which doesn't reconnect on its own, not a lost connection.
+    func testABridgeThatReportsHerdrMissingOnItsFirstReadIsHerdrUnavailable() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge()
+        harness.setScreenSize()
+        await bridge.finishServing(throwing: HerdrBridgeError.herdrNotFound)
+        try await harness.waitUntil("the failure wasn't reported") {
+            harness.states.last?.disconnectedReason != nil
+        }
+        let reason = try XCTUnwrap(harness.states.last?.disconnectedReason)
+        XCTAssertEqual(reason, TerminalDisconnectReason(
+            kind: .backendUnavailable(.herdr),
+            message: HerdrBridgeError.herdrNotFound.errorDescription!
+        ))
+        XCTAssertFalse(reason.allowsAutomaticReconnect)
+    }
+
     // MARK: - Stop and reconnect
 
     /// Stopped before the screen has a size: the bridge closes, no hello goes out, and nothing more is

@@ -658,11 +658,22 @@ struct RemuxAppDependencies: Sendable {
                     )
                 }
             },
-            // The simulated server has no Herdr, as its discovery reports.
+            // The simulated server has no Herdr, as its discovery reports. Like the live bridge, the channel
+            // opens and its first read reports it.
             herdrBridgeOpener: { _, _, _ in
-                throw HerdrBridgeError.herdrNotFound
+                UITestingMissingHerdrBridge()
             }
         )
+    }
+
+    private struct UITestingMissingHerdrBridge: HerdrBridgeTransport {
+        func read() async throws -> [UInt8]? {
+            throw HerdrBridgeError.herdrNotFound
+        }
+
+        func write(_ bytes: [UInt8]) async throws {}
+
+        func close(reusable: Bool) async {}
     }
 
     /// Presents `challenge` as the server's Tailscale SSH check and waits

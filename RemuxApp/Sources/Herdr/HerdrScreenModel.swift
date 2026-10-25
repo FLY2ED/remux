@@ -994,16 +994,8 @@ final class HerdrScreenModel {
         "Terminal renderer could not apply its current configuration. Reconnect to try again."
 
     private static func disconnectReason(openingBridgeFailedWith error: Error) -> TerminalDisconnectReason {
-        switch error as? HerdrBridgeError {
-        case .herdrNotFound?, .herdrNotExecutable?:
-            return TerminalDisconnectReason(kind: .backendUnavailable(.herdr), message: error.localizedDescription)
-        case .remoteExit?:
-            return TerminalDisconnectReason(kind: .remoteExit, message: error.localizedDescription)
-        case .channel?:
-            return TerminalDisconnectReason(kind: .transportIO, message: error.localizedDescription)
-        case nil:
-            return GhosttyTerminalDisconnectReasonClassifier.transportStartFailure(error)
-        }
+        (error as? HerdrBridgeError)?.terminalDisconnectReason
+            ?? GhosttyTerminalDisconnectReasonClassifier.transportStartFailure(error)
     }
 
     private static func disconnectReason(connectionFailedWith error: Error) -> TerminalDisconnectReason {
@@ -1023,12 +1015,30 @@ extension HerdrConnectionError {
     var terminalDisconnectReason: TerminalDisconnectReason {
         let message = errorDescription ?? "The connection to Herdr failed."
         switch self {
+        case .bridge(let error):
+            return error.terminalDisconnectReason
         case .closed, .transport, .unresponsive, .handshakeTimedOut:
             return TerminalDisconnectReason(kind: .transportIO, message: message)
         case .serverShutdown:
             return TerminalDisconnectReason(kind: .remoteExit, message: message)
         case .rejected, .incompatible, .wire:
             return TerminalDisconnectReason(kind: .runtime, message: message)
+        }
+    }
+}
+
+extension HerdrBridgeError {
+    /// The same whether opening the bridge failed or its first read reported the failure: the live bridge
+    /// opens before Herdr's executable is looked up.
+    var terminalDisconnectReason: TerminalDisconnectReason {
+        let message = errorDescription ?? "The bridge to Herdr failed."
+        switch self {
+        case .herdrNotFound, .herdrNotExecutable:
+            return TerminalDisconnectReason(kind: .backendUnavailable(.herdr), message: message)
+        case .remoteExit:
+            return TerminalDisconnectReason(kind: .remoteExit, message: message)
+        case .channel:
+            return TerminalDisconnectReason(kind: .transportIO, message: message)
         }
     }
 }
