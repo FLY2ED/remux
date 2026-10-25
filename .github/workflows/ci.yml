@@ -110,6 +110,10 @@ jobs:
         shell: bash
         run: scripts/test_install_authorized_key.sh
 
+      - name: Test remote program launcher
+        shell: bash
+        run: scripts/test_remote_program_command.sh
+
       - name: Install XcodeGen
         env:
           XCODEGEN_VERSION: 2.46.0

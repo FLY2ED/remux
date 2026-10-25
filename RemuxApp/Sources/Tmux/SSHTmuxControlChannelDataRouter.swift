@@ -2,21 +2,15 @@ import Foundation
 import NIOConcurrencyHelpers
 @preconcurrency import NIOSSH
 
-/// The end of a stream: its last bytes as text, and an escaped preview of fewer of them for traces.
 private struct SSHTmuxBoundedStreamPreview: Equatable, Sendable {
-    private static let limit = 2048
-    private static let previewLimit = 240
+    private static let limit = 240
 
     private(set) var byteCount = 0
     private var bytes = Data()
 
     var preview: String? {
         guard !bytes.isEmpty else { return nil }
-        return GhosttyRuntimeTrace.preview(bytes.suffix(Self.previewLimit), limit: Self.previewLimit)
-    }
-
-    var text: String? {
-        bytes.isEmpty ? nil : String(decoding: bytes, as: UTF8.self)
+        return GhosttyRuntimeTrace.preview(bytes, limit: Self.limit)
     }
 
     mutating func append(_ data: Data) {
@@ -46,7 +40,7 @@ struct SSHTmuxStartupDiagnostics: Equatable, Sendable, CustomStringConvertible {
     /// Output before tmux's first protocol line: login-shell output and, on a
     /// pseudo-terminal, the launch script's stderr.
     let startupOutputPreview: String?
-    /// The end of every message the launch could have written, wherever it arrived, as text.
+    /// Every message the launch wrote, wherever it arrived, as `RemoteProgramMessages` keeps them.
     let messages: String
 
     var isEmpty: Bool {
@@ -79,6 +73,7 @@ private struct SSHTmuxStartupDiagnosticsAccumulator: Equatable, Sendable {
     private var startupOutput = SSHTmuxBoundedStreamPreview()
     private var stderr = SSHTmuxBoundedStreamPreview()
     private var extendedData = SSHTmuxBoundedStreamPreview()
+    private var messages = RemoteProgramMessages()
 
     mutating func recordStdout(_ data: Data) {
         stdout.append(data)
@@ -86,10 +81,12 @@ private struct SSHTmuxStartupDiagnosticsAccumulator: Equatable, Sendable {
 
     mutating func recordStartupOutput(_ data: Data) {
         startupOutput.append(data)
+        messages.append(data)
     }
 
     mutating func recordStderr(_ data: Data) {
         stderr.append(data)
+        messages.append(data)
     }
 
     mutating func recordExtendedData(_ data: Data) {
@@ -104,7 +101,7 @@ private struct SSHTmuxStartupDiagnosticsAccumulator: Equatable, Sendable {
             stderrPreview: stderr.preview,
             extendedDataPreview: extendedData.preview,
             startupOutputPreview: startupOutput.preview,
-            messages: [startupOutput.text, stderr.text].compactMap { $0 }.joined(separator: "\n")
+            messages: messages.text
         )
         return diagnostics.isEmpty ? nil : diagnostics
     }

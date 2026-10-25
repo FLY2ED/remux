@@ -32,9 +32,6 @@ enum HerdrBridgeError: Error, Equatable, LocalizedError {
 /// stops reading holds the server back once the current window (2 MiB, as with OpenSSH) is used, and
 /// `--idle-timeout-v1` (where the host supports it) bounds how long the server keeps it.
 final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
-    /// The tail is kept: the markers and the bridge's own error come last, after any startup noise.
-    private static let stderrLimit = 8 * 1024
-
     private enum State {
         case running
         /// nil for an ordinary end of stream.
@@ -48,7 +45,7 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
     private var pendingWrites: [UInt64: CheckedContinuation<Void, Error>] = [:]
     private var nextWrite: UInt64 = 0
     private var state = State.running
-    private var stderr = Data()
+    private var stderr = RemoteProgramMessages()
     private var readyLine = RemoteProgramCommand.ReadyLine()
     private var connection: RemuxSSHExecConnection?
 
@@ -181,9 +178,6 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
         let (waiter, bytes, rearm) = lock.withLock { () -> (CheckedContinuation<[UInt8]?, Error>?, [UInt8], RemuxSSHExecConnection?) in
             guard type == .channel else {
                 stderr.append(data)
-                if stderr.count > Self.stderrLimit {
-                    stderr.removeFirst(stderr.count - Self.stderrLimit)
-                }
                 return (nil, [], self.waiter == nil ? nil : connection)
             }
             // Closed here: nothing reads any more.
@@ -213,7 +207,7 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
     private func finish(status: Int?, error: Error?) {
         let waiter = lock.withLock { () -> (CheckedContinuation<[UInt8]?, Error>, Error?)? in
             guard case .running = state else { return nil }
-            let ending = Self.ending(status: status, error: error, stderr: String(decoding: stderr, as: UTF8.self))
+            let ending = Self.ending(status: status, error: error, stderr: stderr.text)
             state = .ended(ending)
             guard let waiter = self.waiter else { return nil }
             self.waiter = nil

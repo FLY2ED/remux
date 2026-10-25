@@ -1262,19 +1262,22 @@ final class SSHTmuxControlTransportTests: XCTestCase {
         XCTAssertEqual(router.diagnostics?.messages, notFound)
     }
 
-    /// The launch's own messages come last, after whatever the startup files printed: the end is kept, as text.
-    func testStartupMessagesKeepTheEndOfALongStartup() {
+    /// A long startup before the launch's marker, and a wrapper that prints a lot after the shell's line: the
+    /// shell's line is still read.
+    func testStartupMessagesKeepTheLaunchsLineAroundLongOutput() {
         let router = SSHTmuxControlChannelDataRouter()
-        let motd = String(repeating: "welcome to the server\r\n", count: 200)
+        let motd = String(repeating: "welcome to the server\r\n", count: 1_000)
         let launch = "\r\nremux-ready:1\r\n\r\nremux-ready:1\r\nsh: 1: exec: /opt/tools/tmux: Exec format error\r\n"
+        let after = String(repeating: "more output from the wrapper\r\n", count: 1_000)
 
-        XCTAssertEqual(router.route(type: .channel, data: Data((motd + launch).utf8)), .startupOutput)
+        for chunk in [motd, launch, after] {
+            XCTAssertEqual(router.route(type: .channel, data: Data(chunk.utf8)), .startupOutput)
+        }
 
-        let messages = router.diagnostics?.messages ?? ""
-        XCTAssertTrue(messages.hasSuffix(launch))
-        XCTAssertLessThanOrEqual(messages.utf8.count, 2048)
-        // The trace preview escapes each control byte to four characters.
-        XCTAssertLessThanOrEqual(router.diagnostics?.startupOutputPreview?.count ?? 0, 240 * 4)
+        XCTAssertEqual(
+            RemoteProgramFailure(exitStatus: 126, stderr: router.diagnostics?.messages ?? ""),
+            .couldNotStart("sh: 1: exec: /opt/tools/tmux: Exec format error")
+        )
     }
 
     func testRawPseudoTerminalRequestUsesRawModes() {

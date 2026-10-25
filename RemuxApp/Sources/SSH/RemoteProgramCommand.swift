@@ -68,7 +68,7 @@ enum RemoteProgramCommand {
 
     /// Skips a stream up to the end of the ready marker's line, as Herdr's client does with its own: the
     /// first line that is exactly the marker, optionally ending in a carriage return.
-    struct ReadyLine {
+    struct ReadyLine: Equatable, Sendable {
         private static let marker = Array(RemoteProgramCommand.readyMarker.utf8)
         private(set) var isFound = false
         private var matched = 0
@@ -95,6 +95,36 @@ enum RemoteProgramCommand {
                 }
             }
             return []
+        }
+    }
+}
+
+/// A run's messages as they arrive, kept bounded for `RemoteProgramFailure`: until the ready marker, the end of
+/// them, where the not-found line and the login shell's errors are; from the marker on, what follows it, where
+/// the program's or the shell's first line is, however much the program prints after it.
+struct RemoteProgramMessages: Equatable, Sendable {
+    private static let limit = 8 * 1024
+
+    private var readyLine = RemoteProgramCommand.ReadyLine()
+    private var bytes = Data()
+
+    var text: String {
+        String(decoding: bytes, as: UTF8.self)
+    }
+
+    mutating func append(_ data: Data) {
+        guard !readyLine.isFound else {
+            bytes.append(data.prefix(max(0, Self.limit - bytes.count)))
+            return
+        }
+        let afterMarker = readyLine.output(from: data)
+        if readyLine.isFound {
+            bytes = Data("\n\(RemoteProgramCommand.readyMarker)\n".utf8) + afterMarker.prefix(Self.limit)
+        } else {
+            bytes.append(data)
+            if bytes.count > Self.limit {
+                bytes.removeFirst(bytes.count - Self.limit)
+            }
         }
     }
 }

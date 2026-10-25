@@ -108,6 +108,39 @@ final class RemoteProgramCommandTests: XCTestCase {
         )
     }
 
+    /// Until the marker, the end of the messages is kept: the not-found line comes last, after any amount of
+    /// startup output.
+    func testMessagesKeepTheEndBeforeTheMarker() {
+        var messages = RemoteProgramMessages()
+        messages.append(Data(String(repeating: "welcome to the server\r\n", count: 1_000).utf8))
+        messages.append(Data("remux: not found: tmux\r\n".utf8))
+
+        XCTAssertLessThanOrEqual(messages.text.utf8.count, 8 * 1024)
+        XCTAssertEqual(RemoteProgramFailure(exitStatus: 127, stderr: messages.text), .notFound)
+    }
+
+    /// From the marker on, what follows it is kept, however much the program prints after its first line and
+    /// however the stream is split.
+    func testMessagesKeepWhatFollowsTheMarker() {
+        let stream = Data((
+            String(repeating: "welcome to the server\r\n", count: 1_000)
+                + "\r\nremux-ready:1\r\n\r\nremux-ready:1\r\nsh: 1: exec: /opt/tools/tmux: Exec format error\r\n"
+                + String(repeating: "more output from the wrapper\r\n", count: 1_000)
+        ).utf8)
+        for split in [7, 1_000, stream.count] {
+            var messages = RemoteProgramMessages()
+            for start in stride(from: 0, to: stream.count, by: split) {
+                messages.append(stream[start..<min(start + split, stream.count)])
+            }
+            XCTAssertEqual(
+                RemoteProgramFailure(exitStatus: 126, stderr: messages.text),
+                .couldNotStart("sh: 1: exec: /opt/tools/tmux: Exec format error"),
+                "split \(split)"
+            )
+            XCTAssertLessThanOrEqual(messages.text.utf8.count, 8 * 1024 + 32)
+        }
+    }
+
     /// Without the marker the run never got to the program: the login shell or the startup files failed.
     func testARunThatNeverGotToTheProgramIsNotItsFailure() {
         XCTAssertNil(RemoteProgramFailure(exitStatus: 1, stderr: "This account is currently not available.\n"))
