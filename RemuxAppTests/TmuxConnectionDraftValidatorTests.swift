@@ -24,6 +24,62 @@ final class TmuxConnectionDraftValidatorTests: XCTestCase {
         XCTAssertEqual(secondServer.serverID, expectedID)
     }
 
+    /// A server's last check describes a backend only while the draft names what was checked: the same
+    /// address, account and executable path. The sign-in method doesn't change what is installed.
+    func testTheLastCheckDescribesABackendOnlyWhileTheDraftNamesWhatWasChecked() {
+        let server = SavedServer(
+            displayName: "Mac mini",
+            host: "mini.local",
+            port: 2222,
+            username: "me",
+            identityID: UUID(),
+            herdrExecutablePath: "/opt/herdr/bin/herdr"
+        )
+        let unchanged = TmuxConnectionDraft(
+            server: server,
+            workspace: SavedWorkspace(serverID: server.id, backend: .tmux, sessionName: "main")
+        )
+        XCTAssertTrue(unchanged.checksSameExecutable(as: server, for: .tmux))
+        XCTAssertTrue(unchanged.checksSameExecutable(as: server, for: .herdr))
+
+        var edited = unchanged
+        edited.herdrExecutablePath = "/opt/herdr/bin/herdr2"
+        XCTAssertFalse(edited.checksSameExecutable(as: server, for: .herdr))
+        XCTAssertTrue(edited.checksSameExecutable(as: server, for: .tmux), "tmux's path is still the one checked.")
+
+        edited = unchanged
+        edited.herdrExecutablePath = ""
+        XCTAssertFalse(edited.checksSameExecutable(as: server, for: .herdr), "Automatic wasn't checked.")
+
+        edited = unchanged
+        edited.tmuxExecutablePath = "/usr/bin/tmux"
+        XCTAssertFalse(edited.checksSameExecutable(as: server, for: .tmux), "Automatic was checked, not this path.")
+
+        edited = unchanged
+        edited.tmuxExecutablePath = "  "
+        edited.herdrExecutablePath = " /opt/herdr/bin/herdr "
+        edited.host = " mini.local "
+        edited.username = "me "
+        XCTAssertTrue(edited.checksSameExecutable(as: server, for: .tmux), "Saving trims, so spaces change nothing.")
+        XCTAssertTrue(edited.checksSameExecutable(as: server, for: .herdr))
+
+        for change in [
+            { (draft: inout TmuxConnectionDraft) in draft.host = "other.local" },
+            { (draft: inout TmuxConnectionDraft) in draft.port = "22" },
+            { (draft: inout TmuxConnectionDraft) in draft.username = "you" },
+        ] {
+            edited = unchanged
+            change(&edited)
+            XCTAssertFalse(edited.checksSameExecutable(as: server, for: .tmux))
+            XCTAssertFalse(edited.checksSameExecutable(as: server, for: .herdr))
+        }
+
+        edited = unchanged
+        edited.authenticationKind = .privateKey
+        edited.password = "changed"
+        XCTAssertTrue(edited.checksSameExecutable(as: server, for: .herdr))
+    }
+
     func testTmuxExecutablePathProblem() {
         XCTAssertNil(TmuxConnectionDraftValidator.executablePathProblem(""))
         XCTAssertNil(TmuxConnectionDraftValidator.executablePathProblem("   "))
