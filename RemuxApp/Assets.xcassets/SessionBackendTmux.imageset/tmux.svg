@@ -6,6 +6,8 @@
     <defs></defs>
     <g id="Page-1" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd" sketch:type="MSPage">
         <g id="logomark-copy" sketch:type="MSLayerGroup">
+            <!-- The pane lines are gaps in the screen; white behind them keeps them white on a dark row too. -->
+            <path d="M77,0 L83,0 L83,146 L77,146 Z M83,70 L160,70 L160,76 L83,76 Z" id="pane-lines" fill="#FFFFFF"></path>
             <g id="status-bar" transform="translate(0.000000, 116.000000)" fill="#1BB91F" sketch:type="MSShapeGroup">
                 <path d="M0,0 L160,0 L160,28.9961276 C160,37.2825375 153.278035,44 145.001535,44 L14.9984654,44 C6.71504169,44 0,37.2934149 0,28.9961276 L0,0 Z M0,0 L160,0 L160,30 L0,30 L0,0 Z" id="Rectangle-5"></path>
             </g>
