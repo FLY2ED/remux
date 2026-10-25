@@ -11,9 +11,9 @@ enum HerdrBridgeError: Error, Equatable, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .herdrNotFound:
-            return "Herdr isn't installed on this server, or isn't on its PATH."
+            return "Install Herdr on this server or update Executable Path."
         case .herdrNotExecutable:
-            return "The Herdr executable on this server can't be run."
+            return "Check the Herdr executable and its permissions, then try again."
         case .remoteExit(let status, let stderr):
             let detail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             return detail.isEmpty ? "herdr exited with status \(status)." : detail

@@ -268,7 +268,8 @@ struct TerminalDisconnectReason: Equatable, Sendable {
         case authentication
         case hostKey
         case profile
-        case tmuxUnavailable
+        /// The session's program isn't installed on the server, or can't be run there.
+        case backendUnavailable(SessionBackend)
         case remoteExit
         case runtime
         case userClosed
@@ -286,8 +287,8 @@ struct TerminalDisconnectReason: Equatable, Sendable {
                 "host_key"
             case .profile:
                 "profile"
-            case .tmuxUnavailable:
-                "tmux_unavailable"
+            case .backendUnavailable(let backend):
+                "\(backend.rawValue)_unavailable"
             case .remoteExit:
                 "remote_exit"
             case .runtime:
@@ -322,7 +323,7 @@ struct TerminalDisconnectReason: Equatable, Sendable {
              .authentication,
              .hostKey,
              .profile,
-             .tmuxUnavailable,
+             .backendUnavailable,
              .remoteExit,
              .runtime,
              .userClosed,

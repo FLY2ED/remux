@@ -996,7 +996,7 @@ final class HerdrScreenModel {
     private static func disconnectReason(openingBridgeFailedWith error: Error) -> TerminalDisconnectReason {
         switch error as? HerdrBridgeError {
         case .herdrNotFound?, .herdrNotExecutable?:
-            return TerminalDisconnectReason(kind: .profile, message: error.localizedDescription)
+            return TerminalDisconnectReason(kind: .backendUnavailable(.herdr), message: error.localizedDescription)
         case .remoteExit?:
             return TerminalDisconnectReason(kind: .remoteExit, message: error.localizedDescription)
         case .channel?:

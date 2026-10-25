@@ -722,7 +722,10 @@ final class HerdrScreenModelTests: XCTestCase {
         }
         XCTAssertEqual(
             harness.states.last,
-            .disconnected(TerminalDisconnectReason(kind: .profile, message: HerdrBridgeError.herdrNotFound.errorDescription!))
+            .disconnected(TerminalDisconnectReason(
+                kind: .backendUnavailable(.herdr),
+                message: HerdrBridgeError.herdrNotFound.errorDescription!
+            ))
         )
     }
 

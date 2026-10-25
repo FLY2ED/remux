@@ -657,6 +657,10 @@ struct RemuxAppDependencies: Sendable {
                         sshRootService: sshRootService
                     )
                 }
+            },
+            // The simulated server has no Herdr, as its discovery reports.
+            herdrBridgeOpener: { _, _, _ in
+                throw HerdrBridgeError.herdrNotFound
             }
         )
     }

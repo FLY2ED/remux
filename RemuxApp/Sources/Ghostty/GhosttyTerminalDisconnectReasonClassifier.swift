@@ -38,7 +38,7 @@ enum GhosttyTerminalDisconnectReasonClassifier {
                     diagnostics: diagnostics
                 ) {
                     return TerminalDisconnectReason(
-                        kind: .tmuxUnavailable,
+                        kind: .backendUnavailable(.tmux),
                         message: message
                     )
                 }

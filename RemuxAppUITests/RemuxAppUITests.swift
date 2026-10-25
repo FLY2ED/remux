@@ -1280,6 +1280,41 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Not found on this server."].firstMatch.exists)
     }
 
+    /// Opening a Herdr session on a server without Herdr shows Herdr's own panel, as tmux has one, and its Edit
+    /// Server leads to Herdr's path.
+    func testOpeningAHerdrSessionWithoutHerdrShowsHerdrUnavailable() {
+        app.launchEnvironment.merge(
+            [
+                "REMUX_UI_TESTING": "1",
+                "REMUX_DEBUG_SEED_CONNECTION": "1",
+                "REMUX_DEBUG_HERDR_SESSION": "default",
+                "REMUX_DEBUG_SERVER_HOST": "example.com",
+                "REMUX_DEBUG_SERVER_USERNAME": "tester",
+                "REMUX_DEBUG_SERVER_PASSWORD": "password",
+            ],
+            uniquingKeysWith: { _, new in new }
+        )
+        app.launch()
+
+        let session = app.descendants(matching: .any)
+            .matching(identifier: "library.session.resume")
+            .firstMatch
+        XCTAssertTrue(session.waitForExistence(timeout: 5))
+        session.tap()
+        XCTAssertTrue(app.staticTexts["Herdr Unavailable"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Install Herdr on this server or update Executable Path."].exists)
+        // The panel's identifier covers its buttons, so they're found by their titles.
+        XCTAssertTrue(app.buttons["Retry"].exists)
+
+        app.buttons["Edit Server"].tap()
+        XCTAssertTrue(app.textFields["connection.name"].waitForExistence(timeout: 5))
+        let executable = app.textFields["connection.herdr-executable"]
+        for _ in 0..<4 where !executable.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(executable.isHittable, "Edit Server should open on Herdr's path.")
+    }
+
     /// A saved Herdr session on a server without Herdr says so in place of when it was last opened, and
     /// leads to Herdr's path. The server's tmux is fine, so nothing else on the page mentions Herdr.
     func testASavedHerdrSessionSaysHerdrIsMissing() {
