@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ActiveSessionSwitcherItem: Identifiable, Equatable {
     let id: SavedWorkspace.ID
+    let backend: SessionBackend
     let sessionName: String
     let serverName: String
     let runtimeState: TerminalRuntimeState
@@ -16,10 +17,13 @@ struct RemoteSessionIdentity: Hashable {
 struct AvailableSessionSwitcherItem: Identifiable, Equatable {
     let id: RemoteSessionIdentity
     let serverName: String
+    /// Herdr lists stopped sessions too; opening one starts it.
+    let isRunning: Bool
 }
 
 struct RecentSessionSwitcherItem: Identifiable, Equatable {
     let id: SavedWorkspace.ID
+    let backend: SessionBackend
     let sessionName: String
     let serverName: String
     let lastOpenedAt: Date
@@ -31,6 +35,8 @@ struct SessionSwitcherProjection: Equatable {
     let activeSessions: [ActiveSessionSwitcherItem]
     let availableSessions: [AvailableSessionSwitcherItem]
     let recentSessions: [RecentSessionSwitcherItem]
+    /// Servers none of whose sessions could be listed: a host key to review, or a failed check.
+    let uncheckedServerIDs: Set<SavedServer.ID>
 
     var inlineAvailableSessions: [AvailableSessionSwitcherItem] {
         Array(availableSessions.prefix(Self.maximumInlineAvailableSessionCount))
@@ -40,16 +46,14 @@ struct SessionSwitcherProjection: Equatable {
         availableSessions.count - inlineAvailableSessions.count
     }
 
-    func availableSessionNames(on serverID: SavedServer.ID) -> [String] {
-        availableSessions.compactMap { session in
-            session.id.serverID == serverID ? session.id.locator.name : nil
-        }
+    func availableSessions(on serverID: SavedServer.ID) -> [AvailableSessionSwitcherItem] {
+        availableSessions.filter { $0.id.serverID == serverID }
     }
 
     init(
         snapshot: ConnectionLibrarySnapshot,
         activeSessions: [ActiveTerminalSession],
-        discoveryStates: [SavedServer.ID: TmuxSessionDiscoveryState] = [:],
+        discoveries: [SavedServer.ID: ServerSessionDiscovery] = [:],
         selectedSessionID: SavedWorkspace.ID?
     ) {
         self.activeSessions = RemuxActiveSessionCollection
@@ -57,6 +61,7 @@ struct SessionSwitcherProjection: Equatable {
             .map { session in
                 ActiveSessionSwitcherItem(
                     id: session.id,
+                    backend: session.target.workspace.backend,
                     sessionName: session.target.workspace.sessionName,
                     serverName: session.target.server.displayName,
                     runtimeState: session.runtimeState,
@@ -76,9 +81,9 @@ struct SessionSwitcherProjection: Equatable {
         self.recentSessions = snapshot
             .recentWorkspaces(excluding: activeWorkspaceIDs)
             .filter {
-                TmuxSessionReconciliation.includesSavedWorkspace(
+                SessionReconciliation.includesSavedWorkspace(
                     $0,
-                    discoveryStates: discoveryStates
+                    discoveries: discoveries
                 )
             }
             .compactMap { workspace in
@@ -95,6 +100,7 @@ struct SessionSwitcherProjection: Equatable {
                 }
                 return RecentSessionSwitcherItem(
                     id: workspace.id,
+                    backend: workspace.backend,
                     sessionName: workspace.sessionName,
                     serverName: server.displayName,
                     lastOpenedAt: workspace.lastOpenedAt
@@ -103,21 +109,33 @@ struct SessionSwitcherProjection: Equatable {
 
         self.availableSessions = snapshot.servers
             .flatMap { server in
-                discoveryStates[server.id]?.sessionNames.sorted {
-                    $0.localizedStandardCompare($1) == .orderedAscending
-                }.map { sessionName in
-                    AvailableSessionSwitcherItem(
-                        id: RemoteSessionIdentity(
-                            serverID: server.id,
-                            locator: SessionLocator(backend: .tmux, name: sessionName)
-                        ),
-                        serverName: server.displayName
-                    )
-                } ?? []
+                let discovery = discoveries[server.id] ?? .idle
+                return [SessionBackend.tmux, .herdr]
+                    .flatMap { backend in
+                        discovery[backend].sessions.map { session in
+                            AvailableSessionSwitcherItem(
+                                id: RemoteSessionIdentity(
+                                    serverID: server.id,
+                                    locator: SessionLocator(backend: backend, name: session.name)
+                                ),
+                                serverName: server.displayName,
+                                isRunning: session.isRunning
+                            )
+                        }
+                    }
+                    .sorted { lhs, rhs in
+                        let order = lhs.id.locator.name.localizedStandardCompare(rhs.id.locator.name)
+                        guard order == .orderedSame else { return order == .orderedAscending }
+                        return lhs.id.locator.backend == .tmux && rhs.id.locator.backend == .herdr
+                    }
             }
             .filter {
                 !activeIdentities.contains($0.id) && !recentIdentities.contains($0.id)
             }
+
+        self.uncheckedServerIDs = Set(snapshot.servers.compactMap { server in
+            (discoveries[server.id] ?? .idle).notices.isServerUnchecked ? server.id : nil
+        })
     }
 
     static func orderedServers(
@@ -146,14 +164,14 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
     let currentServerID: SavedServer.ID?
     let onSelectActiveSession: (SavedWorkspace.ID) -> Void
     let onResumeSession: (SavedWorkspace.ID) -> Void
-    let onResumeAvailableSession: (SavedServer.ID, String) -> Void
+    let onResumeAvailableSession: (SavedServer.ID, SessionLocator) -> Void
     let onDisconnectSession: (SavedWorkspace.ID) -> Void
     let isCreatingSession: Bool
     let onCreateSession: (SavedServer.ID) -> Bool
     let onCancelCreateSession: () -> Void
     let newSessionContent: () -> NewSessionContent
     let onRefresh: () -> Void
-    let discoveryStates: [SavedServer.ID: TmuxSessionDiscoveryState]
+    let discoveries: [SavedServer.ID: ServerSessionDiscovery]
 
     @State private var path: [Route] = []
     @State private var showsAllRecentSessions = false
@@ -407,7 +425,7 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
     private func resumeAvailableSession(_ session: AvailableSessionSwitcherItem) {
         Haptic.selection()
         dismiss()
-        onResumeAvailableSession(session.id.serverID, session.id.locator.name)
+        onResumeAvailableSession(session.id.serverID, session.id.locator)
     }
 
     private func recentSessionRow(_ session: RecentSessionSwitcherItem) -> some View {
@@ -441,30 +459,25 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
         path.append(.newSession)
     }
 
-    private var serverDiscoveryStates: [(SavedServer, TmuxSessionDiscoveryState)] {
-        servers.map { ($0, discoveryStates[$0.id] ?? .idle) }
-    }
-
     private var isRefreshing: Bool {
-        serverDiscoveryStates.contains { $0.1.isLoading }
+        servers.contains { (discoveries[$0.id] ?? .idle).isLoading }
     }
 
     private var failedServerNames: [String] {
-        serverDiscoveryStates.compactMap { server, state in
-            guard case .failed = state.phase else { return nil }
-            return server.displayName
+        servers.compactMap { server in
+            projection.uncheckedServerIDs.contains(server.id) ? server.displayName : nil
         }
     }
 
     private var hasUndiscoveredServer: Bool {
-        serverDiscoveryStates.contains { $0.1.phase == .idle }
+        servers.contains { (discoveries[$0.id] ?? .idle).hasIdleBackend }
     }
 
     @ViewBuilder
     private var discoveryStatusRows: some View {
         if isRefreshing {
             discoveryStatusRow(
-                "Looking for tmux sessions…",
+                "Looking for sessions…",
                 systemImage: "arrow.clockwise"
             )
         } else if !failedServerNames.isEmpty {
@@ -475,7 +488,7 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
         } else if projection.availableSessions.isEmpty,
                   hasUndiscoveredServer {
             discoveryStatusRow(
-                "Refresh to find tmux sessions",
+                "Refresh to find sessions",
                 systemImage: "arrow.clockwise"
             )
         } else if projection.availableSessions.isEmpty {
@@ -520,14 +533,7 @@ private struct ActiveSessionSwitcherRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "terminal")
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(
-                    session.isSelected
-                        ? chromeStyle.accent
-                        : TerminalSelectionSheetPalette.secondary
-                )
-                .frame(width: 28, height: 32)
+            SessionBackendLogo(backend: session.backend, size: 28)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(session.sessionName)
@@ -577,12 +583,21 @@ private struct AvailableSessionSwitcherRow: View {
     let session: AvailableSessionSwitcherItem
     var showsServerName = true
 
+    /// The logo tells tmux from Herdr; a Herdr session can be listed while stopped.
+    private var detail: String? {
+        var parts: [String] = []
+        if !session.isRunning {
+            parts.append("Stopped")
+        }
+        if showsServerName {
+            parts.append(session.serverName)
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "terminal")
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(TerminalSelectionSheetPalette.secondary)
-                .frame(width: 28, height: 32)
+            SessionBackendLogo(backend: session.id.locator.backend, size: 28)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(session.id.locator.name)
@@ -591,8 +606,8 @@ private struct AvailableSessionSwitcherRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
 
-                if showsServerName {
-                    Text(session.serverName)
+                if let detail {
+                    Text(detail)
                         .font(.footnote)
                         .foregroundStyle(TerminalSelectionSheetPalette.secondary)
                         .lineLimit(1)
@@ -604,7 +619,10 @@ private struct AvailableSessionSwitcherRow: View {
         .frame(minHeight: 52)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(session.id.locator.name), \(session.serverName)")
+        .accessibilityLabel(
+            ([session.id.locator.name, session.id.locator.backend.displayName] + [detail].compactMap { $0 })
+                .joined(separator: ", ")
+        )
         .accessibilityValue("Available")
         .accessibilityHint("Resume this session")
         .accessibilityAddTraits(.isButton)
@@ -616,10 +634,7 @@ private struct RecentSessionSwitcherRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "terminal")
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(TerminalSelectionSheetPalette.secondary)
-                .frame(width: 28, height: 32)
+            SessionBackendLogo(backend: session.backend, size: 28)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(session.sessionName)

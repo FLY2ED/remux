@@ -1,11 +1,5 @@
 import Foundation
 
-struct HerdrDiscoveredSession: Equatable, Sendable {
-    let name: String
-    /// Stopped sessions are listed too; opening one starts it.
-    let isRunning: Bool
-}
-
 struct HerdrVersion: Comparable, Sendable, CustomStringConvertible {
     let major: Int
     let minor: Int
@@ -77,7 +71,7 @@ enum HerdrSessionDiscovery {
         using claimedRoot: RemuxSSHClaimedRoot,
         herdrExecutable: String,
         trace: RemuxTransportStartupTrace
-    ) async throws -> [HerdrDiscoveredSession] {
+    ) async throws -> [DiscoveredSession] {
         let result = try await RemuxSSHExecSession.run(
             using: claimedRoot,
             command: listSessionsCommand(herdrExecutable: herdrExecutable),
@@ -99,14 +93,12 @@ enum HerdrSessionDiscovery {
         ])
     }
 
-    /// A server without Herdr has no Herdr sessions. A Herdr that fails, or is
-    /// older than the supported minimum, is an error.
-    static func sessions(from result: RemuxSSHExecResult) throws -> [HerdrDiscoveredSession] {
+    /// A Herdr that isn't found, fails, or is older than the supported minimum is an error; a missing
+    /// one exits 127 with `HerdrRemoteCommand.notFoundMarker`, so the caller can tell it apart from a
+    /// Herdr without sessions.
+    static func sessions(from result: RemuxSSHExecResult) throws -> [DiscoveredSession] {
         let stderr = String(decoding: result.stderr, as: UTF8.self)
         guard result.exitStatus == 0 else {
-            if result.exitStatus == 127, stderr.contains(HerdrRemoteCommand.notFoundMarker) {
-                return []
-            }
             throw HerdrSessionDiscoveryError.remoteExit(status: result.exitStatus, stderr: stderr)
         }
         var readyLine = HerdrRemoteCommand.ReadyLine()
@@ -130,7 +122,7 @@ enum HerdrSessionDiscovery {
             throw HerdrSessionDiscoveryError.invalidSessionList
         }
         return list.sessions.map {
-            HerdrDiscoveredSession(name: $0.name, isRunning: $0.running)
+            DiscoveredSession(name: $0.name, isRunning: $0.running)
         }
     }
 

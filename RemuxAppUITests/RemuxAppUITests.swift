@@ -13,6 +13,9 @@ final class RemuxAppUITests: XCTestCase {
         let username: String
         var sessionName: String?
         var tmuxExecutablePath: String?
+        /// The Herdr the app's discovery runs on the server. Without one, discovery finds no Herdr: the server's
+        /// own Herdr and its sessions belong to whoever runs it.
+        var herdrExecutablePath: String?
     }
 
     /// The live Herdr UI test's configuration, a JSON file named by REMUX_LIVE_HERDR_UI_CONFIG (pass it
@@ -1200,9 +1203,9 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertTrue(app.otherElements["terminal.input.ready"].waitForExistence(timeout: 2))
     }
 
-    /// The SSH server is simulated: it signs in and reports that tmux isn't
-    /// installed, as the discovery script does on a host without tmux.
-    func testAddServerWhenTmuxIsMissing() {
+    /// The SSH server is simulated: it signs in and reports that neither tmux nor Herdr is installed, as
+    /// the discovery scripts do on a host without either.
+    func testAddServerWithNeitherBackendInstalled() {
         app.launchEnvironment["REMUX_UI_TEST_TMUX_MISSING"] = "1"
         launchSimulatorApp()
         openConnectionSetup()
@@ -1212,21 +1215,104 @@ final class RemuxAppUITests: XCTestCase {
 
         XCTAssertTrue(
             app.descendants(matching: .any)["library.server.detail"].waitForExistence(timeout: 5),
-            "A server without tmux should be added."
+            "A server without tmux or Herdr should be added."
         )
         XCTAssertFalse(app.alerts["Couldn’t Add Server"].exists)
         XCTAssertTrue(
-            tmuxMissingRow().waitForExistence(timeout: 5),
-            "The server page should say tmux is missing."
+            noBackendRow().waitForExistence(timeout: 5),
+            "The server page should say neither tmux nor Herdr is installed."
         )
+        XCTAssertEqual(noBackendRow().label, "Neither tmux nor Herdr is installed on this server.")
+        XCTAssertFalse(app.buttons["library.server.new-session.empty"].exists)
 
-        tmuxMissingRow().tap()
+        app.buttons["library.server.set-paths"].tap()
         XCTAssertTrue(app.textFields["connection.name"].waitForExistence(timeout: 5))
         let executable = app.textFields["connection.tmux-executable"]
         for _ in 0..<4 where !executable.isHittable {
             app.swipeUp()
         }
-        XCTAssertTrue(executable.isHittable, "The row should lead to the tmux path.")
+        XCTAssertTrue(executable.isHittable, "Set Paths should lead to the paths.")
+        XCTAssertTrue(
+            app.staticTexts["Not found on this server."].firstMatch.exists,
+            "Each path should say the last check found nothing there."
+        )
+    }
+
+    /// Most servers have no Herdr. Where none of its sessions is saved, Edit Server keeps Advanced closed; the
+    /// path says Herdr wasn't found once Advanced is opened.
+    func testEditServerKeepsAdvancedClosedForAnUnusedMissingHerdr() {
+        app.launchEnvironment.merge(
+            [
+                "REMUX_UI_TESTING": "1",
+                "REMUX_DEBUG_SEED_CONNECTION": "1",
+                "REMUX_DEBUG_SERVER_HOST": "example.com",
+                "REMUX_DEBUG_SERVER_USERNAME": "tester",
+                "REMUX_DEBUG_SERVER_PASSWORD": "password",
+            ],
+            uniquingKeysWith: { _, new in new }
+        )
+        app.launch()
+        openFirstServerDetail()
+        XCTAssertTrue(
+            waitForElementToDisappear(
+                app.descendants(matching: .any)["library.server.available.loading"],
+                timeout: 5
+            )
+        )
+
+        let edit = app.buttons["library.server.edit"]
+        XCTAssertTrue(edit.waitForExistence(timeout: 2))
+        edit.tap()
+        XCTAssertTrue(app.textFields["connection.name"].waitForExistence(timeout: 5))
+        let advanced = app.buttons["Advanced"]
+        for _ in 0..<6 where !(advanced.exists && advanced.isHittable) {
+            app.swipeUp()
+        }
+        XCTAssertTrue(advanced.isHittable)
+        XCTAssertFalse(app.textFields["connection.herdr-executable"].exists, "Advanced should start closed.")
+
+        advanced.tap()
+        let executable = app.textFields["connection.herdr-executable"]
+        for _ in 0..<4 where !(executable.exists && executable.isHittable) {
+            app.swipeUp()
+        }
+        XCTAssertTrue(executable.isHittable)
+        XCTAssertTrue(app.staticTexts["Not found on this server."].firstMatch.exists)
+    }
+
+    /// A saved Herdr session on a server without Herdr says so in place of when it was last opened, and
+    /// leads to Herdr's path. The server's tmux is fine, so nothing else on the page mentions Herdr.
+    func testASavedHerdrSessionSaysHerdrIsMissing() {
+        app.launchEnvironment.merge(
+            [
+                "REMUX_UI_TESTING": "1",
+                "REMUX_DEBUG_SEED_CONNECTION": "1",
+                "REMUX_DEBUG_HERDR_SESSION": "default",
+                "REMUX_DEBUG_SERVER_HOST": "example.com",
+                "REMUX_DEBUG_SERVER_USERNAME": "tester",
+                "REMUX_DEBUG_SERVER_PASSWORD": "password",
+            ],
+            uniquingKeysWith: { _, new in new }
+        )
+        app.launch()
+        openFirstServerDetail()
+
+        let session = app.descendants(matching: .any)
+            .matching(identifier: "library.session.resume")
+            .matching(NSPredicate(format: "label CONTAINS %@", "Herdr not found · Set path"))
+            .firstMatch
+        XCTAssertTrue(session.waitForExistence(timeout: 5), "The saved Herdr session should say Herdr is missing.")
+        XCTAssertFalse(noBackendRow().exists)
+        XCTAssertFalse(app.descendants(matching: .any)["library.server.check-failed"].exists)
+
+        session.tap()
+        XCTAssertTrue(app.textFields["connection.name"].waitForExistence(timeout: 5))
+        let executable = app.textFields["connection.herdr-executable"]
+        for _ in 0..<4 where !executable.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(executable.isHittable, "The session should lead to Herdr's path.")
+        XCTAssertTrue(app.staticTexts["Not found on this server."].firstMatch.exists)
     }
 
     func testDeleteServerAsksFirst() {
@@ -1294,6 +1380,11 @@ final class RemuxAppUITests: XCTestCase {
         kind.buttons["Herdr"].tap()
         let filled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "default"), object: name)
         XCTAssertEqual(XCTWaiter.wait(for: [filled], timeout: 2), .completed, "Herdr should start on its default name.")
+        // The simulated server has no Herdr.
+        let herdrMissing = app.staticTexts
+            .matching(NSPredicate(format: "label CONTAINS %@", "Herdr isn't installed on this server."))
+            .firstMatch
+        XCTAssertTrue(herdrMissing.waitForExistence(timeout: 2), "New Session should say Herdr is missing.")
 
         tapFormField(name)
         name.typeText(" two")
@@ -1305,6 +1396,7 @@ final class RemuxAppUITests: XCTestCase {
 
         kind.buttons["tmux"].tap()
         XCTAssertFalse(app.staticTexts["Use only letters, numbers, dots, underscores and hyphens."].exists)
+        XCTAssertFalse(herdrMissing.exists)
         XCTAssertEqual(name.value as? String, "default two")
     }
 
@@ -1322,7 +1414,7 @@ final class RemuxAppUITests: XCTestCase {
         )
         app.launch()
         openFirstServerDetail()
-        XCTAssertTrue(tmuxMissingRow().waitForExistence(timeout: 5))
+        XCTAssertTrue(noBackendRow().waitForExistence(timeout: 5))
 
         let edit = app.buttons["library.server.edit"]
         XCTAssertTrue(edit.waitForExistence(timeout: 2))
@@ -1352,19 +1444,13 @@ final class RemuxAppUITests: XCTestCase {
             "The server page should check its sessions again after the edit."
         )
         XCTAssertTrue(
-            tmuxMissingRow().waitForExistence(timeout: 2),
+            noBackendRow().waitForExistence(timeout: 2),
             "The edited path still finds no tmux."
         )
     }
 
-    private func tmuxMissingRow() -> XCUIElement {
-        app.descendants(matching: .any)
-            .matching(identifier: "library.server.available.failure")
-            .matching(NSPredicate(
-                format: "label CONTAINS %@",
-                "tmux wasn't found"
-            ))
-            .firstMatch
+    private func noBackendRow() -> XCUIElement {
+        app.descendants(matching: .any)["library.server.no-backend"]
     }
 
     func testLiveSessionSwitcherDiscoversAndResumesSessionsWhenConfigured() throws {
@@ -1563,6 +1649,20 @@ final class RemuxAppUITests: XCTestCase {
 
         openHomeFromTerminal()
         captureLiveHerdrStep("4-home", in: configuration)
+
+        // The server page lists both backends' sessions once each backend has answered.
+        openFirstServerDetail()
+        let checking = app.descendants(matching: .any)["library.server.available.loading"]
+        XCTAssertTrue(checking.waitForNonExistence(timeout: 20), "Both backends should finish checking the server.")
+        // The fixture's tmux has no session of that name, so a tmux row named for it is Herdr's list under tmux.
+        let herdrNameAsTmux = app.descendants(matching: .any)
+            .matching(identifier: "library.server.available.session")
+            .matching(NSPredicate(format: "label BEGINSWITH %@", "\(configuration.sessionName), tmux"))
+            .firstMatch
+        XCTAssertFalse(herdrNameAsTmux.exists, "Herdr's sessions should be listed as Herdr's.")
+        captureLiveHerdrStep("4b-server-page", in: configuration)
+        app.navigationBars.buttons.firstMatch.tap()
+
         let activeSession = app.descendants(matching: .any)["library.active-session.show"].firstMatch
         XCTAssertTrue(activeSession.waitForExistence(timeout: 5))
         activeSession.tap()
@@ -3391,6 +3491,8 @@ final class RemuxAppUITests: XCTestCase {
         if let tmuxExecutablePath = configuration.tmuxExecutablePath {
             app.launchEnvironment["REMUX_DEBUG_TMUX_EXECUTABLE_PATH"] = tmuxExecutablePath
         }
+        app.launchEnvironment["REMUX_DEBUG_HERDR_EXECUTABLE_PATH"] =
+            configuration.herdrExecutablePath ?? "/nonexistent/herdr"
         // XCTest records the launch environment in the result bundle, so the
         // app reads the password or private key from the file itself.
         app.launchEnvironment["REMUX_DEBUG_CREDENTIALS_FILE"] = configurationPath
