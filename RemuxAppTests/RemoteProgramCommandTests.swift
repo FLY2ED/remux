@@ -74,9 +74,14 @@ final class RemoteProgramCommandTests: XCTestCase {
         XCTAssertEqual(RemoteProgramFailure(exitStatus: 127, stderr: "remux: not found: herdr\n"), .notFound)
     }
 
-    /// The shell's own line is the message: dash, busybox, and bash's first of two lines.
+    /// The shell's own line is the message: dash, busybox, bash's first of two lines, and macOS's /bin/sh (bash
+    /// 3.2), whose failed `exec` exits 1.
     func testAShellThatCannotStartTheProgramSaysWhy() {
         let runs: [(Int, String, String)] = [
+            (1, "\nremux-ready:1\nsh: /opt/tools/tmux: cannot execute binary file\nsh: /opt/tools/tmux: Undefined error: 0\n",
+             "sh: /opt/tools/tmux: cannot execute binary file"),
+            (1, "\nremux-ready:1\nsh: /opt/tools/tmux: /nonexistent/interpreter: bad interpreter: No such file or directory\n",
+             "sh: /opt/tools/tmux: /nonexistent/interpreter: bad interpreter: No such file or directory"),
             (126, "\nremux-ready:1\nsh: 1: exec: /opt/tools/tmux: Exec format error\n",
              "sh: 1: exec: /opt/tools/tmux: Exec format error"),
             (126, "\nremux-ready:1\nsh: line 1: /opt/tools/tmux: cannot execute binary file: Exec format error\nsh: line 1: /opt/tools/tmux: Success\n",

@@ -12,6 +12,8 @@ import Foundation
 enum RemoteProgramCommand {
     static let readyMarker = "remux-ready:1"
     static let notFoundMarker = "remux: not found"
+    /// The name the script's shell runs under, which starts each of its own error lines.
+    static let shellName = "sh"
 
     /// After the user's PATH: where Herdr's client looks for Herdr, mise's shims, MacPorts, Guix and Snap,
     /// then the system folders the script's own tools live in.
@@ -38,7 +40,7 @@ enum RemoteProgramCommand {
     static func command(program: String, arguments: [String] = [], body: [String]) -> String {
         let script = (prelude + body).joined(separator: "; ")
         return (
-            ["exec /bin/sh -c '\(script)' sh", RemoteShellArgument.octalEncoded(program)]
+            ["exec /bin/sh -c '\(script)' \(shellName)", RemoteShellArgument.octalEncoded(program)]
                 + arguments.map(RemoteShellArgument.octalEncoded)
         ).joined(separator: " ")
     }
@@ -147,7 +149,9 @@ enum RemoteProgramFailure: Error, Equatable, Sendable {
         }
         guard let message = RemoteProgramCommand.programMessage(in: stderr) else { return nil }
         // A shell that can't start a command exits 126, or 127 when the file it names, or its `#!`
-        // interpreter, is missing.
-        self = exitStatus == 126 || exitStatus == 127 ? .couldNotStart(message) : .failed(message)
+        // interpreter, is missing. macOS's /bin/sh, bash 3.2, exits 1 when `exec` can't start it, so its
+        // own line, which starts with its name, says so too.
+        let isShellsOwnLine = message.hasPrefix("\(RemoteProgramCommand.shellName): ")
+        self = exitStatus == 126 || exitStatus == 127 || isShellsOwnLine ? .couldNotStart(message) : .failed(message)
     }
 }
