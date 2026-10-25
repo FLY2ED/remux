@@ -151,6 +151,42 @@ final class TmuxSessionLinkWriteFailureTests: XCTestCase {
         withExtendedLifetime(runtime) {}
     }
 
+    /// tmux ends the client when its session is destroyed, for example by `exit` in its last pane: it sends
+    /// %exit and closes the channel (bytes as tmux 3.5a sent them). The session ended; the channel closing
+    /// after it is no lost connection to reconnect.
+    func testChannelClosingAfterTmuxExitKeepsTheExit() async throws {
+        let runtime = try GhosttyKitRuntime()
+        let stateRecorder = SessionStateRecorder()
+        let transport = LinkTestTransport(failWrites: false)
+        let controller = TmuxSessionController(
+            callbacks: TmuxSessionController.Callbacks(
+                onState: { state in
+                    stateRecorder.append(state)
+                }
+            )
+        )
+        let link = TmuxSessionLink(controller: controller, transport: transport)
+
+        try await link.start(viewport: .default)
+        try await waitUntil("controller did not process the initial tmux response") {
+            stateRecorder.contains(.syncing)
+        }
+        await transport.receive("%sessions-changed\n%exit\n")
+        await transport.finishInput()
+
+        try await waitUntil("transport was not invalidated after read end") {
+            await transport.closeDispositions().first == .invalidated
+        }
+        await link.stop()
+        await withCheckedContinuation { continuation in
+            controller.shutdown { continuation.resume() }
+        }
+
+        XCTAssertTrue(stateRecorder.contains(.detached(.serverExited(nil))))
+        XCTAssertFalse(stateRecorder.contains(.detached(.transportClosed)))
+        withExtendedLifetime(runtime) {}
+    }
+
     func testExplicitStopKeepsChannelOpenUntilTmuxEndsTheClient() async throws {
         let runtime = try GhosttyKitRuntime()
         let stateRecorder = SessionStateRecorder()
@@ -316,6 +352,10 @@ private actor LinkTestTransport: TmuxControlTransport {
             .reduce(Data(), +)
             .split(separator: UInt8(ascii: "\n"))
             .map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    func receive(_ text: String) {
+        continuation.yield(Data(text.utf8))
     }
 
     func finishInput() {
