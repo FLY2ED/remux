@@ -3,6 +3,16 @@ import NIOCore
 import NIOPosix
 
 enum GhosttyTerminalDisconnectReasonClassifier {
+    /// A tmux control session that couldn't start. `tmuxPath` is the one set in Edit Server, nil for Automatic:
+    /// what a tmux that can't run says depends on it.
+    static func tmuxStartFailure(_ error: any Error, tmuxPath: String?) -> TerminalDisconnectReason {
+        if case .remoteExit(let status, let diagnostics)? = error as? SSHTmuxControlTransportError,
+           let failure = RemoteProgramFailure(exitStatus: status, stderr: diagnostics?.messages ?? "") {
+            return BackendProblem(failure, path: tmuxPath).disconnectReason(for: .tmux)
+        }
+        return transportStartFailure(error)
+    }
+
     static func transportStartFailure(_ error: any Error) -> TerminalDisconnectReason {
         let message = String(describing: error)
 
@@ -32,17 +42,8 @@ enum GhosttyTerminalDisconnectReasonClassifier {
 
         if let sshError = error as? SSHTmuxControlTransportError {
             switch sshError {
-            case .remoteExit(let status, let diagnostics):
-                if let message = tmuxExecutableFailureMessage(
-                    status: status,
-                    diagnostics: diagnostics
-                ) {
-                    return TerminalDisconnectReason(
-                        kind: .backendUnavailable(.tmux),
-                        message: message
-                    )
-                }
-                return TerminalDisconnectReason(kind: .remoteExit, message: message)
+            case .remoteExit:
+                return TerminalDisconnectReason(kind: .remoteExit, message: sshError.localizedDescription)
             case .channelRequestFailed:
                 return TerminalDisconnectReason(kind: .profile, message: message)
             case .closed:
@@ -62,16 +63,6 @@ enum GhosttyTerminalDisconnectReasonClassifier {
         }
 
         return TerminalDisconnectReason(kind: .unknown, message: message)
-    }
-
-    private static func tmuxExecutableFailureMessage(
-        status: Int,
-        diagnostics: SSHTmuxStartupDiagnostics?
-    ) -> String? {
-        TmuxExecutableProblem(
-            exitStatus: status,
-            output: diagnostics?.messages ?? ""
-        )?.message
     }
 
     private static func isServerUnreachable(_ error: any Error) -> Bool {

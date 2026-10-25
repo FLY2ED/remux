@@ -18,76 +18,62 @@ final class HerdrSessionDiscoveryTests: XCTestCase {
         XCTAssertFalse(command.contains("touch pwned"))
     }
 
-    func testListsRunningAndStoppedSessions() throws {
-        let sessions = try HerdrSessionDiscovery.sessions(
-            from: result(stdout: "herdr 0.9.3\n\(sessionListJSON)\n")
+    func testListsRunningAndStoppedSessionsAndWhereHerdrIs() throws {
+        let listing = try HerdrSessionDiscovery.listing(
+            from: result(stdout: "/usr/local/bin/herdr\nherdr 0.9.3\n\(sessionListJSON)\n")
         )
 
-        XCTAssertEqual(sessions, [
+        XCTAssertEqual(listing, SessionListing(executablePath: "/usr/local/bin/herdr", sessions: [
             DiscoveredSession(name: "default", isRunning: false),
             DiscoveredSession(name: "probe", isRunning: true),
-        ])
+        ]))
     }
 
     /// A missing Herdr is an error, not an empty list, so the app can tell it apart from a Herdr without
-    /// sessions; it reads as "not found".
+    /// sessions. Captured on Debian.
     func testMissingHerdrIsNotFound() {
-        let stderr = "\(HerdrRemoteCommand.notFoundMarker): herdr\n"
-
         XCTAssertThrowsError(
-            try HerdrSessionDiscovery.sessions(from: result(exitStatus: 127, stderr: stderr))
+            try HerdrSessionDiscovery.listing(from: RemuxSSHExecResult(
+                exitStatus: 127,
+                stdout: Data(),
+                stderr: Data("remux: not found: herdr\n".utf8)
+            ))
         ) { error in
-            XCTAssertEqual(error as? HerdrSessionDiscoveryError, .remoteExit(status: 127, stderr: stderr))
-            XCTAssertEqual(SessionDiscoveryProblem(error, backend: .herdr), .notFound)
+            XCTAssertEqual(error as? RemoteProgramFailure, .notFound)
         }
     }
 
-    func testHerdrProblemsReadFromItsErrors() {
-        let notExecutable = HerdrSessionDiscoveryError.remoteExit(
-            status: 126,
-            stderr: "\(HerdrRemoteCommand.notExecutableMarker): /opt/herdr\n"
-        )
-        let old = HerdrSessionDiscoveryError.unsupportedVersion(HerdrVersion(major: 0, minor: 9, patch: 2))
-
-        XCTAssertEqual(SessionDiscoveryProblem(notExecutable, backend: .herdr), .notExecutable)
-        XCTAssertEqual(
-            SessionDiscoveryProblem(old, backend: .herdr),
-            .unsupportedVersion(HerdrVersion(major: 0, minor: 9, patch: 2))
-        )
-        XCTAssertNil(SessionDiscoveryProblem(HerdrSessionDiscoveryError.incompleteOutput, backend: .herdr))
-        XCTAssertNil(
-            SessionDiscoveryProblem(
-                HerdrSessionDiscoveryError.remoteExit(status: 127, stderr: "sh: something else failed\n"),
-                backend: .herdr
-            )
-        )
-    }
-
-    func testHerdrThatCannotRunIsAnError() {
-        let stderr = "\(HerdrRemoteCommand.notExecutableMarker): /opt/herdr\n"
-
+    /// Captured on Debian: Herdr's version prints, then its session list fails.
+    func testAHerdrThatFailsSaysWhy() {
         XCTAssertThrowsError(
-            try HerdrSessionDiscovery.sessions(from: result(exitStatus: 126, stderr: stderr))
+            try HerdrSessionDiscovery.listing(from: result(
+                exitStatus: 1,
+                stdout: "/usr/local/bin/herdr\nherdr 0.9.5\n",
+                stderr: "\n\(RemoteProgramCommand.readyMarker)\nherdr: something went wrong\n"
+            ))
         ) { error in
-            XCTAssertEqual(
-                error as? HerdrSessionDiscoveryError,
-                .remoteExit(status: 126, stderr: stderr)
-            )
+            XCTAssertEqual(error as? RemoteProgramFailure, .failed("herdr: something went wrong"))
         }
     }
 
-    func testExit127WithoutTheMarkerIsAnError() {
+    /// Without the marker the run never got to Herdr: the login shell failed.
+    func testALoginShellThatFailsIsNotHerdrs() {
+        let stderr = "This account is currently not available.\n"
         XCTAssertThrowsError(
-            try HerdrSessionDiscovery.sessions(
-                from: result(exitStatus: 127, stderr: "sh: something else failed\n")
-            )
-        )
+            try HerdrSessionDiscovery.listing(from: RemuxSSHExecResult(
+                exitStatus: 1,
+                stdout: Data(),
+                stderr: Data(stderr.utf8)
+            ))
+        ) { error in
+            XCTAssertEqual(error as? HerdrSessionDiscoveryError, .remoteExit(status: 1, stderr: stderr))
+        }
     }
 
     func testHerdrOlderThanTheMinimumIsRefused() {
         XCTAssertThrowsError(
-            try HerdrSessionDiscovery.sessions(
-                from: result(stdout: "herdr 0.9.0\n\(sessionListJSON)\n")
+            try HerdrSessionDiscovery.listing(
+                from: result(stdout: "/usr/local/bin/herdr\nherdr 0.9.0\n\(sessionListJSON)\n")
             )
         ) { error in
             XCTAssertEqual(
@@ -98,16 +84,16 @@ final class HerdrSessionDiscoveryTests: XCTestCase {
     }
 
     func testNewerHerdrIsAccepted() throws {
-        let sessions = try HerdrSessionDiscovery.sessions(
-            from: result(stdout: "herdr 1.0.0\n\(sessionListJSON)\n")
+        let listing = try HerdrSessionDiscovery.listing(
+            from: result(stdout: "/usr/local/bin/herdr\nherdr 1.0.0\n\(sessionListJSON)\n")
         )
 
-        XCTAssertEqual(sessions.map(\.name), ["default", "probe"])
+        XCTAssertEqual(listing.sessions.map(\.name), ["default", "probe"])
     }
 
     func testUnreadableVersionIsAnError() {
         XCTAssertThrowsError(
-            try HerdrSessionDiscovery.sessions(from: result(stdout: "herdr\n\(sessionListJSON)\n"))
+            try HerdrSessionDiscovery.listing(from: result(stdout: "/usr/local/bin/herdr\nherdr\n\(sessionListJSON)\n"))
         ) { error in
             XCTAssertEqual(error as? HerdrSessionDiscoveryError, .unreadableVersion("herdr"))
         }
@@ -115,16 +101,23 @@ final class HerdrSessionDiscoveryTests: XCTestCase {
 
     /// What the server's startup files print before the ready marker is not the command's output.
     func testStartupOutputBeforeTheReadyMarkerIsSkipped() throws {
-        let sessions = try HerdrSessionDiscovery.sessions(
-            from: result(stdout: "Welcome, last login yesterday\nherdr 0.1.0\n", readyThen: "herdr 0.9.3\n\(sessionListJSON)\n")
+        let listing = try HerdrSessionDiscovery.listing(
+            from: result(
+                stdout: "Welcome, last login yesterday\nherdr 0.1.0\n",
+                readyThen: "/usr/local/bin/herdr\nherdr 0.9.3\n\(sessionListJSON)\n"
+            )
         )
-        XCTAssertEqual(sessions.map(\.name), ["default", "probe"])
+        XCTAssertEqual(listing.sessions.map(\.name), ["default", "probe"])
     }
 
     func testOutputWithoutTheReadyMarkerIsAnError() {
         XCTAssertThrowsError(
-            try HerdrSessionDiscovery.sessions(
-                from: RemuxSSHExecResult(exitStatus: 0, stdout: Data("herdr 0.9.3\n\(sessionListJSON)\n".utf8), stderr: Data())
+            try HerdrSessionDiscovery.listing(
+                from: RemuxSSHExecResult(
+                    exitStatus: 0,
+                    stdout: Data("/usr/local/bin/herdr\nherdr 0.9.3\n\(sessionListJSON)\n".utf8),
+                    stderr: Data()
+                )
             )
         ) { error in
             XCTAssertEqual(error as? HerdrSessionDiscoveryError, .incompleteOutput)
@@ -133,7 +126,7 @@ final class HerdrSessionDiscoveryTests: XCTestCase {
 
     func testInvalidSessionListIsAnError() {
         XCTAssertThrowsError(
-            try HerdrSessionDiscovery.sessions(from: result(stdout: "herdr 0.9.3\nnot json\n"))
+            try HerdrSessionDiscovery.listing(from: result(stdout: "/usr/local/bin/herdr\nherdr 0.9.3\nnot json\n"))
         ) { error in
             XCTAssertEqual(error as? HerdrSessionDiscoveryError, .invalidSessionList)
         }
@@ -147,8 +140,8 @@ final class HerdrSessionDiscoveryTests: XCTestCase {
         readyThen: String? = nil,
         stderr: String = ""
     ) -> RemuxSSHExecResult {
-        let output = readyThen.map { stdout + "\n\(HerdrRemoteCommand.readyMarker)\n" + $0 }
-            ?? "\n\(HerdrRemoteCommand.readyMarker)\n" + stdout
+        let marker = "\n\(RemoteProgramCommand.readyMarker)\n"
+        let output = readyThen.map { stdout + marker + $0 } ?? marker + stdout
         return RemuxSSHExecResult(
             exitStatus: exitStatus,
             stdout: Data(output.utf8),

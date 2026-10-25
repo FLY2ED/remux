@@ -77,72 +77,73 @@ final class GhosttyTerminalDisconnectReasonClassifierTests: XCTestCase {
         )
     }
 
-    func testTmuxUnavailableRequiresLauncherMarker() {
-        let cases = [
-            (
-                127,
-                SSHTmuxControlCommandBuilder.tmuxNotFoundMarker,
-                "Install tmux on this server or update Executable Path."
-            ),
-            (
-                126,
-                SSHTmuxControlCommandBuilder.tmuxNotExecutableMarker,
-                "Check the tmux executable and its permissions, then try again."
-            ),
-        ]
+    /// The launch runs on a pty, so what the script and the shell print arrives as startup output, with
+    /// carriage returns. Where nothing can run, the words depend on whether a path is set.
+    func testATmuxThatIsNotThereIsUnavailable() {
+        let failure = SSHTmuxControlTransportError.remoteExit(
+            127,
+            diagnostics: diagnostics(messages: "remux: not found: tmux\r\n")
+        )
 
-        for (status, marker, message) in cases {
-            let reason = GhosttyTerminalDisconnectReasonClassifier.transportStartFailure(
-                SSHTmuxControlTransportError.remoteExit(
-                    status,
-                    diagnostics: diagnostics(stderr: "\(marker): /usr/bin/tmux\\x0A")
-                )
+        XCTAssertEqual(
+            GhosttyTerminalDisconnectReasonClassifier.tmuxStartFailure(failure, tmuxPath: nil),
+            TerminalDisconnectReason(
+                kind: .backendUnavailable(.tmux),
+                message: "Remux couldn't find tmux on this server. Install it, or set its path in Edit Server."
             )
-            XCTAssertEqual(reason.kind, .backendUnavailable(.tmux))
-            XCTAssertEqual(reason.message, message)
+        )
+        XCTAssertEqual(
+            GhosttyTerminalDisconnectReasonClassifier.tmuxStartFailure(failure, tmuxPath: "/opt/tools/tmux"),
+            TerminalDisconnectReason(
+                kind: .backendUnavailable(.tmux),
+                message: "Remux can't run tmux from /opt/tools/tmux. Check the path in Edit Server."
+            )
+        )
+    }
+
+    /// The shell's own line, captured on Debian with dash, follows both copies of the ready marker.
+    func testATmuxTheServerCannotStartShowsTheServersWords() {
+        let reason = GhosttyTerminalDisconnectReasonClassifier.tmuxStartFailure(
+            SSHTmuxControlTransportError.remoteExit(
+                126,
+                diagnostics: diagnostics(
+                    messages: "\r\nremux-ready:1\r\n\r\nremux-ready:1\r\nsh: 1: exec: /opt/tools/tmux: Exec format error\r\n"
+                )
+            ),
+            tmuxPath: "/opt/tools/tmux"
+        )
+
+        XCTAssertEqual(reason, TerminalDisconnectReason(
+            kind: .backendUnavailable(.tmux),
+            message: "Running /opt/tools/tmux failed.",
+            detail: "sh: 1: exec: /opt/tools/tmux: Exec format error"
+        ))
+    }
+
+    /// The login shell failed before the script ran: not tmux's failure, and no internal text.
+    func testALoginShellThatFailsIsAnExitNotTmuxUnavailable() {
+        for (status, output) in [
+            (127, "fish: Unknown command: export\r\n"),
+            (126, "fish: exec: /bin/sh: Permission denied\r\n"),
+        ] {
+            let reason = GhosttyTerminalDisconnectReasonClassifier.tmuxStartFailure(
+                SSHTmuxControlTransportError.remoteExit(status, diagnostics: diagnostics(messages: output)),
+                tmuxPath: nil
+            )
+            XCTAssertEqual(reason.kind, .remoteExit)
+            XCTAssertEqual(reason.message, "The remote tmux control session exited with status \(status).")
         }
     }
 
-    func testTmuxUnavailableMarkerOnAPseudoTerminalArrivesAsStartupOutput() {
-        let diagnostics = SSHTmuxStartupDiagnostics(
-            stdoutByteCount: 48,
+    private func diagnostics(messages: String) -> SSHTmuxStartupDiagnostics {
+        SSHTmuxStartupDiagnostics(
+            stdoutByteCount: messages.utf8.count,
             stderrByteCount: 0,
             extendedDataByteCount: 0,
             stderrPreview: nil,
             extendedDataPreview: nil,
-            startupOutputPreview: "\(SSHTmuxControlCommandBuilder.tmuxNotFoundMarker): tmux\\x0A"
-        )
-        let reason = GhosttyTerminalDisconnectReasonClassifier.transportStartFailure(
-            SSHTmuxControlTransportError.remoteExit(127, diagnostics: diagnostics)
-        )
-
-        XCTAssertEqual(reason.kind, .backendUnavailable(.tmux))
-        XCTAssertEqual(reason.message, "Install tmux on this server or update Executable Path.")
-    }
-
-    func testShellFailuresAreNotReportedAsTmuxUnavailable() {
-        for (status, stderr) in [
-            (127, "fish: Unknown command: export\\x0A"),
-            (126, "fish: exec: /bin/sh: Permission denied\\x0A"),
-        ] {
-            let reason = GhosttyTerminalDisconnectReasonClassifier.transportStartFailure(
-                SSHTmuxControlTransportError.remoteExit(
-                    status,
-                    diagnostics: diagnostics(stderr: stderr)
-                )
-            )
-            XCTAssertEqual(reason.kind, .remoteExit)
-        }
-    }
-
-    private func diagnostics(stderr: String) -> SSHTmuxStartupDiagnostics {
-        SSHTmuxStartupDiagnostics(
-            stdoutByteCount: 0,
-            stderrByteCount: stderr.utf8.count,
-            extendedDataByteCount: 0,
-            stderrPreview: stderr,
-            extendedDataPreview: nil,
-            startupOutputPreview: nil
+            startupOutputPreview: nil,
+            messages: messages
         )
     }
 

@@ -55,12 +55,12 @@ struct RemuxAppDependencies: Sendable {
         _ target: SessionTarget,
         _ trustedHostStore: TrustedHostStore,
         _ sshRootService: RemuxSSHRootService
-    ) async throws -> [String]
+    ) async throws -> SessionListing
     private let herdrSessionDiscoverer: @Sendable (
         _ target: SessionTarget,
         _ trustedHostStore: TrustedHostStore,
         _ sshRootService: RemuxSSHRootService
-    ) async throws -> [DiscoveredSession]
+    ) async throws -> SessionListing
     private let sshAccessVerifier: @Sendable (
         _ target: SessionTarget,
         _ trustedHostStore: TrustedHostStore,
@@ -103,12 +103,12 @@ struct RemuxAppDependencies: Sendable {
             _ target: SessionTarget,
             _ trustedHostStore: TrustedHostStore,
             _ sshRootService: RemuxSSHRootService
-        ) async throws -> [String] = RemuxAppDependencies.liveTmuxSessionDiscoverer,
+        ) async throws -> SessionListing = RemuxAppDependencies.liveTmuxSessionDiscoverer,
         herdrSessionDiscoverer: @escaping @Sendable (
             _ target: SessionTarget,
             _ trustedHostStore: TrustedHostStore,
             _ sshRootService: RemuxSSHRootService
-        ) async throws -> [DiscoveredSession] = RemuxAppDependencies.liveHerdrSessionDiscoverer,
+        ) async throws -> SessionListing = RemuxAppDependencies.liveHerdrSessionDiscoverer,
         sshAccessVerifier: @escaping @Sendable (
             _ target: SessionTarget,
             _ trustedHostStore: TrustedHostStore,
@@ -222,11 +222,11 @@ struct RemuxAppDependencies: Sendable {
         attachmentTransferServiceFactory(target, trustedHostStore, sshRootService)
     }
 
-    func discoverTmuxSessions(for target: SessionTarget) async throws -> [String] {
+    func discoverTmuxSessions(for target: SessionTarget) async throws -> SessionListing {
         try await tmuxSessionDiscoverer(target, trustedHostStore, sshRootService)
     }
 
-    func discoverHerdrSessions(for target: SessionTarget) async throws -> [DiscoveredSession] {
+    func discoverHerdrSessions(for target: SessionTarget) async throws -> SessionListing {
         try await herdrSessionDiscoverer(target, trustedHostStore, sshRootService)
     }
 
@@ -356,7 +356,7 @@ struct RemuxAppDependencies: Sendable {
         target: SessionTarget,
         trustedHostStore: TrustedHostStore,
         sshRootService: RemuxSSHRootService
-    ) async throws -> [String] {
+    ) async throws -> SessionListing {
         try await withClaimedSSHRoot(
             for: target,
             trustedHostStore: trustedHostStore,
@@ -374,7 +374,7 @@ struct RemuxAppDependencies: Sendable {
         target: SessionTarget,
         trustedHostStore: TrustedHostStore,
         sshRootService: RemuxSSHRootService
-    ) async throws -> [DiscoveredSession] {
+    ) async throws -> SessionListing {
         try await withClaimedSSHRoot(
             for: target,
             trustedHostStore: trustedHostStore,
@@ -631,24 +631,17 @@ struct RemuxAppDependencies: Sendable {
                         tailscaleSSHCheckChallenge,
                         sshRootService: sshRootService
                     )
-                    return []
+                    return uiTestingTmuxListing(sessionNames: [])
                 }
                 if simulatesMissingTmux {
-                    // What the discovery script reports when tmux isn't found.
-                    let executable = target.server.tmuxExecutablePath ?? "tmux"
-                    throw TmuxSessionDiscoveryError.remoteExit(
-                        status: 127,
-                        stderr: "\(SSHTmuxControlCommandBuilder.tmuxNotFoundMarker): \(executable)\n"
-                    )
+                    throw RemoteProgramFailure.notFound
                 }
-                return DebugConnectionProfileSeeder.seededSessionName().map { [$0] } ?? []
-            },
-            herdrSessionDiscoverer: { target, _, _ in
-                let executable = target.server.herdrExecutablePath ?? "herdr"
-                throw HerdrSessionDiscoveryError.remoteExit(
-                    status: 127,
-                    stderr: "\(HerdrRemoteCommand.notFoundMarker): \(executable)\n"
+                return uiTestingTmuxListing(
+                    sessionNames: DebugConnectionProfileSeeder.seededSessionName().map { [$0] } ?? []
                 )
+            },
+            herdrSessionDiscoverer: { _, _, _ in
+                throw RemoteProgramFailure.notFound
             },
             sshAccessVerifier: { target, _, sshRootService in
                 if target.sshAuth.credential == .none, let tailscaleSSHCheckChallenge {
@@ -666,9 +659,16 @@ struct RemuxAppDependencies: Sendable {
         )
     }
 
+    private static func uiTestingTmuxListing(sessionNames: [String]) -> SessionListing {
+        SessionListing(
+            executablePath: "/usr/bin/tmux",
+            sessions: sessionNames.map { DiscoveredSession(name: $0, isRunning: true) }
+        )
+    }
+
     private struct UITestingMissingHerdrBridge: HerdrBridgeTransport {
         func read() async throws -> [UInt8]? {
-            throw HerdrBridgeError.herdrNotFound
+            throw HerdrBridgeError.program(.notFound)
         }
 
         func write(_ bytes: [UInt8]) async throws {}

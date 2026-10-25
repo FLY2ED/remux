@@ -18,30 +18,8 @@ final class HerdrBridgeTests: XCTestCase {
         XCTAssertFalse(command.contains(executable))
         XCTAssertFalse(command.contains(session))
         XCTAssertTrue(command.hasSuffix(
-            " remux \(RemoteShellArgument.octalEncoded(executable)) \(RemoteShellArgument.octalEncoded(session))"
+            " sh \(RemoteShellArgument.octalEncoded(executable)) \(RemoteShellArgument.octalEncoded(session))"
         ))
-    }
-
-    /// The script sits inside single quotes, so a single quote in it would end the quoting early: only
-    /// the script's two and each argument's two may appear.
-    func testScriptContainsNoSingleQuote() {
-        let command = HerdrSSHBridge.command(herdrExecutable: "herdr", session: "default")
-        XCTAssertEqual(command.filter { $0 == "'" }.count, 6)
-        let discovery = HerdrSessionDiscovery.listSessionsCommand(herdrExecutable: "herdr")
-        XCTAssertEqual(discovery.filter { $0 == "'" }.count, 4)
-    }
-
-    /// Herdr's ready marker comes first, then the search with the places Herdr's client looks.
-    func testScriptPrintsTheReadyMarkerThenFindsHerdrWhereHerdrsClientLooks() {
-        let command = HerdrSSHBridge.command(herdrExecutable: "herdr", session: "default")
-        XCTAssertTrue(command.hasPrefix(#"exec /bin/sh -c 'printf "\n%s\n" "herdr-remote-output-ready:1"; "#))
-        for directory in [
-            "$HOME/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin",
-            "$HOME/.nix-profile/bin", "/etc/profiles/per-user/${USER:-}/bin",
-            "/nix/var/nix/profiles/default/bin", "/run/current-system/sw/bin",
-        ] {
-            XCTAssertTrue(command.contains(directory), directory)
-        }
     }
 
     func testCommandAsksForTheIdleTimeoutOnlyWhereHerdrReportsIt() {
@@ -49,27 +27,7 @@ final class HerdrBridgeTests: XCTestCase {
         XCTAssertTrue(command.contains(#""$resolved" status client --json"#))
         XCTAssertTrue(command.contains(#"remote_bridge_idle_timeout\": *true"#))
         XCTAssertTrue(command.contains(#"--session "$session" remote-client-bridge --idle-timeout-v1"#))
-        XCTAssertTrue(command.contains(#"exec "$resolved" --session "$session" remote-client-bridge' remux"#))
-    }
-
-    // MARK: - Ready marker
-
-    /// As Herdr's client: output starts after the line that is exactly the marker (a trailing carriage
-    /// return allowed), however the stream is split.
-    func testOutputStartsAfterTheReadyMarkersLine() {
-        let stream = Array("motd herdr-remote-output-ready:1 not alone\nherdr-remote-output-ready:10\n\nherdr-remote-output-ready:1\r\npayload".utf8)
-        for split in [1, 3, 7, stream.count] {
-            var line = HerdrRemoteCommand.ReadyLine()
-            var output: [UInt8] = []
-            for start in stride(from: 0, to: stream.count, by: split) {
-                output += line.output(from: stream[start..<min(start + split, stream.count)])
-            }
-            XCTAssertTrue(line.isFound, "split \(split)")
-            XCTAssertEqual(String(decoding: output, as: UTF8.self), "payload", "split \(split)")
-        }
-        var missing = HerdrRemoteCommand.ReadyLine()
-        XCTAssertEqual(missing.output(from: Array("no marker here\n".utf8)), [])
-        XCTAssertFalse(missing.isFound)
+        XCTAssertTrue(command.contains(#"exec "$resolved" --session "$session" remote-client-bridge' sh"#))
     }
 
     // MARK: - On an SSH channel
@@ -240,7 +198,7 @@ final class HerdrBridgeTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private static let readyLine = Data("\nherdr-remote-output-ready:1\n".utf8)
+    private static let readyLine = Data("\n\(RemoteProgramCommand.readyMarker)\n".utf8)
 
     private func openBridge(steps: [SSHPublicKeyLiveExecStep]) async throws -> HerdrSSHBridge {
         let server = try await SSHPublicKeyLiveTestServer.start(username: "remux", execSteps: steps)

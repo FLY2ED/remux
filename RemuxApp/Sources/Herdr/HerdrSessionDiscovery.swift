@@ -38,11 +38,12 @@ struct HerdrVersion: Comparable, Sendable, CustomStringConvertible {
 enum HerdrSessionDiscoveryError: Error, Equatable, LocalizedError {
     case unsupportedVersion(HerdrVersion)
     case unreadableVersion(String)
-    /// The command ended before the ready marker, so nothing it printed can be told apart from the
-    /// server's startup files.
+    /// The command ended before the ready marker, or before its output, so nothing it printed can be told
+    /// apart from the server's startup files.
     case incompleteOutput
     case invalidSessionList
     case invalidUTF8
+    /// The run ended before it got to Herdr: the login shell or the server's startup files failed.
     case remoteExit(status: Int, stderr: String)
 
     var errorDescription: String? {
@@ -60,7 +61,7 @@ enum HerdrSessionDiscoveryError: Error, Equatable, LocalizedError {
         case .remoteExit(let status, let stderr):
             let detail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             return detail.isEmpty
-                ? "herdr exited with status \(status)."
+                ? "The command on this server exited with status \(status)."
                 : detail
         }
     }
@@ -71,59 +72,64 @@ enum HerdrSessionDiscovery {
         using claimedRoot: RemuxSSHClaimedRoot,
         herdrExecutable: String,
         trace: RemuxTransportStartupTrace
-    ) async throws -> [DiscoveredSession] {
+    ) async throws -> SessionListing {
         let result = try await RemuxSSHExecSession.run(
             using: claimedRoot,
             command: listSessionsCommand(herdrExecutable: herdrExecutable),
             stdin: nil,
             trace: trace
         )
-        return try sessions(from: result)
+        return try listing(from: result)
     }
 
-    /// One exec prints the first line of `herdr --version`, then the
-    /// `session list --json` document (`HerdrRemoteCommand`).
+    /// One exec prints, after the ready marker, where it found Herdr, the first line of `herdr --version`,
+    /// then the `session list --json` document.
     static func listSessionsCommand(herdrExecutable: String) -> String {
-        HerdrRemoteCommand.command(herdrExecutable: herdrExecutable, body: [
+        RemoteProgramCommand.command(program: herdrExecutable, body: [
             "LC_ALL=C",
             "export LC_ALL",
+            #"printf "%s\n" "$resolved""#,
             #"version=$("$resolved" --version) || exit $?"#,
             #"printf "%s\n" "$version" | head -n 1"#,
             #"exec "$resolved" session list --json"#,
         ])
     }
 
-    /// A Herdr that isn't found, fails, or is older than the supported minimum is an error; a missing
-    /// one exits 127 with `HerdrRemoteCommand.notFoundMarker`, so the caller can tell it apart from a
-    /// Herdr without sessions.
-    static func sessions(from result: RemuxSSHExecResult) throws -> [DiscoveredSession] {
-        let stderr = String(decoding: result.stderr, as: UTF8.self)
+    /// A Herdr that isn't found or fails throws `RemoteProgramFailure`; one older than the supported minimum
+    /// throws `HerdrSessionDiscoveryError.unsupportedVersion`.
+    static func listing(from result: RemuxSSHExecResult) throws -> SessionListing {
         guard result.exitStatus == 0 else {
-            throw HerdrSessionDiscoveryError.remoteExit(status: result.exitStatus, stderr: stderr)
+            let stderr = String(decoding: result.stderr, as: UTF8.self)
+            throw RemoteProgramFailure(exitStatus: result.exitStatus, stderr: stderr)
+                ?? HerdrSessionDiscoveryError.remoteExit(status: result.exitStatus, stderr: stderr)
         }
-        var readyLine = HerdrRemoteCommand.ReadyLine()
+        var readyLine = RemoteProgramCommand.ReadyLine()
         let output = readyLine.output(from: result.stdout)
         guard readyLine.isFound else { throw HerdrSessionDiscoveryError.incompleteOutput }
         guard let text = String(data: Data(output), encoding: .utf8) else {
             throw HerdrSessionDiscoveryError.invalidUTF8
         }
 
-        let parts = text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
-        let versionLine = parts.first.map(String.init) ?? ""
+        let parts = text.split(separator: "\n", maxSplits: 2, omittingEmptySubsequences: false)
+        guard let path = parts.first, !path.isEmpty, parts.count > 1 else {
+            throw HerdrSessionDiscoveryError.incompleteOutput
+        }
+        let versionLine = String(parts[1])
         guard let version = HerdrVersion(versionOutput: versionLine) else {
             throw HerdrSessionDiscoveryError.unreadableVersion(versionLine)
         }
         guard version >= .minimumSupported else {
             throw HerdrSessionDiscoveryError.unsupportedVersion(version)
         }
-        guard parts.count == 2,
-              let list = try? JSONDecoder().decode(SessionList.self, from: Data(parts[1].utf8))
+        guard parts.count == 3,
+              let list = try? JSONDecoder().decode(SessionList.self, from: Data(parts[2].utf8))
         else {
             throw HerdrSessionDiscoveryError.invalidSessionList
         }
-        return list.sessions.map {
-            DiscoveredSession(name: $0.name, isRunning: $0.running)
-        }
+        return SessionListing(
+            executablePath: String(path),
+            sessions: list.sessions.map { DiscoveredSession(name: $0.name, isRunning: $0.running) }
+        )
     }
 
     private struct SessionList: Decodable {
@@ -134,5 +140,4 @@ enum HerdrSessionDiscovery {
 
         let sessions: [Session]
     }
-
 }

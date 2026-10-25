@@ -40,11 +40,8 @@ struct SSHTmuxStartupDiagnostics: Equatable, Sendable, CustomStringConvertible {
     /// Output before tmux's first protocol line: login-shell output and, on a
     /// pseudo-terminal, the launch script's stderr.
     let startupOutputPreview: String?
-
-    /// Every message the launch could have written, wherever it arrived.
-    var messages: String {
-        [startupOutputPreview, stderrPreview].compactMap { $0 }.joined(separator: "\n")
-    }
+    /// Every message the launch wrote, wherever it arrived, as `RemoteProgramMessages` keeps them.
+    let messages: String
 
     var isEmpty: Bool {
         stdoutByteCount == 0 &&
@@ -76,6 +73,7 @@ private struct SSHTmuxStartupDiagnosticsAccumulator: Equatable, Sendable {
     private var startupOutput = SSHTmuxBoundedStreamPreview()
     private var stderr = SSHTmuxBoundedStreamPreview()
     private var extendedData = SSHTmuxBoundedStreamPreview()
+    private var messages = RemoteProgramMessages()
 
     mutating func recordStdout(_ data: Data) {
         stdout.append(data)
@@ -83,10 +81,12 @@ private struct SSHTmuxStartupDiagnosticsAccumulator: Equatable, Sendable {
 
     mutating func recordStartupOutput(_ data: Data) {
         startupOutput.append(data)
+        messages.append(data)
     }
 
     mutating func recordStderr(_ data: Data) {
         stderr.append(data)
+        messages.append(data)
     }
 
     mutating func recordExtendedData(_ data: Data) {
@@ -100,7 +100,8 @@ private struct SSHTmuxStartupDiagnosticsAccumulator: Equatable, Sendable {
             extendedDataByteCount: extendedData.byteCount,
             stderrPreview: stderr.preview,
             extendedDataPreview: extendedData.preview,
-            startupOutputPreview: startupOutput.preview
+            startupOutputPreview: startupOutput.preview,
+            messages: messages.text
         )
         return diagnostics.isEmpty ? nil : diagnostics
     }

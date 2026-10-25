@@ -1255,12 +1255,28 @@ final class SSHTmuxControlTransportTests: XCTestCase {
 
     func testStartupMessagesIncludeLauncherOutputOnAPseudoTerminal() {
         let router = SSHTmuxControlChannelDataRouter()
-        let marker = "\(SSHTmuxControlCommandBuilder.tmuxNotFoundMarker): tmux\n"
+        let notFound = "\(RemoteProgramCommand.notFoundMarker): tmux\r\n"
 
-        XCTAssertEqual(router.route(type: .channel, data: Data(marker.utf8)), .startupOutput)
+        XCTAssertEqual(router.route(type: .channel, data: Data(notFound.utf8)), .startupOutput)
 
-        XCTAssertTrue(
-            router.diagnostics?.messages.contains(SSHTmuxControlCommandBuilder.tmuxNotFoundMarker) == true
+        XCTAssertEqual(router.diagnostics?.messages, notFound)
+    }
+
+    /// A long startup before the launch's marker, and a wrapper that prints a lot after the shell's line: the
+    /// shell's line is still read.
+    func testStartupMessagesKeepTheLaunchsLineAroundLongOutput() {
+        let router = SSHTmuxControlChannelDataRouter()
+        let motd = String(repeating: "welcome to the server\r\n", count: 1_000)
+        let launch = "\r\nremux-ready:1\r\n\r\nremux-ready:1\r\nsh: 1: exec: /opt/tools/tmux: Exec format error\r\n"
+        let after = String(repeating: "more output from the wrapper\r\n", count: 1_000)
+
+        for chunk in [motd, launch, after] {
+            XCTAssertEqual(router.route(type: .channel, data: Data(chunk.utf8)), .startupOutput)
+        }
+
+        XCTAssertEqual(
+            RemoteProgramFailure(exitStatus: 126, stderr: router.diagnostics?.messages ?? ""),
+            .couldNotStart("sh: 1: exec: /opt/tools/tmux: Exec format error")
         )
     }
 
@@ -1325,7 +1341,8 @@ final class SSHTmuxControlTransportTests: XCTestCase {
             extendedDataByteCount: 0,
             stderrPreview: "tmux failed",
             extendedDataPreview: nil,
-            startupOutputPreview: nil
+            startupOutputPreview: nil,
+            messages: "tmux failed"
         )
 
         XCTAssertEqual(
@@ -1357,7 +1374,8 @@ final class SSHTmuxControlTransportTests: XCTestCase {
             extendedDataByteCount: 0,
             stderrPreview: "tmux failed",
             extendedDataPreview: nil,
-            startupOutputPreview: nil
+            startupOutputPreview: nil,
+            messages: "tmux failed"
         )
         let completionState = SSHTmuxControlChannelCompletionState()
 
@@ -1383,7 +1401,8 @@ final class SSHTmuxControlTransportTests: XCTestCase {
             extendedDataByteCount: 0,
             stderrPreview: "tmux failed",
             extendedDataPreview: nil,
-            startupOutputPreview: nil
+            startupOutputPreview: nil,
+            messages: "tmux failed"
         )
         let completionState = SSHTmuxControlChannelCompletionState()
 
@@ -1442,9 +1461,8 @@ final class SSHTmuxControlTransportTests: XCTestCase {
         )
 
         XCTAssertTrue(command.hasPrefix("exec /bin/sh -c '"))
-        XCTAssertTrue(command.contains(#"PATH="${PATH:+$PATH:}/opt/homebrew/bin"#))
-        XCTAssertTrue(command.contains(#"exec "$resolved" -u -C new-session -A"#))
-        XCTAssertTrue(command.hasSuffix(" 45 37"))
+        XCTAssertTrue(command.contains(#"PATH="${PATH:+$PATH:}\#(RemoteProgramCommand.fallbackPath)""#))
+        XCTAssertTrue(command.contains(#"exec "$resolved" -u -C new-session -A -s "$session" -x 45 -y 37'"#))
     }
 
     func testControlSessionCommandKeepsValuesOutOfLoginShellSyntax() {
@@ -1465,7 +1483,9 @@ final class SSHTmuxControlTransportTests: XCTestCase {
         XCTAssertFalse(command.contains(sessionName))
         XCTAssertFalse(command.contains("\n"))
         XCTAssertFalse(command.contains("!"))
-        XCTAssertTrue(command.hasSuffix(" 120 40"))
+        XCTAssertTrue(command.hasSuffix(
+            " sh \(RemoteShellArgument.octalEncoded(tmuxExecutable)) \(RemoteShellArgument.octalEncoded(sessionName))"
+        ))
     }
 
     func testSendAfterCloseFailsInsteadOfQueueingBytes() async {

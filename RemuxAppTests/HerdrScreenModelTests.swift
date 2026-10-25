@@ -711,12 +711,15 @@ final class HerdrScreenModelTests: XCTestCase {
         try await harness.waitUntil("the end wasn't reported") {
             harness.states.last?.disconnectedReason != nil
         }
-        XCTAssertEqual(harness.states.last, .disconnected(HerdrConnectionError.closed.terminalDisconnectReason))
+        XCTAssertEqual(
+            harness.states.last,
+            .disconnected(HerdrConnectionError.closed.terminalDisconnectReason(herdrPath: nil))
+        )
         XCTAssertEqual(harness.states.filter { $0.disconnectedReason != nil }.count, 1)
     }
 
     func testABridgeThatCannotStartIsReported() async throws {
-        let harness = await makeHarness(failingOpenWith: HerdrBridgeError.herdrNotFound)
+        let harness = await makeHarness(failingOpenWith: HerdrBridgeError.program(.notFound))
         try await harness.waitUntil("the failure wasn't reported") {
             harness.states.last?.disconnectedReason != nil
         }
@@ -724,7 +727,7 @@ final class HerdrScreenModelTests: XCTestCase {
             harness.states.last,
             .disconnected(TerminalDisconnectReason(
                 kind: .backendUnavailable(.herdr),
-                message: HerdrBridgeError.herdrNotFound.errorDescription!
+                message: "Remux couldn't find Herdr on this server. Install it, or set its path in Edit Server."
             ))
         )
     }
@@ -735,14 +738,14 @@ final class HerdrScreenModelTests: XCTestCase {
         let harness = await makeHarness()
         let bridge = try await harness.bridge()
         harness.setScreenSize()
-        await bridge.finishServing(throwing: HerdrBridgeError.herdrNotFound)
+        await bridge.finishServing(throwing: HerdrBridgeError.program(.notFound))
         try await harness.waitUntil("the failure wasn't reported") {
             harness.states.last?.disconnectedReason != nil
         }
         let reason = try XCTUnwrap(harness.states.last?.disconnectedReason)
         XCTAssertEqual(reason, TerminalDisconnectReason(
             kind: .backendUnavailable(.herdr),
-            message: HerdrBridgeError.herdrNotFound.errorDescription!
+            message: "Remux couldn't find Herdr on this server. Install it, or set its path in Edit Server."
         ))
         XCTAssertFalse(reason.allowsAutomaticReconnect)
     }
