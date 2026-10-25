@@ -175,6 +175,12 @@ struct DiscoveredSession: Equatable, Sendable {
     let isRunning: Bool
 }
 
+/// What a backend's discovery found on a server: where its program is, and its sessions.
+struct SessionListing: Equatable, Sendable {
+    let executablePath: String
+    let sessions: [DiscoveredSession]
+}
+
 struct SavedWorkspace: Identifiable, Equatable, Codable, Sendable {
     let id: UUID
     let serverID: SavedServer.ID
@@ -303,15 +309,19 @@ struct TerminalDisconnectReason: Equatable, Sendable {
 
     let kind: Kind
     let message: String
+    /// The server's own words, shown under `message`.
+    let detail: String?
     let hostKeyChallenge: SSHHostKeyTrustChallenge?
 
     init(
         kind: Kind,
         message: String,
+        detail: String? = nil,
         hostKeyChallenge: SSHHostKeyTrustChallenge? = nil
     ) {
         self.kind = kind
         self.message = message
+        self.detail = detail
         self.hostKeyChallenge = hostKeyChallenge
     }
 
@@ -505,21 +515,15 @@ struct TmuxConnectionDraft: Equatable, Sendable {
     /// draft names: the same account at the same address and the same executable path. The sign-in method
     /// doesn't change what is installed for the account, so it doesn't count.
     func checksSameExecutable(as server: SavedServer, for backend: SessionBackend) -> Bool {
-        let savedPath: String?
-        let draftPath: String
-        switch backend {
-        case .tmux:
-            savedPath = server.tmuxExecutablePath
-            draftPath = tmuxExecutablePath
-        case .herdr:
-            savedPath = server.herdrExecutablePath
-            draftPath = herdrExecutablePath
+        let draftPath = switch backend {
+        case .tmux: tmuxExecutablePath
+        case .herdr: herdrExecutablePath
         }
         let path = draftPath.trimmingCharacters(in: .whitespacesAndNewlines)
         return host.trimmingCharacters(in: .whitespacesAndNewlines) == server.host
             && Int(port) == server.port
             && username.trimmingCharacters(in: .whitespacesAndNewlines) == server.username
-            && (path.isEmpty ? nil : path) == savedPath
+            && (path.isEmpty ? nil : path) == server.executablePath(for: backend)
     }
 }
 

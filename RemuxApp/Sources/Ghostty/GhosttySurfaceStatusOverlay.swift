@@ -99,6 +99,15 @@ struct GhosttySurfaceStatusOverlay: View {
                     .foregroundStyle(GhosttySheetPalette.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 2)
+
+                if let detail = reason?.detail {
+                    Text(detail)
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundStyle(GhosttySheetPalette.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("terminal.status.detail")
+                }
             }
 
             if let hostKeyVerification = hostKeyVerification(for: reason?.hostKeyChallenge) {

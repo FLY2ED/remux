@@ -416,6 +416,12 @@ private struct RemuxWorkspaceShell: View {
         onSave: @escaping @MainActor () -> Void
     ) -> some View {
         let setupSessionID = model.setupSessionID
+        let serverID = setup.mode.existingServerID
+        // An edited path, address or account wasn't checked, so the server's last check doesn't describe it.
+        let checkedBackends = serverID.flatMap { model.library.server(id: $0) }.map { server in
+            Set([SessionBackend.tmux, .herdr].filter { setup.draft.checksSameExecutable(as: server, for: $0) })
+        } ?? []
+        let discovery = model.sessionDiscovery(for: serverID)
         return ConnectionSetupView(
             draft: setup.draft,
             validation: setup.validation,
@@ -423,14 +429,12 @@ private struct RemuxWorkspaceShell: View {
             setupSessionID: setupSessionID,
             isActionInProgress: model.isSetupActionInProgress,
             showsServerSummaryForNewSession: showsServerSummaryForNewSession,
-            backendProblems: setup.mode.existingServerID.flatMap { serverID in
-                model.library.server(id: serverID).map { server in
-                    // An edited path, address or account wasn't checked, so the last check doesn't describe it.
-                    model.discoveryNotices(for: serverID).backendProblems.filter { backend, _ in
-                        setup.draft.checksSameExecutable(as: server, for: backend)
-                    }
-                }
+            backendProblems: serverID.map { serverID in
+                model.discoveryNotices(for: serverID).backendProblems.filter { checkedBackends.contains($0.key) }
             } ?? [:],
+            foundExecutables: Dictionary(uniqueKeysWithValues: checkedBackends.compactMap { backend in
+                discovery[backend].executablePath.map { (backend, $0) }
+            }),
             opensAdvanced: setup.mode.existingServerID.map { serverID in
                 model.discoveryNotices(for: serverID).showsBackendProblem(
                     savedBackends: Set(model.library.workspaces(for: serverID).map(\.backend))
@@ -1397,7 +1401,7 @@ private struct ServerDetailView: View {
 
             Section("Sessions") {
                 if notices.isNeitherBackendInstalled {
-                    Text("Neither tmux nor Herdr is installed on this server.")
+                    Text("Remux couldn't find tmux or Herdr on this server.")
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("library.server.no-backend")
                     Button("Set Paths") {
@@ -1797,7 +1801,7 @@ private struct SessionLibraryRow: View {
     let runtimeState: TerminalRuntimeState?
     let subtitleMode: SubtitleMode
     /// What the server's last check found wrong with this session's backend.
-    var problem: SessionDiscoveryProblem?
+    var problem: BackendProblem?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -2282,7 +2286,10 @@ struct ConnectionSetupView: View {
     let showsServerSummaryForNewSession: Bool
     /// What the server's last check found wrong with each backend whose executable the draft still names as
     /// checked: each path says it, and New Session says it for the kind chosen.
-    let backendProblems: [SessionBackend: SessionDiscoveryProblem]
+    let backendProblems: [SessionBackend: BackendProblem]
+    /// Where the server's last check found each backend's program, for the backends the draft still names as
+    /// checked: a path left on Automatic says it.
+    let foundExecutables: [SessionBackend: String]
     /// Advanced starts open, on the paths, when the server page shows a backend's problem. A backend missing
     /// from a server where none of its sessions is saved leaves it closed.
     let opensAdvanced: Bool
@@ -2752,7 +2759,8 @@ struct ConnectionSetupView: View {
                 "Letters, numbers, dots, underscores and hyphens, up to 64 characters. Opens the Herdr session with this name, and starts it if it isn't running."
             }
             guard let problem = backendProblems[draft.backend] else { return naming }
-            return Self.newSessionNote(problem, backend: draft.backend) + "\n\n" + naming
+            let note = [problem.message(for: draft.backend), problem.detail].compactMap { $0 }
+            return note.joined(separator: "\n") + "\n\n" + naming
         case .editWorkspace:
             return "Renaming applies the next time you connect."
         case .newServer, .editServer:
@@ -2785,7 +2793,7 @@ struct ConnectionSetupView: View {
         autocorrectionDisabled: Bool = true,
         keyboardType: UIKeyboardType = .default,
         submitLabel: SubmitLabel = .next,
-        note: String? = nil,
+        note: FieldNote? = nil,
         accessibilityIdentifier: String
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -2821,10 +2829,18 @@ struct ConnectionSetupView: View {
 
             fieldValidationMessage(validationMessage)
             if validationMessage == nil, let note {
-                Text(note)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("\(accessibilityIdentifier).note")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(note.text)
+                        .accessibilityIdentifier("\(accessibilityIdentifier).note")
+                    if let detail = note.detail {
+                        Text(detail)
+                            .monospaced()
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("\(accessibilityIdentifier).note.detail")
+                    }
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 6)
@@ -2832,6 +2848,26 @@ struct ConnectionSetupView: View {
         .onTapGesture {
             focusedField = field
         }
+    }
+
+    /// A line under a field, and the server's own words under it.
+    private struct FieldNote {
+        let text: String
+        var detail: String?
+    }
+
+    /// Under a backend's path: what the server's last check found wrong there, or, on Automatic, where it
+    /// found the program.
+    private func executablePathNote(for backend: SessionBackend, path: String) -> FieldNote? {
+        if let problem = backendProblems[backend] {
+            return FieldNote(text: problem.pathNote(for: backend), detail: problem.detail)
+        }
+        guard path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let found = foundExecutables[backend]
+        else {
+            return nil
+        }
+        return FieldNote(text: "Using \(found)")
     }
 
     private func tmuxExecutableInputRow() -> some View {
@@ -2842,7 +2878,7 @@ struct ConnectionSetupView: View {
             field: .tmuxExecutablePath,
             validationMessage: tmuxExecutablePathMessage,
             keyboardType: .URL,
-            note: backendProblems[.tmux].map(Self.executablePathNote),
+            note: executablePathNote(for: .tmux, path: draft.tmuxExecutablePath),
             accessibilityIdentifier: "connection.tmux-executable"
         )
     }
@@ -2856,7 +2892,7 @@ struct ConnectionSetupView: View {
             validationMessage: herdrExecutablePathMessage,
             keyboardType: .URL,
             submitLabel: .go,
-            note: backendProblems[.herdr].map(Self.executablePathNote),
+            note: executablePathNote(for: .herdr, path: draft.herdrExecutablePath),
             accessibilityIdentifier: "connection.herdr-executable"
         )
     }
@@ -3388,31 +3424,6 @@ struct ConnectionSetupView: View {
         UIPasteboard.general.string = publicKeyLine
         publicKeyCopyMessage = "Public key copied"
         Haptic.tap()
-    }
-
-    /// Under a backend's path in Edit Server: what the server's last check found there.
-    static func executablePathNote(_ problem: SessionDiscoveryProblem) -> String {
-        switch problem {
-        case .notFound:
-            "Not found on this server."
-        case .notExecutable:
-            "Found, but it can't be run. Check its permissions."
-        case .unsupportedVersion(let version):
-            "Herdr \(version) is installed. Remux needs \(HerdrVersion.minimumSupported) or later."
-        }
-    }
-
-    /// Under New Session's kind, for a kind the server's last check found a problem with. Starting stays
-    /// possible: the check may be out of date.
-    static func newSessionNote(_ problem: SessionDiscoveryProblem, backend: SessionBackend) -> String {
-        switch problem {
-        case .notFound:
-            "\(backend.displayName) isn't installed on this server. Set its path in Edit Server."
-        case .notExecutable:
-            "\(backend.displayName) can't be run on this server. Check its path in Edit Server."
-        case .unsupportedVersion(let version):
-            "Herdr \(version) on this server is too old. Remux needs \(HerdrVersion.minimumSupported) or later."
-        }
     }
 
     @ViewBuilder

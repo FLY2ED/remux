@@ -182,59 +182,6 @@ struct ActiveTerminalScreenEntry: Identifiable {
     }
 }
 
-/// Why a backend's discovery couldn't list a server's sessions, when the backend itself is the cause.
-enum SessionDiscoveryProblem: Equatable, Sendable {
-    case notFound
-    case notExecutable
-    /// A Herdr older than the oldest one Remux supports.
-    case unsupportedVersion(HerdrVersion)
-
-    /// Setting the backend's path in Edit Server is the fix.
-    var isFixedByPath: Bool {
-        switch self {
-        case .notFound, .notExecutable: true
-        case .unsupportedVersion: false
-        }
-    }
-
-    /// On a saved session of the backend, in place of when it was last opened.
-    func sessionRowLine(for backend: SessionBackend) -> String {
-        switch self {
-        case .notFound:
-            "\(backend.displayName) not found · Set path"
-        case .notExecutable:
-            "\(backend.displayName) can't be run · Check path"
-        case .unsupportedVersion(let version):
-            "Herdr \(version) is too old · Needs \(HerdrVersion.minimumSupported)"
-        }
-    }
-
-    init?(_ error: Error, backend: SessionBackend) {
-        switch backend {
-        case .tmux:
-            guard case .remoteExit(let status, let stderr) = error as? TmuxSessionDiscoveryError,
-                  let problem = TmuxExecutableProblem(exitStatus: status, output: stderr) else {
-                return nil
-            }
-            switch problem {
-            case .notFound: self = .notFound
-            case .notExecutable: self = .notExecutable
-            }
-        case .herdr:
-            switch error as? HerdrSessionDiscoveryError {
-            case .remoteExit(127, let stderr) where stderr.contains(HerdrRemoteCommand.notFoundMarker):
-                self = .notFound
-            case .remoteExit(126, let stderr) where stderr.contains(HerdrRemoteCommand.notExecutableMarker):
-                self = .notExecutable
-            case .unsupportedVersion(let version):
-                self = .unsupportedVersion(version)
-            default:
-                return nil
-            }
-        }
-    }
-}
-
 /// One backend's discovery on one server.
 struct SessionDiscoveryState: Equatable {
     enum Phase: Equatable {
@@ -248,14 +195,17 @@ struct SessionDiscoveryState: Equatable {
         phase: .idle,
         lastSuccessfulSessions: nil,
         hostKeyChallenge: nil,
-        problem: nil
+        problem: nil,
+        executablePath: nil
     )
 
     let phase: Phase
     let lastSuccessfulSessions: [DiscoveredSession]?
     let hostKeyChallenge: SSHHostKeyTrustChallenge?
-    /// Why the last refresh failed, when it was the backend's executable on the server.
-    let problem: SessionDiscoveryProblem?
+    /// Why the last refresh failed, when it was the backend's program on the server.
+    let problem: BackendProblem?
+    /// Where the last refresh found the backend's program, when it listed its sessions.
+    let executablePath: String?
 
     var sessions: [DiscoveredSession] {
         lastSuccessfulSessions ?? []
@@ -274,28 +224,31 @@ struct SessionDiscoveryState: Equatable {
             phase: .loading,
             lastSuccessfulSessions: lastSuccessfulSessions,
             hostKeyChallenge: nil,
-            problem: nil
+            problem: nil,
+            executablePath: nil
         )
     }
 
-    func finishingRefresh(with sessions: [DiscoveredSession]) -> Self {
+    func finishingRefresh(with listing: SessionListing) -> Self {
         Self(
             phase: .loaded,
-            lastSuccessfulSessions: sessions,
+            lastSuccessfulSessions: listing.sessions,
             hostKeyChallenge: nil,
-            problem: nil
+            problem: nil,
+            executablePath: listing.executablePath
         )
     }
 
     func failingRefresh(
         hostKeyChallenge: SSHHostKeyTrustChallenge? = nil,
-        problem: SessionDiscoveryProblem? = nil
+        problem: BackendProblem? = nil
     ) -> Self {
         Self(
             phase: .failed,
             lastSuccessfulSessions: lastSuccessfulSessions,
             hostKeyChallenge: hostKeyChallenge,
-            problem: problem
+            problem: problem,
+            executablePath: nil
         )
     }
 
@@ -305,7 +258,8 @@ struct SessionDiscoveryState: Equatable {
             phase: .loaded,
             lastSuccessfulSessions: lastSuccessfulSessions,
             hostKeyChallenge: nil,
-            problem: nil
+            problem: nil,
+            executablePath: nil
         )
     }
 
@@ -323,7 +277,8 @@ struct SessionDiscoveryState: Equatable {
             phase: phase,
             lastSuccessfulSessions: lastSuccessfulSessions,
             hostKeyChallenge: hostKeyChallenge,
-            problem: problem
+            problem: problem,
+            executablePath: executablePath
         )
     }
 }
@@ -380,7 +335,7 @@ struct ServerSessionDiscovery: Equatable {
         }
         let checkFailed = tmux.phase == .failed && herdr.phase == .failed
             && tmux.problem == nil && herdr.problem == nil
-        var backendProblems: [SessionBackend: SessionDiscoveryProblem] = [:]
+        var backendProblems: [SessionBackend: BackendProblem] = [:]
         for backend in [SessionBackend.tmux, .herdr] where self[backend].phase == .failed {
             backendProblems[backend] = self[backend].problem
         }
@@ -404,10 +359,11 @@ struct ServerDiscoveryNotices: Equatable {
     /// Neither backend could be checked, for a reason that isn't either backend's: the server didn't answer,
     /// signing in failed, or the connection dropped.
     let checkFailed: Bool
-    let backendProblems: [SessionBackend: SessionDiscoveryProblem]
+    let backendProblems: [SessionBackend: BackendProblem]
 
+    /// Nothing that can run was found for either backend, on Automatic or at the path set.
     var isNeitherBackendInstalled: Bool {
-        backendProblems[.tmux] == .notFound && backendProblems[.herdr] == .notFound
+        backendProblems[.tmux]?.isNotFound == true && backendProblems[.herdr]?.isNotFound == true
     }
 
     /// No session on the server could be listed.
@@ -2265,7 +2221,7 @@ final class RemuxRootModel: ObservableObject {
         } catch {
             guard isCurrentSessionRefresh(server, refreshID: refreshID) else { return }
             sessionDiscoveries[server.id] = sessionDiscovery(for: server.id).mapping {
-                Self.applying(.failure(error), to: $0, backend: nil)
+                Self.applying(.failure(error), to: $0, backend: nil, configuredPath: nil)
             }
             return
         }
@@ -2278,19 +2234,19 @@ final class RemuxRootModel: ObservableObject {
         let dependencies = dependencies
         // Each child awaits before building its tuple: optimized Swift 6.3 and 6.4 builds return the wrong first
         // element from a tuple expression that contains the `await`.
-        await withTaskGroup(of: (SessionBackend, Result<[DiscoveredSession], Error>).self) { group in
+        await withTaskGroup(of: (SessionBackend, Result<SessionListing, Error>).self) { group in
             group.addTask {
                 do {
-                    let names = try await dependencies.discoverTmuxSessions(for: discoveryTarget)
-                    return (.tmux, .success(names.map { DiscoveredSession(name: $0, isRunning: true) }))
+                    let listing = try await dependencies.discoverTmuxSessions(for: discoveryTarget)
+                    return (.tmux, .success(listing))
                 } catch {
                     return (.tmux, .failure(error))
                 }
             }
             group.addTask {
                 do {
-                    let sessions = try await dependencies.discoverHerdrSessions(for: discoveryTarget)
-                    return (.herdr, .success(sessions))
+                    let listing = try await dependencies.discoverHerdrSessions(for: discoveryTarget)
+                    return (.herdr, .success(listing))
                 } catch {
                     return (.herdr, .failure(error))
                 }
@@ -2298,28 +2254,40 @@ final class RemuxRootModel: ObservableObject {
             for await (backend, result) in group {
                 guard isCurrentSessionRefresh(server, refreshID: refreshID) else { continue }
                 var discovery = sessionDiscovery(for: server.id)
-                discovery[backend] = Self.applying(result, to: discovery[backend], backend: backend)
+                discovery[backend] = Self.applying(
+                    result,
+                    to: discovery[backend],
+                    backend: backend,
+                    configuredPath: server.executablePath(for: backend)
+                )
                 sessionDiscoveries[server.id] = discovery
             }
         }
     }
 
     /// Discovery is auxiliary: a failure stays in the server's discovery state and never replaces the app
-    /// route. `backend` is nil for a failure before either backend ran.
+    /// route. `backend` is nil for a failure before either backend ran; `configuredPath` is the backend's
+    /// path set in Edit Server, nil for Automatic.
     private static func applying(
-        _ result: Result<[DiscoveredSession], Error>,
+        _ result: Result<SessionListing, Error>,
         to state: SessionDiscoveryState,
-        backend: SessionBackend?
+        backend: SessionBackend?,
+        configuredPath: String?
     ) -> SessionDiscoveryState {
         switch result {
-        case .success(let sessions):
-            return state.finishingRefresh(with: normalizedSessions(sessions))
+        case .success(let listing):
+            return state.finishingRefresh(with: SessionListing(
+                executablePath: listing.executablePath,
+                sessions: normalizedSessions(listing.sessions)
+            ))
         case .failure(let error) where error is CancellationError:
             return state.cancellingRefresh()
         case .failure(TrustedHostStoreError.hostKeyTrustRequired(let challenge)):
             return state.failingRefresh(hostKeyChallenge: challenge)
         case .failure(let error):
-            return state.failingRefresh(problem: backend.flatMap { SessionDiscoveryProblem(error, backend: $0) })
+            return state.failingRefresh(
+                problem: backend == nil ? nil : BackendProblem(discoveryError: error, path: configuredPath)
+            )
         }
     }
 

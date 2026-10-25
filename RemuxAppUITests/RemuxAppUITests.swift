@@ -1230,7 +1230,7 @@ final class RemuxAppUITests: XCTestCase {
             noBackendRow().waitForExistence(timeout: 5),
             "The server page should say neither tmux nor Herdr is installed."
         )
-        XCTAssertEqual(noBackendRow().label, "Neither tmux nor Herdr is installed on this server.")
+        XCTAssertEqual(noBackendRow().label, "Remux couldn't find tmux or Herdr on this server.")
         XCTAssertFalse(app.buttons["library.server.new-session.empty"].exists)
 
         app.buttons["library.server.set-paths"].tap()
@@ -1240,8 +1240,9 @@ final class RemuxAppUITests: XCTestCase {
             app.swipeUp()
         }
         XCTAssertTrue(executable.isHittable, "Set Paths should lead to the paths.")
-        XCTAssertTrue(
-            app.staticTexts["Not found on this server."].firstMatch.exists,
+        XCTAssertEqual(
+            app.staticTexts["connection.tmux-executable.note"].label,
+            "Remux couldn't find tmux on this server.",
             "Each path should say the last check found nothing there."
         )
     }
@@ -1285,7 +1286,12 @@ final class RemuxAppUITests: XCTestCase {
             app.swipeUp()
         }
         XCTAssertTrue(executable.isHittable)
-        XCTAssertTrue(app.staticTexts["Not found on this server."].firstMatch.exists)
+        XCTAssertEqual(
+            app.staticTexts["connection.herdr-executable.note"].label,
+            "Remux couldn't find Herdr on this server."
+        )
+        // tmux is on Automatic and the simulated server has it: its path says where.
+        XCTAssertEqual(app.staticTexts["connection.tmux-executable.note"].label, "Using /usr/bin/tmux")
     }
 
     /// Opening a Herdr session on a server without Herdr shows Herdr's own panel, as tmux has one, and its Edit
@@ -1310,7 +1316,9 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertTrue(session.waitForExistence(timeout: 5))
         session.tap()
         XCTAssertTrue(app.staticTexts["Herdr Unavailable"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["Install Herdr on this server or update Executable Path."].exists)
+        XCTAssertTrue(
+            app.staticTexts["Remux couldn't find Herdr on this server. Install it, or set its path in Edit Server."].exists
+        )
         // The panel's identifier covers its buttons, so they're found by their titles.
         XCTAssertTrue(app.buttons["Retry"].exists)
 
@@ -1355,7 +1363,10 @@ final class RemuxAppUITests: XCTestCase {
             app.swipeUp()
         }
         XCTAssertTrue(executable.isHittable, "The session should lead to Herdr's path.")
-        XCTAssertTrue(app.staticTexts["Not found on this server."].firstMatch.exists)
+        XCTAssertEqual(
+            app.staticTexts["connection.herdr-executable.note"].label,
+            "Remux couldn't find Herdr on this server."
+        )
     }
 
     func testDeleteServerAsksFirst() {
@@ -1425,7 +1436,7 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [filled], timeout: 2), .completed, "Herdr should start on its default name.")
         // The simulated server has no Herdr.
         let herdrMissing = app.staticTexts
-            .matching(NSPredicate(format: "label CONTAINS %@", "Herdr isn't installed on this server."))
+            .matching(NSPredicate(format: "label CONTAINS %@", "Remux couldn't find Herdr on this server."))
             .firstMatch
         XCTAssertTrue(herdrMissing.waitForExistence(timeout: 2), "New Session should say Herdr is missing.")
 
@@ -1471,7 +1482,7 @@ final class RemuxAppUITests: XCTestCase {
             "With tmux missing, Edit Server should open Advanced on the tmux path."
         )
         let note = app.staticTexts["connection.tmux-executable.note"]
-        XCTAssertEqual(note.label, "Not found on this server.")
+        XCTAssertEqual(note.label, "Remux couldn't find tmux on this server.")
         tapFormField(executable)
         XCTAssertTrue(waitForSoftwareKeyboardOnScreen(timeout: 3))
         XCTAssertTrue(waitForElementToSettle(executable))

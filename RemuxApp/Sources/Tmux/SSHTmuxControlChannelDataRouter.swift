@@ -2,15 +2,21 @@ import Foundation
 import NIOConcurrencyHelpers
 @preconcurrency import NIOSSH
 
+/// The end of a stream: its last bytes as text, and an escaped preview of fewer of them for traces.
 private struct SSHTmuxBoundedStreamPreview: Equatable, Sendable {
-    private static let limit = 240
+    private static let limit = 2048
+    private static let previewLimit = 240
 
     private(set) var byteCount = 0
     private var bytes = Data()
 
     var preview: String? {
         guard !bytes.isEmpty else { return nil }
-        return GhosttyRuntimeTrace.preview(bytes, limit: Self.limit)
+        return GhosttyRuntimeTrace.preview(bytes.suffix(Self.previewLimit), limit: Self.previewLimit)
+    }
+
+    var text: String? {
+        bytes.isEmpty ? nil : String(decoding: bytes, as: UTF8.self)
     }
 
     mutating func append(_ data: Data) {
@@ -40,11 +46,8 @@ struct SSHTmuxStartupDiagnostics: Equatable, Sendable, CustomStringConvertible {
     /// Output before tmux's first protocol line: login-shell output and, on a
     /// pseudo-terminal, the launch script's stderr.
     let startupOutputPreview: String?
-
-    /// Every message the launch could have written, wherever it arrived.
-    var messages: String {
-        [startupOutputPreview, stderrPreview].compactMap { $0 }.joined(separator: "\n")
-    }
+    /// The end of every message the launch could have written, wherever it arrived, as text.
+    let messages: String
 
     var isEmpty: Bool {
         stdoutByteCount == 0 &&
@@ -100,7 +103,8 @@ private struct SSHTmuxStartupDiagnosticsAccumulator: Equatable, Sendable {
             extendedDataByteCount: extendedData.byteCount,
             stderrPreview: stderr.preview,
             extendedDataPreview: extendedData.preview,
-            startupOutputPreview: startupOutput.preview
+            startupOutputPreview: startupOutput.preview,
+            messages: [startupOutput.text, stderr.text].compactMap { $0 }.joined(separator: "\n")
         )
         return diagnostics.isEmpty ? nil : diagnostics
     }

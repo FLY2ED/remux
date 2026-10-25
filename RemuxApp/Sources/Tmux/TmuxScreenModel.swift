@@ -110,6 +110,7 @@ final class TmuxScreenModel: ObservableObject {
             paneViewTheme: { [weak self, target] in
                 self?.currentTerminalSettings.theme ?? target.terminalSettings.theme
             },
+            tmuxPath: target.server.tmuxExecutablePath,
             zoomOwner: TmuxZoomOwner(serverID: target.server.id)
         )
         self.session = session

@@ -379,10 +379,15 @@ final class SessionSwitcherProjectionTests: XCTestCase {
         herdr: [DiscoveredSession]? = nil
     ) -> ServerSessionDiscovery {
         ServerSessionDiscovery(
-            tmux: SessionDiscoveryState.idle.finishingRefresh(
-                with: tmuxNames.map { DiscoveredSession(name: $0, isRunning: true) }
-            ),
-            herdr: herdr.map { SessionDiscoveryState.idle.finishingRefresh(with: $0) } ?? .idle
+            tmux: SessionDiscoveryState.idle.finishingRefresh(with: SessionListing(
+                executablePath: "/usr/bin/tmux",
+                sessions: tmuxNames.map { DiscoveredSession(name: $0, isRunning: true) }
+            )),
+            herdr: herdr.map {
+                SessionDiscoveryState.idle.finishingRefresh(
+                    with: SessionListing(executablePath: "/usr/local/bin/herdr", sessions: $0)
+                )
+            } ?? .idle
         )
     }
 

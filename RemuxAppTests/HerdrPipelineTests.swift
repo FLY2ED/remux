@@ -35,7 +35,7 @@ final class HerdrPipelineTests: XCTestCase {
         harness.setScreenSize()
 
         try await assertPanesShowHerdrsCells(harness, recording: recording)
-        XCTAssertEqual(harness.states.last, .disconnected(HerdrConnectionError.closed.terminalDisconnectReason))
+        XCTAssertEqual(harness.states.last, .disconnected(HerdrConnectionError.closed.terminalDisconnectReason(herdrPath: nil)))
     }
 
     /// Connected hidden as Herdr's client connects, the session is shown once selected, and painted as
@@ -100,7 +100,7 @@ final class HerdrPipelineTests: XCTestCase {
         }
         XCTAssertEqual(
             harness.states.last,
-            .disconnected(HerdrConnectionError.wire(.invalidSurfaceUpdate("surface delta without a baseline")).terminalDisconnectReason)
+            .disconnected(HerdrConnectionError.wire(.invalidSurfaceUpdate("surface delta without a baseline")).terminalDisconnectReason(herdrPath: nil))
         )
     }
 

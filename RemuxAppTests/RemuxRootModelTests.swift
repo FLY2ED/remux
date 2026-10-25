@@ -114,7 +114,7 @@ final class RemuxRootModelTests: XCTestCase {
 
         let didLoadSessions = await waitUntil {
             harness.model.sessionDiscovery(for: pair.server.id).tmux
-                == SessionDiscoveryState.idle.finishingRefresh(with: running(["main", "ops"]))
+                == SessionDiscoveryState.idle.finishingRefresh(with: tmuxListing(["main", "ops"]))
         }
         XCTAssertTrue(didLoadSessions)
 
@@ -228,7 +228,7 @@ final class RemuxRootModelTests: XCTestCase {
 
         let didRetry = await waitUntil {
             harness.model.sessionDiscovery(for: pair.server.id).tmux
-                == SessionDiscoveryState.idle.finishingRefresh(with: running(["main", "ops"]))
+                == SessionDiscoveryState.idle.finishingRefresh(with: tmuxListing(["main", "ops"]))
         }
         XCTAssertTrue(didRetry)
         let discoveryCount = await discoverer.targets().count
@@ -236,7 +236,7 @@ final class RemuxRootModelTests: XCTestCase {
     }
 
     func testDiscoveryRefreshRetainsLastSuccessfulSnapshotOnFailure() {
-        let loaded = SessionDiscoveryState.idle.finishingRefresh(with: running(["main"]))
+        let loaded = SessionDiscoveryState.idle.finishingRefresh(with: tmuxListing(["main"]))
 
         let loading = loaded.startingRefresh()
         let failed = loading.failingRefresh()
@@ -287,10 +287,7 @@ final class RemuxRootModelTests: XCTestCase {
             identities: [pair.identity],
             tmuxSessionDiscoverer: { _, _, _ in ["main"] },
             herdrSessionDiscoverer: { _, _, _ in
-                throw HerdrSessionDiscoveryError.remoteExit(
-                    status: 127,
-                    stderr: "\(HerdrRemoteCommand.notFoundMarker): herdr\n"
-                )
+                throw RemoteProgramFailure.notFound
             }
         )
         try await harness.credentialHelper.savePassword("secret", for: pair.server.id)
@@ -305,9 +302,35 @@ final class RemuxRootModelTests: XCTestCase {
             harness.model.discoveryNotices(for: pair.server.id),
             ServerDiscoveryNotices(hostKey: nil, checkFailed: false, backendProblems: [.herdr: .notFound])
         )
+        let discovery = harness.model.sessionDiscovery(for: pair.server.id)
+        XCTAssertEqual(discovery.tmux.executablePath, Self.tmuxPath)
+        XCTAssertNil(discovery.herdr.executablePath)
         // A failed Herdr discovery hides none of its saved sessions.
         XCTAssertTrue(
             SessionReconciliation.includesSavedWorkspace(saved, discoveries: harness.model.sessionDiscoveries)
+        )
+    }
+
+    /// With a path set in Edit Server, nothing that can run there is that path's problem, not a missing tmux.
+    func testNothingAtThePathSetIsThatPathsProblem() async throws {
+        let pair = makePasswordBackedServer()
+        var server = pair.server
+        server.tmuxExecutablePath = "/opt/tools/tmux"
+        let harness = makeHarness(
+            servers: [server],
+            identities: [pair.identity],
+            tmuxSessionDiscoverer: { _, _, _ in throw RemoteProgramFailure.notFound }
+        )
+        try await harness.credentialHelper.savePassword("secret", for: server.id)
+        await harness.model.load()
+
+        let didFinish = await waitUntil {
+            harness.model.sessionDiscovery(for: server.id).tmux.phase == .failed
+        }
+        XCTAssertTrue(didFinish)
+        XCTAssertEqual(
+            harness.model.discoveryNotices(for: server.id).backendProblems[.tmux],
+            .notAtPath("/opt/tools/tmux")
         )
     }
 
@@ -354,7 +377,7 @@ final class RemuxRootModelTests: XCTestCase {
     /// the server answered, and nothing says what to fix.
     func testABackendFailingForAnotherReasonIsNoNotice() {
         let discovery = ServerSessionDiscovery(
-            tmux: SessionDiscoveryState.idle.finishingRefresh(with: running(["main"])),
+            tmux: SessionDiscoveryState.idle.finishingRefresh(with: tmuxListing(["main"])),
             herdr: SessionDiscoveryState.idle.failingRefresh()
         )
         XCTAssertEqual(discovery.notices, .none)
@@ -363,7 +386,7 @@ final class RemuxRootModelTests: XCTestCase {
     /// Edit Server opens Advanced only for a problem the server page shows.
     func testABackendsProblemShowsWhereItsSessionsAreSaved() {
         let herdrMissing = ServerSessionDiscovery(
-            tmux: SessionDiscoveryState.idle.finishingRefresh(with: running(["main"])),
+            tmux: SessionDiscoveryState.idle.finishingRefresh(with: tmuxListing(["main"])),
             herdr: SessionDiscoveryState.idle.failingRefresh(problem: .notFound)
         ).notices
         XCTAssertFalse(herdrMissing.showsBackendProblem(savedBackends: []))
@@ -385,12 +408,20 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertTrue(neither.notices.isNeitherBackendInstalled)
         XCTAssertFalse(neither.notices.isServerUnchecked)
 
+        let broken = BackendProblem.couldNotStart(path: nil, message: "sh: 1: exec: /usr/bin/tmux: Exec format error")
         let tmuxBroken = ServerSessionDiscovery(
-            tmux: SessionDiscoveryState.idle.failingRefresh(problem: .notExecutable),
+            tmux: SessionDiscoveryState.idle.failingRefresh(problem: broken),
             herdr: SessionDiscoveryState.idle.failingRefresh(problem: .notFound)
         )
         XCTAssertFalse(tmuxBroken.notices.isNeitherBackendInstalled)
-        XCTAssertEqual(tmuxBroken.notices.backendProblems, [.tmux: .notExecutable, .herdr: .notFound])
+        XCTAssertEqual(tmuxBroken.notices.backendProblems, [.tmux: broken, .herdr: .notFound])
+
+        // Nothing at the path set counts as not found: the server page still says neither was found.
+        let pathSet = ServerSessionDiscovery(
+            tmux: SessionDiscoveryState.idle.failingRefresh(problem: .notAtPath("/opt/tmux")),
+            herdr: SessionDiscoveryState.idle.failingRefresh(problem: .notFound)
+        )
+        XCTAssertTrue(pathSet.notices.isNeitherBackendInstalled)
     }
 
     /// Herdr's discovery hides a saved Herdr session it no longer lists, as tmux's does for tmux; neither
@@ -678,7 +709,7 @@ final class RemuxRootModelTests: XCTestCase {
         }
         let didRetry = await waitUntil {
             harness.model.sessionDiscovery(for: pair.server.id).tmux
-                == SessionDiscoveryState.idle.finishingRefresh(with: running(["main"]))
+                == SessionDiscoveryState.idle.finishingRefresh(with: tmuxListing(["main"]))
         }
         XCTAssertTrue(didRetry)
         let discoveryCount = await discoverer.targets().count
@@ -807,6 +838,7 @@ final class RemuxRootModelTests: XCTestCase {
                 isActionInProgress: isActionInProgress,
                 showsServerSummaryForNewSession: false,
                 backendProblems: [:],
+                foundExecutables: [:],
                 opensAdvanced: false,
                 isClosing: isClosing,
                 onChange: { _ in },
@@ -1693,10 +1725,7 @@ final class RemuxRootModelTests: XCTestCase {
         let discoverer = RecordingTmuxSessionDiscoverer(
             results: [
                 .failure(
-                    TmuxSessionDiscoveryError.remoteExit(
-                        status: 127,
-                        stderr: SSHTmuxControlCommandBuilder.tmuxNotFoundMarker
-                    )
+                    RemoteProgramFailure.notFound
                 ),
             ]
         )
@@ -2889,10 +2918,7 @@ final class RemuxRootModelTests: XCTestCase {
         let server = passwordBackedServer.server
         let discoverer = RecordingTmuxSessionDiscoverer(results: [
             .failure(
-                TmuxSessionDiscoveryError.remoteExit(
-                    status: 127,
-                    stderr: SSHTmuxControlCommandBuilder.tmuxNotFoundMarker
-                )
+                RemoteProgramFailure.notFound
             ),
             .success(["base"]),
         ])
@@ -4432,6 +4458,7 @@ final class RemuxRootModelTests: XCTestCase {
             FailingGhosttyAttachmentTransferService()
         }
         let resolvedTmuxSessionDiscoverer = tmuxSessionDiscoverer ?? { _, _, _ in [] }
+        let resolvedHerdrSessionDiscoverer = herdrSessionDiscoverer ?? { _, _, _ in [] }
         let resolvedPublicKeyInstaller = publicKeyInstaller ?? makePublicKeyInstaller(
             recorder: RootModelPublicKeyInstallerRecorder(results: [])
         )
@@ -4446,8 +4473,19 @@ final class RemuxRootModelTests: XCTestCase {
             transportFactory: resolvedTransportFactory,
             sshConnectionPrewarmer: resolvedSSHConnectionPrewarmer,
             attachmentTransferServiceFactory: resolvedAttachmentTransferServiceFactory,
-            tmuxSessionDiscoverer: resolvedTmuxSessionDiscoverer,
-            herdrSessionDiscoverer: herdrSessionDiscoverer ?? { _, _, _ in [] },
+            tmuxSessionDiscoverer: { target, trustedHostStore, sshRootService in
+                SessionListing(
+                    executablePath: Self.tmuxPath,
+                    sessions: try await resolvedTmuxSessionDiscoverer(target, trustedHostStore, sshRootService)
+                        .map { DiscoveredSession(name: $0, isRunning: true) }
+                )
+            },
+            herdrSessionDiscoverer: { target, trustedHostStore, sshRootService in
+                SessionListing(
+                    executablePath: Self.herdrPath,
+                    sessions: try await resolvedHerdrSessionDiscoverer(target, trustedHostStore, sshRootService)
+                )
+            },
             sshAccessVerifier: sshAccessVerifier ?? { _, _, _ in },
             herdrBridgeOpener: herdrBridgeOpener ?? { _, _, _ in
                 throw HerdrBridgeError.channel("this test opens no Herdr bridge")
@@ -4471,6 +4509,15 @@ final class RemuxRootModelTests: XCTestCase {
     private func running(_ names: [String]) -> [DiscoveredSession] {
         names.map { DiscoveredSession(name: $0, isRunning: true) }
     }
+
+    /// What tmux's discovery finds in these tests: tmux at `tmuxPath`, with these sessions.
+    private func tmuxListing(_ names: [String]) -> SessionListing {
+        SessionListing(executablePath: Self.tmuxPath, sessions: running(names))
+    }
+
+    /// Where the harness's discovery finds tmux and Herdr.
+    private nonisolated static let tmuxPath = "/usr/bin/tmux"
+    private nonisolated static let herdrPath = "/usr/local/bin/herdr"
 
     /// `TmuxScreenModel` starts connecting in `init`.
     private func waitForConnecting(

@@ -187,7 +187,7 @@ final class HerdrConnectionTests: XCTestCase {
     /// The live bridge opens before Herdr's executable is looked up, so a missing Herdr is reported by the
     /// first read. It keeps its kind: Herdr unavailable, which Edit Server fixes, not a lost connection.
     func testABridgeThatReportsHerdrMissingOnItsFirstReadKeepsItsKind() async throws {
-        for bridgeError in [HerdrBridgeError.herdrNotFound, .herdrNotExecutable] {
+        for bridgeError in [HerdrBridgeError.program(.notFound), .program(.couldNotStart("sh: 1: exec: herdr: Permission denied"))] {
             let transport = FakeBridgeTransport()
             await transport.finishServing(throwing: bridgeError)
             do {
@@ -201,7 +201,7 @@ final class HerdrConnectionTests: XCTestCase {
                 XCTFail("opened")
             } catch let error as HerdrConnectionError {
                 XCTAssertEqual(error, .bridge(bridgeError))
-                XCTAssertEqual(error.terminalDisconnectReason.kind, .backendUnavailable(.herdr))
+                XCTAssertEqual(error.terminalDisconnectReason(herdrPath: nil).kind, .backendUnavailable(.herdr))
                 XCTAssertEqual(error.localizedDescription, bridgeError.errorDescription)
             }
         }

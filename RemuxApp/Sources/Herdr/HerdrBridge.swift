@@ -3,17 +3,17 @@ import NIOConcurrencyHelpers
 @preconcurrency import NIOSSH
 
 enum HerdrBridgeError: Error, Equatable, LocalizedError {
-    case herdrNotFound
-    case herdrNotExecutable
+    /// Herdr isn't on the server, or couldn't run, or ran and failed.
+    case program(RemoteProgramFailure)
+    /// The run ended before it got to Herdr: the login shell or the server's startup files failed.
     case remoteExit(status: Int, stderr: String)
     case channel(String)
 
     var errorDescription: String? {
         switch self {
-        case .herdrNotFound:
-            return "Install Herdr on this server or update Executable Path."
-        case .herdrNotExecutable:
-            return "Check the Herdr executable and its permissions, then try again."
+        case .program(let failure):
+            let problem = BackendProblem(failure, path: nil)
+            return [problem.message(for: .herdr), problem.detail].compactMap { $0 }.joined(separator: " ")
         case .remoteExit(let status, let stderr):
             let detail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             return detail.isEmpty ? "herdr exited with status \(status)." : detail
@@ -26,8 +26,8 @@ enum HerdrBridgeError: Error, Equatable, LocalizedError {
 /// `herdr remote-client-bridge` on an SSH exec channel: the bridge copies its stdin to the session's
 /// client socket and the socket to its stdout, so the channel carries the endpoint protocol unchanged.
 ///
-/// The channel has no pty, so stderr stays out of the protocol stream, and stdout up to Herdr's ready
-/// marker (`HerdrRemoteCommand`) is skipped, so text from the server's startup files never reaches the
+/// The channel has no pty, so stderr stays out of the protocol stream, and stdout up to the ready marker
+/// (`RemoteProgramCommand`) is skipped, so text from the server's startup files never reaches the
 /// protocol. Reads are on demand: the SSH window refills only as the connection reads, so a phone that
 /// stops reading holds the server back once the current window (2 MiB, as with OpenSSH) is used, and
 /// `--idle-timeout-v1` (where the host supports it) bounds how long the server keeps it.
@@ -49,7 +49,7 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
     private var nextWrite: UInt64 = 0
     private var state = State.running
     private var stderr = Data()
-    private var readyLine = HerdrRemoteCommand.ReadyLine()
+    private var readyLine = RemoteProgramCommand.ReadyLine()
     private var connection: RemuxSSHExecConnection?
 
     private init() {}
@@ -79,7 +79,7 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
     /// for its background bridges. No locale is forced, since the bridge may start the server, whose
     /// panes inherit the environment.
     static func command(herdrExecutable: String, session: String) -> String {
-        HerdrRemoteCommand.command(herdrExecutable: herdrExecutable, arguments: [session], body: [
+        RemoteProgramCommand.command(program: herdrExecutable, arguments: [session], body: [
             #"session=$(printf %b "$2")"#,
             #"if "$resolved" status client --json 2> /dev/null | grep -Eq "\"remote_bridge_idle_timeout\": *true"; then exec "$resolved" --session "$session" remote-client-bridge --idle-timeout-v1; fi"#,
             #"exec "$resolved" --session "$session" remote-client-bridge"#,
@@ -232,15 +232,8 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
         if let error {
             return HerdrBridgeError.channel(String(describing: error))
         }
-        switch status {
-        case 127? where stderr.contains(HerdrRemoteCommand.notFoundMarker):
-            return HerdrBridgeError.herdrNotFound
-        case 126? where stderr.contains(HerdrRemoteCommand.notExecutableMarker):
-            return HerdrBridgeError.herdrNotExecutable
-        case let status? where status != 0:
-            return HerdrBridgeError.remoteExit(status: status, stderr: stderr)
-        default:
-            return nil
-        }
+        guard let status, status != 0 else { return nil }
+        return RemoteProgramFailure(exitStatus: status, stderr: stderr).map(HerdrBridgeError.program)
+            ?? HerdrBridgeError.remoteExit(status: status, stderr: stderr)
     }
 }

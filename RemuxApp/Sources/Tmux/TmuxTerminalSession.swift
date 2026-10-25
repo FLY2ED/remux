@@ -19,6 +19,8 @@ final class TmuxTerminalSession: ObservableObject {
     private let link: TmuxSessionLink
     private let baseSurfaceConfig: () -> ghostty_terminal_surface_config_s
     private let paneViewTheme: () -> TerminalTheme
+    /// The tmux path set in Edit Server, nil for Automatic: what a tmux that can't run says depends on it.
+    private let tmuxPath: String?
 
     typealias PaneSurfaceCreator = @MainActor (
         ghostty_app_t,
@@ -79,12 +81,14 @@ final class TmuxTerminalSession: ObservableObject {
         transport: any TmuxControlTransport,
         baseSurfaceConfig: @escaping () -> ghostty_terminal_surface_config_s,
         paneViewTheme: @escaping () -> TerminalTheme,
+        tmuxPath: String? = nil,
         zoomOwner: TmuxZoomOwner? = nil,
         createPaneSurface: @escaping PaneSurfaceCreator = TmuxPaneSurface.create
     ) {
         self.app = app
         self.baseSurfaceConfig = baseSurfaceConfig
         self.paneViewTheme = paneViewTheme
+        self.tmuxPath = tmuxPath
         self.createPaneSurface = createPaneSurface
 
         let relay = Relay()
@@ -139,7 +143,7 @@ final class TmuxTerminalSession: ObservableObject {
         await failed.stop()
         guard !isShutDown, link === failed, linkIsActive else { return }
         linkIsActive = false
-        transportFailure = GhosttyTerminalDisconnectReasonClassifier.transportStartFailure(error)
+        transportFailure = GhosttyTerminalDisconnectReasonClassifier.tmuxStartFailure(error, tmuxPath: tmuxPath)
         state = .detached(nil)
     }
 
