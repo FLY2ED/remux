@@ -42,6 +42,9 @@ enum HerdrConnectionError: Error, Equatable, LocalizedError {
     case wire(HerdrWireError)
     case serverShutdown(reason: String?)
     case closed
+    /// The bridge to Herdr failed, as it reports it: Herdr missing or unrunnable on the server, or the
+    /// bridge exiting.
+    case bridge(HerdrBridgeError)
     /// The stream failed; the text is for the user.
     case transport(String)
     /// No bytes arrived for a while after a health ping, or no snapshot after connecting.
@@ -61,6 +64,8 @@ enum HerdrConnectionError: Error, Equatable, LocalizedError {
             return "The Herdr server stopped."
         case .closed:
             return "The connection to Herdr closed."
+        case .bridge(let error):
+            return error.errorDescription
         case .transport(let detail):
             return detail
         case .unresponsive:
@@ -346,6 +351,8 @@ actor HerdrConnection {
             return error
         case let error as HerdrWireError:
             return .wire(error)
+        case let error as HerdrBridgeError:
+            return .bridge(error)
         case let error as LocalizedError:
             return .transport(error.errorDescription ?? "The connection to Herdr failed.")
         default:

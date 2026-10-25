@@ -60,8 +60,8 @@ struct TerminalRuntimeStatusPresentation: Equatable, Sendable {
             "Host Key"
         case .profile:
             "Profile Error"
-        case .tmuxUnavailable:
-            "tmux Error"
+        case .backendUnavailable(let backend):
+            "\(backend.displayName) Error"
         case .remoteExit:
             "Exited"
         case .runtime:

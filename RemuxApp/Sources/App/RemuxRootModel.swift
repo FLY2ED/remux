@@ -2048,7 +2048,7 @@ final class RemuxRootModel: ObservableObject {
             return "Remux could not reach the server. Check the address, port, network, or VPN."
         case .authentication:
             return "The server rejected these credentials. Check the user and authentication details."
-        case .tmuxUnavailable:
+        case .backendUnavailable:
             return reason.message
         case .hostKey:
             return "Remux could not verify the SSH host key."

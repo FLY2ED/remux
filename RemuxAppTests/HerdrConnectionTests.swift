@@ -184,6 +184,29 @@ final class HerdrConnectionTests: XCTestCase {
         }
     }
 
+    /// The live bridge opens before Herdr's executable is looked up, so a missing Herdr is reported by the
+    /// first read. It keeps its kind: Herdr unavailable, which Edit Server fixes, not a lost connection.
+    func testABridgeThatReportsHerdrMissingOnItsFirstReadKeepsItsKind() async throws {
+        for bridgeError in [HerdrBridgeError.herdrNotFound, .herdrNotExecutable] {
+            let transport = FakeBridgeTransport()
+            await transport.finishServing(throwing: bridgeError)
+            do {
+                _ = try await HerdrConnection.open(
+                    transport: transport,
+                    hello: hello,
+                    appActive: false,
+                    timing: relaxed,
+                    onEvent: { _ in }
+                )
+                XCTFail("opened")
+            } catch let error as HerdrConnectionError {
+                XCTAssertEqual(error, .bridge(bridgeError))
+                XCTAssertEqual(error.terminalDisconnectReason.kind, .backendUnavailable(.herdr))
+                XCTAssertEqual(error.localizedDescription, bridgeError.errorDescription)
+            }
+        }
+    }
+
     /// A read doesn't end when its task is cancelled, so cancelling the open closes the transport.
     func testCancellingTheOpenClosesTheTransportAndOpensNothing() async throws {
         let transport = FakeBridgeTransport()

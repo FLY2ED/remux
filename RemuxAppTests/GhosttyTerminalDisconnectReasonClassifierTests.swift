@@ -98,7 +98,7 @@ final class GhosttyTerminalDisconnectReasonClassifierTests: XCTestCase {
                     diagnostics: diagnostics(stderr: "\(marker): /usr/bin/tmux\\x0A")
                 )
             )
-            XCTAssertEqual(reason.kind, .tmuxUnavailable)
+            XCTAssertEqual(reason.kind, .backendUnavailable(.tmux))
             XCTAssertEqual(reason.message, message)
         }
     }
@@ -116,7 +116,7 @@ final class GhosttyTerminalDisconnectReasonClassifierTests: XCTestCase {
             SSHTmuxControlTransportError.remoteExit(127, diagnostics: diagnostics)
         )
 
-        XCTAssertEqual(reason.kind, .tmuxUnavailable)
+        XCTAssertEqual(reason.kind, .backendUnavailable(.tmux))
         XCTAssertEqual(reason.message, "Install tmux on this server or update Executable Path.")
     }
 

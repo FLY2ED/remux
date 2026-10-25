@@ -165,8 +165,8 @@ struct GhosttySurfaceStatusOverlay: View {
                 )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-        } else if reason?.kind == .serverUnreachable || reason?.kind == .tmuxUnavailable {
-            let identifierKind = reason?.kind == .tmuxUnavailable ? "tmux" : "unreachable"
+        } else if reason?.kind == .serverUnreachable || unavailableBackend(reason) != nil {
+            let identifierKind = unavailableBackend(reason)?.rawValue ?? "unreachable"
             HStack(spacing: 12) {
                 GhosttyRepairActionButton(
                     title: "Retry",
@@ -201,6 +201,13 @@ struct GhosttySurfaceStatusOverlay: View {
         }
     }
 
+    private func unavailableBackend(_ reason: TerminalDisconnectReason?) -> SessionBackend? {
+        if case .backendUnavailable(let backend)? = reason?.kind {
+            return backend
+        }
+        return nil
+    }
+
     private func title(for reason: TerminalDisconnectReason?) -> String {
         if let challenge = reason?.hostKeyChallenge {
             switch challenge.kind {
@@ -219,8 +226,8 @@ struct GhosttySurfaceStatusOverlay: View {
             return "Server Unreachable"
         }
 
-        if reason?.kind == .tmuxUnavailable {
-            return "tmux Unavailable"
+        if let backend = unavailableBackend(reason) {
+            return "\(backend.displayName) Unavailable"
         }
 
         return "Disconnected"
@@ -239,8 +246,8 @@ struct GhosttySurfaceStatusOverlay: View {
             return "CONNECTION"
         }
 
-        if reason?.kind == .tmuxUnavailable {
-            return "TMUX"
+        if let backend = unavailableBackend(reason) {
+            return backend.displayName.uppercased()
         }
 
         return "TERMINAL"
