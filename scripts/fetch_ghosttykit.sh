@@ -5,8 +5,8 @@ set -euo pipefail
 # places it at the path configured in project.yml, so building Remux does not
 # require Zig or a Ghostty checkout.
 
-release_tag="ghosttykit-20261024"
-asset_sha256="5b8e54fe13521aa0ab2d3f23f179d43545acc1cb992d85eb0055980dad22f18f"
+release_tag="ghosttykit-20261025"
+asset_sha256="47ade43a68e259ee83b809d9ff12eea356fbe603febb7e95c7697f439c3f8320"
 asset_url="https://github.com/h3nock/remux-ghostty/releases/download/${release_tag}/GhosttyKit.xcframework.zip"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
