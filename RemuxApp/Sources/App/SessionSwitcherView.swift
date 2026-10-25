@@ -35,7 +35,7 @@ struct SessionSwitcherProjection: Equatable {
     let activeSessions: [ActiveSessionSwitcherItem]
     let availableSessions: [AvailableSessionSwitcherItem]
     let recentSessions: [RecentSessionSwitcherItem]
-    /// Servers none of whose sessions could be listed: a host key to review, or no answer.
+    /// Servers none of whose sessions could be listed: a host key to review, or a failed check.
     let uncheckedServerIDs: Set<SavedServer.ID>
 
     var inlineAvailableSessions: [AvailableSessionSwitcherItem] {

@@ -1472,11 +1472,11 @@ private struct ServerDetailView: View {
                             .foregroundStyle(.secondary)
                     }
                     .accessibilityIdentifier("library.server.available.loading")
-                } else if notices.isUnreachable {
-                    Text("Couldn't reach \(server.displayName), so its other sessions aren't listed. Pull down to try again.")
+                } else if notices.checkFailed {
+                    Text("Couldn't check \(server.displayName), so its other sessions aren't listed. Pull down to try again.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("library.server.unreachable")
+                        .accessibilityIdentifier("library.server.check-failed")
                 }
 
                 if availableSessions.count > Self.maximumInlineAvailableSessionCount {

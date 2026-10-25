@@ -376,9 +376,9 @@ struct ServerSessionDiscovery: Equatable {
 
     var notices: ServerDiscoveryNotices {
         if let hostKeyChallenge {
-            return ServerDiscoveryNotices(hostKey: hostKeyChallenge, isUnreachable: false, backendProblems: [:])
+            return ServerDiscoveryNotices(hostKey: hostKeyChallenge, checkFailed: false, backendProblems: [:])
         }
-        let isUnreachable = tmux.phase == .failed && herdr.phase == .failed
+        let checkFailed = tmux.phase == .failed && herdr.phase == .failed
             && tmux.problem == nil && herdr.problem == nil
         var backendProblems: [SessionBackend: SessionDiscoveryProblem] = [:]
         for backend in [SessionBackend.tmux, .herdr] where self[backend].phase == .failed {
@@ -386,23 +386,24 @@ struct ServerSessionDiscovery: Equatable {
         }
         return ServerDiscoveryNotices(
             hostKey: nil,
-            isUnreachable: isUnreachable,
+            checkFailed: checkFailed,
             backendProblems: backendProblems
         )
     }
 }
 
 /// What a server's discovery has to say, each where it applies: a host key to review at the top of the
-/// server page, a server that couldn't be reached after its saved sessions, and a backend's own problem on
+/// server page, a server that couldn't be checked after its saved sessions, and a backend's own problem on
 /// that backend's saved sessions and where its path is set. A backend missing from a server where none of its
 /// sessions is saved shows nowhere on the server page: most servers have only one of the two.
 struct ServerDiscoveryNotices: Equatable {
-    static let none = ServerDiscoveryNotices(hostKey: nil, isUnreachable: false, backendProblems: [:])
+    static let none = ServerDiscoveryNotices(hostKey: nil, checkFailed: false, backendProblems: [:])
 
     /// Nothing on the server can be checked until it's reviewed.
     let hostKey: SSHHostKeyTrustChallenge?
-    /// Neither backend could be checked, for a reason that isn't either backend's.
-    let isUnreachable: Bool
+    /// Neither backend could be checked, for a reason that isn't either backend's: the server didn't answer,
+    /// signing in failed, or the connection dropped.
+    let checkFailed: Bool
     let backendProblems: [SessionBackend: SessionDiscoveryProblem]
 
     var isNeitherBackendInstalled: Bool {
@@ -411,7 +412,7 @@ struct ServerDiscoveryNotices: Equatable {
 
     /// No session on the server could be listed.
     var isServerUnchecked: Bool {
-        hostKey != nil || isUnreachable
+        hostKey != nil || checkFailed
     }
 
     /// Whether the server page shows a backend's problem: on that backend's saved sessions, or as one line when
@@ -1779,6 +1780,12 @@ final class RemuxRootModel: ObservableObject {
         currentAppLifecyclePhase = phase
         if phase == .background {
             cancelAllSessionRefreshes()
+        }
+        // Going to the background cancels discovery, leaving a server's first check undone; it resumes on return.
+        if phase == .active {
+            for server in library.servers where sessionDiscovery(for: server.id).hasIdleBackend {
+                refreshSessions(for: server.id)
+            }
         }
         let runtimes = Array(terminalRuntimes.values)
         for runtime in runtimes {

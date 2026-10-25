@@ -303,7 +303,7 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertTrue(didFinish)
         XCTAssertEqual(
             harness.model.discoveryNotices(for: pair.server.id),
-            ServerDiscoveryNotices(hostKey: nil, isUnreachable: false, backendProblems: [.herdr: .notFound])
+            ServerDiscoveryNotices(hostKey: nil, checkFailed: false, backendProblems: [.herdr: .notFound])
         )
         // A failed Herdr discovery hides none of its saved sessions.
         XCTAssertTrue(
@@ -312,7 +312,7 @@ final class RemuxRootModelTests: XCTestCase {
     }
 
     /// A failure that isn't either backend's, such as the server being unreachable, is the server's.
-    func testAServerNeitherBackendCouldCheckIsUnreachable() async throws {
+    func testAServerNeitherBackendCouldCheckIsAFailedCheck() async throws {
         struct Unreachable: Error {}
         let pair = makePasswordBackedServer()
         let harness = makeHarness(
@@ -332,7 +332,7 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertTrue(didFail)
         XCTAssertEqual(
             harness.model.discoveryNotices(for: pair.server.id),
-            ServerDiscoveryNotices(hostKey: nil, isUnreachable: true, backendProblems: [:])
+            ServerDiscoveryNotices(hostKey: nil, checkFailed: true, backendProblems: [:])
         )
     }
 
@@ -345,7 +345,7 @@ final class RemuxRootModelTests: XCTestCase {
         )
         XCTAssertEqual(
             discovery.notices,
-            ServerDiscoveryNotices(hostKey: challenge, isUnreachable: false, backendProblems: [:])
+            ServerDiscoveryNotices(hostKey: challenge, checkFailed: false, backendProblems: [:])
         )
         XCTAssertTrue(discovery.notices.isServerUnchecked)
     }
@@ -617,6 +617,33 @@ final class RemuxRootModelTests: XCTestCase {
         await herdrDiscoverer.resumeFirst(with: [])
     }
 
+    /// Going to the background cancels a server's first check; returning to the app checks the server again, so the
+    /// server page doesn't wait on a check nothing runs.
+    func testReturningToTheAppResumesACheckTheBackgroundCutShort() async throws {
+        let pair = makePasswordBackedServer()
+        let tmuxDiscoverer = FirstSuspendingTmuxSessionDiscoverer(laterNames: ["main"])
+        let harness = makeHarness(
+            servers: [pair.server],
+            identities: [pair.identity],
+            tmuxSessionDiscoverer: { target, _, _ in
+                await tmuxDiscoverer.discover(target)
+            }
+        )
+        try await harness.credentialHelper.savePassword("secret", for: pair.server.id)
+        await harness.model.load()
+        await tmuxDiscoverer.waitForFirstCall()
+
+        harness.model.handleAppLifecyclePhase(.background)
+        XCTAssertEqual(harness.model.sessionDiscovery(for: pair.server.id).tmux, .idle)
+
+        harness.model.handleAppLifecyclePhase(.active)
+        let resumed = await waitUntil {
+            harness.model.sessionDiscovery(for: pair.server.id).tmux.sessionNames == ["main"]
+        }
+        XCTAssertTrue(resumed)
+        await tmuxDiscoverer.resumeFirst(with: [])
+    }
+
     func testCancelledCurrentTmuxRefreshReturnsToIdleAndCanRetry() async throws {
         let pair = makePasswordBackedServer()
         let discoverer = RecordingTmuxSessionDiscoverer(
@@ -643,7 +670,12 @@ final class RemuxRootModelTests: XCTestCase {
         }
         XCTAssertTrue(didReturnToIdle)
 
-        harness.model.refreshSessions(for: pair.server.id)
+        // Herdr's discovery runs in the same refresh, and a request made before it ends joins that refresh rather
+        // than starting another; each call here either waits out that refresh or is the retry.
+        for _ in 0..<2 {
+            guard await discoverer.targets().count < 2 else { break }
+            await harness.model.refreshSessionsAndWait(for: pair.server.id)
+        }
         let didRetry = await waitUntil {
             harness.model.sessionDiscovery(for: pair.server.id).tmux
                 == SessionDiscoveryState.idle.finishingRefresh(with: running(["main"]))

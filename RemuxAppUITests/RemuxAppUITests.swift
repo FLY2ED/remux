@@ -1303,7 +1303,7 @@ final class RemuxAppUITests: XCTestCase {
             .firstMatch
         XCTAssertTrue(session.waitForExistence(timeout: 5), "The saved Herdr session should say Herdr is missing.")
         XCTAssertFalse(noBackendRow().exists)
-        XCTAssertFalse(app.descendants(matching: .any)["library.server.unreachable"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["library.server.check-failed"].exists)
 
         session.tap()
         XCTAssertTrue(app.textFields["connection.name"].waitForExistence(timeout: 5))
@@ -1654,6 +1654,12 @@ final class RemuxAppUITests: XCTestCase {
         openFirstServerDetail()
         let checking = app.descendants(matching: .any)["library.server.available.loading"]
         XCTAssertTrue(checking.waitForNonExistence(timeout: 20), "Both backends should finish checking the server.")
+        // The fixture's tmux has no session of that name, so a tmux row named for it is Herdr's list under tmux.
+        let herdrNameAsTmux = app.descendants(matching: .any)
+            .matching(identifier: "library.server.available.session")
+            .matching(NSPredicate(format: "label BEGINSWITH %@", "\(configuration.sessionName), tmux"))
+            .firstMatch
+        XCTAssertFalse(herdrNameAsTmux.exists, "Herdr's sessions should be listed as Herdr's.")
         captureLiveHerdrStep("4b-server-page", in: configuration)
         app.navigationBars.buttons.firstMatch.tap()
 
