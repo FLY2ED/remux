@@ -423,8 +423,13 @@ private struct RemuxWorkspaceShell: View {
             setupSessionID: setupSessionID,
             isActionInProgress: model.isSetupActionInProgress,
             showsServerSummaryForNewSession: showsServerSummaryForNewSession,
-            backendProblems: setup.mode.existingServerID.map {
-                model.discoveryNotices(for: $0).backendProblems
+            backendProblems: setup.mode.existingServerID.flatMap { serverID in
+                model.library.server(id: serverID).map { server in
+                    // An edited path, address or account wasn't checked, so the last check doesn't describe it.
+                    model.discoveryNotices(for: serverID).backendProblems.filter { backend, _ in
+                        setup.draft.checksSameExecutable(as: server, for: backend)
+                    }
+                }
             } ?? [:],
             opensAdvanced: setup.mode.existingServerID.map { serverID in
                 model.discoveryNotices(for: serverID).showsBackendProblem(
@@ -2275,8 +2280,8 @@ struct ConnectionSetupView: View {
     let setupSessionID: UUID?
     let isActionInProgress: Bool
     let showsServerSummaryForNewSession: Bool
-    /// What the server's last check found wrong with each backend: each path says it, and New Session says
-    /// it for the kind chosen.
+    /// What the server's last check found wrong with each backend whose executable the draft still names as
+    /// checked: each path says it, and New Session says it for the kind chosen.
     let backendProblems: [SessionBackend: SessionDiscoveryProblem]
     /// Advanced starts open, on the paths, when the server page shows a backend's problem. A backend missing
     /// from a server where none of its sessions is saved leaves it closed.
@@ -2347,7 +2352,7 @@ struct ConnectionSetupView: View {
                         keyPath: \.port,
                         field: .port,
                         validationMessage: validation.port,
-                        keyboardType: .numberPad,
+                        keyboardType: .numbersAndPunctuation,
                         accessibilityIdentifier: "connection.port"
                     )
 
@@ -2458,16 +2463,6 @@ struct ConnectionSetupView: View {
                 .prominentConfirmationStyle()
                 .disabled(!canSubmit || isActionInProgress)
                 .accessibilityIdentifier("connection.save")
-            }
-
-            ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
-                Button {
-                    dismissKeyboard()
-                } label: {
-                    Text("Done")
-                        .fontWeight(.semibold)
-                }
             }
         }
         .fileImporter(
@@ -2798,22 +2793,38 @@ struct ConnectionSetupView: View {
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(.secondary)
 
-            TextField(placeholder, text: binding(for: keyPath))
-                .textInputAutocapitalization(textInputAutocapitalization)
-                .autocorrectionDisabled(autocorrectionDisabled)
-                .keyboardType(keyboardType)
-                .font(textStyle.font)
-                .multilineTextAlignment(.leading)
-                .focused($focusedField, equals: field)
-                .submitLabel(submitLabel)
-                .onSubmit { advance(from: field) }
-                .accessibilityIdentifier(accessibilityIdentifier)
+            HStack(spacing: 8) {
+                TextField(placeholder, text: binding(for: keyPath))
+                    .textInputAutocapitalization(textInputAutocapitalization)
+                    .autocorrectionDisabled(autocorrectionDisabled)
+                    .keyboardType(keyboardType)
+                    .font(textStyle.font)
+                    .multilineTextAlignment(.leading)
+                    .focused($focusedField, equals: field)
+                    .submitLabel(submitLabel)
+                    .onSubmit { advance(from: field) }
+                    .accessibilityIdentifier(accessibilityIdentifier)
+
+                // The system text field's clear button, which SwiftUI's TextField doesn't offer.
+                if focusedField == field && !draft[keyPath: keyPath].isEmpty {
+                    Button {
+                        binding(for: keyPath).wrappedValue = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Clear")
+                    .accessibilityIdentifier("\(accessibilityIdentifier).clear")
+                }
+            }
 
             fieldValidationMessage(validationMessage)
             if validationMessage == nil, let note {
                 Text(note)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("\(accessibilityIdentifier).note")
             }
         }
         .padding(.vertical, 6)
