@@ -182,7 +182,61 @@ struct ActiveTerminalScreenEntry: Identifiable {
     }
 }
 
-struct TmuxSessionDiscoveryState: Equatable {
+/// Why a backend's discovery couldn't list a server's sessions, when the backend itself is the cause.
+enum SessionDiscoveryProblem: Equatable, Sendable {
+    case notFound
+    case notExecutable
+    /// A Herdr older than the oldest one Remux supports.
+    case unsupportedVersion(HerdrVersion)
+
+    /// Setting the backend's path in Edit Server is the fix.
+    var isFixedByPath: Bool {
+        switch self {
+        case .notFound, .notExecutable: true
+        case .unsupportedVersion: false
+        }
+    }
+
+    /// On a saved session of the backend, in place of when it was last opened.
+    func sessionRowLine(for backend: SessionBackend) -> String {
+        switch self {
+        case .notFound:
+            "\(backend.displayName) not found · Set path"
+        case .notExecutable:
+            "\(backend.displayName) can't be run · Check path"
+        case .unsupportedVersion(let version):
+            "Herdr \(version) is too old · Needs \(HerdrVersion.minimumSupported)"
+        }
+    }
+
+    init?(_ error: Error, backend: SessionBackend) {
+        switch backend {
+        case .tmux:
+            guard case .remoteExit(let status, let stderr) = error as? TmuxSessionDiscoveryError,
+                  let problem = TmuxExecutableProblem(exitStatus: status, output: stderr) else {
+                return nil
+            }
+            switch problem {
+            case .notFound: self = .notFound
+            case .notExecutable: self = .notExecutable
+            }
+        case .herdr:
+            switch error as? HerdrSessionDiscoveryError {
+            case .remoteExit(127, let stderr) where stderr.contains(HerdrRemoteCommand.notFoundMarker):
+                self = .notFound
+            case .remoteExit(126, let stderr) where stderr.contains(HerdrRemoteCommand.notExecutableMarker):
+                self = .notExecutable
+            case .unsupportedVersion(let version):
+                self = .unsupportedVersion(version)
+            default:
+                return nil
+            }
+        }
+    }
+}
+
+/// One backend's discovery on one server.
+struct SessionDiscoveryState: Equatable {
     enum Phase: Equatable {
         case idle
         case loading
@@ -190,21 +244,25 @@ struct TmuxSessionDiscoveryState: Equatable {
         case failed
     }
 
-    static let idle = TmuxSessionDiscoveryState(
+    static let idle = SessionDiscoveryState(
         phase: .idle,
-        lastSuccessfulSessionNames: nil,
+        lastSuccessfulSessions: nil,
         hostKeyChallenge: nil,
-        executableProblem: nil
+        problem: nil
     )
 
     let phase: Phase
-    let lastSuccessfulSessionNames: [String]?
+    let lastSuccessfulSessions: [DiscoveredSession]?
     let hostKeyChallenge: SSHHostKeyTrustChallenge?
-    /// Why the last refresh failed, when it was the server's tmux itself.
-    let executableProblem: TmuxExecutableProblem?
+    /// Why the last refresh failed, when it was the backend's executable on the server.
+    let problem: SessionDiscoveryProblem?
+
+    var sessions: [DiscoveredSession] {
+        lastSuccessfulSessions ?? []
+    }
 
     var sessionNames: [String] {
-        lastSuccessfulSessionNames ?? []
+        sessions.map(\.name)
     }
 
     var isLoading: Bool {
@@ -214,77 +272,173 @@ struct TmuxSessionDiscoveryState: Equatable {
     func startingRefresh() -> Self {
         Self(
             phase: .loading,
-            lastSuccessfulSessionNames: lastSuccessfulSessionNames,
+            lastSuccessfulSessions: lastSuccessfulSessions,
             hostKeyChallenge: nil,
-            executableProblem: nil
+            problem: nil
         )
     }
 
-    func finishingRefresh(with sessionNames: [String]) -> Self {
+    func finishingRefresh(with sessions: [DiscoveredSession]) -> Self {
         Self(
             phase: .loaded,
-            lastSuccessfulSessionNames: sessionNames,
+            lastSuccessfulSessions: sessions,
             hostKeyChallenge: nil,
-            executableProblem: nil
+            problem: nil
         )
     }
 
     func failingRefresh(
         hostKeyChallenge: SSHHostKeyTrustChallenge? = nil,
-        executableProblem: TmuxExecutableProblem? = nil
+        problem: SessionDiscoveryProblem? = nil
     ) -> Self {
         Self(
             phase: .failed,
-            lastSuccessfulSessionNames: lastSuccessfulSessionNames,
+            lastSuccessfulSessions: lastSuccessfulSessions,
             hostKeyChallenge: hostKeyChallenge,
-            executableProblem: executableProblem
+            problem: problem
         )
     }
 
     func cancellingRefresh() -> Self {
-        guard let lastSuccessfulSessionNames else { return .idle }
+        guard let lastSuccessfulSessions else { return .idle }
         return Self(
             phase: .loaded,
-            lastSuccessfulSessionNames: lastSuccessfulSessionNames,
+            lastSuccessfulSessions: lastSuccessfulSessions,
             hostKeyChallenge: nil,
-            executableProblem: nil
+            problem: nil
         )
     }
 
+    /// A session that just opened exists and runs, whatever the last list said.
     func confirmingExistingSession(named sessionName: String) -> Self {
-        guard var lastSuccessfulSessionNames,
-              !lastSuccessfulSessionNames.contains(sessionName) else {
-            return self
+        guard var lastSuccessfulSessions else { return self }
+        let running = DiscoveredSession(name: sessionName, isRunning: true)
+        if let index = lastSuccessfulSessions.firstIndex(where: { $0.name == sessionName }) {
+            guard !lastSuccessfulSessions[index].isRunning else { return self }
+            lastSuccessfulSessions[index] = running
+        } else {
+            lastSuccessfulSessions.append(running)
         }
-        lastSuccessfulSessionNames.append(sessionName)
         return Self(
             phase: phase,
-            lastSuccessfulSessionNames: lastSuccessfulSessionNames,
+            lastSuccessfulSessions: lastSuccessfulSessions,
             hostKeyChallenge: hostKeyChallenge,
-            executableProblem: executableProblem
+            problem: problem
         )
     }
 }
 
-enum TmuxSessionReconciliation {
-    /// Hides a saved tmux workspace once a successful discovery no longer lists
-    /// it. tmux discovery says nothing about other backends' sessions.
+/// Discovery on one server: one state per backend. Both run over the server's SSH connection, so a host
+/// key to review stops both.
+struct ServerSessionDiscovery: Equatable {
+    static let idle = ServerSessionDiscovery(tmux: .idle, herdr: .idle)
+
+    var tmux: SessionDiscoveryState
+    var herdr: SessionDiscoveryState
+
+    subscript(backend: SessionBackend) -> SessionDiscoveryState {
+        get {
+            switch backend {
+            case .tmux: tmux
+            case .herdr: herdr
+            }
+        }
+        set {
+            switch backend {
+            case .tmux: tmux = newValue
+            case .herdr: herdr = newValue
+            }
+        }
+    }
+
+    var hostKeyChallenge: SSHHostKeyTrustChallenge? {
+        tmux.hostKeyChallenge ?? herdr.hostKeyChallenge
+    }
+
+    var isLoading: Bool {
+        tmux.isLoading || herdr.isLoading
+    }
+
+    var isIdle: Bool {
+        tmux.phase == .idle && herdr.phase == .idle
+    }
+
+    /// A backend whose sessions haven't been listed: discovery hasn't run for it, or a cancelled refresh ended
+    /// before its first result. A refresh cancelled between the two results leaves one backend listed and the
+    /// other idle.
+    var hasIdleBackend: Bool {
+        tmux.phase == .idle || herdr.phase == .idle
+    }
+
+    func mapping(_ transform: (SessionDiscoveryState) -> SessionDiscoveryState) -> Self {
+        Self(tmux: transform(tmux), herdr: transform(herdr))
+    }
+
+    var notices: ServerDiscoveryNotices {
+        if let hostKeyChallenge {
+            return ServerDiscoveryNotices(hostKey: hostKeyChallenge, checkFailed: false, backendProblems: [:])
+        }
+        let checkFailed = tmux.phase == .failed && herdr.phase == .failed
+            && tmux.problem == nil && herdr.problem == nil
+        var backendProblems: [SessionBackend: SessionDiscoveryProblem] = [:]
+        for backend in [SessionBackend.tmux, .herdr] where self[backend].phase == .failed {
+            backendProblems[backend] = self[backend].problem
+        }
+        return ServerDiscoveryNotices(
+            hostKey: nil,
+            checkFailed: checkFailed,
+            backendProblems: backendProblems
+        )
+    }
+}
+
+/// What a server's discovery has to say, each where it applies: a host key to review at the top of the
+/// server page, a server that couldn't be checked after its saved sessions, and a backend's own problem on
+/// that backend's saved sessions and where its path is set. A backend missing from a server where none of its
+/// sessions is saved shows nowhere on the server page: most servers have only one of the two.
+struct ServerDiscoveryNotices: Equatable {
+    static let none = ServerDiscoveryNotices(hostKey: nil, checkFailed: false, backendProblems: [:])
+
+    /// Nothing on the server can be checked until it's reviewed.
+    let hostKey: SSHHostKeyTrustChallenge?
+    /// Neither backend could be checked, for a reason that isn't either backend's: the server didn't answer,
+    /// signing in failed, or the connection dropped.
+    let checkFailed: Bool
+    let backendProblems: [SessionBackend: SessionDiscoveryProblem]
+
+    var isNeitherBackendInstalled: Bool {
+        backendProblems[.tmux] == .notFound && backendProblems[.herdr] == .notFound
+    }
+
+    /// No session on the server could be listed.
+    var isServerUnchecked: Bool {
+        hostKey != nil || checkFailed
+    }
+
+    /// Whether the server page shows a backend's problem: on that backend's saved sessions, or as one line when
+    /// neither backend is installed.
+    func showsBackendProblem(savedBackends: Set<SessionBackend>) -> Bool {
+        isNeitherBackendInstalled || backendProblems.keys.contains(where: savedBackends.contains)
+    }
+}
+
+enum SessionReconciliation {
+    /// Hides a saved session once its backend's discovery succeeds without listing it. Each backend's
+    /// discovery says nothing about the other's sessions.
     static func includesSavedWorkspace(
         _ workspace: SavedWorkspace,
-        discoveryStates: [SavedServer.ID: TmuxSessionDiscoveryState]
+        discoveries: [SavedServer.ID: ServerSessionDiscovery]
     ) -> Bool {
-        guard workspace.backend == .tmux,
-              let discoveredNames = discoveryStates[workspace.serverID]?
-            .lastSuccessfulSessionNames else {
+        guard let sessions = discoveries[workspace.serverID]?[workspace.backend].lastSuccessfulSessions else {
             return true
         }
-        return discoveredNames.contains(workspace.sessionName)
+        return sessions.contains { $0.name == workspace.sessionName }
     }
 }
 
 @MainActor
 final class RemuxRootModel: ObservableObject {
-    private struct TmuxSessionRefresh {
+    private struct SessionRefresh {
         let id: UUID
         let task: Task<Void, Never>
     }
@@ -377,7 +531,7 @@ final class RemuxRootModel: ObservableObject {
     @Published private(set) var terminalSettingsSaveFailed = false
     @Published private(set) var activeSessions: [ActiveTerminalSession] = []
     @Published private(set) var isSetupActionInProgress = false
-    @Published private(set) var tmuxSessionDiscoveryStates: [SavedServer.ID: TmuxSessionDiscoveryState] = [:]
+    @Published private(set) var sessionDiscoveries: [SavedServer.ID: ServerSessionDiscovery] = [:]
 
     var setupSessionID: UUID? {
         currentSetupID
@@ -406,7 +560,7 @@ final class RemuxRootModel: ObservableObject {
     private var currentSetupID: UUID?
     private var activeSetupAction: SetupAction?
     private var editServerTrustSnapshot: EditServerTrustSnapshot?
-    private var tmuxSessionRefreshes: [SavedServer.ID: TmuxSessionRefresh] = [:]
+    private var sessionRefreshes: [SavedServer.ID: SessionRefresh] = [:]
     // Keep the user's order across library reloads, including reads started before a move.
     private var preferredServerOrder: [SavedServer.ID]?
     private var pendingServerOrder: [SavedServer.ID]?
@@ -436,7 +590,7 @@ final class RemuxRootModel: ObservableObject {
 
     deinit {
         MainActor.assumeIsolated {
-            for refresh in tmuxSessionRefreshes.values {
+            for refresh in sessionRefreshes.values {
                 refresh.task.cancel()
             }
             stopAllTerminalRuntimes()
@@ -460,7 +614,7 @@ final class RemuxRootModel: ObservableObject {
             scheduleLibrarySSHPrewarm(snapshot: library)
             // Each launch check is registered before load returns, so a later
             // request for the same server joins it instead of repeating it.
-            refreshTmuxSessions()
+            refreshSessions()
         } catch {
             guard setupAllowsLibraryReload else { return }
             transitionToFailed(error)
@@ -943,7 +1097,7 @@ final class RemuxRootModel: ObservableObject {
             updateLibrary(try await dependencies.profileRepository.loadSnapshot())
             guard isCurrentSetupAction(action) else { return nil }
             finishSetupSession(action.setupID)
-            refreshTmuxSessions(for: server.id)
+            refreshSessions(for: server.id)
             scheduleLibrarySSHPrewarm(snapshot: library)
             return server.id
         } catch {
@@ -1017,7 +1171,7 @@ final class RemuxRootModel: ObservableObject {
                     throw ConnectionProfileRepositoryError.missingServer(serverID)
                 }
 
-                invalidateTmuxSessionRefresh(for: serverID)
+                invalidateSessionRefresh(for: serverID)
                 // However this save ends, check the server's sessions again
                 // against the profile it leaves saved. A check started during
                 // the save would carry the old profile and be dropped as stale.
@@ -1027,9 +1181,9 @@ final class RemuxRootModel: ObservableObject {
                 // there leaves the app failed, and the next launch checks again.
                 var libraryMatchesSavedServer = true
                 defer {
-                    invalidateTmuxSessionRefresh(for: serverID)
+                    invalidateSessionRefresh(for: serverID)
                     if libraryMatchesSavedServer {
-                        refreshTmuxSessions(for: serverID)
+                        refreshSessions(for: serverID)
                     }
                 }
                 let server = submission.savedServer(identityID: updatedIdentityCredential.identity.id)
@@ -1307,16 +1461,15 @@ final class RemuxRootModel: ObservableObject {
         await connect(server: server, workspace: workspace)
     }
 
-    /// Opens a session found by discovery, which lists tmux sessions.
+    /// Opens a session that discovery found on a server, through its saved session if there is one.
     func connectToDiscoveredSession(
-        named sessionName: String,
+        _ locator: SessionLocator,
         on serverID: SavedServer.ID
     ) async {
-        guard !sessionName.isEmpty,
+        guard !locator.name.isEmpty,
               let server = library.server(id: serverID) else {
             return
         }
-        let locator = SessionLocator(backend: .tmux, name: sessionName)
         let workspace = library.workspaces(for: serverID).first {
             $0.locator == locator
         } ?? SavedWorkspace(serverID: serverID, backend: locator.backend, sessionName: locator.name)
@@ -1336,10 +1489,10 @@ final class RemuxRootModel: ObservableObject {
         )
         switch workspace.backend {
         case .tmux:
-            cancelTmuxSessionRefreshForInteractiveConnection(serverID: server.id)
+            cancelSessionRefreshForInteractiveConnection(serverID: server.id)
         case .herdr:
-            // Only a connected tmux session starts discovery again, and the bridge shares the server's
-            // pooled SSH connection with a running discovery.
+            // The bridge shares the server's pooled SSH connection with a running discovery, so the
+            // discovery keeps running.
             break
         }
 
@@ -1392,60 +1545,65 @@ final class RemuxRootModel: ObservableObject {
         }
     }
 
-    func tmuxSessionDiscoveryState(
+    func sessionDiscovery(
         for serverID: SavedServer.ID?
-    ) -> TmuxSessionDiscoveryState {
+    ) -> ServerSessionDiscovery {
         guard let serverID else { return .idle }
-        return tmuxSessionDiscoveryStates[serverID] ?? .idle
+        return sessionDiscoveries[serverID] ?? .idle
     }
 
-    func refreshTmuxSessions() {
+    func discoveryNotices(for serverID: SavedServer.ID) -> ServerDiscoveryNotices {
+        guard library.server(id: serverID) != nil else { return .none }
+        return sessionDiscovery(for: serverID).notices
+    }
+
+    func refreshSessions() {
         for server in library.servers {
-            refreshTmuxSessions(for: server.id)
+            refreshSessions(for: server.id)
         }
     }
 
     /// Coalesces launch and explicit refresh requests for one server. A
     /// completed result must still match the server profile it started with;
     /// editing or deleting that server makes the result stale.
-    func refreshTmuxSessions(for serverID: SavedServer.ID) {
-        guard tmuxSessionRefreshes[serverID] == nil,
+    func refreshSessions(for serverID: SavedServer.ID) {
+        guard sessionRefreshes[serverID] == nil,
               let server = library.server(id: serverID) else {
             return
         }
 
         let refreshID = UUID()
-        tmuxSessionDiscoveryStates[serverID] = tmuxSessionDiscoveryState(for: serverID)
-            .startingRefresh()
+        sessionDiscoveries[serverID] = sessionDiscovery(for: serverID)
+            .mapping { $0.startingRefresh() }
         let task = Task(priority: .utility) { [weak self] in
             guard let self else { return }
-            await self.performTmuxSessionRefresh(
+            await self.performSessionRefresh(
                 for: server,
                 refreshID: refreshID
             )
         }
-        tmuxSessionRefreshes[serverID] = TmuxSessionRefresh(id: refreshID, task: task)
+        sessionRefreshes[serverID] = SessionRefresh(id: refreshID, task: task)
     }
 
-    func refreshTmuxSessionsAndWait(for serverID: SavedServer.ID) async {
-        refreshTmuxSessions(for: serverID)
-        guard let refresh = tmuxSessionRefreshes[serverID] else { return }
+    func refreshSessionsAndWait(for serverID: SavedServer.ID) async {
+        refreshSessions(for: serverID)
+        guard let refresh = sessionRefreshes[serverID] else { return }
         await refresh.task.value
     }
 
-    func trustTmuxSessionDiscoveryHostKey(_ challenge: SSHHostKeyTrustChallenge) {
+    func trustSessionDiscoveryHostKey(_ challenge: SSHHostKeyTrustChallenge) {
         guard library.server(id: challenge.serverID) != nil,
-              tmuxSessionDiscoveryState(for: challenge.serverID).hostKeyChallenge == challenge else {
+              sessionDiscovery(for: challenge.serverID).hostKeyChallenge == challenge else {
             return
         }
 
         do {
             try dependencies.trustedHostStore.trustHostKey(challenge)
-            refreshTmuxSessions(for: challenge.serverID)
+            refreshSessions(for: challenge.serverID)
         } catch {
-            tmuxSessionDiscoveryStates[challenge.serverID] = tmuxSessionDiscoveryState(
+            sessionDiscoveries[challenge.serverID] = sessionDiscovery(
                 for: challenge.serverID
-            ).failingRefresh()
+            ).mapping { $0.failingRefresh() }
         }
     }
 
@@ -1589,18 +1747,23 @@ final class RemuxRootModel: ObservableObject {
         case .applied(.connected),
              .automaticReconnectStarted(_, .connected),
              .automaticReconnectSkipped(_, .connected):
-            // A Herdr session has no tmux viewport to claim, and tmux discovery doesn't list it.
             if let session = RemuxActiveSessionCollection.session(
                 update.workspaceID,
                 in: activeSessions
-            ), case .tmux(let model)? = terminalRuntimes[TerminalRuntimeAttemptKey(session: session)] {
-                claimActiveTmuxViewportIfSelectedAndActive(model, for: session)
+            ) {
+                // Only a tmux session has a viewport to claim.
+                if case .tmux(let model)? = terminalRuntimes[TerminalRuntimeAttemptKey(session: session)] {
+                    claimActiveTmuxViewportIfSelectedAndActive(model, for: session)
+                }
                 let serverID = session.target.server.id
-                let discoveryState = tmuxSessionDiscoveryState(for: serverID)
-                tmuxSessionDiscoveryStates[serverID] = discoveryState
+                let backend = session.target.workspace.backend
+                var discovery = sessionDiscovery(for: serverID)
+                let previousPhase = discovery[backend].phase
+                discovery[backend] = discovery[backend]
                     .confirmingExistingSession(named: session.target.workspace.sessionName)
-                if discoveryState.phase == .idle || discoveryState.phase == .failed {
-                    refreshTmuxSessions(for: serverID)
+                sessionDiscoveries[serverID] = discovery
+                if previousPhase == .failed || discovery.hasIdleBackend {
+                    refreshSessions(for: serverID)
                 }
             }
         case .missingSession, .staleInstance, .applied,
@@ -1616,7 +1779,13 @@ final class RemuxRootModel: ObservableObject {
     func handleAppLifecyclePhase(_ phase: GhosttyAppLifecyclePhase) {
         currentAppLifecyclePhase = phase
         if phase == .background {
-            cancelAllTmuxSessionRefreshes()
+            cancelAllSessionRefreshes()
+        }
+        // Going to the background cancels discovery, leaving a server's first check undone; it resumes on return.
+        if phase == .active {
+            for server in library.servers where sessionDiscovery(for: server.id).hasIdleBackend {
+                refreshSessions(for: server.id)
+            }
         }
         let runtimes = Array(terminalRuntimes.values)
         for runtime in runtimes {
@@ -1672,7 +1841,7 @@ final class RemuxRootModel: ObservableObject {
     func deleteServer(_ id: SavedServer.ID) async {
         do {
             let deletedServer = library.server(id: id)
-            invalidateTmuxSessionRefresh(for: id)
+            invalidateSessionRefresh(for: id)
             try await dependencies.profileRepository.deleteServer(id: id)
             try dependencies.trustedHostStore.deleteIdentity(for: id)
             var snapshot = try await dependencies.profileRepository.loadSnapshot()
@@ -2082,88 +2251,120 @@ final class RemuxRootModel: ObservableObject {
         )
     }
 
-    private func performTmuxSessionRefresh(
+    /// Lists both backends' sessions over the server's SSH connection, each applied as it arrives, so a
+    /// slow or missing backend doesn't hold back the other.
+    private func performSessionRefresh(
         for server: SavedServer,
         refreshID: UUID
     ) async {
-        defer { finishTmuxSessionRefresh(for: server.id, refreshID: refreshID) }
+        defer { finishSessionRefresh(for: server.id, refreshID: refreshID) }
 
+        let sshAuth: ResolvedSSHAuth
         do {
-            let sshAuth = try await resolveSSHAuth(for: server)
-            guard isCurrentTmuxSessionRefresh(server, refreshID: refreshID) else { return }
-            let discoveryTarget = target(
-                server: server,
-                workspace: SavedWorkspace(serverID: server.id, sessionName: ""),
-                sshAuth: sshAuth
-            )
-            let names = try await dependencies.discoverTmuxSessions(for: discoveryTarget)
-            guard isCurrentTmuxSessionRefresh(server, refreshID: refreshID) else { return }
-            tmuxSessionDiscoveryStates[server.id] = tmuxSessionDiscoveryState(for: server.id)
-                .finishingRefresh(with: Self.normalizedTmuxSessionNames(names))
-        } catch is CancellationError {
-            guard isCurrentTmuxSessionRefresh(server, refreshID: refreshID) else { return }
-            tmuxSessionDiscoveryStates[server.id] = tmuxSessionDiscoveryState(for: server.id)
-                .cancellingRefresh()
-            return
-        } catch TrustedHostStoreError.hostKeyTrustRequired(let challenge) {
-            guard isCurrentTmuxSessionRefresh(server, refreshID: refreshID) else { return }
-            tmuxSessionDiscoveryStates[server.id] = tmuxSessionDiscoveryState(for: server.id)
-                .failingRefresh(hostKeyChallenge: challenge)
+            sshAuth = try await resolveSSHAuth(for: server)
         } catch {
-            guard isCurrentTmuxSessionRefresh(server, refreshID: refreshID) else { return }
-            // Discovery is auxiliary: its failure stays in the server's
-            // discovery state and never replaces the app route.
-            var executableProblem: TmuxExecutableProblem?
-            if case .remoteExit(let status, let stderr) = error as? TmuxSessionDiscoveryError {
-                executableProblem = TmuxExecutableProblem(exitStatus: status, output: stderr)
+            guard isCurrentSessionRefresh(server, refreshID: refreshID) else { return }
+            sessionDiscoveries[server.id] = sessionDiscovery(for: server.id).mapping {
+                Self.applying(.failure(error), to: $0, backend: nil)
             }
-            tmuxSessionDiscoveryStates[server.id] = tmuxSessionDiscoveryState(for: server.id)
-                .failingRefresh(executableProblem: executableProblem)
+            return
+        }
+        guard isCurrentSessionRefresh(server, refreshID: refreshID) else { return }
+        let discoveryTarget = target(
+            server: server,
+            workspace: SavedWorkspace(serverID: server.id, sessionName: ""),
+            sshAuth: sshAuth
+        )
+        let dependencies = dependencies
+        // Each child awaits before building its tuple: optimized Swift 6.3 and 6.4 builds return the wrong first
+        // element from a tuple expression that contains the `await`.
+        await withTaskGroup(of: (SessionBackend, Result<[DiscoveredSession], Error>).self) { group in
+            group.addTask {
+                do {
+                    let names = try await dependencies.discoverTmuxSessions(for: discoveryTarget)
+                    return (.tmux, .success(names.map { DiscoveredSession(name: $0, isRunning: true) }))
+                } catch {
+                    return (.tmux, .failure(error))
+                }
+            }
+            group.addTask {
+                do {
+                    let sessions = try await dependencies.discoverHerdrSessions(for: discoveryTarget)
+                    return (.herdr, .success(sessions))
+                } catch {
+                    return (.herdr, .failure(error))
+                }
+            }
+            for await (backend, result) in group {
+                guard isCurrentSessionRefresh(server, refreshID: refreshID) else { continue }
+                var discovery = sessionDiscovery(for: server.id)
+                discovery[backend] = Self.applying(result, to: discovery[backend], backend: backend)
+                sessionDiscoveries[server.id] = discovery
+            }
         }
     }
 
-    private static func normalizedTmuxSessionNames(_ names: [String]) -> [String] {
-        var seen = Set<String>()
-        return names.filter { !$0.isEmpty && seen.insert($0).inserted }
+    /// Discovery is auxiliary: a failure stays in the server's discovery state and never replaces the app
+    /// route. `backend` is nil for a failure before either backend ran.
+    private static func applying(
+        _ result: Result<[DiscoveredSession], Error>,
+        to state: SessionDiscoveryState,
+        backend: SessionBackend?
+    ) -> SessionDiscoveryState {
+        switch result {
+        case .success(let sessions):
+            return state.finishingRefresh(with: normalizedSessions(sessions))
+        case .failure(let error) where error is CancellationError:
+            return state.cancellingRefresh()
+        case .failure(TrustedHostStoreError.hostKeyTrustRequired(let challenge)):
+            return state.failingRefresh(hostKeyChallenge: challenge)
+        case .failure(let error):
+            return state.failingRefresh(problem: backend.flatMap { SessionDiscoveryProblem(error, backend: $0) })
+        }
     }
 
-    private func isCurrentTmuxSessionRefresh(
+    private static func normalizedSessions(_ sessions: [DiscoveredSession]) -> [DiscoveredSession] {
+        var seen = Set<String>()
+        return sessions.filter { !$0.name.isEmpty && seen.insert($0.name).inserted }
+    }
+
+    private func isCurrentSessionRefresh(
         _ server: SavedServer,
         refreshID: UUID
     ) -> Bool {
-        tmuxSessionRefreshes[server.id]?.id == refreshID
+        sessionRefreshes[server.id]?.id == refreshID
             && library.server(id: server.id) == server
     }
 
-    private func finishTmuxSessionRefresh(
+    private func finishSessionRefresh(
         for serverID: SavedServer.ID,
         refreshID: UUID
     ) {
-        guard tmuxSessionRefreshes[serverID]?.id == refreshID else { return }
-        tmuxSessionRefreshes.removeValue(forKey: serverID)
+        guard sessionRefreshes[serverID]?.id == refreshID else { return }
+        sessionRefreshes.removeValue(forKey: serverID)
     }
 
-    private func invalidateTmuxSessionRefresh(for serverID: SavedServer.ID) {
-        tmuxSessionRefreshes.removeValue(forKey: serverID)?.task.cancel()
-        tmuxSessionDiscoveryStates.removeValue(forKey: serverID)
+    private func invalidateSessionRefresh(for serverID: SavedServer.ID) {
+        sessionRefreshes.removeValue(forKey: serverID)?.task.cancel()
+        sessionDiscoveries.removeValue(forKey: serverID)
     }
 
-    private func cancelTmuxSessionRefreshForInteractiveConnection(
+    private func cancelSessionRefreshForInteractiveConnection(
         serverID: SavedServer.ID
     ) {
-        guard let refresh = tmuxSessionRefreshes.removeValue(forKey: serverID) else { return }
+        guard let refresh = sessionRefreshes.removeValue(forKey: serverID) else { return }
         refresh.task.cancel()
-        tmuxSessionDiscoveryStates[serverID] = tmuxSessionDiscoveryState(for: serverID)
-            .cancellingRefresh()
+        sessionDiscoveries[serverID] = sessionDiscovery(for: serverID)
+            .mapping { $0.cancellingRefresh() }
     }
 
-    private func cancelAllTmuxSessionRefreshes() {
-        let refreshes = tmuxSessionRefreshes
-        tmuxSessionRefreshes.removeAll()
+    private func cancelAllSessionRefreshes() {
+        let refreshes = sessionRefreshes
+        sessionRefreshes.removeAll()
         for (serverID, refresh) in refreshes {
             refresh.task.cancel()
-            tmuxSessionDiscoveryStates[serverID] = tmuxSessionDiscoveryState(for: serverID)
-                .cancellingRefresh()
+            sessionDiscoveries[serverID] = sessionDiscovery(for: serverID)
+                .mapping { $0.cancellingRefresh() }
         }
     }
 

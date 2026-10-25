@@ -9,7 +9,7 @@ final class SessionSwitcherProjectionTests: XCTestCase {
         let projection = SessionSwitcherProjection(
             snapshot: snapshot(servers: [zulu, alpha], workspaces: []),
             activeSessions: [],
-            discoveryStates: [
+            discoveries: [
                 zulu.id: loadedDiscovery(["z", "a"]),
                 alpha.id: loadedDiscovery(["b"]),
             ],
@@ -17,6 +17,50 @@ final class SessionSwitcherProjectionTests: XCTestCase {
         )
         XCTAssertEqual(projection.availableSessions.map(\.id.serverID), [zulu.id, zulu.id, alpha.id])
         XCTAssertEqual(projection.availableSessions.map(\.id.locator.name), ["a", "z", "b"])
+    }
+
+    /// Herdr's sessions join tmux's in one list sorted by name. A tmux and a Herdr session with the same
+    /// name are different sessions, and Herdr's stopped sessions are listed too.
+    func testAvailableSessionsMixBothBackendsByName() {
+        let server = makeServer(name: "Mini")
+        let projection = SessionSwitcherProjection(
+            snapshot: snapshot(servers: [server], workspaces: []),
+            activeSessions: [],
+            discoveries: [
+                server.id: loadedDiscovery(["main", "default"], herdr: [
+                    DiscoveredSession(name: "default", isRunning: true),
+                    DiscoveredSession(name: "agents", isRunning: false),
+                ]),
+            ],
+            selectedSessionID: nil
+        )
+        XCTAssertEqual(projection.availableSessions.map(\.id.locator), [
+            SessionLocator(backend: .herdr, name: "agents"),
+            SessionLocator(backend: .tmux, name: "default"),
+            SessionLocator(backend: .herdr, name: "default"),
+            SessionLocator(backend: .tmux, name: "main"),
+        ])
+        XCTAssertEqual(projection.availableSessions.map(\.isRunning), [false, true, true, true])
+    }
+
+    /// The switcher names a server only when none of its sessions could be listed. A missing Herdr, even
+    /// where a Herdr session is saved, leaves the server's tmux sessions listed.
+    func testOnlyAServerNoneOfWhoseSessionsCouldBeListedIsUnchecked() {
+        let herdrMissing = makeServer(name: "Herdr Missing")
+        let unreachable = makeServer(name: "Unreachable")
+        let saved = SavedWorkspace(serverID: herdrMissing.id, backend: .herdr, sessionName: "default")
+        var missing = loadedDiscovery(["main"])
+        missing.herdr = SessionDiscoveryState.idle.failingRefresh(problem: .notFound)
+        let projection = SessionSwitcherProjection(
+            snapshot: snapshot(servers: [herdrMissing, unreachable], workspaces: [saved]),
+            activeSessions: [],
+            discoveries: [
+                herdrMissing.id: missing,
+                unreachable.id: ServerSessionDiscovery.idle.mapping { $0.failingRefresh() },
+            ],
+            selectedSessionID: nil
+        )
+        XCTAssertEqual(projection.uncheckedServerIDs, [unreachable.id])
     }
 
     @MainActor
@@ -83,7 +127,7 @@ final class SessionSwitcherProjectionTests: XCTestCase {
                 makeSession(server: server, workspace: first),
                 makeSession(server: server, workspace: second),
             ],
-            discoveryStates: [server.id: loadedDiscovery(["shared"])],
+            discoveries: [server.id: loadedDiscovery(["shared"])],
             selectedSessionID: second.id
         )
 
@@ -117,7 +161,7 @@ final class SessionSwitcherProjectionTests: XCTestCase {
                 workspaces: [active, recent, missing]
             ),
             activeSessions: [makeSession(server: production, workspace: active)],
-            discoveryStates: [
+            discoveries: [
                 production.id: loadedDiscovery(["active", "recent", "remote"]),
                 staging.id: loadedDiscovery(["logs"]),
             ],
@@ -137,8 +181,8 @@ final class SessionSwitcherProjectionTests: XCTestCase {
         XCTAssertFalse(
             projection.availableSessions.contains { $0.id.locator.name == "recent" }
         )
-        XCTAssertEqual(projection.availableSessionNames(on: production.id), ["remote"])
-        XCTAssertEqual(projection.availableSessionNames(on: staging.id), ["logs"])
+        XCTAssertEqual(projection.availableSessions(on: production.id).map(\.id.locator.name), ["remote"])
+        XCTAssertEqual(projection.availableSessions(on: staging.id).map(\.id.locator.name), ["logs"])
     }
 
     func testSameNamedTmuxAndHerdrSessionsStayDistinct() {
@@ -159,7 +203,7 @@ final class SessionSwitcherProjectionTests: XCTestCase {
         let projection = SessionSwitcherProjection(
             snapshot: snapshot(servers: [server], workspaces: [herdrOps, herdrAgents]),
             activeSessions: [],
-            discoveryStates: [server.id: loadedDiscovery(["ops"])],
+            discoveries: [server.id: loadedDiscovery(["ops"])],
             selectedSessionID: nil
         )
 
@@ -177,7 +221,7 @@ final class SessionSwitcherProjectionTests: XCTestCase {
         let projection = SessionSwitcherProjection(
             snapshot: snapshot(servers: [server], workspaces: []),
             activeSessions: [],
-            discoveryStates: [
+            discoveries: [
                 server.id: loadedDiscovery(["one", "two", "three", "four", "five"]),
             ],
             selectedSessionID: nil
@@ -187,8 +231,8 @@ final class SessionSwitcherProjectionTests: XCTestCase {
         XCTAssertEqual(projection.inlineAvailableSessions.count, 3)
         XCTAssertEqual(projection.hiddenAvailableSessionCount, 2)
         XCTAssertEqual(
-            projection.availableSessionNames(on: server.id),
-            projection.availableSessions.map(\.id.locator.name)
+            projection.availableSessions(on: server.id),
+            projection.availableSessions
         )
         XCTAssertEqual(
             projection.inlineAvailableSessions.map(\.id.locator.name),
@@ -330,8 +374,16 @@ final class SessionSwitcherProjectionTests: XCTestCase {
         )
     }
 
-    private func loadedDiscovery(_ names: [String]) -> TmuxSessionDiscoveryState {
-        TmuxSessionDiscoveryState.idle.finishingRefresh(with: names)
+    private func loadedDiscovery(
+        _ tmuxNames: [String],
+        herdr: [DiscoveredSession]? = nil
+    ) -> ServerSessionDiscovery {
+        ServerSessionDiscovery(
+            tmux: SessionDiscoveryState.idle.finishingRefresh(
+                with: tmuxNames.map { DiscoveredSession(name: $0, isRunning: true) }
+            ),
+            herdr: herdr.map { SessionDiscoveryState.idle.finishingRefresh(with: $0) } ?? .idle
+        )
     }
 
     private func makeServer(name: String) -> SavedServer {
