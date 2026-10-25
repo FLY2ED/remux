@@ -356,10 +356,12 @@ final class TmuxSessionController: @unchecked Sendable {
             deferredWindowZoomIntent = nil
             successfulMutationRequiredAfterRevision = nil
             viewportClaimAwaitingTopology = false
-            guard case .closed = state else {
-                publishState(.detached(.transportClosed))
-                return
-            }
+            if case .closed = state { return }
+            // The client already ended for a reason of its own, such as tmux's
+            // %exit; the channel closing after it is part of that ending, not a
+            // lost connection to reconnect.
+            if case .detached(.some) = state { return }
+            publishState(.detached(.transportClosed))
         }
     }
 
