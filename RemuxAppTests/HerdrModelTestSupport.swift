@@ -445,6 +445,7 @@ final class HerdrModelHarness {
     init(
         settings: TerminalSettings = .default,
         timing: HerdrConnection.Timing = HerdrConnection.Timing(),
+        recovery: HerdrScreenModel.RecoveryTiming = HerdrScreenModel.RecoveryTiming(),
         failingOpenWith openError: Error? = nil,
         bridgeOpeningTakes: Duration = .zero,
         producerFailure: ProducerFailure? = nil,
@@ -474,6 +475,7 @@ final class HerdrModelHarness {
             openBridge: { try await bridges.open() },
             onRuntimeStateChange: { stateLog.updates.append($0) },
             connectionTiming: timing,
+            recoveryTiming: recovery,
             engine: producerFailure.map {
                 HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1, makeProducer: SwitchableProducer.factory($0))
             } ?? HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1),

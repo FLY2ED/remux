@@ -200,7 +200,10 @@ actor HerdrConnection {
     /// first-snapshot limit applies.
     private var heardSinceWelcome = false
     private var outstandingPing: (data: String, sentAt: ContinuousClock.Instant)?
-    private var pongWaiters: [String: CheckedContinuation<Bool, Never>] = [:]
+    /// Back from the background, a ping goes out at once instead of after the next silence.
+    private var probeDue = false
+    /// Alive checks waiting for their own ping's reply, each with when its reply limit started.
+    private var pongWaiters: [String: (since: ContinuousClock.Instant, waiter: CheckedContinuation<Bool, Never>)] = [:]
     private var nextID: UInt64 = 0
 
     private var writeQueue: [[UInt8]] = []
@@ -367,7 +370,8 @@ actor HerdrConnection {
 
     private func start(appActive: Bool) {
         Task { await self.readLoop() }
-        setAppActive(appActive)
+        self.appActive = appActive
+        startHealthCheck()
     }
 
     // MARK: - Reading
@@ -426,7 +430,7 @@ actor HerdrConnection {
                 await onEvent(.surface(try decoder.decode(.scroll(scroll))))
             case .healthPong(let data):
                 if outstandingPing?.data == data { outstandingPing = nil }
-                pongWaiters.removeValue(forKey: data)?.resume(returning: true)
+                pongWaiters.removeValue(forKey: data)?.waiter.resume(returning: true)
             case .welcome, .ignored:
                 break
             }
@@ -827,55 +831,42 @@ actor HerdrConnection {
     /// still arriving over cellular; and time the screen spends taking messages doesn't count, since
     /// nothing is read then. In the background nothing is sent: pings from a suspended phone would keep
     /// a bridge that isn't reading alive.
+    ///
+    /// Back from the background, as Herdr's client after a resume, the reply limits start over and a
+    /// ping goes out at once: a suspended phone's connection may be gone without a word, and a reply
+    /// already waiting unread mustn't be taken for silence.
     func setAppActive(_ active: Bool) {
         guard active != appActive else { return }
         appActive = active
+        outstandingPing = nil
+        probeDue = active
+        if active {
+            let now = ContinuousClock.now
+            pongWaiters = pongWaiters.mapValues { (now, $0.waiter) }
+        }
+        startHealthCheck()
+    }
+
+    private func startHealthCheck() {
         healthTask?.cancel()
         healthTask = nil
-        outstandingPing = nil
-        guard active, !ended else { return }
+        guard appActive, !ended else { return }
         healthTask = Task { await self.monitorHealth() }
     }
 
     /// Sends a ping with a fresh id and reports whether its own reply came back. Herdr answers a ping
-    /// only after reading everything sent before it. As with the health check, a ping left unanswered
-    /// ends the connection: once nothing has arrived for `unansweredPing` after the server has sent
-    /// something, not counting time the screen spends taking the backlog queued ahead of the reply, or
-    /// when no snapshot has come by the first-snapshot limit. Herdr's client keeps one ping and fails
-    /// the connection the same way, and Herdr drops a message the connection ends in the middle of.
+    /// only after reading everything sent before it. As with the health check's ping, one left
+    /// unanswered ends the connection once nothing has arrived for `unansweredPing` after the server has
+    /// sent something, and the health check, which runs while the app is open, keeps that limit too.
     func confirmAlive() async -> Bool {
         guard !ended else { return false }
         let data = makeID("alive")
-        let sentAt = ContinuousClock.now
         return await withCheckedContinuation { continuation in
-            pongWaiters[data] = continuation
+            pongWaiters[data] = (.now, continuation)
             enqueue(.healthPing(data: data))
-            Task { await self.expireWhenSilent(data, sentAt: sentAt) }
+            // Its reply limit can come before the check's next time.
+            startHealthCheck()
         }
-    }
-
-    private func expireWhenSilent(_ data: String, sentAt: ContinuousClock.Instant) async {
-        while pongWaiters[data] != nil {
-            try? await Task.sleep(until: aliveCheckDue(sentAt: sentAt), clock: .continuous)
-            if delivering { continue }
-            let now = ContinuousClock.now
-            let noSnapshotInTime = bootID == nil && now - openedAt >= timing.firstSnapshot
-            let unanswered = heardSinceWelcome && now - max(sentAt, lastProgress) >= timing.unansweredPing
-            if noSnapshotInTime || unanswered {
-                await end(.unresponsive)
-                return
-            }
-        }
-    }
-
-    /// When the alive check can next give up, found as `nextHealthCheck` finds its time: before the
-    /// server has sent anything, bytes that come later start the reply's limit no earlier than now.
-    private func aliveCheckDue(sentAt: ContinuousClock.Instant) -> ContinuousClock.Instant {
-        let now = ContinuousClock.now
-        if delivering { return now + timing.deliveryRecheck }
-        var due = (heardSinceWelcome ? max(sentAt, lastProgress) : now) + timing.unansweredPing
-        if bootID == nil { due = min(due, openedAt + timing.firstSnapshot) }
-        return due
     }
 
     private func monitorHealth() async {
@@ -891,12 +882,13 @@ actor HerdrConnection {
             if let ping = outstandingPing, lastProgress > ping.sentAt {
                 outstandingPing = nil
             }
-            if let ping = outstandingPing {
-                if heardSinceWelcome, now - ping.sentAt >= timing.unansweredPing {
-                    await end(.unresponsive)
-                    return
-                }
-            } else if now - lastProgress >= timing.pingAfterSilence {
+            if heardSinceWelcome, let since = oldestUnansweredPing,
+               now - max(since, lastProgress) >= timing.unansweredPing {
+                await end(.unresponsive)
+                return
+            }
+            if outstandingPing == nil, probeDue || now - lastProgress >= timing.pingAfterSilence {
+                probeDue = false
                 let data = makeID("ping")
                 outstandingPing = (data, now)
                 enqueue(.healthPing(data: data))
@@ -911,6 +903,7 @@ actor HerdrConnection {
     private func nextHealthCheck() -> ContinuousClock.Instant {
         let now = ContinuousClock.now
         if delivering { return now + timing.deliveryRecheck }
+        if probeDue { return now }
         var due: ContinuousClock.Instant
         if let ping = outstandingPing, lastProgress <= ping.sentAt {
             due = now + timing.pingAfterSilence
@@ -918,8 +911,21 @@ actor HerdrConnection {
         } else {
             due = lastProgress + timing.pingAfterSilence
         }
+        // Before the server has sent anything, bytes that come later start an alive check's limit no
+        // earlier than now.
+        if let since = pongWaiters.values.map(\.since).min() {
+            due = min(due, (heardSinceWelcome ? max(since, lastProgress) : now) + timing.unansweredPing)
+        }
         if bootID == nil { due = min(due, openedAt + timing.firstSnapshot) }
         return due
+    }
+
+    /// The oldest ping still waiting for its reply: the health check's until any bytes answer it, and an
+    /// alive check's until its own reply comes.
+    private var oldestUnansweredPing: ContinuousClock.Instant? {
+        let alive = pongWaiters.values.map(\.since).min()
+        guard let health = outstandingPing?.sentAt else { return alive }
+        return min(health, alive ?? health)
     }
 
     // MARK: - Ending
@@ -927,11 +933,12 @@ actor HerdrConnection {
     /// Ends the connection; no `ended` event follows, not even for an end found earlier that the screen
     /// hasn't been told about yet. Nothing is written first: Herdr removes an endpoint client whose
     /// stream ends just as one that sends `Detach`, and the bridge passes the end of its input on.
-    func close() async {
+    /// `reusable` is false when the caller found the path silent.
+    func close(reusable: Bool = true) async {
         endReason = nil
         guard !ended else { return }
         finish()
-        await transport.close(reusable: true)
+        await transport.close(reusable: reusable)
     }
 
     /// The reader reports `error` once the screen has taken what it was given.
@@ -953,8 +960,8 @@ actor HerdrConnection {
         for request in ending {
             resolve(request.waiter, with: .failure(HerdrCommandError.connectionEnded))
         }
-        for waiter in pongWaiters.values {
-            waiter.resume(returning: false)
+        for check in pongWaiters.values {
+            check.waiter.resume(returning: false)
         }
         pongWaiters.removeAll()
         let waiters = laneWaiters
