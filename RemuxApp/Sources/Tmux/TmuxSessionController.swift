@@ -29,10 +29,8 @@ final class TmuxSessionController: @unchecked Sendable {
         case channelAborted
         case outOfMemory
         case transportClosed
-        /// The server no longer has the session, as Remux found after the client ended.
+        /// tmux refused to attach: the server doesn't have the session.
         case sessionEnded
-        /// The client ended with a plain exit and the session still runs: another client detached it.
-        case detachedElsewhere
     }
 
     enum CloseReason: Equatable, Sendable {

@@ -64,8 +64,7 @@ final class TmuxScreenModel: ObservableObject {
         sessionInstanceID: UUID,
         transportFactory: @escaping TransportFactory,
         onRuntimeStateChange: @escaping (TerminalRuntimeStateUpdate) -> Void,
-        initialClientSize: TmuxSessionController.ClientSize? = nil,
-        sessionRuns: TmuxTerminalSession.SessionLookup? = nil
+        initialClientSize: TmuxSessionController.ClientSize? = nil
     ) {
         self.target = target
         self.sessionInstanceID = sessionInstanceID
@@ -112,7 +111,6 @@ final class TmuxScreenModel: ObservableObject {
                 self?.currentTerminalSettings.theme ?? target.terminalSettings.theme
             },
             tmuxPath: target.server.tmuxExecutablePath,
-            sessionRuns: sessionRuns,
             zoomOwner: TmuxZoomOwner(serverID: target.server.id)
         )
         self.session = session

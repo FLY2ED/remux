@@ -200,14 +200,19 @@ final class GhosttyRepairPanelContentTests: XCTestCase {
         XCTAssertFalse(TmuxSessionController.DetachReason.sessionEnded.terminalDisconnectReason.allowsAutomaticReconnect)
     }
 
-    func testASessionAnotherClientDetachedOffersReconnect() {
-        let reason = TmuxSessionController.DetachReason.detachedElsewhere.terminalDisconnectReason
-        let content = panel(reason)
-
-        XCTAssertEqual(content.title, "Detached")
-        XCTAssertEqual(content.message, "Another tmux client detached Remux from main.")
-        XCTAssertEqual(titles(content), ["Reconnect"])
-        XCTAssertFalse(reason.allowsAutomaticReconnect)
+    /// tmux ending the client is a lost connection: Remux reconnects, which attaches if the session is still
+    /// there.
+    func testTmuxEndingTheClientReconnects() {
+        for reason in [
+            TmuxSessionController.DetachReason.serverExited(nil),
+            .serverExited("too far behind"),
+            .serverExited("server exited unexpectedly"),
+        ] {
+            let disconnect = reason.terminalDisconnectReason
+            XCTAssertEqual(disconnect.kind, .transportIO, "\(reason)")
+            XCTAssertTrue(disconnect.allowsAutomaticReconnect, "\(reason)")
+            XCTAssertEqual(panel(disconnect).message, "The connection was lost.")
+        }
     }
 
     func testALostConnectionSaysSo() {

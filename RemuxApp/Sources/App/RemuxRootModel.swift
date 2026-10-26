@@ -419,8 +419,7 @@ final class RemuxRootModel: ObservableObject {
         UUID,
         @escaping TmuxScreenModel.TransportFactory,
         @escaping (TerminalRuntimeStateUpdate) -> Void,
-        TmuxSessionController.ClientSize?,
-        @escaping TmuxTerminalSession.SessionLookup
+        TmuxSessionController.ClientSize?
     ) -> TmuxScreenModel
 
     enum SetupMode: Equatable {
@@ -2019,8 +2018,8 @@ final class RemuxRootModel: ObservableObject {
             return reason.message
         case .hostKey:
             return "Remux could not verify the SSH host key."
-        case .verificationExpired, .sessionEnded, .detachedElsewhere, .transportIO, .profile, .remoteExit, .runtime,
-             .userClosed, .unknown:
+        case .verificationExpired, .sessionEnded, .transportIO, .profile, .remoteExit, .runtime, .userClosed,
+             .unknown:
             return error.localizedDescription
         }
     }
@@ -2353,16 +2352,14 @@ final class RemuxRootModel: ObservableObject {
         sessionInstanceID: UUID,
         transportFactory: @escaping TmuxScreenModel.TransportFactory,
         onRuntimeStateChange: @escaping (TerminalRuntimeStateUpdate) -> Void,
-        initialClientSize: TmuxSessionController.ClientSize?,
-        sessionRuns: @escaping TmuxTerminalSession.SessionLookup
+        initialClientSize: TmuxSessionController.ClientSize?
     ) -> TmuxScreenModel {
         TmuxScreenModel(
             target: target,
             sessionInstanceID: sessionInstanceID,
             transportFactory: transportFactory,
             onRuntimeStateChange: onRuntimeStateChange,
-            initialClientSize: initialClientSize,
-            sessionRuns: sessionRuns
+            initialClientSize: initialClientSize
         )
     }
 
@@ -2388,19 +2385,12 @@ final class RemuxRootModel: ObservableObject {
             let transportFactory: TmuxScreenModel.TransportFactory = { [preparedTransportCoordinator] target in
                 preparedTransportCoordinator.claimOrCreateTransport(for: target)
             }
-            let target = session.target
-            // A list of its own, started after the exit: one already running could predate it.
-            let sessionRuns: TmuxTerminalSession.SessionLookup = { [dependencies] in
-                guard let listing = try? await dependencies.discoverTmuxSessions(for: target) else { return nil }
-                return listing.sessions.contains { $0.name == target.workspace.sessionName }
-            }
             runtime = .tmux(terminalScreenModelFactory(
                 session.target,
                 session.instanceID,
                 transportFactory,
                 onRuntimeStateChange,
-                carriedClientSize,
-                sessionRuns
+                carriedClientSize
             ))
         case .herdr:
             let target = session.target

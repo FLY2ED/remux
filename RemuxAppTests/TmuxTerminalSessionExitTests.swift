@@ -4,141 +4,39 @@ import XCTest
 @testable import Remux
 
 /// tmux ends the client the same bare way (`%exit`, then the channel closes) whether the session ended or another
-/// client detached it, and refuses an attach to a missing session with an error before the exit (bytes as tmux
-/// 3.5a sends them). The session asks the server whether it still runs before it says which.
+/// client detached it, and refuses an attach to a session it doesn't have before the session ever shows (bytes as
+/// tmux 3.5a sends them).
 @MainActor
 final class TmuxTerminalSessionExitTests: XCTestCase {
-    func testAnExitWhenTheServerNoLongerHasTheSessionIsSessionEnded() async throws {
-        let (session, transport, runtime) = try await connectedSession(sessionRuns: { false })
+    func testAnAttachTmuxRefusesIsSessionEnded() async throws {
+        for refusal in ["can't find session: main", "no sessions"] {
+            let (session, _, runtime) = try await connectedSession(
+                greeting: "%begin 1 1 0\n\(refusal)\n%error 1 1 0\n%exit\n"
+            )
+
+            try await waitUntil { session.state == .detached(.sessionEnded) }
+            await session.shutdown()
+            withExtendedLifetime(runtime) {}
+        }
+    }
+
+    /// The session's state keeps tmux's exit; its reason reconnects, which finds out whether the session is still
+    /// there.
+    func testAnExitKeepsTmuxsExit() async throws {
+        let (session, transport, runtime) = try await connectedSession()
 
         await transport.receive("%sessions-changed\n%exit\n")
         await transport.finishInput()
 
-        try await waitUntil { session.state == .detached(.sessionEnded) }
+        try await waitUntil { session.state == .detached(.serverExited(nil)) }
         await session.shutdown()
-        withExtendedLifetime(runtime) {}
-    }
-
-    func testAnExitWhileTheSessionStillRunsIsAnotherClientDetachingIt() async throws {
-        let (session, transport, runtime) = try await connectedSession(sessionRuns: { true })
-
-        await transport.receive("%exit\n")
-        await transport.finishInput()
-
-        try await waitUntil { session.state == .detached(.detachedElsewhere) }
-        await session.shutdown()
-        withExtendedLifetime(runtime) {}
-    }
-
-    /// The list goes over the same server: when it can't be had, the connection is gone too.
-    func testAnExitWhenTheServerCannotBeAskedIsALostConnection() async throws {
-        let (session, transport, runtime) = try await connectedSession(sessionRuns: { nil })
-
-        await transport.receive("%exit\n")
-        await transport.finishInput()
-
-        try await waitUntil { session.state == .detached(.transportClosed) }
-        await session.shutdown()
-        withExtendedLifetime(runtime) {}
-    }
-
-    func testAnAttachTmuxRefusesForAMissingSessionIsSessionEnded() async throws {
-        let (session, _, runtime) = try await connectedSession(
-            greeting: "%begin 1 1 0\ncan't find session: main\n%error 1 1 0\n%exit\n",
-            sessionRuns: { false }
-        )
-
-        try await waitUntil { session.state == .detached(.sessionEnded) }
-        await session.shutdown()
-        withExtendedLifetime(runtime) {}
-    }
-
-    /// A failure while the session still runs is no ended session.
-    func testAProtocolFailureWhileTheSessionRunsStaysAFailure() async throws {
-        let (session, _, runtime) = try await connectedSession(
-            greeting: "%begin 1 1 0\nsomething went wrong\n%error 1 1 0\n",
-            sessionRuns: { true }
-        )
-
-        try await waitUntil { session.state == .detached(.channelAborted) }
-        await session.shutdown()
-        withExtendedLifetime(runtime) {}
-    }
-
-    /// Until the server answers, the screen keeps what it showed, and nothing after the exit changes the answer.
-    func testTheStateHoldsUntilTheServerAnswers() async throws {
-        let answer = PendingAnswer()
-        let (session, transport, runtime) = try await connectedSession(sessionRuns: { await answer.value() })
-        let before = session.state
-
-        await transport.receive("%exit\n")
-        await transport.finishInput()
-        try await waitUntil { answer.isWaiting }
-        try await Task.sleep(for: .milliseconds(100))
-        XCTAssertEqual(session.state, before)
-
-        answer.resume(false)
-        try await waitUntil { session.state == .detached(.sessionEnded) }
-        await session.shutdown()
-        withExtendedLifetime(runtime) {}
-    }
-
-    /// tmux says why when it has a reason, as for a client too far behind its output; the session may still run,
-    /// and its reason is what happened.
-    func testAnExitWithTmuxsReasonKeepsIt() async throws {
-        let answer = PendingAnswer()
-        let (session, transport, runtime) = try await connectedSession(sessionRuns: { await answer.value() })
-
-        await transport.receive("%exit too far behind\n")
-        await transport.finishInput()
-
-        try await waitUntil { session.state == .detached(.serverExited("too far behind")) }
-        XCTAssertFalse(answer.isWaiting)
-        await session.shutdown()
-        withExtendedLifetime(runtime) {}
-    }
-
-    /// A server that stops answering after the exit doesn't leave the screen as it was.
-    func testALookupThatNeverAnswersEndsAsALostConnection() async throws {
-        let answer = PendingAnswer()
-        let (session, transport, runtime) = try await connectedSession(
-            sessionRuns: { await answer.value() },
-            exitLookupTimeout: .milliseconds(200)
-        )
-
-        await transport.receive("%exit\n")
-        await transport.finishInput()
-
-        try await waitUntil { session.state == .detached(.transportClosed) }
-        answer.resume(false)
-        try await Task.sleep(for: .milliseconds(100))
-        XCTAssertEqual(session.state, .detached(.transportClosed))
-        await session.shutdown()
-        withExtendedLifetime(runtime) {}
-    }
-
-    func testAnAnswerAfterShutdownChangesNothing() async throws {
-        let answer = PendingAnswer()
-        let (session, transport, runtime) = try await connectedSession(sessionRuns: { await answer.value() })
-
-        await transport.receive("%exit\n")
-        await transport.finishInput()
-        try await waitUntil { answer.isWaiting }
-        let before = session.state
-        await session.shutdown()
-
-        answer.resume(false)
-        try await Task.sleep(for: .milliseconds(100))
-        XCTAssertEqual(session.state, before)
         withExtendedLifetime(runtime) {}
     }
 
     // MARK: - Support
 
     private func connectedSession(
-        greeting: String = "%begin 1 1 0\n%end 1 1 0\n%session-changed $42 main\n",
-        sessionRuns: @escaping TmuxTerminalSession.SessionLookup,
-        exitLookupTimeout: Duration = .seconds(10)
+        greeting: String = "%begin 1 1 0\n%end 1 1 0\n%session-changed $42 main\n"
     ) async throws -> (TmuxTerminalSession, ExitTestTransport, GhosttyKitRuntime) {
         let runtime = try GhosttyKitRuntime()
         let transport = ExitTestTransport(greeting: greeting)
@@ -146,9 +44,7 @@ final class TmuxTerminalSessionExitTests: XCTestCase {
             app: runtime.appHandleForTesting,
             transport: transport,
             baseSurfaceConfig: { runtime.makeTmuxBaseSurfaceConfig() },
-            paneViewTheme: { .remuxDark },
-            sessionRuns: sessionRuns,
-            exitLookupTimeout: exitLookupTimeout
+            paneViewTheme: { .remuxDark }
         )
         session.connect(viewport: .default)
         try await waitUntil { await transport.hasStarted }
@@ -166,25 +62,6 @@ final class TmuxTerminalSessionExitTests: XCTestCase {
         }
         let met = await condition()
         XCTAssertTrue(met, "condition not met in time")
-    }
-}
-
-/// An answer the test gives when it chooses.
-@MainActor
-private final class PendingAnswer {
-    private var continuation: CheckedContinuation<Bool?, Never>?
-    private(set) var isWaiting = false
-
-    func value() async -> Bool? {
-        await withCheckedContinuation { continuation in
-            self.continuation = continuation
-            isWaiting = true
-        }
-    }
-
-    func resume(_ value: Bool?) {
-        continuation?.resume(returning: value)
-        continuation = nil
     }
 }
 

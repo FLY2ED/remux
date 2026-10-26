@@ -58,8 +58,6 @@ struct TerminalRuntimeStatusPresentation: Equatable, Sendable {
             "Not Verified"
         case .sessionEnded:
             "Ended"
-        case .detachedElsewhere:
-            "Detached"
         case .serverUnreachable:
             "Unreachable"
         case .hostKey:

@@ -297,8 +297,6 @@ struct TerminalDisconnectReason: Equatable, Sendable {
         case verificationExpired
         /// The session is gone from the server: it was ended or killed, or it never existed.
         case sessionEnded
-        /// Another client detached this one; the session still runs.
-        case detachedElsewhere
         case hostKey
         case profile
         /// The session's program isn't installed on the server, or can't be run there.
@@ -320,8 +318,6 @@ struct TerminalDisconnectReason: Equatable, Sendable {
                 "verification_expired"
             case .sessionEnded:
                 "session_ended"
-            case .detachedElsewhere:
-                "detached_elsewhere"
             case .hostKey:
                 "host_key"
             case .profile:
@@ -368,7 +364,6 @@ struct TerminalDisconnectReason: Equatable, Sendable {
              .authentication,
              .verificationExpired,
              .sessionEnded,
-             .detachedElsewhere,
              .hostKey,
              .profile,
              .backendUnavailable,

@@ -100,10 +100,6 @@ struct GhosttyRepairPanelContent: Equatable {
                     accessibilityIdentifier: "terminal.status.sessionEnded.restart"
                 ),
             ]
-        case .detachedElsewhere:
-            title = "Detached"
-            message = "Another tmux client detached Remux from \(sessionName)."
-            actions = [Self.reconnect]
         case .remoteExit:
             title = "Disconnected"
             message = reason?.message ?? ""

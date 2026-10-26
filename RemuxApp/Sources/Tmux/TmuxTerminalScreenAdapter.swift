@@ -1080,8 +1080,10 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
 extension TmuxSessionController.DetachReason {
     var terminalDisconnectReason: TerminalDisconnectReason {
         switch self {
+        // tmux ends the client whether the session ended or another client detached this one; reconnecting
+        // attaches if the session is still there and finds out if it isn't.
         case .serverExited(let reason):
-            TerminalDisconnectReason(kind: .remoteExit, message: "tmux disconnected Remux.", detail: reason)
+            TerminalDisconnectReason(kind: .transportIO, message: reason ?? "tmux ended the client")
         case .transportClosed:
             TerminalDisconnectReason(
                 kind: .transportIO,
@@ -1098,9 +1100,7 @@ extension TmuxSessionController.DetachReason {
                 message: "tmux session sync failed"
             )
         case .sessionEnded:
-            TerminalDisconnectReason(kind: .sessionEnded, message: "the session is gone from the server")
-        case .detachedElsewhere:
-            TerminalDisconnectReason(kind: .detachedElsewhere, message: "another client detached the session")
+            TerminalDisconnectReason(kind: .sessionEnded, message: "tmux has no session by this name")
         }
     }
 }
