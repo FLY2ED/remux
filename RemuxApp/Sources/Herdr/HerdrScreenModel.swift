@@ -740,7 +740,7 @@ final class HerdrScreenModel {
             )
         } catch {
             guard isCurrent(attempt) else { return }
-            end(attempt, disconnectReason(connectionFailedWith: error), recovery: Self.recovery(connectionFailedWith: error))
+            end(attempt, disconnectReason(connectionFailedWith: error), recovery: Self.recovery(connectionFailedWith: error, opened: false))
             return
         }
         guard isCurrent(attempt) else {
@@ -954,7 +954,7 @@ final class HerdrScreenModel {
 
     private func connectionEnded(_ attemptID: UInt64, _ error: HerdrConnectionError) {
         guard let attempt, attempt.id == attemptID else { return }
-        end(attempt, error.terminalDisconnectReason(on: target.server), recovery: Self.recovery(connectionFailedWith: error))
+        end(attempt, error.terminalDisconnectReason(on: target.server), recovery: Self.recovery(connectionFailedWith: error, opened: true))
     }
 
     /// Ends the attempt and reports why. A connection Remux closes sends no `ended` event, so whoever
@@ -1187,7 +1187,7 @@ final class HerdrScreenModel {
             surfaces[paneID]?.renderer.failPresentation(message: Self.rendererFailureMessage)
         case .failed(let error, let connection):
             if let attempt, attempt.feed?.connection == connection {
-                end(attempt, error.terminalDisconnectReason(on: target.server), recovery: Self.recovery(connectionFailedWith: error))
+                end(attempt, error.terminalDisconnectReason(on: target.server), recovery: Self.recovery(connectionFailedWith: error, opened: true))
             }
         case .activated(let request, let connection):
             activated(request, connection: connection)
@@ -1404,8 +1404,9 @@ final class HerdrScreenModel {
 
     /// As Herdr's client sorts an endpoint's failures (`supervisor.rs`, `remote/saved.rs`): a dropped or
     /// broken connection is retried, a server that can't talk to Remux needs attention. Remux leaves
-    /// sign-in, host key and a missing Herdr to the repair panel, whose actions fix them.
-    private static func recovery(connectionFailedWith error: Error) -> Recovery {
+    /// sign-in, host key and a missing Herdr to the repair panel, whose actions fix them. `opened` says
+    /// whether the connection had opened before it failed.
+    private static func recovery(connectionFailedWith error: Error, opened: Bool) -> Recovery {
         switch error as? HerdrConnectionError {
         case .closed?, .transport?, .unresponsive?, .handshakeTimedOut?, .serverShutdown?:
             return .retry
@@ -1418,24 +1419,28 @@ final class HerdrScreenModel {
         case .outdated?, .rejected?, .incompatible?:
             return .recheck
         case .bridge(let error)?:
-            return recovery(bridgeFailedWith: error)
+            return recovery(bridgeFailedWith: error, opened: opened)
         case nil:
             return .none
         }
     }
 
-    private static func recovery(bridgeFailedWith error: HerdrBridgeError) -> Recovery {
+    /// A bridge that exits once its connection is open is a drop, as Herdr's client retries any endpoint
+    /// that disconnects: Herdr's bridge exits by itself after a minute with nothing to carry, which an app
+    /// in the background can't prevent. One that exits while opening says why: Herdr is missing or
+    /// couldn't start.
+    private static func recovery(bridgeFailedWith error: HerdrBridgeError, opened: Bool) -> Recovery {
         switch error {
         case .remoteExit, .channel:
             .retry
         case .program:
-            .none
+            opened ? .retry : .none
         }
     }
 
     /// An SSH failure is retried when the server couldn't be reached or the link broke.
     private static func recovery(openingBridgeFailedWith error: Error, reason: TerminalDisconnectReason) -> Recovery {
-        if let error = error as? HerdrBridgeError { return recovery(bridgeFailedWith: error) }
+        if let error = error as? HerdrBridgeError { return recovery(bridgeFailedWith: error, opened: false) }
         switch reason.kind {
         case .serverUnreachable, .transportIO, .unknown:
             return .retry

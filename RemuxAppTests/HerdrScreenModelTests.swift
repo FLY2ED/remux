@@ -1015,6 +1015,23 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertLessThan(starts[3] - droppedAt, .milliseconds(1000), "the delays didn't start over")
     }
 
+    /// Herdr's bridge exits by itself after a minute with nothing to carry, as it does while the app is
+    /// in the background, with status 1 and nothing after the ready marker. Once the connection is open
+    /// that is a drop: the session reconnects by itself, as Herdr's client does.
+    func testABridgeThatExitsAfterTheConnectionOpenedReconnects() async throws {
+        var recovery = HerdrScreenModel.RecoveryTiming()
+        recovery.firstRetry = .milliseconds(50)
+        let harness = await makeHarness(recovery: recovery)
+        let first = try await connectedSession(harness, lines: ["one"])
+
+        await first.finishServing(throwing: HerdrBridgeError.program(.failed("")))
+        try await harness.waitUntil("the bridge's exit didn't start a reconnect") {
+            harness.states.last == .reconnecting(.transportLoss)
+        }
+        _ = try await harness.bridge(1)
+        XCTAssertFalse(harness.states.contains { $0.disconnectedReason != nil }, "\(harness.states)")
+    }
+
     /// A server whose snapshot Remux can't read needs attention: the session says why, keeps saying it
     /// while the server is checked again every so often, and is back once a connection works.
     func testAServerThatNeedsAttentionSaysWhyAndIsCheckedAgain() async throws {
