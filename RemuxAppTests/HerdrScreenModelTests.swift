@@ -1194,6 +1194,18 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertGreaterThan(scrollView.contentSize.height, container.bounds.height)
     }
 
+    /// A server reporting a history at the top of the range gets a capped total, not a crash.
+    func testAnOversizedHistoryCapsTheScrollTotal() {
+        let scroll = HerdrPaneScroll(
+            linesFromBottom: 0,
+            maxLinesFromBottom: .max,
+            rows: 40,
+            mouseReporting: false,
+            alternateScreenActive: false
+        )
+        XCTAssertEqual(scroll.scrollState, GhosttySurfaceScrollState(total: .max, offset: .max, len: 40, cellOffset: 0))
+    }
+
     /// A scroll gesture's travel becomes Herdr wheel steps as Ghostty makes lines of it for tmux: one
     /// per cell height, the rest kept for the next, up or down with the travel, at the cell where the
     /// gesture is, each carrying Herdr's three history lines.
