@@ -137,6 +137,38 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// As in Herdr's client, the frame completing a show is drawn against the newest snapshot: a snapshot
+    /// that arrives after the painted frame, before Herdr's answer, waits for its own frame.
+    func testAShowWaitsForTheFrameOfASnapshotNewerThanThePaintedOne() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection()
+        await feed.receive(try Self.snapshot(revision: 1))
+
+        await feed.beginActivation(request: 1, columns: 4, rows: 2)
+        await feed.receive(.surface(try Self.surface(
+            revision: 1,
+            lines: ["one ", "two "],
+            panes: [Self.pane("P", x: 0, width: 4, height: 2)]
+        )))
+        _ = try await updates.nextLayout()
+        _ = try await updates.nextPaneScroll()
+        await feed.receive(try Self.snapshot(revision: 2))
+        await feed.acknowledgeActivation(request: 1, floor: 1)
+        await feed.receive(.surface(try Self.surface(
+            projection: 2,
+            revision: 2,
+            lines: ["one ", "two "],
+            panes: [Self.pane("P", x: 0, width: 4, height: 2, scroll: (fromBottom: 0, max: 5, rows: 2))]
+        )))
+
+        guard case .paneScroll(let scrolls) = try await updates.next(),
+              case .activated(1, _) = try await updates.next()
+        else { return XCTFail("the show completed on a frame its snapshot had replaced") }
+        XCTAssertEqual(scrolls["P"]?.maxLinesFromBottom, 5)
+        await engine.stop()
+    }
+
     /// A pane whose text area changes size is resized and repainted at once: none of its old text
     /// survives beside the new content.
     func testAResizedPaneIsRepaintedAtItsNewSize() async throws {

@@ -222,8 +222,11 @@ actor HerdrTerminalEngine {
         activation = nil
     }
 
+    /// Herdr's client checks the pair again at completion: a snapshot that arrived after the painted
+    /// frame waits for its own frame.
     private func completeActivationIfPainted() {
         guard let activation, let floor = activation.floor, let painted = activation.painted,
+              presentation.presented?.surface.projectionRevision == painted.projectionRevision,
               painted.projectionRevision >= floor,
               painted.columns == activation.columns, painted.rows == activation.rows
         else { return }
