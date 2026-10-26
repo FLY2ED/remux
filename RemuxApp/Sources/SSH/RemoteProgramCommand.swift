@@ -73,7 +73,7 @@ enum RemoteProgramCommand {
     /// few lines (fish names the file and line, then marks the spot). nil when it printed nothing.
     static func startupMessage(in output: String) -> String? {
         let lines = output.split(whereSeparator: \.isNewline)
-            .map { String($0).replacing(/\s+$/, with: "") }
+            .map { String($0.reversed().drop(while: \.isWhitespace).reversed()) }
             .filter { !$0.isEmpty }
         guard !lines.isEmpty else { return nil }
         return lines.suffix(startupMessageLineLimit).joined(separator: "\n")
