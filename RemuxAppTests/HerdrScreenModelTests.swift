@@ -1169,6 +1169,15 @@ final class HerdrScreenModelTests: XCTestCase {
         let history = try XCTUnwrap(lookup.managedSurface(for: ids[0]))
         XCTAssertEqual(history.scrollState, GhosttySurfaceScrollState(total: 41, offset: 34, len: 1, cellOffset: 0))
 
+        var screenChanges = 0
+        let watch = adapter.objectWillChange.sink { screenChanges += 1 }
+        await serve(3, history: 41)
+        try await harness.waitUntil("the grown history didn't reach the pane") {
+            history.scrollState.total == 42
+        }
+        watch.cancel()
+        XCTAssertEqual(screenChanges, 0, "a change of scrolling alone redrew the screen")
+
         let container = GhosttyPaneScrollContainerView(frame: CGRect(x: 0, y: 0, width: 300, height: 40))
         _ = container.update(
             surface: history,
@@ -1183,15 +1192,6 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertFalse(scrollView.isScrollEnabled, "history scrolled locally instead of on Herdr")
         XCTAssertTrue(scrollView.showsVerticalScrollIndicator)
         XCTAssertGreaterThan(scrollView.contentSize.height, container.bounds.height)
-
-        var screenChanges = 0
-        let watch = adapter.objectWillChange.sink { screenChanges += 1 }
-        defer { watch.cancel() }
-        await serve(3, history: 41)
-        try await harness.waitUntil("the grown history didn't reach the pane") {
-            history.scrollState.total == 42
-        }
-        XCTAssertEqual(screenChanges, 0, "a change of scrolling alone redrew the screen")
     }
 
     /// A scroll gesture's travel becomes Herdr wheel steps as Ghostty makes lines of it for tmux: one

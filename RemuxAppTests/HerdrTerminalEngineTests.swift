@@ -284,6 +284,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await first.receive(.surface(try Self.surface(revision: 1, lines: ["one"], panes: panes)))
         let terminal = try await updates.terminal(for: "P")
         let layout = try await updates.nextLayout()
+        _ = try await updates.nextPaneScroll()
         let renderer = try await makeRenderer(engine: engine, paneID: "P", terminal: terminal, columns: 3, rows: 1)
 
         let second = await engine.beginConnection()
@@ -411,6 +412,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await feed.receive(.surface(try Self.surface(revision: 1, lines: ["abcd"], panes: panes)))
         let terminal = try await updates.terminal(for: "P")
         _ = try await updates.nextLayout()
+        _ = try await updates.nextPaneScroll()
         let renderer = try await makeRenderer(engine: engine, paneID: "P", terminal: terminal, columns: 4, rows: 1)
 
         let patches = try (UInt64(2)...UInt64(400)).map { revision in
