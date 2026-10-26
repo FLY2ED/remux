@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import XCTest
 @testable import Remux
 
@@ -122,6 +123,160 @@ final class HerdrLiveConnectionTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(sent, 5, "too few health pings for six seconds of a quiet connection")
         let ended = await live.log.endReason
         XCTAssertNil(ended, "the connection ended: \(String(describing: ended))")
+    }
+
+    // MARK: - Composer
+
+    /// Remux's composer sends a message to a Herdr pane as one paste, then Enter in a read of its own at
+    /// least the composer's pause later, so a program sees the paste settle before Enter. The program
+    /// asks for bracketed paste, as agents' prompts do; the message starts with a slash, which opens a
+    /// command menu in some agents.
+    @MainActor
+    func testAComposedMessageArrivesAsAPasteThenEnterAfterThePauseOnHerdr093() async throws {
+        try await checkComposedMessage(version: "0.9.3", message: Self.composedMessage)
+    }
+
+    @MainActor
+    func testAComposedMessageArrivesAsAPasteThenEnterAfterThePauseOnHerdr095() async throws {
+        try await checkComposedMessage(version: "0.9.5", message: Self.composedMessage)
+    }
+
+    /// Over a slow uplink a long paste is still arriving well after the phone wrote it. The pause before
+    /// Enter runs once Herdr has the paste, so Enter still comes on its own, the pause after the paste.
+    @MainActor
+    func testAComposedMessageKeepsItsPauseOverASlowUplink() async throws {
+        // The program's log of a longer message is more than a command's output may be.
+        let message = "/review " + String(repeating: "0123456789abcdef", count: 1024)
+        try await checkComposedMessage(version: "0.9.5", message: message) {
+            HerdrLiveSlowUplink($0, bytesPerSecond: 32_000)
+        }
+    }
+
+    private static let composedMessage = "/review the composer\nsecond line '/tmp/a b.png'"
+
+    @MainActor
+    private func checkComposedMessage(
+        version: String,
+        message: String,
+        through wrap: @escaping @Sendable (any HerdrBridgeTransport) -> any HerdrBridgeTransport = { $0 }
+    ) async throws {
+        let session = try await openShownSession(version: version, through: wrap)
+        let adapter = session.model.terminalScreenAdapter
+        let log = HerdrLiveReadLog(fixture: session.fixture, path: session.fixture.root + "/reads.log")
+        let program = #"stty raw -echo; printf '\033[?2004h'; exec perl -MTime::HiRes=time -e 'open(my $f, ">>", shift) or die; $f->autoflush(1); print $f "R\n"; while (sysread(STDIN, my $b, 65536)) { printf $f "%.1f %s\n", time * 1000, unpack("H*", $b) }' "#
+        XCTAssertEqual(session.model.sendText(program + log.path + "\r"), .accepted)
+        try await log.waitForStart()
+
+        let composer = GhosttyComposerModel()
+        composer.draft = message
+        let surfaceID = try XCTUnwrap(adapter.terminalInteractionProjection.selectedActiveLeafID)
+        // As the screen sends a composed message.
+        composer.submit(to: GhosttyComposerSubmissionDestination(
+            workspaceID: session.model.target.workspace.id,
+            surfaceID: surfaceID,
+            destinationLabel: nil,
+            makeAttachmentTransferService: { FailingComposerAttachmentTransferService() },
+            prepareTerminalInput: {},
+            sendPaste: { await adapter.sendPasteAwaitingCommandCompletion($0, to: surfaceID) },
+            sendEnter: {
+                let enter = GhosttySurfaceKeyEvent(action: .press, keyCode: .enter)
+                guard await adapter.sendKeyEventAwaitingCommandCompletion(enter, to: surfaceID) else { return false }
+                _ = adapter.sendKeyEvent(GhosttySurfaceKeyEvent(action: .release, keyCode: .enter), to: surfaceID)
+                return true
+            }
+        ))
+        try await waitUntil("the message wasn't sent", timeout: .seconds(30)) { !composer.isSubmitting }
+        XCTAssertNil(composer.statusMessage)
+        XCTAssertEqual(composer.draft, "")
+
+        let paste = Array("\u{1b}[200~\(message)\u{1b}[201~".utf8)
+        let reads = try await log.reads(until: { $0.flatMap(\.bytes).count >= paste.count + 1 })
+        XCTAssertEqual(reads.flatMap(\.bytes), paste + [0x0d], "Herdr \(version)")
+        guard let enter = reads.last, enter.bytes == [0x0d], reads.count >= 2 else {
+            return XCTFail("Enter came in the paste's read on Herdr \(version): \(reads.map(\.bytes.count))")
+        }
+        let gap = enter.milliseconds - reads[reads.count - 2].milliseconds
+        XCTAssertGreaterThanOrEqual(gap, 150, "Enter came \(gap) ms after the paste on Herdr \(version)")
+    }
+
+    private struct ShownSession {
+        let fixture: HerdrLiveFixture
+        let model: HerdrScreenModel
+    }
+
+    /// A Herdr session model on a fresh isolated server for Herdr `version`, shown, with its first pane
+    /// drawn in a window as on the screen. `through` can put a transport between the model's connection
+    /// and the bridge.
+    @MainActor
+    private func openShownSession(
+        version: String,
+        through wrap: @escaping @Sendable (any HerdrBridgeTransport) -> any HerdrBridgeTransport
+    ) async throws -> ShownSession {
+        let fixture = try await HerdrLiveFixture.start(try HerdrLiveConfiguration.load(), version: version)
+        addTeardownBlock {
+            for problem in await fixture.tearDown() {
+                XCTFail(problem)
+            }
+        }
+        let trace = RemuxTransportStartupTrace(flowID: "herdr-live-composer")
+        let server = SavedServer(
+            displayName: "herdr-live",
+            host: fixture.configuration.host,
+            port: fixture.configuration.port,
+            username: fixture.configuration.username
+        )
+        let model = HerdrScreenModel(
+            target: SessionTarget(
+                server: server,
+                workspace: SavedWorkspace(serverID: server.id, sessionName: fixture.session),
+                sshAuth: .password(
+                    username: server.username,
+                    password: "",
+                    identityID: server.identityID,
+                    displayLabel: server.displayName
+                ),
+                terminalSettings: .default
+            ),
+            sessionInstanceID: UUID(),
+            openBridge: {
+                wrap(try await HerdrSSHBridge.open(
+                    using: try await fixture.claimRoot(trace: trace),
+                    herdrExecutable: fixture.executable,
+                    session: fixture.session,
+                    trace: trace
+                ))
+            },
+            onRuntimeStateChange: { _ in }
+        )
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 600))
+        window.rootViewController = UIViewController()
+        // Teardown blocks run last first, so the model closes its connection before the fixture stops Herdr.
+        addTeardownBlock { @MainActor in
+            window.isHidden = true
+            await model.stop()
+        }
+        model.terminalScreenAdapter.prepareInitialViewport(size: CGSize(width: 390, height: 844), scale: 3)
+        model.setSelected(true)
+        try await waitUntil("the first pane wasn't drawn", timeout: .seconds(20)) {
+            model.layout?.panes.first(where: \.hasTextArea).flatMap { model.paneSurface($0.paneID) } != nil
+        }
+        for pane in model.layout?.panes ?? [] {
+            if let view = model.paneSurface(pane.paneID)?.renderer.view {
+                window.rootViewController?.view.addSubview(view)
+            }
+        }
+        window.isHidden = false
+        try await waitUntil("the session didn't take input", timeout: .seconds(20)) { model.isInputAvailable }
+        return ShownSession(fixture: fixture, model: model)
+    }
+
+    @MainActor
+    private func waitUntil(_ failure: String, timeout: Duration, _ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while !condition() {
+            guard ContinuousClock.now < deadline else { throw HerdrLiveError(description: failure) }
+            try await Task.sleep(for: .milliseconds(50))
+        }
     }
 
     private func checkTypedInputReachesTheProgram(version: String) async throws {
@@ -268,6 +423,93 @@ struct HerdrLiveDump {
     private func contents() async throws -> [UInt8] {
         let result = try await fixture.run(#"cat -- "$(printf %b "$1")" 2>/dev/null || true"#, arguments: [path])
         return Array(result.stdout)
+    }
+}
+
+/// What a pane's program read, as the composer test's program logs it: "R" once it runs, then a line for
+/// each read with the time it came, in milliseconds, and the bytes in hex.
+struct HerdrLiveReadLog {
+    struct Read: Sendable {
+        let milliseconds: Double
+        let bytes: [UInt8]
+    }
+
+    let fixture: HerdrLiveFixture
+    let path: String
+
+    func waitForStart(timeout: Duration = .seconds(15)) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while try await lines().first != "R" {
+            guard ContinuousClock.now < deadline else { throw HerdrLiveError(description: "the program didn't start") }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+    }
+
+    /// The reads so far, once `done` holds for them or `timeout` passed, and after a short wait for any
+    /// more, so a read too many shows up here.
+    func reads(timeout: Duration = .seconds(15), until done: @Sendable ([Read]) -> Bool) async throws -> [Read] {
+        let deadline = ContinuousClock.now + timeout
+        while !done(try await reads()), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        try await Task.sleep(for: .milliseconds(500))
+        return try await reads()
+    }
+
+    private func reads() async throws -> [Read] {
+        try await lines().dropFirst().compactMap { line in
+            let fields = line.split(separator: " ")
+            guard fields.count == 2, let milliseconds = Double(fields[0]) else { return nil }
+            func nibble(_ digit: UInt8) -> UInt8 {
+                digit <= UInt8(ascii: "9") ? digit - UInt8(ascii: "0") : digit - UInt8(ascii: "a") + 10
+            }
+            let hex = Array(fields[1].utf8)
+            let bytes = stride(from: 0, to: hex.count - 1, by: 2).map { nibble(hex[$0]) << 4 | nibble(hex[$0 + 1]) }
+            return Read(milliseconds: milliseconds, bytes: bytes)
+        }
+    }
+
+    private func lines() async throws -> [String] {
+        let result = try await fixture.run(#"cat -- "$(printf %b "$1")" 2>/dev/null || true"#, arguments: [path])
+        return String(decoding: result.stdout, as: UTF8.self).split(separator: "\n").map(String.init)
+    }
+}
+
+/// Passes a bridge through as a slow uplink does: a write returns at once, and its bytes reach the bridge
+/// at `bytesPerSecond`, in order.
+actor HerdrLiveSlowUplink: HerdrBridgeTransport {
+    private let bridge: any HerdrBridgeTransport
+    private let bytesPerSecond: Int
+    private var queued: [[UInt8]] = []
+    private var isSending = false
+
+    init(_ bridge: any HerdrBridgeTransport, bytesPerSecond: Int) {
+        self.bridge = bridge
+        self.bytesPerSecond = bytesPerSecond
+    }
+
+    func read() async throws -> [UInt8]? {
+        try await bridge.read()
+    }
+
+    func write(_ bytes: [UInt8]) async throws {
+        queued.append(bytes)
+        guard !isSending else { return }
+        isSending = true
+        Task { await sendQueued() }
+    }
+
+    private func sendQueued() async {
+        while !queued.isEmpty {
+            let bytes = queued.removeFirst()
+            try? await Task.sleep(for: .seconds(Double(bytes.count) / Double(bytesPerSecond)))
+            try? await bridge.write(bytes)
+        }
+        isSending = false
+    }
+
+    func close(reusable: Bool) async {
+        await bridge.close(reusable: reusable)
     }
 }
 

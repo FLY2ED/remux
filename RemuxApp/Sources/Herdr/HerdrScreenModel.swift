@@ -18,6 +18,7 @@ final class HerdrPaneSurface: TerminalPaneInputSink {
         renderer.screenSurface(id: id, inputSink: self)
     }
 
+    // The composer's input goes through the screen model, which holds the connection.
     func sendPasteAwaitingCommandCompletion(_ text: String) async -> Bool { false }
 
     func sendKeyEventAwaitingCommandCompletion(_ event: GhosttySurfaceKeyEvent) async -> Bool { false }
@@ -51,7 +52,13 @@ final class HerdrScreenModel {
         case resize(HerdrSurfaceGeometry)
         case theme([HerdrHostThemeUpdate])
         case appActive(Bool)
-        case input(paneID: String, events: [HerdrInputEvent])
+        /// `delivered`, when given, learns whether Herdr has the input.
+        case input(paneID: String, events: [HerdrInputEvent], delivered: CheckedContinuation<Bool, Never>?)
+
+        /// Tells whoever waits on the operation that it won't be carried out.
+        func abandon() {
+            if case .input(_, _, let delivered?) = self { delivered.resume(returning: false) }
+        }
     }
 
     /// One connection to the server, from opening its bridge to its end. A reconnect replaces it, and
@@ -91,7 +98,10 @@ final class HerdrScreenModel {
         /// matters, as Herdr's client sends only the newest it sampled: a new size replaces every one
         /// not yet sent. A show queued before it already carries a newer size than those.
         func ask(_ operation: Operation) {
-            guard !ended, !operationsFinished else { return }
+            guard !ended, !operationsFinished else {
+                operation.abandon()
+                return
+            }
             if case .resize = operation {
                 operations.removeAll { if case .resize = $0 { true } else { false } }
             }
@@ -111,7 +121,9 @@ final class HerdrScreenModel {
 
         func finishOperations() {
             operationsFinished = true
+            let abandoned = operations
             operations.removeAll()
+            abandoned.forEach { $0.abandon() }
             wake()
         }
 
@@ -370,11 +382,16 @@ final class HerdrScreenModel {
     }
 
     private var inputTarget: (attempt: Attempt, paneID: String)? {
-        guard let attempt, isCurrent(attempt), !attempt.ended, attempt.connection != nil,
-              attempt.requestedShown, let paneID = focusedPaneID,
-              presentation(ofPane: paneID) == .ready
-        else { return nil }
+        guard let attempt = shownAttempt, let paneID = focusedPaneID, presentation(ofPane: paneID) == .ready else {
+            return nil
+        }
         return (attempt, paneID)
+    }
+
+    private var shownAttempt: Attempt? {
+        guard let attempt, isCurrent(attempt), !attempt.ended, attempt.connection != nil, attempt.requestedShown
+        else { return nil }
+        return attempt
     }
 
     func sendText(_ text: String) -> FocusedTerminalInputSubmissionResult {
@@ -416,9 +433,31 @@ final class HerdrScreenModel {
             return .surfaceRejected
         }
         for message in messages {
-            target.attempt.ask(.input(paneID: target.paneID, events: message))
+            target.attempt.ask(.input(paneID: target.paneID, events: message, delivered: nil))
         }
         return .accepted
+    }
+
+    /// The composer's message goes to the pane it was written in, focused or not: Herdr takes input for
+    /// every pane on the shown tab. Each part returns true once Herdr has it, so the composer's pause
+    /// before Enter runs from there; false when it can't go, or the connection ended first.
+    func sendPasteAwaitingDelivery(_ text: String, toPane paneID: String) async -> Bool {
+        guard !text.isEmpty else { return false }
+        return await sendAwaitingDelivery([.paste(text)], toPane: paneID)
+    }
+
+    func sendKeyAwaitingDelivery(_ key: GhosttySurfaceKeyEvent, toPane paneID: String) async -> Bool {
+        guard let event = HerdrInputTranslator.event(for: key) else { return false }
+        return await sendAwaitingDelivery([event], toPane: paneID)
+    }
+
+    private func sendAwaitingDelivery(_ events: [HerdrInputEvent], toPane paneID: String) async -> Bool {
+        guard let attempt = shownAttempt, presentation(ofPane: paneID) == .ready,
+              (try? HerdrConnection.checkLimits(events)) != nil
+        else { return false }
+        return await withCheckedContinuation { delivered in
+            attempt.ask(.input(paneID: paneID, events: events, delivered: delivered))
+        }
     }
 
     /// Asks Herdr to focus the pane, as Herdr's client does on a click; keys follow the snapshot that
@@ -522,7 +561,10 @@ final class HerdrScreenModel {
         reconcilePresentationActivity()
         didChange()
         while let operation = await attempt.nextOperation() {
-            guard isCurrent(attempt) else { break }
+            guard isCurrent(attempt) else {
+                operation.abandon()
+                break
+            }
             await perform(operation, on: connection, attemptID: attempt.id)
         }
     }
@@ -586,14 +628,23 @@ final class HerdrScreenModel {
             }
         case .appActive(let active):
             await connection.setAppActive(active)
-        case .input(let paneID, let events):
+        case .input(let paneID, let events, let delivered):
             do {
                 try await connection.send(events, toPane: paneID)
-            } catch HerdrInputError.connectionEnded {
-                // The connection's end is reported when the reader sees it.
             } catch {
-                inputFailed(attemptID)
+                if let delivered {
+                    // The composer says what didn't go.
+                    delivered.resume(returning: false)
+                } else if (error as? HerdrInputError) != .connectionEnded {
+                    // The connection's end is reported when the reader sees it.
+                    inputFailed(attemptID)
+                }
+                return
             }
+            guard let delivered else { return }
+            // Herdr acknowledges no input, but answers a ping only after reading everything sent before
+            // it. Later operations don't wait for the answer.
+            Task { delivered.resume(returning: await connection.confirmAlive()) }
         }
     }
 

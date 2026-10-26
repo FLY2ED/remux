@@ -225,9 +225,6 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     /// Herdr panes get Ctrl+B at once; Herdr's own keybindings aren't offered on the phone.
     var holdsTmuxPrefixKey: Bool { false }
 
-    /// A composed message needs an awaited paste and Enter, which Herdr input doesn't have.
-    var acceptsComposerMessages: Bool { false }
-
     func sendInputToFocusedSurface(_ text: String) -> FocusedTerminalInputSubmissionResult {
         model?.sendText(text) ?? .transportUnavailable
     }
@@ -242,8 +239,11 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         return sendPasteToFocusedSurface(text)
     }
 
+    /// The composer's paste and Enter go to the pane its message was written in, which may no longer be
+    /// focused.
     func sendPasteAwaitingCommandCompletion(_ text: String, to surfaceID: UUID) async -> Bool {
-        false
+        guard let model, let paneID = paneID(for: surfaceID) else { return false }
+        return await model.sendPasteAwaitingDelivery(text, toPane: paneID)
     }
 
     func sendKeyEvent(_ event: GhosttySurfaceKeyEvent, to surfaceID: UUID) -> FocusedTerminalInputSubmissionResult {
@@ -252,7 +252,8 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func sendKeyEventAwaitingCommandCompletion(_ event: GhosttySurfaceKeyEvent, to surfaceID: UUID) async -> Bool {
-        false
+        guard let model, let paneID = paneID(for: surfaceID) else { return false }
+        return await model.sendKeyAwaitingDelivery(event, toPane: paneID)
     }
 
     func sendKeyEventToFocusedSurface(_ event: GhosttySurfaceKeyEvent) -> FocusedTerminalInputSubmissionResult {

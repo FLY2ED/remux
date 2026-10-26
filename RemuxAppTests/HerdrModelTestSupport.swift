@@ -218,6 +218,7 @@ enum ClientWrite: Equatable {
     /// A pane input message, as framed.
     case paneInput([UInt8])
     case paneFocus(id: String, paneID: String)
+    case ping(data: String)
     case other(tag: UInt32, kind: String)
 
     var isSurfaceSet: Bool {
@@ -231,6 +232,7 @@ enum ClientWrite: Equatable {
         case 20:
             let kind = try reader.string()
             let data = try reader.string()
+            if kind == HerdrControlKind.healthPing { return .ping(data: data) }
             guard kind == HerdrControlKind.hello else { return .other(tag: tag, kind: kind) }
             let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(data.utf8)) as? [String: Any])
             let size = try XCTUnwrap(json["surface_size"] as? [String: Int])

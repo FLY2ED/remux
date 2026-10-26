@@ -1100,8 +1100,8 @@ actor FakeBridgeTransport: HerdrBridgeTransport {
     }
 }
 
-/// Records connection events; `hold()` makes delivery wait, as a busy screen would.
-private actor AnswerBox {
+/// An answer that arrives later, or nil while it hasn't.
+actor AnswerBox {
     private(set) var value: Bool?
 
     func set(_ answer: Bool) {
@@ -1109,6 +1109,7 @@ private actor AnswerBox {
     }
 }
 
+/// Records connection events; `hold()` makes delivery wait, as a busy screen would.
 actor EventRecorder {
     private(set) var events: [HerdrConnectionEvent] = []
     private var held = false
