@@ -24,6 +24,8 @@ struct HerdrPaneLayout: Equatable, Sendable {
     let columns: UInt16
     let rows: UInt16
     let panes: [Pane]
+    /// Whether a popup is open over the tab. It takes the tab's input meanwhile.
+    let hasPopup: Bool
 }
 
 /// What the engine tells its main-actor owner, in order.
@@ -308,7 +310,8 @@ actor HerdrTerminalEngine {
                     name: Self.name(ofPane: $0.paneID, in: snapshot),
                     path: Self.path(ofPane: $0.paneID, in: snapshot)
                 )
-            }
+            },
+            hasPopup: surface.popup != nil
         )
         guard next != layout else { return }
         layout = next

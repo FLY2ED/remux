@@ -93,10 +93,6 @@ protocol GhosttyTerminalInputModeling: ObservableObject {
     /// tmux's prefix key (Ctrl+B) is held briefly so Ctrl+B [ can open tmux's copy mode.
     var holdsTmuxPrefixKey: Bool { get }
 
-    /// The composer can send a message, through `sendPasteAwaitingCommandCompletion` and
-    /// `sendKeyEventAwaitingCommandCompletion`.
-    var acceptsComposerMessages: Bool { get }
-
     @discardableResult
     func sendInputToFocusedSurface(_ text: String) -> FocusedTerminalInputSubmissionResult
 

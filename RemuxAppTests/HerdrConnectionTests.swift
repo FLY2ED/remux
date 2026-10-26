@@ -672,17 +672,19 @@ final class HerdrConnectionTests: XCTestCase {
         XCTAssertEqual(kinds, ["bell", "ended(unresponsive)"])
     }
 
-    /// The check after the app returns follows the same rule: before anything has come since the welcome
-    /// it keeps waiting, and once the server has sent something an unanswered check gives up.
+    /// An alive check follows the same rule, also with the app in the background, where the health check
+    /// isn't running: before anything has come since the welcome it keeps waiting, and once the server
+    /// has sent something an unanswered check ends the connection.
     func testConfirmAliveWaitsUntilTheServerHasSentSomething() async throws {
         let transport = FakeBridgeTransport()
         await transport.serve(HerdrWire.frame(try Self.frames(Self.recording("herdr-01-handshake-all-caps-A"))[0]))
+        let events = EventRecorder()
         let connection = try await HerdrConnection.open(
             transport: transport,
             hello: hello,
             appActive: false,
             timing: timing(unansweredPing: .milliseconds(100)),
-            onEvent: EventRecorder().record
+            onEvent: events.record
         )
         addTeardownBlock { await connection.close() }
         let answer = AnswerBox()
@@ -696,6 +698,8 @@ final class HerdrConnectionTests: XCTestCase {
         await check.value
         let finalAnswer = await answer.value
         XCTAssertEqual(finalAnswer, false)
+        let kinds = await events.waitForEnd().map(\.kind)
+        XCTAssertEqual(kinds, ["bell", "ended(unresponsive)"])
     }
 
     /// Messages without a snapshot don't extend the first-snapshot limit, even with the app in the
@@ -703,12 +707,13 @@ final class HerdrConnectionTests: XCTestCase {
     func testConfirmAliveGivesUpWhenNoSnapshotCameInTime() async throws {
         let transport = FakeBridgeTransport()
         await transport.serve(HerdrWire.frame(try Self.frames(Self.recording("herdr-01-handshake-all-caps-A"))[0]))
+        let events = EventRecorder()
         let connection = try await HerdrConnection.open(
             transport: transport,
             hello: hello,
             appActive: false,
             timing: timing(unansweredPing: .milliseconds(300), firstSnapshot: .milliseconds(400)),
-            onEvent: EventRecorder().record
+            onEvent: events.record
         )
         addTeardownBlock { await connection.close() }
         let bells = Task {
@@ -727,6 +732,8 @@ final class HerdrConnectionTests: XCTestCase {
         }
         let answered = await answer.value
         XCTAssertEqual(answered, false, "the check must give up at the first-snapshot limit")
+        let last = await events.waitForEnd().last?.kind
+        XCTAssertEqual(last, "ended(unresponsive)")
     }
 
     func testConfirmAliveIsAnsweredByItsOwnPong() async throws {
@@ -738,13 +745,19 @@ final class HerdrConnectionTests: XCTestCase {
         XCTAssertTrue(answered)
     }
 
+    /// Another ping's reply doesn't answer the check, so it stays unanswered and ends the connection.
     func testAnotherPongDoesNotConfirmAlive() async throws {
-        let (connection, transport, _) = try await openedSession(surfaceActive: true, timing: timing(unansweredPing: .milliseconds(200)))
+        let (connection, transport, events) = try await openedSession(
+            surfaceActive: true,
+            timing: timing(unansweredPing: .milliseconds(200))
+        )
         async let alive = connection.confirmAlive()
         _ = try await transport.written(1)
         await transport.serve(Self.pong("not-this-one"))
         let answered = await alive
         XCTAssertFalse(answered)
+        let last = await events.waitForEnd().last?.kind
+        XCTAssertEqual(last, "ended(unresponsive)")
     }
 
     // MARK: - Closing
@@ -1100,8 +1113,8 @@ actor FakeBridgeTransport: HerdrBridgeTransport {
     }
 }
 
-/// Records connection events; `hold()` makes delivery wait, as a busy screen would.
-private actor AnswerBox {
+/// An answer that arrives later, or nil while it hasn't.
+actor AnswerBox {
     private(set) var value: Bool?
 
     func set(_ answer: Bool) {
@@ -1109,6 +1122,7 @@ private actor AnswerBox {
     }
 }
 
+/// Records connection events; `hold()` makes delivery wait, as a busy screen would.
 actor EventRecorder {
     private(set) var events: [HerdrConnectionEvent] = []
     private var held = false

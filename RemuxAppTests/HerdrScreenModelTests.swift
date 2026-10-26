@@ -549,8 +549,6 @@ final class HerdrScreenModelTests: XCTestCase {
             XCTAssertTrue(interaction.hasFocusedSurface)
             XCTAssertTrue(interaction.isInputAvailable)
         }
-        // The composer's Send waits for an awaited submit.
-        XCTAssertFalse(adapter.acceptsComposerMessages)
     }
 
     /// A pane's screen surface is made when its renderer is admitted, so the screen's lookups only read:
@@ -1026,6 +1024,120 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(adapter.commandFailureEvent?.message, "Herdr: input failed")
     }
 
+    // MARK: - Composer
+
+    /// The composer's paste and its Enter each count as sent once Herdr has them, so the composer's pause
+    /// before Enter runs from there: Herdr acknowledges no input, but answers a ping only after reading
+    /// what came before it.
+    func testAComposedMessageCountsAsSentOnceHerdrHasIt() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let pane = adapter.terminalScreenPresentationProjection.viewport.panes[0].id
+        let message = "fix it\n'/tmp/a b.png'"
+
+        let pasted = AnswerBox()
+        let paste = Task { await pasted.set(await adapter.sendPasteAwaitingCommandCompletion(message, to: pane)) }
+        let pasteInput = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(pasteInput, frame("w1:p1", [.paste(message)]))
+        let pastePing = try await nextWrite(session.bridge, from: &index, ping)
+        try await Task.sleep(for: .milliseconds(100))
+        let early = await pasted.value
+        XCTAssertNil(early, "the paste counted as sent before Herdr had it")
+        await session.bridge.serve(HerdrConnectionTests.pong(pastePing))
+        await paste.value
+        let pasteAnswer = await pasted.value
+        XCTAssertEqual(pasteAnswer, true)
+
+        let enter = Task {
+            await adapter.sendKeyEventAwaitingCommandCompletion(GhosttySurfaceKeyEvent(keyCode: .enter), to: pane)
+        }
+        let enterInput = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(enterInput, frame("w1:p1", [.key(HerdrKeyEvent(code: .enter, tracksRelease: true))]))
+        let enterPing = try await nextWrite(session.bridge, from: &index, ping)
+        await session.bridge.serve(HerdrConnectionTests.pong(enterPing))
+        let entered = await enter.value
+        XCTAssertTrue(entered)
+    }
+
+    /// A composed message goes to the pane it was written in after another pane takes the focus: Herdr
+    /// takes input for every pane on the shown tab.
+    func testAComposedMessageGoesToItsPaneAfterTheFocusMoves() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let pane = adapter.terminalScreenPresentationProjection.viewport.panes[0].id
+        await session.bridge.serve(HerdrServerScript.snapshot(revision: 2, focusedPane: "w1:p2"))
+        try await harness.waitUntil("the focus didn't move") { harness.model.focusedPaneID == "w1:p2" }
+
+        let enter = Task {
+            await adapter.sendKeyEventAwaitingCommandCompletion(GhosttySurfaceKeyEvent(keyCode: .enter), to: pane)
+        }
+        let sent = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(sent, frame("w1:p1", [.key(HerdrKeyEvent(code: .enter, tracksRelease: true))]))
+        let enterPing = try await nextWrite(session.bridge, from: &index, ping)
+        await session.bridge.serve(HerdrConnectionTests.pong(enterPing))
+        let entered = await enter.value
+        XCTAssertTrue(entered)
+    }
+
+    /// A composed message that can't go isn't sent, and the composer says so itself: over Herdr's byte
+    /// limit, to a pane no longer on the tab, while a popup is open over the tab, or while the session is
+    /// hidden. Herdr would refuse the first and drop the others without a word, still answering pings.
+    func testAComposedMessageThatCantGoIsNotSent() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        let adapter = harness.model.terminalScreenAdapter
+        let pane = adapter.terminalScreenPresentationProjection.viewport.panes[0].id
+
+        let tooLarge = String(repeating: "a", count: HerdrConnection.maxInputBytes + 1)
+        let oversized = await adapter.sendPasteAwaitingCommandCompletion(tooLarge, to: pane)
+        XCTAssertFalse(oversized)
+        let elsewhere = await adapter.sendPasteAwaitingCommandCompletion("x", to: UUID())
+        XCTAssertFalse(elsewhere)
+        await session.bridge.serve(HerdrServerScript.surface(
+            projection: 1,
+            revision: 2,
+            lines: ["one two"],
+            panes: [
+                .init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true),
+                .init(id: "w1:p2", x: 4, width: 3, height: 1),
+            ],
+            popup: "popup-terminal"
+        ))
+        try await harness.waitUntil("the popup wasn't seen") { harness.model.layout?.hasPopup == true }
+        let underPopup = await adapter.sendPasteAwaitingCommandCompletion("x", to: pane)
+        XCTAssertFalse(underPopup)
+        harness.model.setSelected(false)
+        let hidden = await adapter.sendPasteAwaitingCommandCompletion("x", to: pane)
+        XCTAssertFalse(hidden)
+
+        XCTAssertNil(adapter.commandFailureEvent)
+        try await Task.sleep(for: .milliseconds(100))
+        let written = await session.bridge.writtenCount
+        for index in session.next..<written {
+            let write = try ClientWrite.decode(try await session.bridge.written(index))
+            XCTAssertNil(paneInput(write), "input that can't go was sent")
+        }
+    }
+
+    /// A paste whose connection ends before Herdr has it isn't sent, so the composer keeps the message.
+    func testAComposedMessageIsNotSentWhenTheConnectionEndsFirst() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        let adapter = harness.model.terminalScreenAdapter
+        let pane = adapter.terminalScreenPresentationProjection.viewport.panes[0].id
+
+        await session.bridge.stallWrites()
+        let paste = Task { await adapter.sendPasteAwaitingCommandCompletion("fix it", to: pane) }
+        await session.bridge.waitForStalledWrites(1)
+        await session.bridge.finishServing()
+        let pasted = await paste.value
+        XCTAssertFalse(pasted)
+    }
+
     /// A session shown with panes `w1:p1` and `w1:p2`, both drawn, its snapshot focusing `focusedPane`;
     /// returns its bridge and the index of the first write after the show. A test that moves the focus
     /// types into the other pane, which takes input only once it has drawn.
@@ -1092,6 +1204,10 @@ final class HerdrScreenModelTests: XCTestCase {
 
     private func paneInput(_ write: ClientWrite) -> [UInt8]? {
         if case .paneInput(let frame) = write { frame } else { nil }
+    }
+
+    private func ping(_ write: ClientWrite) -> String? {
+        if case .ping(let data) = write { data } else { nil }
     }
 
     private func paneFocus(_ write: ClientWrite) -> (id: String, paneID: String)? {

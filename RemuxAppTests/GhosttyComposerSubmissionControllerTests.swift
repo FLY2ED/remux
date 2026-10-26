@@ -291,7 +291,7 @@ final class GhosttyComposerSubmissionControllerTests: XCTestCase {
     }
 }
 
-private struct FailingComposerAttachmentTransferService: GhosttyAttachmentTransferService {
+struct FailingComposerAttachmentTransferService: GhosttyAttachmentTransferService {
     func transfer(
         _ job: GhosttyAttachmentTransferJob,
         progress: @escaping GhosttyAttachmentTransferProgressHandler
