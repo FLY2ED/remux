@@ -42,6 +42,7 @@ final class RemuxAppUITests: XCTestCase {
 
     private var app: XCUIApplication!
     private var acceptedExpectedLiveHostKey = false
+    private var startedLiveSession = false
     private var launchedLiveSSHApp = false
 
     override func setUpWithError() throws {
@@ -3614,7 +3615,8 @@ final class RemuxAppUITests: XCTestCase {
             if failedStatuses.firstMatch.exists {
                 // The host-key panel is a failed status, so it's checked once one is seen: a check made
                 // before can miss a panel that appears just after it.
-                if trustExpectedUnknownLiveHostKeyIfNeeded(expectedHostKey: expectedHostKey) {
+                if trustExpectedUnknownLiveHostKeyIfNeeded(expectedHostKey: expectedHostKey)
+                    || startLiveSessionIfNeeded() {
                     RunLoop.current.run(until: Date().addingTimeInterval(0.5))
                     continue
                 }
@@ -3633,6 +3635,17 @@ final class RemuxAppUITests: XCTestCase {
         }
 
         XCTFail("Timed out waiting for a live SSH terminal to become ready.")
+    }
+
+    /// A test's own session doesn't exist until the test starts it: its saved session opens as ended, and Restart
+    /// starts it, once.
+    private func startLiveSessionIfNeeded() -> Bool {
+        guard !startedLiveSession else { return false }
+        let restart = app.buttons["terminal.status.sessionEnded.restart"]
+        guard restart.exists else { return false }
+        restart.tap()
+        startedLiveSession = true
+        return true
     }
 
     private func trustExpectedUnknownLiveHostKeyIfNeeded(expectedHostKey: String? = nil) -> Bool {
