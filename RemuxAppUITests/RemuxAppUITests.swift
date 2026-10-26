@@ -3640,8 +3640,9 @@ final class RemuxAppUITests: XCTestCase {
     /// A test's own session doesn't exist until the test starts it: its saved session opens as ended, and Restart
     /// starts it, once.
     private func startLiveSessionIfNeeded() -> Bool {
-        guard !startedLiveSession else { return false }
-        let restart = app.buttons["terminal.status.sessionEnded.restart"]
+        guard !startedLiveSession, app.staticTexts["Session Ended"].exists else { return false }
+        // The panel's identifier covers its buttons, so the button is found by its title.
+        let restart = app.buttons["Restart"]
         guard restart.exists else { return false }
         restart.tap()
         startedLiveSession = true
