@@ -5107,7 +5107,8 @@ private func makeTestTerminalScreenModel(
     sessionInstanceID: UUID,
     transportFactory: @escaping TmuxScreenModel.TransportFactory,
     onRuntimeStateChange: @escaping (TerminalRuntimeStateUpdate) -> Void,
-    initialClientSize: TmuxSessionController.ClientSize?
+    initialClientSize: TmuxSessionController.ClientSize?,
+    sessionRuns _: @escaping TmuxTerminalSession.SessionLookup
 ) -> TmuxScreenModel {
     TmuxScreenModel(
         target: target,
@@ -5133,7 +5134,7 @@ private final class RecordingTerminalScreenModelFactory: @unchecked Sendable {
     private(set) var recordedUpdates: [TerminalRuntimeStateUpdate] = []
 
     var factory: RemuxRootModel.TerminalScreenModelFactory {
-        { target, sessionInstanceID, transportFactory, onRuntimeStateChange, initialClientSize in
+        { target, sessionInstanceID, transportFactory, onRuntimeStateChange, initialClientSize, _ in
             self.makeModel(
                 target: target,
                 sessionInstanceID: sessionInstanceID,

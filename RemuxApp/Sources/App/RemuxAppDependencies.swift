@@ -315,6 +315,7 @@ struct RemuxAppDependencies: Sendable {
             controlNoResponseTimeout: RemuxConnectionTimeouts.tmuxControlNoResponse,
             tmuxExecutable: target.server.tmuxExecutablePath ?? "tmux",
             sessionName: target.workspace.sessionName,
+            sessionOpening: target.opening,
             traceFlowID: traceFlowID,
             sshRootKey: RemuxSSHRootKey(target: target)
         )

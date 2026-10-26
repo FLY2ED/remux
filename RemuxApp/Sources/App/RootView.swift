@@ -538,6 +538,12 @@ private struct RemuxWorkspaceShell: View {
                     onReconnect: {
                         model.reconnectActiveSession(entry.id, source: .manualButton)
                     },
+                    onCloseSession: {
+                        model.disconnectActiveSession(entry.id)
+                    },
+                    onRestartSession: {
+                        model.reconnectActiveSession(entry.id, source: .restart)
+                    },
                     onUpdateCredentials: {
                         Task {
                             await model.beginCredentialRepair(for: entry.id)
@@ -788,6 +794,8 @@ private struct ActiveTerminalSessionView: View {
     let composer: GhosttyComposerModel
     let shortcutStore: ShortcutStore
     let onReconnect: () -> Void
+    let onCloseSession: () -> Void
+    let onRestartSession: () -> Void
     let onUpdateCredentials: () -> Void
     let onEditServer: () -> Void
     let onTrustHostKey: () -> Void
@@ -803,6 +811,8 @@ private struct ActiveTerminalSessionView: View {
         composer: GhosttyComposerModel,
         shortcutStore: ShortcutStore,
         onReconnect: @escaping () -> Void,
+        onCloseSession: @escaping () -> Void,
+        onRestartSession: @escaping () -> Void,
         onUpdateCredentials: @escaping () -> Void,
         onEditServer: @escaping () -> Void,
         onTrustHostKey: @escaping () -> Void,
@@ -815,6 +825,8 @@ private struct ActiveTerminalSessionView: View {
         self.composer = composer
         self.shortcutStore = shortcutStore
         self.onReconnect = onReconnect
+        self.onCloseSession = onCloseSession
+        self.onRestartSession = onRestartSession
         self.onUpdateCredentials = onUpdateCredentials
         self.onEditServer = onEditServer
         self.onTrustHostKey = onTrustHostKey
@@ -858,6 +870,8 @@ private struct ActiveTerminalSessionView: View {
             attachmentTransferServiceFactory: entry.attachmentTransferServiceFactory,
             onPreviewSelection: previewSelectionHandler,
             onReconnect: onReconnect,
+            onCloseSession: onCloseSession,
+            onRestartSession: onRestartSession,
             onShowSessions: onShowSessions,
             onShowLibrary: onShowLibrary,
             onUpdateCredentials: onUpdateCredentials,

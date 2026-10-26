@@ -198,6 +198,7 @@
 		98F06D0122031E7CF2983E09 /* ShortcutStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94DD2F30DD98DCF438F312FA /* ShortcutStoreTests.swift */; };
 		9A4566B0F3270AB498791E05 /* TerminalPaneRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D92116210ECB209AE34F18B /* TerminalPaneRenderer.swift */; };
 		9AE92F88C80E1E5758A9C342 /* RemuxActiveSessionCollection.swift in Sources */ = {isa = PBXBuildFile; fileRef = E683A3CF94359C176CCEA22A /* RemuxActiveSessionCollection.swift */; };
+		9BFEA4529F73EB078BDF37A5 /* TmuxTerminalSessionExitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 601E0ECCF425905CF379480D /* TmuxTerminalSessionExitTests.swift */; };
 		9C712FFD570281CAAA1F034C /* SSHPublicKeyInstallCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6571D859285B5A3938DC43B /* SSHPublicKeyInstallCoordinator.swift */; };
 		9C8A6153FD7153DF85AF353C /* herdr-14-input-A.s2c.bin in Resources */ = {isa = PBXBuildFile; fileRef = 0BAEE616FC7A13F707A56A06 /* herdr-14-input-A.s2c.bin */; };
 		9D4A57264269B97C768C6CA1 /* HerdrSurfaceDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A7B796DB1F72A4F6D1F1F88 /* HerdrSurfaceDecoderTests.swift */; };
@@ -475,6 +476,7 @@
 		5BE8D13A42F5D190C93DF02D /* SSHAuthResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHAuthResolverTests.swift; sourceTree = "<group>"; };
 		5CFAF9987924329CACA090BC /* HerdrSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HerdrSurface.swift; sourceTree = "<group>"; };
 		5EFEF4C2C61B013DA831F7D9 /* Shortcut.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Shortcut.swift; sourceTree = "<group>"; };
+		601E0ECCF425905CF379480D /* TmuxTerminalSessionExitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TmuxTerminalSessionExitTests.swift; sourceTree = "<group>"; };
 		603A62637F1E7C43FD9A1370 /* PanePreviewLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanePreviewLayoutTests.swift; sourceTree = "<group>"; };
 		6051890D165AEFC762DD5DF4 /* RemuxPreparedTransportCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemuxPreparedTransportCache.swift; sourceTree = "<group>"; };
 		60FE6CB3913B2DD433F57472 /* ShortcutExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutExecutor.swift; sourceTree = "<group>"; };
@@ -843,6 +845,7 @@
 				35267B5913ECA2D06DC5EE1B /* TmuxSessionDiscoveryTests.swift */,
 				FEDEA02EF430A8D0066B6B42 /* TmuxSessionLinkWriteFailureTests.swift */,
 				B1861094273B802BF30CB94A /* TmuxTerminalScreenAdapterTests.swift */,
+				601E0ECCF425905CF379480D /* TmuxTerminalSessionExitTests.swift */,
 				C18E95DAAAF9312AED56CC0F /* TmuxTerminalSessionShutdownDrainTests.swift */,
 				592AA53C09D889D5E3DB7EAD /* TmuxZoomOwnershipTests.swift */,
 				4F778523A4645EC556D77631 /* Fixtures */,
@@ -1641,6 +1644,7 @@
 				3DF5306E3D25CA58D87542C6 /* TmuxSessionDiscoveryTests.swift in Sources */,
 				947951F381AE95D318AE6FD8 /* TmuxSessionLinkWriteFailureTests.swift in Sources */,
 				55FCF706AF91DE6D03F5FAF6 /* TmuxTerminalScreenAdapterTests.swift in Sources */,
+				9BFEA4529F73EB078BDF37A5 /* TmuxTerminalSessionExitTests.swift in Sources */,
 				D5BC8B5AFF97FD9FDD27D04A /* TmuxTerminalSessionShutdownDrainTests.swift in Sources */,
 				FAF84442994D1E86A4A7CAC9 /* TmuxZoomOwnershipTests.swift in Sources */,
 			);

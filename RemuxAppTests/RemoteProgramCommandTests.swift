@@ -24,15 +24,22 @@ final class RemoteProgramCommandTests: XCTestCase {
     func testScriptContainsNoSingleQuote() {
         let commands = [
             SSHTmuxControlCommandBuilder.listSessionsCommand(tmuxExecutable: "tmux"),
-            SSHTmuxControlCommandBuilder.attachOrCreateControlSessionCommand(
+            SSHTmuxControlCommandBuilder.controlSessionCommand(
                 tmuxExecutable: "tmux",
                 sessionName: "main",
+                opening: .attach,
+                initialViewport: .default
+            ),
+            SSHTmuxControlCommandBuilder.controlSessionCommand(
+                tmuxExecutable: "tmux",
+                sessionName: "main",
+                opening: .create,
                 initialViewport: .default
             ),
             HerdrSessionDiscovery.listSessionsCommand(herdrExecutable: "herdr"),
             HerdrSSHBridge.command(herdrExecutable: "herdr", session: "default"),
         ]
-        XCTAssertEqual(commands.map { $0.filter { $0 == "'" }.count }, [4, 6, 4, 6])
+        XCTAssertEqual(commands.map { $0.filter { $0 == "'" }.count }, [4, 6, 6, 4, 6])
     }
 
     /// After the user's PATH: where Herdr's client looks for Herdr, mise's shims, MacPorts, Guix and Snap,

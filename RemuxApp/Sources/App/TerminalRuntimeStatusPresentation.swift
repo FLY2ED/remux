@@ -56,6 +56,10 @@ struct TerminalRuntimeStatusPresentation: Equatable, Sendable {
             "Auth Failed"
         case .verificationExpired:
             "Not Verified"
+        case .sessionEnded:
+            "Ended"
+        case .detachedElsewhere:
+            "Detached"
         case .serverUnreachable:
             "Unreachable"
         case .hostKey:

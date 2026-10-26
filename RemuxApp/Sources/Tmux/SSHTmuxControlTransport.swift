@@ -16,6 +16,7 @@ struct SSHTmuxControlConfiguration: Sendable {
     let sftpOperationTimeout: TimeAmount
     let tmuxExecutable: String
     let sessionName: String
+    let sessionOpening: SessionOpening
     let initialViewport: TmuxControlViewport
     let traceFlowID: String?
     let sshRootKey: RemuxSSHRootKey?
@@ -32,6 +33,7 @@ struct SSHTmuxControlConfiguration: Sendable {
         sftpOperationTimeout: TimeAmount = .seconds(15),
         tmuxExecutable: String = "tmux",
         sessionName: String,
+        sessionOpening: SessionOpening = .attach,
         initialViewport: TmuxControlViewport = .default,
         traceFlowID: String? = nil,
         sshRootKey: RemuxSSHRootKey? = nil
@@ -47,6 +49,7 @@ struct SSHTmuxControlConfiguration: Sendable {
         self.sftpOperationTimeout = sftpOperationTimeout
         self.tmuxExecutable = tmuxExecutable
         self.sessionName = sessionName
+        self.sessionOpening = sessionOpening
         self.initialViewport = initialViewport
         self.traceFlowID = traceFlowID
         self.sshRootKey = sshRootKey
@@ -580,9 +583,10 @@ actor SSHTmuxControlTransport: TmuxControlTransport, TmuxControlTransportLivenes
     }
 
     private func tmuxAttachCommand(viewport: TmuxControlViewport) -> String {
-        SSHTmuxControlCommandBuilder.attachOrCreateControlSessionCommand(
+        SSHTmuxControlCommandBuilder.controlSessionCommand(
             tmuxExecutable: configuration.tmuxExecutable,
             sessionName: configuration.sessionName,
+            opening: configuration.sessionOpening,
             initialViewport: viewport
         )
     }

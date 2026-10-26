@@ -43,6 +43,7 @@ struct ActiveTerminalSession: Identifiable, Equatable, Sendable {
 
     mutating func replaceRuntime(source: TerminalReconnectSource) {
         instanceID = UUID()
+        target.opening = source == .restart ? .create : .attach
         reconnectRuntime(source: source)
     }
 
@@ -418,7 +419,8 @@ final class RemuxRootModel: ObservableObject {
         UUID,
         @escaping TmuxScreenModel.TransportFactory,
         @escaping (TerminalRuntimeStateUpdate) -> Void,
-        TmuxSessionController.ClientSize?
+        TmuxSessionController.ClientSize?,
+        @escaping TmuxTerminalSession.SessionLookup
     ) -> TmuxScreenModel
 
     enum SetupMode: Equatable {
@@ -1337,7 +1339,8 @@ final class RemuxRootModel: ObservableObject {
                 activate(
                     server: server,
                     workspace: submission.workspace,
-                    sshAuth: sshAuth
+                    sshAuth: sshAuth,
+                    opening: .create
                 )
             } catch {
                 transitionToFailed(error)
@@ -1723,6 +1726,11 @@ final class RemuxRootModel: ObservableObject {
                     refreshSessions(for: serverID)
                 }
             }
+        case .applied(.disconnected(let reason)) where reason.kind == .sessionEnded:
+            // The server's list no longer has it.
+            if let session = RemuxActiveSessionCollection.session(update.workspaceID, in: activeSessions) {
+                refreshSessions(for: session.target.server.id)
+            }
         case .missingSession, .staleInstance, .applied,
              .automaticReconnectStarted, .automaticReconnectSkipped:
             break
@@ -1925,7 +1933,8 @@ final class RemuxRootModel: ObservableObject {
     private func activate(
         server: SavedServer,
         workspace: SavedWorkspace,
-        sshAuth: ResolvedSSHAuth
+        sshAuth: ResolvedSSHAuth,
+        opening: SessionOpening = .attach
     ) {
         let flow = sessionOpenFlowID(workspace.id)
         GhosttyRuntimeTrace.flowEvent(
@@ -1939,7 +1948,8 @@ final class RemuxRootModel: ObservableObject {
         )
         cancelLibrarySSHPrewarm()
         closePreparedTransports(forServerID: server.id, excludingWorkspaceID: workspace.id)
-        let target = target(server: server, workspace: workspace, sshAuth: sshAuth)
+        var target = target(server: server, workspace: workspace, sshAuth: sshAuth)
+        target.opening = opening
         let activeSession = ActiveTerminalSession(target: target)
         prepareTmuxTransport(for: target, reason: .activation)
         replaceTerminalRuntime(for: activeSession)
@@ -2009,7 +2019,8 @@ final class RemuxRootModel: ObservableObject {
             return reason.message
         case .hostKey:
             return "Remux could not verify the SSH host key."
-        case .verificationExpired, .transportIO, .profile, .remoteExit, .runtime, .userClosed, .unknown:
+        case .verificationExpired, .sessionEnded, .detachedElsewhere, .transportIO, .profile, .remoteExit, .runtime,
+             .userClosed, .unknown:
             return error.localizedDescription
         }
     }
@@ -2342,14 +2353,16 @@ final class RemuxRootModel: ObservableObject {
         sessionInstanceID: UUID,
         transportFactory: @escaping TmuxScreenModel.TransportFactory,
         onRuntimeStateChange: @escaping (TerminalRuntimeStateUpdate) -> Void,
-        initialClientSize: TmuxSessionController.ClientSize?
+        initialClientSize: TmuxSessionController.ClientSize?,
+        sessionRuns: @escaping TmuxTerminalSession.SessionLookup
     ) -> TmuxScreenModel {
         TmuxScreenModel(
             target: target,
             sessionInstanceID: sessionInstanceID,
             transportFactory: transportFactory,
             onRuntimeStateChange: onRuntimeStateChange,
-            initialClientSize: initialClientSize
+            initialClientSize: initialClientSize,
+            sessionRuns: sessionRuns
         )
     }
 
@@ -2375,12 +2388,19 @@ final class RemuxRootModel: ObservableObject {
             let transportFactory: TmuxScreenModel.TransportFactory = { [preparedTransportCoordinator] target in
                 preparedTransportCoordinator.claimOrCreateTransport(for: target)
             }
+            let target = session.target
+            // A list of its own, started after the exit: one already running could predate it.
+            let sessionRuns: TmuxTerminalSession.SessionLookup = { [dependencies] in
+                guard let listing = try? await dependencies.discoverTmuxSessions(for: target) else { return nil }
+                return listing.sessions.contains { $0.name == target.workspace.sessionName }
+            }
             runtime = .tmux(terminalScreenModelFactory(
                 session.target,
                 session.instanceID,
                 transportFactory,
                 onRuntimeStateChange,
-                carriedClientSize
+                carriedClientSize,
+                sessionRuns
             ))
         case .herdr:
             let target = session.target

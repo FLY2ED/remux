@@ -5,9 +5,12 @@ struct GhosttySurfaceStatusOverlay: View {
 
     let projection: GhosttyTerminalStatusOverlayProjection
     let loadingTitle: String
+    let sessionName: String
     /// The session's server, as Remux names it.
     let serverName: String
     let onReconnect: () -> Void
+    let onCloseSession: () -> Void
+    let onRestartSession: () -> Void
     let onUpdateCredentials: () -> Void
     let onEditServer: () -> Void
     let onCancel: () -> Void
@@ -65,7 +68,7 @@ struct GhosttySurfaceStatusOverlay: View {
                 .accessibilityIdentifier("terminal.status.ready")
 
         case .failed(_, let reason):
-            repairPanel(GhosttyRepairPanelContent(reason: reason, serverName: serverName))
+            repairPanel(GhosttyRepairPanelContent(reason: reason, sessionName: sessionName, serverName: serverName))
         }
     }
 
@@ -151,6 +154,8 @@ struct GhosttySurfaceStatusOverlay: View {
         case .updateCredentials: onUpdateCredentials
         case .retry, .reconnect: onReconnect
         case .editServer: onEditServer
+        case .close: onCloseSession
+        case .restart: onRestartSession
         }
     }
 }

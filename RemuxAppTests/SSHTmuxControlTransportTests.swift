@@ -1448,10 +1448,24 @@ final class SSHTmuxControlTransportTests: XCTestCase {
         XCTAssertNoThrow(try promise.futureResult.wait())
     }
 
-    func testControlSessionCommandDelegatesStartupToPOSIXShell() {
-        let command = SSHTmuxControlCommandBuilder.attachOrCreateControlSessionCommand(
+    /// Opening a saved session attaches to it by its exact name, so one that's gone isn't created again.
+    func testOpeningASessionAttachesByItsExactName() {
+        let command = SSHTmuxControlCommandBuilder.controlSessionCommand(
             tmuxExecutable: "tmux",
             sessionName: "base",
+            opening: .attach,
+            initialViewport: .default
+        )
+
+        XCTAssertTrue(command.contains(#"exec "$resolved" -u -C attach-session -t "=$session"'"#))
+        XCTAssertFalse(command.contains("new-session"))
+    }
+
+    func testControlSessionCommandDelegatesStartupToPOSIXShell() {
+        let command = SSHTmuxControlCommandBuilder.controlSessionCommand(
+            tmuxExecutable: "tmux",
+            sessionName: "base",
+            opening: .create,
             initialViewport: TmuxControlViewport(
                 columns: 45,
                 rows: 37,
@@ -1468,9 +1482,10 @@ final class SSHTmuxControlTransportTests: XCTestCase {
     func testControlSessionCommandKeepsValuesOutOfLoginShellSyntax() {
         let tmuxExecutable = "/home/owner's tools/tmux"
         let sessionName = "owner's bäse! back\\slash"
-        let command = SSHTmuxControlCommandBuilder.attachOrCreateControlSessionCommand(
+        let command = SSHTmuxControlCommandBuilder.controlSessionCommand(
             tmuxExecutable: tmuxExecutable,
             sessionName: sessionName,
+            opening: .attach,
             initialViewport: TmuxControlViewport(
                 columns: 120,
                 rows: 40,

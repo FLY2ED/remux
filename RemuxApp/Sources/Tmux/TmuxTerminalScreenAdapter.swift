@@ -1100,6 +1100,10 @@ extension TmuxSessionController.DetachReason {
                 kind: .runtime,
                 message: "tmux session sync failed"
             )
+        case .sessionEnded:
+            TerminalDisconnectReason(kind: .sessionEnded, message: "the session is gone from the server")
+        case .detachedElsewhere:
+            TerminalDisconnectReason(kind: .detachedElsewhere, message: "another client detached the session")
         }
     }
 }

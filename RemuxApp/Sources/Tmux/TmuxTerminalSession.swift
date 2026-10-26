@@ -21,6 +21,10 @@ final class TmuxTerminalSession: ObservableObject {
     private let paneViewTheme: () -> TerminalTheme
     /// The tmux path set in Edit Server, nil for Automatic: what a tmux that can't run says depends on it.
     private let tmuxPath: String?
+    /// Whether the server still runs this session: nil when it couldn't be asked.
+    typealias SessionLookup = @MainActor () async -> Bool?
+    private let sessionRuns: SessionLookup?
+    private var exitLookup: Task<Void, Never>?
 
     typealias PaneSurfaceCreator = @MainActor (
         ghostty_app_t,
@@ -82,6 +86,7 @@ final class TmuxTerminalSession: ObservableObject {
         baseSurfaceConfig: @escaping () -> ghostty_terminal_surface_config_s,
         paneViewTheme: @escaping () -> TerminalTheme,
         tmuxPath: String? = nil,
+        sessionRuns: SessionLookup? = nil,
         zoomOwner: TmuxZoomOwner? = nil,
         createPaneSurface: @escaping PaneSurfaceCreator = TmuxPaneSurface.create
     ) {
@@ -89,6 +94,7 @@ final class TmuxTerminalSession: ObservableObject {
         self.baseSurfaceConfig = baseSurfaceConfig
         self.paneViewTheme = paneViewTheme
         self.tmuxPath = tmuxPath
+        self.sessionRuns = sessionRuns
         self.createPaneSurface = createPaneSurface
 
         let relay = Relay()
@@ -197,6 +203,57 @@ final class TmuxTerminalSession: ObservableObject {
     // MARK: Native callbacks
 
     private func handleState(_ newState: TmuxSessionController.SessionState) {
+        // Once tmux has ended the client, what follows (the channel closing) adds nothing.
+        guard exitLookup == nil else { return }
+        if case .detached(let reason?) = newState,
+           let sessionRuns,
+           let lookup = Self.exitNeedingLookup(reason),
+           linkIsActive,
+           !isShutDown {
+            // tmux ends the client the same bare way whether the session ended or another client detached it,
+            // and refuses an attach to a session that's gone with an error; the server's list tells them apart.
+            // The screen keeps its last state until then.
+            linkIsActive = false
+            Task { await link.stop() }
+            exitLookup = Task { [weak self] in
+                let runs = await sessionRuns()
+                self?.finishExit(lookup.reading(runs: runs))
+            }
+            return
+        }
+        applyState(newState)
+    }
+
+    private func finishExit(_ reason: TmuxSessionController.DetachReason) {
+        guard !isShutDown else { return }
+        applyState(.detached(reason))
+    }
+
+    /// An end Remux didn't ask for, and what it means once the server has said whether the session runs.
+    private enum ExitLookup {
+        case exit
+        case failure(TmuxSessionController.DetachReason)
+
+        func reading(runs: Bool?) -> TmuxSessionController.DetachReason {
+            switch (self, runs) {
+            case (_, false?): .sessionEnded
+            case (.exit, true?): .detachedElsewhere
+            // The server couldn't be asked: the connection is gone too, and reconnecting finds out.
+            case (.exit, nil): .transportClosed
+            case (.failure(let reason), _): reason
+            }
+        }
+    }
+
+    private static func exitNeedingLookup(_ reason: TmuxSessionController.DetachReason) -> ExitLookup? {
+        switch reason {
+        case .serverExited: .exit
+        case .channelAborted: .failure(reason)
+        case .outOfMemory, .transportClosed, .sessionEnded, .detachedElsewhere: nil
+        }
+    }
+
+    private func applyState(_ newState: TmuxSessionController.SessionState) {
         state = newState
         switch newState {
         case .detached, .closed:
