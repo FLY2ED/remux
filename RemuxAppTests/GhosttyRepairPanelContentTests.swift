@@ -204,8 +204,8 @@ final class GhosttyRepairPanelContentTests: XCTestCase {
         let reason = TmuxSessionController.DetachReason.detachedElsewhere.terminalDisconnectReason
         let content = panel(reason)
 
-        XCTAssertEqual(content.title, "Disconnected")
-        XCTAssertEqual(content.message, "Another tmux client detached main.")
+        XCTAssertEqual(content.title, "Detached")
+        XCTAssertEqual(content.message, "Another tmux client detached Remux from main.")
         XCTAssertEqual(titles(content), ["Reconnect"])
         XCTAssertFalse(reason.allowsAutomaticReconnect)
     }

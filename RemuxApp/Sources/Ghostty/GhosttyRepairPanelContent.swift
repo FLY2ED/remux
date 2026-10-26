@@ -101,8 +101,8 @@ struct GhosttyRepairPanelContent: Equatable {
                 ),
             ]
         case .detachedElsewhere:
-            title = "Disconnected"
-            message = "Another tmux client detached \(sessionName)."
+            title = "Detached"
+            message = "Another tmux client detached Remux from \(sessionName)."
             actions = [Self.reconnect]
         case .remoteExit:
             title = "Disconnected"
