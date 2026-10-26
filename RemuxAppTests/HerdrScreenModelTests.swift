@@ -1065,6 +1065,66 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(answered, index, "an older waiting tap was sent")
     }
 
+    /// As in Herdr's client, a tap Herdr answers as no longer applying, because the pane changed
+    /// meanwhile, shows no notice. A refused tap does, but not again while the same refusal is on screen.
+    /// Each tap goes out only once the one before it is answered, so a sent tap means its predecessor's
+    /// answer was handled.
+    func testAFocusFailureShowsANoticeOnlyWhenItMeansSomething() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let other = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.panes.map(\.id).last)
+
+        XCTAssertEqual(adapter.focusPane(other), .queued)
+        let stale = try await nextWrite(session.bridge, from: &index, paneFocus)
+        XCTAssertEqual(adapter.focusPane(other), .queued)
+        await session.bridge.serve(HerdrConnectionTests.reply(id: stale.id, error: ("stale_target", "the pane moved")))
+        let refused = try await nextWrite(session.bridge, from: &index, paneFocus)
+        XCTAssertNil(adapter.commandFailureEvent, "a tap on a pane that changed was reported")
+
+        XCTAssertEqual(adapter.focusPane(other), .queued)
+        await session.bridge.serve(HerdrConnectionTests.reply(id: refused.id, error: ("pane_not_found", "pane not found")))
+        let repeated = try await nextWrite(session.bridge, from: &index, paneFocus)
+        XCTAssertEqual(adapter.commandFailureEvent?.message, "Herdr: select pane failed")
+        let shown = adapter.commandFailureEvent?.token
+
+        XCTAssertEqual(adapter.focusPane(other), .queued)
+        await session.bridge.serve(HerdrConnectionTests.reply(id: repeated.id, error: ("pane_not_found", "pane not found")))
+        let last = try await nextWrite(session.bridge, from: &index, paneFocus)
+        XCTAssertEqual(adapter.commandFailureEvent?.token, shown, "the same refusal was shown again while on screen")
+        await session.bridge.serve(HerdrConnectionTests.reply(id: last.id, json: #"{"type":"ok"}"#))
+    }
+
+    /// A tap Herdr doesn't answer in time says so once; another timeout is shown only after a tap has
+    /// worked, as Herdr's client clears its timeout notice on success.
+    func testAFocusTimeoutIsShownOnceUntilAFocusWorks() async throws {
+        var timing = HerdrConnection.Timing()
+        timing.command = .milliseconds(200)
+        let harness = await makeHarness(timing: timing)
+        let session = try await shownSession(harness)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let other = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.panes.map(\.id).last)
+
+        XCTAssertEqual(adapter.focusPane(other), .queued)
+        _ = try await nextWrite(session.bridge, from: &index, paneFocus)
+        XCTAssertEqual(adapter.focusPane(other), .queued)
+        _ = try await nextWrite(session.bridge, from: &index, paneFocus)
+        let first = adapter.commandFailureEvent?.token
+        XCTAssertNotNil(first, "the timeout wasn't shown")
+
+        XCTAssertEqual(adapter.focusPane(other), .queued)
+        let worked = try await nextWrite(session.bridge, from: &index, paneFocus)
+        XCTAssertEqual(adapter.commandFailureEvent?.token, first, "a second timeout was shown")
+        XCTAssertEqual(adapter.focusPane(other), .queued)
+        await session.bridge.serve(HerdrConnectionTests.reply(id: worked.id, json: #"{"type":"ok"}"#))
+        _ = try await nextWrite(session.bridge, from: &index, paneFocus)
+        try await harness.waitUntil("a timeout after a tap that worked wasn't shown") {
+            adapter.commandFailureEvent?.token != first
+        }
+    }
+
     /// Once Herdr reports that the focused pane asks for every key, non-ASCII text goes to it as a commit.
     func testAReportAllPaneGetsNonASCIITextAsACommit() async throws {
         let harness = await makeHarness()
@@ -1101,6 +1161,23 @@ final class HerdrScreenModelTests: XCTestCase {
         await session.bridge.serve(HerdrServerScript.inputRefused("Paste rejected"))
         try await harness.waitUntil("the refusal wasn't shown") { adapter.commandFailureEvent?.token != firstToken }
         XCTAssertEqual(adapter.commandFailureEvent?.message, "Herdr: input failed")
+    }
+
+    /// Herdr's refusal of input is shown for each new reason, but not again while the same refusal is on
+    /// screen, as Herdr's client repeats a notice only once the last one is gone.
+    func testARepeatedInputRefusalIsNotShownAgainWhileOnScreen() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        let adapter = harness.model.terminalScreenAdapter
+
+        await session.bridge.serve(HerdrServerScript.inputRefused("paste too large"))
+        try await harness.waitUntil("the refusal wasn't shown") { adapter.commandFailureEvent != nil }
+        let first = try XCTUnwrap(adapter.commandFailureEvent?.token)
+        await session.bridge.serve(HerdrServerScript.inputRefused("paste too large"))
+        await session.bridge.serve(HerdrServerScript.inputRefused("pane closed"))
+        try await harness.waitUntil("the new reason wasn't shown") { adapter.commandFailureEvent?.token != first }
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(adapter.commandFailureEvent?.token, first &+ 1, "the same refusal was shown again")
     }
 
     // MARK: - Composer

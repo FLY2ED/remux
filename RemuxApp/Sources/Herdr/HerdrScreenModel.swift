@@ -181,6 +181,7 @@ final class HerdrScreenModel {
     private var scrollPointers: [String: CGPoint] = [:]
     private var wheelRemainders: [String: Double] = [:]
     private var presentationFailures: [String: TerminalDisconnectReason] = [:]
+    private var notices = HerdrNoticePolicy(visibleFor: GhosttyTerminalCommandFailureNotice.duration)
     private var creatingTerminals: Set<ObjectIdentifier> = []
     /// Ghostty gives a terminal one renderer at a time, so a replacement waits for these to close.
     private var closingTerminals: Set<ObjectIdentifier> = []
@@ -506,8 +507,14 @@ final class HerdrScreenModel {
     private func focusAnswered(attempt: Attempt, connection: HerdrConnection, failure: Error?) {
         attempt.focusInFlight = false
         guard isCurrent(attempt), !attempt.ended else { return }
-        if let failure, (failure as? HerdrCommandError) != .connectionEnded {
-            terminalScreenAdapter.presentFailure(Self.focusFailureLabel)
+        if let failure {
+            let error = failure as? HerdrCommandError
+                ?? .failed(code: "invalid_response", message: failure.localizedDescription)
+            if notices.shows(Self.paneFocusMethod, failedWith: error, bootID: layout?.bootID) {
+                terminalScreenAdapter.presentFailure(Self.focusFailureLabel)
+            }
+        } else {
+            notices.succeeded(Self.paneFocusMethod, bootID: layout?.bootID)
         }
         if let next = attempt.waitingFocus {
             attempt.waitingFocus = nil
@@ -578,6 +585,14 @@ final class HerdrScreenModel {
 
     private func inputFailed(_ attemptID: UInt64) {
         guard let attempt, attempt.id == attemptID, isCurrent(attempt), !attempt.ended else { return }
+        terminalScreenAdapter.presentFailure(Self.inputFailureLabel)
+    }
+
+    /// Herdr refused input, with its reason; the same refusal isn't repeated while it is on screen.
+    private func inputRefused(_ attemptID: UInt64, message: String) {
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt), !attempt.ended,
+              notices.showsRefusedInput(message, bootID: layout?.bootID)
+        else { return }
         terminalScreenAdapter.presentFailure(Self.inputFailureLabel)
     }
 
@@ -754,8 +769,8 @@ final class HerdrScreenModel {
                 await feed.receive(output)
             case .ended(let error):
                 await model.connectionEnded(attemptID, error)
-            case .inputRefused:
-                Task { @MainActor in model.inputFailed(attemptID) }
+            case .inputRefused(let message):
+                Task { @MainActor in model.inputRefused(attemptID, message: message) }
             case .keyboardReportAll(let enabled):
                 Task { @MainActor in model.keyboardReportAllChanged(attemptID, enabled) }
             case .bell, .notification, .clipboard:

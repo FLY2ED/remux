@@ -29,6 +29,9 @@ struct GhosttyTerminalCommandFailureEvent: Equatable {
 /// few seconds, until a newer failure replaces it.
 @MainActor
 final class GhosttyTerminalCommandFailureNotice {
+    /// How long a notice stays on screen.
+    nonisolated static let duration: Duration = .seconds(4)
+
     private(set) var event: GhosttyTerminalCommandFailureEvent?
     private(set) var message: String?
     private let onChange: () -> Void
@@ -43,7 +46,7 @@ final class GhosttyTerminalCommandFailureNotice {
         self.message = message
         onChange()
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(4))
+            try? await Task.sleep(for: Self.duration)
             guard let self, self.event?.token == token else { return }
             self.message = nil
             self.onChange()
