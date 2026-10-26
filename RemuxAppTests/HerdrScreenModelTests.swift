@@ -1178,7 +1178,7 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertFalse(elsewhere)
         await session.bridge.serve(HerdrServerScript.surface(
             projection: 1,
-            revision: 2,
+            revision: 3,
             lines: ["one two"],
             panes: [
                 .init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true),
