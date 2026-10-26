@@ -248,6 +248,67 @@ final class HerdrScreenModelTests: XCTestCase {
         try await harness.waitUntil("the connection wasn't closed") { await bridge.isClosed }
     }
 
+    /// Shown again, the session keeps its last frame and reads as connected, but takes no input until
+    /// the show completes: Herdr's answer alone doesn't, a frame Herdr sends after it does, as Herdr's
+    /// client freezes input while a show is in progress.
+    func testAShownAgainSessionTakesInputOnlyOnceTheShowCompletes() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+
+        harness.model.setSelected(false)
+        harness.model.setSelected(true)
+        let hide = try await harness.nextSurfaceSet(session.bridge, from: &index)
+        let show = try await harness.nextSurfaceSet(session.bridge, from: &index)
+        XCTAssertEqual([hide.active, show.active], [false, true])
+        XCTAssertEqual(harness.model.presentation(ofPane: "w1:p1"), .ready, "the last frame left the screen")
+        XCTAssertEqual(harness.states.last, .connected)
+        XCTAssertFalse(adapter.terminalInteractionProjection.isInputAvailable)
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("x"), .transportUnavailable)
+
+        await session.bridge.serve(HerdrServerScript.surfaceSetReply(id: hide.id, active: false))
+        await session.bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(harness.model.isInputAvailable, "Herdr's answer completed the show without a frame")
+
+        await session.bridge.serve(try harness.shownSurface(
+            projection: 1,
+            revision: 3,
+            lines: ["one two"],
+            panes: [
+                .init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true),
+                .init(id: "w1:p2", x: 4, width: 3, height: 1),
+            ]
+        ))
+        try await harness.waitUntil("input wasn't offered once the show's frame came") {
+            adapter.terminalInteractionProjection.isInputAvailable
+        }
+        XCTAssertEqual(harness.states.last, .connected)
+    }
+
+    /// A show Herdr answers without sending a frame in time is rolled back: the connection ends, as for
+    /// a show Herdr doesn't answer.
+    func testAShowWithoutAFrameInTimeEndsTheConnection() async throws {
+        var timing = HerdrConnection.Timing()
+        timing.activation = .milliseconds(300)
+        let harness = await makeHarness(timing: timing)
+        let bridge = try await harness.bridge()
+        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        harness.setScreenSize()
+        harness.model.setSelected(true)
+        var index = 0
+        let show = try await harness.nextSurfaceSet(bridge, from: &index)
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+
+        try await harness.waitUntil("the show that didn't complete wasn't rolled back") {
+            harness.states.last?.disconnectedReason != nil
+        }
+        XCTAssertEqual(harness.states.last?.disconnectedReason?.kind, .transportIO)
+        XCTAssertEqual(harness.states.last?.disconnectedReason?.message, "Herdr didn't show the session in time.")
+        XCTAssertTrue(harness.model.isDisconnected)
+    }
+
     // MARK: - Panes
 
     /// Each pane with a text area gets a renderer showing its cells; the tab is the screen's one
@@ -528,21 +589,22 @@ final class HerdrScreenModelTests: XCTestCase {
     func testAReadySessionOffersInput() async throws {
         let harness = await makeHarness()
         let bridge = try await harness.bridge()
+        let panes: [HerdrServerScript.Pane] = [.init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true)]
         await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
-        await bridge.serve(HerdrServerScript.surface(
-            projection: 1,
-            revision: 1,
-            lines: ["one"],
-            panes: [.init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true)]
-        ))
+        await bridge.serve(HerdrServerScript.surface(projection: 1, revision: 1, lines: ["one"], panes: panes))
         harness.setScreenSize()
         harness.model.setSelected(true)
+        var index = 0
+        let show = try await harness.nextSurfaceSet(bridge, from: &index)
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        await bridge.serve(try harness.shownSurface(projection: 1, revision: 2, lines: ["one"], panes: panes))
         try await harness.waitUntil("the pane's renderer wasn't created") {
             harness.model.paneSurface("w1:p1") != nil
         }
         showInWindow(harness, panes: ["w1:p1"])
 
         try await harness.waitUntil("the session wasn't ready") { harness.states.last == .connected }
+        try await harness.waitUntil("input wasn't offered") { harness.model.isInputAvailable }
         let adapter = harness.model.terminalScreenAdapter
         // The screen reads input availability from both projections.
         for interaction in [adapter.terminalInteractionProjection, adapter.terminalScreenPresentationProjection.interaction] {
@@ -609,11 +671,22 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertFalse(adapter.terminalInteractionProjection.isInputAvailable)
 
         harness.model.setSelected(true)
+        var index = 0
+        let show = try await harness.nextSurfaceSet(bridge, from: &index)
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        await bridge.serve(try harness.shownSurface(
+            projection: 1,
+            revision: 2,
+            lines: ["one"],
+            panes: [.init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true)]
+        ))
         try await harness.waitUntil("the shown pane didn't draw") {
             harness.model.presentation(ofPane: "w1:p1") == .ready
         }
         XCTAssertEqual(harness.states.last, .connected)
-        XCTAssertTrue(adapter.terminalInteractionProjection.isInputAvailable)
+        try await harness.waitUntil("input wasn't offered once the show completed") {
+            adapter.terminalInteractionProjection.isInputAvailable
+        }
     }
 
     /// While shown, a new screen size goes to Herdr at once; a hidden session gets it with its show.
@@ -917,6 +990,12 @@ final class HerdrScreenModelTests: XCTestCase {
         var index = 0
         let show = try await harness.nextSurfaceSet(bridge, from: &index)
         await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        await bridge.serve(try harness.shownSurface(
+            projection: 1,
+            revision: 2,
+            lines: ["one"],
+            panes: [.init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true)]
+        ))
         try await harness.waitUntil("input wasn't offered once shown") {
             adapter.terminalInteractionProjection.isInputAvailable
         }
@@ -1161,7 +1240,7 @@ final class HerdrScreenModelTests: XCTestCase {
                 ]
             ))
         }
-        await serve(2, history: 40)
+        await serve(3, history: 40)
         try await harness.waitUntil("the scrolling didn't reach the panes") {
             lookup.managedSurface(for: ids[0])?.scrollRoute == .remoteHistory
                 && lookup.managedSurface(for: ids[1])?.scrollRoute == .mouseReport
@@ -1171,7 +1250,7 @@ final class HerdrScreenModelTests: XCTestCase {
 
         var screenChanges = 0
         let watch = adapter.objectWillChange.sink { screenChanges += 1 }
-        await serve(3, history: 41)
+        await serve(4, history: 41)
         try await harness.waitUntil("the grown history didn't reach the pane") {
             history.scrollState.total == 42
         }
@@ -1305,27 +1384,24 @@ final class HerdrScreenModelTests: XCTestCase {
         await bridge.serve(
             try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1, focusedPane: focusedPane)
         )
-        await bridge.serve(HerdrServerScript.surface(
-            projection: 1,
-            revision: 1,
-            lines: ["one two"],
-            panes: [
-                .init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true),
-                .init(id: "w1:p2", x: 4, width: 3, height: 1),
-            ]
-        ))
+        let panes: [HerdrServerScript.Pane] = [
+            .init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true),
+            .init(id: "w1:p2", x: 4, width: 3, height: 1),
+        ]
+        await bridge.serve(HerdrServerScript.surface(projection: 1, revision: 1, lines: ["one two"], panes: panes))
         harness.setScreenSize()
         harness.model.setSelected(true)
         var index = 0
         let show = try await harness.nextSurfaceSet(bridge, from: &index)
         await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        await bridge.serve(try harness.shownSurface(projection: 1, revision: 2, lines: ["one two"], panes: panes))
         try await harness.waitUntil("the panes' renderers weren't created") {
             harness.model.paneSurface("w1:p1") != nil && harness.model.paneSurface("w1:p2") != nil
         }
-        let panes = ["w1:p1", "w1:p2"]
-        showInWindow(harness, panes: panes)
+        let paneIDs = panes.map(\.id)
+        showInWindow(harness, panes: paneIDs)
         try await harness.waitUntil("the panes didn't draw") {
-            panes.allSatisfy { harness.model.presentation(ofPane: $0) == .ready }
+            paneIDs.allSatisfy { harness.model.presentation(ofPane: $0) == .ready }
         }
         try await harness.waitUntil("input wasn't offered") { harness.model.isInputAvailable }
         return (bridge, index)

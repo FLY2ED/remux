@@ -57,6 +57,9 @@ enum HerdrEngineUpdate: Sendable {
     /// A surface Remux can't index came over `connection`. Nothing more of it is painted; the owner
     /// ends that connection.
     case failed(HerdrConnectionError, connection: UInt64)
+    /// The show `request` on `connection` completed: a frame that arrived after it, at or after the floor
+    /// Herdr acknowledged and at the requested size, is painted. Follows that frame's layout.
+    case activated(request: UInt64, connection: UInt64)
 }
 
 /// One connection's way into the engine. Once a later connection begins, this one's events are
@@ -71,6 +74,22 @@ struct HerdrEngineFeed: Sendable {
 
     func receive(_ output: HerdrSurfaceDecoder.Output) async {
         await engine.receive(output, connection: connection)
+    }
+
+    func beginActivation(request: UInt64, columns: UInt16, rows: UInt16) async {
+        await engine.beginActivation(request: request, columns: columns, rows: rows, connection: connection)
+    }
+
+    func acknowledgeActivation(request: UInt64, floor: UInt64) async {
+        await engine.acknowledgeActivation(request: request, floor: floor, connection: connection)
+    }
+
+    func resizeActivation(columns: UInt16, rows: UInt16) async {
+        await engine.resizeActivation(columns: columns, rows: rows, connection: connection)
+    }
+
+    func endActivation() async {
+        await engine.endActivation(connection: connection)
     }
 }
 
@@ -105,6 +124,18 @@ actor HerdrTerminalEngine {
         let surfaceRevision: UInt64
     }
 
+    /// A show in progress, as Herdr's client tracks one (`activation/model.rs`): only frames painted
+    /// after it began count, so the last frame from before a hide never completes it.
+    private struct Activation {
+        let request: UInt64
+        var columns: UInt16
+        var rows: UInt16
+        /// The projection revision Herdr's acknowledgement returned, once it arrives.
+        var floor: UInt64?
+        /// The newest frame painted since the activation began, or since the size last changed.
+        var painted: (projectionRevision: UInt64, columns: UInt16, rows: UInt16)?
+    }
+
     /// Makes a pane's producer for a terminal of the given columns and rows.
     typealias ProducerFactory = @Sendable (_ columns: UInt16, _ rows: UInt16) throws -> any HerdrPaneProducing
 
@@ -127,6 +158,7 @@ actor HerdrTerminalEngine {
     private var failedPaneIDs: Set<String> = []
     private var bootID: String?
     private var paintedSurface: PaintedSurface?
+    private var activation: Activation?
     private var layout: HerdrPaneLayout?
     private var paneScrolls: [String: HerdrPaneScroll] = [:]
     private var cellWidthPx: UInt32
@@ -155,8 +187,48 @@ actor HerdrTerminalEngine {
         if state == .failed { state = .running }
         presentation = HerdrPresentation()
         paintedSurface = nil
+        activation = nil
         failedPaneIDs.removeAll()
         return HerdrEngineFeed(engine: self, connection: connection)
+    }
+
+    // MARK: - Showing
+
+    /// A show for `columns` x `rows` is about to go out. Herdr sends no frames to a hidden session, so
+    /// every frame painted from here on answers this show or a later one.
+    fileprivate func beginActivation(request: UInt64, columns: UInt16, rows: UInt16, connection: UInt64) {
+        guard state == .running, connection == self.connection else { return }
+        activation = Activation(request: request, columns: max(columns, 1), rows: max(rows, 1))
+    }
+
+    /// Herdr's answer to the show: its projection revision, which a frame completing it must reach.
+    fileprivate func acknowledgeActivation(request: UInt64, floor: UInt64, connection: UInt64) {
+        guard state == .running, connection == self.connection, activation?.request == request else { return }
+        activation?.floor = floor
+        completeActivationIfPainted()
+    }
+
+    /// The screen's size changed while the show is in progress: only a frame at the new size completes
+    /// it, as Herdr's client drops its evidence on a resize.
+    fileprivate func resizeActivation(columns: UInt16, rows: UInt16, connection: UInt64) {
+        guard connection == self.connection, activation != nil else { return }
+        activation?.columns = max(columns, 1)
+        activation?.rows = max(rows, 1)
+        activation?.painted = nil
+    }
+
+    fileprivate func endActivation(connection: UInt64) {
+        guard connection == self.connection else { return }
+        activation = nil
+    }
+
+    private func completeActivationIfPainted() {
+        guard let activation, let floor = activation.floor, let painted = activation.painted,
+              painted.projectionRevision >= floor,
+              painted.columns == activation.columns, painted.rows == activation.rows
+        else { return }
+        self.activation = nil
+        continuation.yield(.activated(request: activation.request, connection: connection))
     }
 
     fileprivate func receive(_ snapshot: HerdrSnapshot, connection: UInt64) {
@@ -243,6 +315,11 @@ actor HerdrTerminalEngine {
         failedPaneIDs.formIntersection(listed)
         publishLayout(of: surface, snapshot: snapshot)
         publishScroll(of: surface)
+        if activation != nil {
+            // Counted even when no cell changed: the frame is the screen Herdr shows now.
+            activation?.painted = (surface.projectionRevision, surface.frame.width, surface.frame.height)
+            completeActivationIfPainted()
+        }
     }
 
     private func paint(_ next: HerdrPanePainter.Painted, paneID: String) {
