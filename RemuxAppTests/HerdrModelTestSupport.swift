@@ -132,34 +132,22 @@ enum HerdrServerScript {
         value.map { #""\#($0)""# } ?? "null"
     }
 
-    /// A full surface of the given lines, all of one width, with every pane's text area on row 0 down.
+    /// A full surface of the given lines, all of one width, with every pane's text area on row 0 down,
+    /// and a one-cell popup for the terminal `popup` names, if any.
     static func surface(
         boot: String = "boot",
         projection: UInt64,
         revision: UInt64,
         lines: [String],
-        panes: [Pane]
+        panes: [Pane],
+        popup: String? = nil
     ) -> [UInt8] {
-        let width = lines.first?.count ?? 0
-        precondition(lines.allSatisfy { $0.count == width })
         var writer = HerdrWireWriter()
         writer.variant(13)
         writer.string(boot)
         writer.u64(projection)
         writer.u64(revision)
-        writer.array(Array(lines.joined())) { writer, character in
-            writer.string(String(character))
-            writer.u32(0)
-            writer.u32(0)
-            writer.u16(0)
-            writer.bool(false)
-            writer.optional(nil as UInt32?) { $0.u32($1) }
-        }
-        writer.u16(UInt16(width))
-        writer.u16(UInt16(lines.count))
-        writer.optional(nil as UInt8?) { $0.u8($1) }
-        writer.array([String]()) { $0.string($1) }
-        writer.byteArray([])
+        frame(lines, to: &writer)
         writer.array(panes) { writer, pane in
             writer.string(pane.id)
             writer.u64(1)
@@ -179,11 +167,39 @@ enum HerdrServerScript {
             writer.u32(0)
         }
         writer.array([UInt8]()) { $0.u8($1) }
-        writer.optional(nil as UInt8?) { $0.u8($1) }
+        writer.optional(popup) { writer, terminalID in
+            writer.string(terminalID)
+            writer.string("popup")
+            writer.optional(nil as UInt8?) { $0.u8($1) }
+            writer.optional(nil as UInt8?) { $0.u8($1) }
+            frame(["p"], to: &writer)
+            writer.bool(false)
+            writer.bool(false)
+            writer.u32(0)
+            writer.u32(0)
+        }
         for _ in 0..<3 {
             writer.array([UInt8]()) { $0.u8($1) }
         }
         return HerdrWire.frame(writer.bytes)
+    }
+
+    private static func frame(_ lines: [String], to writer: inout HerdrWireWriter) {
+        let width = lines.first?.count ?? 0
+        precondition(lines.allSatisfy { $0.count == width })
+        writer.array(Array(lines.joined())) { writer, character in
+            writer.string(String(character))
+            writer.u32(0)
+            writer.u32(0)
+            writer.u16(0)
+            writer.bool(false)
+            writer.optional(nil as UInt32?) { $0.u32($1) }
+        }
+        writer.u16(UInt16(width))
+        writer.u16(UInt16(lines.count))
+        writer.optional(nil as UInt8?) { $0.u8($1) }
+        writer.array([String]()) { $0.string($1) }
+        writer.byteArray([])
     }
 
     static func keyboardReportAll(_ enabled: Bool) -> [UInt8] {

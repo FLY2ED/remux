@@ -452,7 +452,8 @@ final class HerdrScreenModel {
     }
 
     private func sendAwaitingDelivery(_ events: [HerdrInputEvent], toPane paneID: String) async -> Bool {
-        guard let attempt = shownAttempt, presentation(ofPane: paneID) == .ready,
+        // Herdr drops pane input while a popup is open over the tab, and still answers the ping.
+        guard let attempt = shownAttempt, presentation(ofPane: paneID) == .ready, layout?.hasPopup == false,
               (try? HerdrConnection.checkLimits(events)) != nil
         else { return false }
         return await withCheckedContinuation { delivered in
