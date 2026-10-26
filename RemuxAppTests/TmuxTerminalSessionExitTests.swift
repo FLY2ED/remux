@@ -83,6 +83,40 @@ final class TmuxTerminalSessionExitTests: XCTestCase {
         withExtendedLifetime(runtime) {}
     }
 
+    /// tmux says why when it has a reason, as for a client too far behind its output; the session may still run,
+    /// and its reason is what happened.
+    func testAnExitWithTmuxsReasonKeepsIt() async throws {
+        let answer = PendingAnswer()
+        let (session, transport, runtime) = try await connectedSession(sessionRuns: { await answer.value() })
+
+        await transport.receive("%exit too far behind\n")
+        await transport.finishInput()
+
+        try await waitUntil { session.state == .detached(.serverExited("too far behind")) }
+        XCTAssertFalse(answer.isWaiting)
+        await session.shutdown()
+        withExtendedLifetime(runtime) {}
+    }
+
+    /// A server that stops answering after the exit doesn't leave the screen as it was.
+    func testALookupThatNeverAnswersEndsAsALostConnection() async throws {
+        let answer = PendingAnswer()
+        let (session, transport, runtime) = try await connectedSession(
+            sessionRuns: { await answer.value() },
+            exitLookupTimeout: .milliseconds(200)
+        )
+
+        await transport.receive("%exit\n")
+        await transport.finishInput()
+
+        try await waitUntil { session.state == .detached(.transportClosed) }
+        answer.resume(false)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(session.state, .detached(.transportClosed))
+        await session.shutdown()
+        withExtendedLifetime(runtime) {}
+    }
+
     func testAnAnswerAfterShutdownChangesNothing() async throws {
         let answer = PendingAnswer()
         let (session, transport, runtime) = try await connectedSession(sessionRuns: { await answer.value() })
@@ -103,7 +137,8 @@ final class TmuxTerminalSessionExitTests: XCTestCase {
 
     private func connectedSession(
         greeting: String = "%begin 1 1 0\n%end 1 1 0\n%session-changed $42 main\n",
-        sessionRuns: @escaping TmuxTerminalSession.SessionLookup
+        sessionRuns: @escaping TmuxTerminalSession.SessionLookup,
+        exitLookupTimeout: Duration = .seconds(10)
     ) async throws -> (TmuxTerminalSession, ExitTestTransport, GhosttyKitRuntime) {
         let runtime = try GhosttyKitRuntime()
         let transport = ExitTestTransport(greeting: greeting)
@@ -112,7 +147,8 @@ final class TmuxTerminalSessionExitTests: XCTestCase {
             transport: transport,
             baseSurfaceConfig: { runtime.makeTmuxBaseSurfaceConfig() },
             paneViewTheme: { .remuxDark },
-            sessionRuns: sessionRuns
+            sessionRuns: sessionRuns,
+            exitLookupTimeout: exitLookupTimeout
         )
         session.connect(viewport: .default)
         try await waitUntil { await transport.hasStarted }

@@ -2366,6 +2366,12 @@ final class RemuxRootModel: ObservableObject {
         )
     }
 
+    /// By the name tmux keeps for the session.
+    static func listing(_ listing: SessionListing, has sessionName: String) -> Bool {
+        let name = TmuxSessionName.kept(sessionName)
+        return listing.sessions.contains { $0.name == name }
+    }
+
     private func replaceTerminalRuntime(for session: ActiveTerminalSession) {
         let previous = terminalRuntimes.first(where: {
             $0.key.workspaceID == session.id
@@ -2392,7 +2398,7 @@ final class RemuxRootModel: ObservableObject {
             // A list of its own, started after the exit: one already running could predate it.
             let sessionRuns: TmuxTerminalSession.SessionLookup = { [dependencies] in
                 guard let listing = try? await dependencies.discoverTmuxSessions(for: target) else { return nil }
-                return listing.sessions.contains { $0.name == target.workspace.sessionName }
+                return Self.listing(listing, has: target.workspace.sessionName)
             }
             runtime = .tmux(terminalScreenModelFactory(
                 session.target,

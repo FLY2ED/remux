@@ -1461,6 +1461,20 @@ final class SSHTmuxControlTransportTests: XCTestCase {
         XCTAssertFalse(command.contains("new-session"))
     }
 
+    /// tmux keeps `work.api` as `work_api`; asking for `work.api` would find nothing, or a pane.
+    func testASessionIsAskedForByTheNameTmuxKeeps() {
+        let command = SSHTmuxControlCommandBuilder.controlSessionCommand(
+            tmuxExecutable: "tmux",
+            sessionName: "work.api:2",
+            opening: .attach,
+            initialViewport: .default
+        )
+
+        XCTAssertTrue(command.hasSuffix(" \(RemoteShellArgument.octalEncoded("work_api_2"))"))
+        XCTAssertEqual(TmuxSessionName.kept("main"), "main")
+        XCTAssertEqual(TmuxSessionName.kept("v1.2:dev"), "v1_2_dev")
+    }
+
     func testControlSessionCommandDelegatesStartupToPOSIXShell() {
         let command = SSHTmuxControlCommandBuilder.controlSessionCommand(
             tmuxExecutable: "tmux",

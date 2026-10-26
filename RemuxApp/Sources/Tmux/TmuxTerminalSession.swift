@@ -24,7 +24,11 @@ final class TmuxTerminalSession: ObservableObject {
     /// Whether the server still runs this session: nil when it couldn't be asked.
     typealias SessionLookup = @MainActor () async -> Bool?
     private let sessionRuns: SessionLookup?
-    private var exitLookup: Task<Void, Never>?
+    private let exitLookupTimeout: Duration
+    /// Once tmux has ended the client, what follows (the channel closing) adds nothing.
+    private var exitSeen = false
+    private var exitAnswered = false
+    private var exitLookups: [Task<Void, Never>] = []
 
     typealias PaneSurfaceCreator = @MainActor (
         ghostty_app_t,
@@ -87,6 +91,7 @@ final class TmuxTerminalSession: ObservableObject {
         paneViewTheme: @escaping () -> TerminalTheme,
         tmuxPath: String? = nil,
         sessionRuns: SessionLookup? = nil,
+        exitLookupTimeout: Duration = .seconds(10),
         zoomOwner: TmuxZoomOwner? = nil,
         createPaneSurface: @escaping PaneSurfaceCreator = TmuxPaneSurface.create
     ) {
@@ -95,6 +100,7 @@ final class TmuxTerminalSession: ObservableObject {
         self.paneViewTheme = paneViewTheme
         self.tmuxPath = tmuxPath
         self.sessionRuns = sessionRuns
+        self.exitLookupTimeout = exitLookupTimeout
         self.createPaneSurface = createPaneSurface
 
         let relay = Relay()
@@ -175,6 +181,7 @@ final class TmuxTerminalSession: ObservableObject {
     func shutdown() async {
         guard !isShutDown else { return }
         isShutDown = true
+        exitLookups.forEach { $0.cancel() }
         livePaneIDs.removeAll()
         pendingTerminalsByPaneID.removeAll()
 
@@ -203,8 +210,7 @@ final class TmuxTerminalSession: ObservableObject {
     // MARK: Native callbacks
 
     private func handleState(_ newState: TmuxSessionController.SessionState) {
-        // Once tmux has ended the client, what follows (the channel closing) adds nothing.
-        guard exitLookup == nil else { return }
+        guard !exitSeen else { return }
         if case .detached(let reason?) = newState,
            let sessionRuns,
            let lookup = Self.exitNeedingLookup(reason),
@@ -212,20 +218,30 @@ final class TmuxTerminalSession: ObservableObject {
            !isShutDown {
             // tmux ends the client the same bare way whether the session ended or another client detached it,
             // and refuses an attach to a session that's gone with an error; the server's list tells them apart.
-            // The screen keeps its last state until then.
+            // The screen keeps its last state until then, and no longer than the deadline.
+            exitSeen = true
             linkIsActive = false
             Task { await link.stop() }
-            exitLookup = Task { [weak self] in
-                let runs = await sessionRuns()
-                self?.finishExit(lookup.reading(runs: runs))
-            }
+            exitLookups = [
+                Task { [weak self] in
+                    let runs = await sessionRuns()
+                    self?.finishExit(lookup.reading(runs: runs))
+                },
+                Task { [weak self, timeout = exitLookupTimeout] in
+                    try? await Task.sleep(for: timeout)
+                    guard !Task.isCancelled else { return }
+                    self?.finishExit(lookup.reading(runs: nil))
+                },
+            ]
             return
         }
         applyState(newState)
     }
 
     private func finishExit(_ reason: TmuxSessionController.DetachReason) {
-        guard !isShutDown else { return }
+        guard !exitAnswered, !isShutDown else { return }
+        exitAnswered = true
+        exitLookups.forEach { $0.cancel() }
         applyState(.detached(reason))
     }
 
@@ -245,9 +261,11 @@ final class TmuxTerminalSession: ObservableObject {
         }
     }
 
+    /// An exit tmux gives a reason for (a client that fell too far behind) says what happened itself.
     private static func exitNeedingLookup(_ reason: TmuxSessionController.DetachReason) -> ExitLookup? {
         switch reason {
-        case .serverExited: .exit
+        case .serverExited(nil): .exit
+        case .serverExited: nil
         case .channelAborted: .failure(reason)
         case .outOfMemory, .transportClosed, .sessionEnded, .detachedElsewhere: nil
         }

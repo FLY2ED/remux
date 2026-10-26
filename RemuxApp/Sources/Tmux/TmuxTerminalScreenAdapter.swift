@@ -1080,11 +1080,8 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
 extension TmuxSessionController.DetachReason {
     var terminalDisconnectReason: TerminalDisconnectReason {
         switch self {
-        case .serverExited(let message):
-            TerminalDisconnectReason(
-                kind: .remoteExit,
-                message: message ?? "tmux server exited"
-            )
+        case .serverExited(let reason):
+            TerminalDisconnectReason(kind: .remoteExit, message: "tmux disconnected Remux.", detail: reason)
         case .transportClosed:
             TerminalDisconnectReason(
                 kind: .transportIO,
