@@ -1232,6 +1232,16 @@ final class HerdrScreenModelTests: XCTestCase {
             frame("w1:p1", [up]),
             frame("w1:p1", [down, down, down]),
         ])
+
+        // A cancelled gesture, as when the program's mouse mode changes, sends none of its travel.
+        XCTAssertEqual(travel(0.9, .began), .sent)
+        XCTAssertEqual(travel(0.5, .cancelled), .sent)
+        try await Task.sleep(for: .milliseconds(100))
+        let written = await session.bridge.writtenCount
+        for position in index..<written {
+            let write = try ClientWrite.decode(try await session.bridge.written(position))
+            XCTAssertNil(paneInput(write), "a cancelled gesture's travel was sent")
+        }
     }
 
     /// As in Herdr's client, scrolling another pane focuses it, and its steps go to it. A hidden session

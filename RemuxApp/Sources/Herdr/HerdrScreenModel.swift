@@ -523,9 +523,14 @@ final class HerdrScreenModel {
     /// in Herdr's client, scrolling another pane focuses it.
     func scroll(_ event: GhosttySurfaceMouseScrollEvent, inPane paneID: String) -> Bool {
         let momentum = event.mods.momentum
+        // A cancelled gesture, as when the program's mouse mode changes, sends none of its travel.
+        guard momentum != .cancelled else {
+            wheelRemainders[paneID] = nil
+            return true
+        }
         if momentum == .began { wheelRemainders[paneID] = 0 }
         defer {
-            if momentum == .ended || momentum == .cancelled { wheelRemainders[paneID] = nil }
+            if momentum == .ended { wheelRemainders[paneID] = nil }
         }
         guard let attempt = shownAttempt, let measurement, presentation(ofPane: paneID) == .ready,
               let pane = layout?.panes.first(where: { $0.paneID == paneID })
