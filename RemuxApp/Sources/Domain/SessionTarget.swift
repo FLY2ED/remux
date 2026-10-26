@@ -837,13 +837,16 @@ enum TmuxConnectionDraftValidator {
         var validation = TmuxConnectionDraftValidation.empty
         let sessionName = draft.sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        let savedName: String
         switch draft.backend {
         case .tmux:
             if sessionName.isEmpty {
                 validation.sessionName = "tmux session name is required."
             }
+            savedName = TmuxSessionName.kept(sessionName)
         case .herdr:
             validation.sessionName = herdrSessionNameProblem(sessionName)
+            savedName = sessionName
         }
 
         guard validation.isValid else {
@@ -856,11 +859,19 @@ enum TmuxConnectionDraftValidator {
                     id: existingWorkspaceID ?? UUID(),
                     serverID: serverID,
                     backend: draft.backend,
-                    sessionName: sessionName,
+                    sessionName: savedName,
                     lastOpenedAt: Date()
                 )
             )
         )
+    }
+}
+
+/// A session's name as tmux keeps it: tmux turns ':' and '.' into '_' when it names a session, so `work.api` is
+/// `work_api` on the server, and attaching by `work.api` would look for pane `api`.
+enum TmuxSessionName {
+    static func kept(_ name: String) -> String {
+        String(name.map { $0 == ":" || $0 == "." ? "_" : $0 })
     }
 }
 

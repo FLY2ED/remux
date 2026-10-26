@@ -2919,8 +2919,17 @@ struct ConnectionSetupView: View {
             field: .sessionName,
             validationMessage: sessionNameMessage,
             submitLabel: .go,
+            note: sessionNameNote,
             accessibilityIdentifier: "connection.session"
         )
+    }
+
+    /// tmux keeps a name with '.' or ':' with '_' in their place, and that's the name Remux saves.
+    private var sessionNameNote: FieldNote? {
+        guard draft.backend == .tmux else { return nil }
+        let name = draft.sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let kept = TmuxSessionName.kept(name)
+        return kept == name ? nil : FieldNote(text: "tmux will name it \(kept).")
     }
 
     private func passwordInputRow(validationMessage: String?) -> some View {

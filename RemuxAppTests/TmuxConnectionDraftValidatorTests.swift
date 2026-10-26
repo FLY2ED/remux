@@ -168,6 +168,32 @@ final class TmuxConnectionDraftValidatorTests: XCTestCase {
         XCTAssertEqual(submission.workspace.backend, .herdr)
     }
 
+    /// tmux turns '.' and ':' into '_' when it names a session, so the session is saved by that name; Herdr keeps
+    /// its own.
+    func testATmuxSessionIsSavedByTheNameTmuxKeeps() {
+        var draft = validServerDraft()
+        draft.sessionName = "work.api:2"
+        guard case .valid(let submission) = TmuxConnectionDraftValidator.validateWorkspace(
+            draft,
+            serverID: UUID(),
+            existingWorkspaceID: nil
+        ) else {
+            return XCTFail("a tmux name with a dot should be valid")
+        }
+        XCTAssertEqual(submission.workspace.sessionName, "work_api_2")
+
+        draft.backend = .herdr
+        draft.sessionName = "work.2"
+        guard case .valid(let herdr) = TmuxConnectionDraftValidator.validateWorkspace(
+            draft,
+            serverID: UUID(),
+            existingWorkspaceID: nil
+        ) else {
+            return XCTFail("a Herdr name with a dot should be valid")
+        }
+        XCTAssertEqual(herdr.workspace.sessionName, "work.2")
+    }
+
     /// The Herdr path follows the tmux path's rule, and empty means automatic.
     func testHerdrExecutablePathIsCheckedAndTrimmed() {
         var draft = validServerDraft()

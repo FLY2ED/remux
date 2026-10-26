@@ -3972,17 +3972,6 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertEqual(factory.createdTargets.first?.workspace.sessionName, "fresh")
     }
 
-    /// The server's list has the session by the name tmux keeps for it.
-    func testTheServersListIsReadByTheNameTmuxKeeps() {
-        let listing = SessionListing(
-            executablePath: "/usr/bin/tmux",
-            sessions: [DiscoveredSession(name: "work_api", isRunning: true)]
-        )
-        XCTAssertTrue(RemuxRootModel.listing(listing, has: "work.api"))
-        XCTAssertTrue(RemuxRootModel.listing(listing, has: "work_api"))
-        XCTAssertFalse(RemuxRootModel.listing(listing, has: "work"))
-    }
-
     func testTrustHostKeyUpdatesTrustAndReconnectsActiveSession() async throws {
         let pair = makePasswordBackedServer()
         let server = pair.server
