@@ -106,10 +106,12 @@ final class HerdrLiveConnectionTests: XCTestCase {
 
     /// Hidden and shown again, the session takes no input until Herdr's show completes, then takes it
     /// again: Herdr answers the show and sends a frame at the phone's size.
+    @MainActor
     func testAShownAgainSessionTakesInputOnceTheShowCompletesOnHerdr093() async throws {
         try await checkShownAgainSessionTakesInput(version: "0.9.3")
     }
 
+    @MainActor
     func testAShownAgainSessionTakesInputOnceTheShowCompletesOnHerdr095() async throws {
         try await checkShownAgainSessionTakesInput(version: "0.9.5")
     }
