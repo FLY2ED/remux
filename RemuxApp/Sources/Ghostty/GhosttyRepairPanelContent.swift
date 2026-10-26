@@ -10,6 +10,8 @@ struct GhosttyRepairPanelContent: Equatable {
             case retry
             case editServer
             case reconnect
+            case close
+            case restart
         }
 
         let kind: Kind
@@ -28,7 +30,7 @@ struct GhosttyRepairPanelContent: Equatable {
     let actions: [Action]
 
     /// `serverName` is the server's name in Remux.
-    init(reason: TerminalDisconnectReason?, serverName: String) {
+    init(reason: TerminalDisconnectReason?, sessionName: String, serverName: String) {
         detail = reason?.detail
         hostKey = reason?.hostKeyChallenge.flatMap(Self.hostKey)
 
@@ -80,6 +82,24 @@ struct GhosttyRepairPanelContent: Equatable {
             title = "\(backend.displayName) Unavailable"
             message = reason?.message ?? ""
             actions = [Self.retry(backend.rawValue), Self.editServer(backend.rawValue)]
+        case .sessionEnded:
+            title = "Session Ended"
+            message = "\(sessionName) is no longer running on \(serverName)."
+            actions = [
+                Action(
+                    kind: .close,
+                    title: "Close",
+                    systemImage: "xmark",
+                    accessibilityIdentifier: "terminal.status.sessionEnded.close",
+                    isPrimary: true
+                ),
+                Action(
+                    kind: .restart,
+                    title: "Restart",
+                    systemImage: "arrow.clockwise",
+                    accessibilityIdentifier: "terminal.status.sessionEnded.restart"
+                ),
+            ]
         case .remoteExit:
             title = "Disconnected"
             message = reason?.message ?? ""

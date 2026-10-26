@@ -29,6 +29,8 @@ final class TmuxSessionController: @unchecked Sendable {
         case channelAborted
         case outOfMemory
         case transportClosed
+        /// tmux refused to attach: the server doesn't have the session.
+        case sessionEnded
     }
 
     enum CloseReason: Equatable, Sendable {

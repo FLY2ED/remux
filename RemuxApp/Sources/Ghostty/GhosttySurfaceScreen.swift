@@ -96,6 +96,8 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
 #endif
 
     private let onReconnect: () -> Void
+    private let onCloseSession: () -> Void
+    private let onRestartSession: () -> Void
     private let onShowSessions: () -> Void
     private let onShowLibrary: () -> Void
     private let onUpdateCredentials: () -> Void
@@ -116,6 +118,8 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
         attachmentTransferServiceFactory: @escaping @Sendable () -> any GhosttyAttachmentTransferService,
         onPreviewSelection: ((UUID, TerminalPreviewCandidate) -> Void)? = nil,
         onReconnect: @escaping () -> Void,
+        onCloseSession: @escaping () -> Void,
+        onRestartSession: @escaping () -> Void,
         onShowSessions: @escaping () -> Void,
         onShowLibrary: @escaping () -> Void,
         onUpdateCredentials: @escaping () -> Void,
@@ -131,6 +135,8 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
         self.attachmentTransferServiceFactory = attachmentTransferServiceFactory
         self.onPreviewSelection = onPreviewSelection
         self.onReconnect = onReconnect
+        self.onCloseSession = onCloseSession
+        self.onRestartSession = onRestartSession
         self.onShowSessions = onShowSessions
         self.onShowLibrary = onShowLibrary
         self.onUpdateCredentials = onUpdateCredentials
@@ -336,8 +342,11 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
                         GhosttySurfaceStatusOverlay(
                             projection: screenProjection.statusOverlay,
                             loadingTitle: presentation.loadingTitle,
+                            sessionName: presentation.sessionName,
                             serverName: presentation.serverName,
                             onReconnect: onReconnect,
+                            onCloseSession: onCloseSession,
+                            onRestartSession: onRestartSession,
                             onUpdateCredentials: onUpdateCredentials,
                             onEditServer: onEditServer,
                             onCancel: onShowLibrary,

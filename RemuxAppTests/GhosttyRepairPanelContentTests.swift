@@ -8,7 +8,7 @@ final class GhosttyRepairPanelContentTests: XCTestCase {
     private static let server = SavedServer(displayName: "Lab", host: "lab.example.test", username: "builder")
 
     private func panel(_ reason: TerminalDisconnectReason?) -> GhosttyRepairPanelContent {
-        GhosttyRepairPanelContent(reason: reason, serverName: Self.server.displayName)
+        GhosttyRepairPanelContent(reason: reason, sessionName: "main", serverName: Self.server.displayName)
     }
 
     private func titles(_ content: GhosttyRepairPanelContent) -> [String] {
@@ -186,6 +186,33 @@ final class GhosttyRepairPanelContentTests: XCTestCase {
         XCTAssertEqual(content.title, "Disconnected")
         XCTAssertEqual(content.message, "The server closed the connection before Herdr started.")
         XCTAssertEqual(content.detail, "This account is currently not available.")
+    }
+
+    /// The session is gone from the server: close it, or start a new one with its name.
+    func testASessionThatEndedOffersCloseAndRestart() {
+        let content = panel(TmuxSessionController.DetachReason.sessionEnded.terminalDisconnectReason)
+
+        XCTAssertEqual(content.title, "Session Ended")
+        XCTAssertEqual(content.message, "main is no longer running on Lab.")
+        XCTAssertEqual(titles(content), ["Close", "Restart"])
+        XCTAssertEqual(content.actions.map(\.kind), [.close, .restart])
+        XCTAssertEqual(content.actions.first?.isPrimary, true)
+        XCTAssertFalse(TmuxSessionController.DetachReason.sessionEnded.terminalDisconnectReason.allowsAutomaticReconnect)
+    }
+
+    /// tmux ending the client is a lost connection: Remux reconnects, which attaches if the session is still
+    /// there.
+    func testTmuxEndingTheClientReconnects() {
+        for reason in [
+            TmuxSessionController.DetachReason.serverExited(nil),
+            .serverExited("too far behind"),
+            .serverExited("server exited unexpectedly"),
+        ] {
+            let disconnect = reason.terminalDisconnectReason
+            XCTAssertEqual(disconnect.kind, .transportIO, "\(reason)")
+            XCTAssertTrue(disconnect.allowsAutomaticReconnect, "\(reason)")
+            XCTAssertEqual(panel(disconnect).message, "The connection was lost.")
+        }
     }
 
     func testALostConnectionSaysSo() {

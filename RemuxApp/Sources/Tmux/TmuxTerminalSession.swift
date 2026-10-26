@@ -21,6 +21,7 @@ final class TmuxTerminalSession: ObservableObject {
     private let paneViewTheme: () -> TerminalTheme
     /// The tmux path set in Edit Server, nil for Automatic: what a tmux that can't run says depends on it.
     private let tmuxPath: String?
+    private var hasBeenReady = false
 
     typealias PaneSurfaceCreator = @MainActor (
         ghostty_app_t,
@@ -197,6 +198,19 @@ final class TmuxTerminalSession: ObservableObject {
     // MARK: Native callbacks
 
     private func handleState(_ newState: TmuxSessionController.SessionState) {
+        if case .ready = newState {
+            hasBeenReady = true
+        }
+        // tmux refuses an attach to a session it doesn't have before the session ever shows ("can't find
+        // session", or "no sessions" with no server); the control client reads that refusal as a failure.
+        if case .detached(.channelAborted) = newState, !hasBeenReady {
+            applyState(.detached(.sessionEnded))
+            return
+        }
+        applyState(newState)
+    }
+
+    private func applyState(_ newState: TmuxSessionController.SessionState) {
         state = newState
         switch newState {
         case .detached, .closed:

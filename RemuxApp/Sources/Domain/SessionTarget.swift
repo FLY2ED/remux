@@ -226,11 +226,21 @@ struct SavedWorkspace: Identifiable, Equatable, Codable, Sendable {
     }
 }
 
+/// How opening a session treats one that isn't there. Remux creates a session only when asked: New Session and
+/// Restart. Herdr creates a session on first use itself, so only tmux reads this.
+enum SessionOpening: Equatable, Sendable {
+    /// Attach to the session by its exact name; a session that's gone stays gone.
+    case attach
+    /// Attach to it, or create it when it isn't there.
+    case create
+}
+
 struct SessionTarget: Equatable, Sendable {
     let server: SavedServer
     let workspace: SavedWorkspace
     let sshAuth: ResolvedSSHAuth
     let terminalSettings: TerminalSettings
+    var opening: SessionOpening
 
     var locator: SessionLocator {
         workspace.locator
@@ -240,12 +250,14 @@ struct SessionTarget: Equatable, Sendable {
         server: SavedServer,
         workspace: SavedWorkspace,
         sshAuth: ResolvedSSHAuth,
-        terminalSettings: TerminalSettings = .default
+        terminalSettings: TerminalSettings = .default,
+        opening: SessionOpening = .attach
     ) {
         self.server = server
         self.workspace = workspace
         self.sshAuth = sshAuth
         self.terminalSettings = terminalSettings
+        self.opening = opening
     }
 }
 
@@ -283,6 +295,8 @@ struct TerminalDisconnectReason: Equatable, Sendable {
         case authentication
         /// Tailscale asked to verify the connection, and it wasn't verified in time.
         case verificationExpired
+        /// The session is gone from the server: it was ended or killed, or it never existed.
+        case sessionEnded
         case hostKey
         case profile
         /// The session's program isn't installed on the server, or can't be run there.
@@ -302,6 +316,8 @@ struct TerminalDisconnectReason: Equatable, Sendable {
                 "authentication"
             case .verificationExpired:
                 "verification_expired"
+            case .sessionEnded:
+                "session_ended"
             case .hostKey:
                 "host_key"
             case .profile:
@@ -347,6 +363,7 @@ struct TerminalDisconnectReason: Equatable, Sendable {
         case .serverUnreachable,
              .authentication,
              .verificationExpired,
+             .sessionEnded,
              .hostKey,
              .profile,
              .backendUnavailable,
@@ -364,12 +381,14 @@ enum TerminalReconnectSource: Equatable, Hashable, Sendable {
     case foreground
     case manualButton
     case transportLoss
+    /// Restart on an ended session: a new, empty one with its name.
+    case restart
 
     var isAutomatic: Bool {
         switch self {
         case .foreground, .transportLoss:
             true
-        case .activeSessionTap, .manualButton:
+        case .activeSessionTap, .manualButton, .restart:
             false
         }
     }
@@ -384,6 +403,8 @@ enum TerminalReconnectSource: Equatable, Hashable, Sendable {
             "manual_button"
         case .transportLoss:
             "transport_loss"
+        case .restart:
+            "restart"
         }
     }
 }
@@ -811,13 +832,16 @@ enum TmuxConnectionDraftValidator {
         var validation = TmuxConnectionDraftValidation.empty
         let sessionName = draft.sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        let savedName: String
         switch draft.backend {
         case .tmux:
             if sessionName.isEmpty {
                 validation.sessionName = "tmux session name is required."
             }
+            savedName = TmuxSessionName.kept(sessionName)
         case .herdr:
             validation.sessionName = herdrSessionNameProblem(sessionName)
+            savedName = sessionName
         }
 
         guard validation.isValid else {
@@ -830,11 +854,19 @@ enum TmuxConnectionDraftValidator {
                     id: existingWorkspaceID ?? UUID(),
                     serverID: serverID,
                     backend: draft.backend,
-                    sessionName: sessionName,
+                    sessionName: savedName,
                     lastOpenedAt: Date()
                 )
             )
         )
+    }
+}
+
+/// A session's name as tmux keeps it: tmux turns ':' and '.' into '_' when it names a session, so `work.api` is
+/// `work_api` on the server, and attaching by `work.api` would look for pane `api`.
+enum TmuxSessionName {
+    static func kept(_ name: String) -> String {
+        String(name.map { $0 == ":" || $0 == "." ? "_" : $0 })
     }
 }
 

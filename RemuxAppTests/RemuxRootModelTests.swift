@@ -3931,6 +3931,47 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertEqual(harness.model.state, .terminal(workspace.id))
     }
 
+    /// Remux creates a tmux session only when asked: opening a saved one and reconnecting attach, Restart creates.
+    func testOnlyRestartCreatesASavedSession() async throws {
+        let pair = makePasswordBackedServer()
+        let workspace = SavedWorkspace(serverID: pair.server.id, sessionName: "base")
+        let factory = RecordingTerminalScreenModelFactory()
+        let harness = makeHarness(
+            servers: [pair.server],
+            workspaces: [workspace],
+            identities: [pair.identity],
+            terminalScreenModelFactory: factory.factory
+        )
+        try await harness.credentialHelper.savePassword("secret", for: pair.server.id)
+        await harness.model.load()
+
+        await harness.model.connect(to: workspace.id)
+        harness.model.reconnectActiveSession(workspace.id, source: .manualButton)
+        harness.model.reconnectActiveSession(workspace.id, source: .restart)
+        harness.model.reconnectActiveSession(workspace.id, source: .transportLoss)
+
+        XCTAssertEqual(factory.createdTargets.map(\.opening), [.attach, .attach, .create, .attach])
+    }
+
+    func testNewSessionCreatesTheSession() async throws {
+        let pair = makePasswordBackedServer()
+        let factory = RecordingTerminalScreenModelFactory()
+        let harness = makeHarness(
+            servers: [pair.server],
+            identities: [pair.identity],
+            terminalScreenModelFactory: factory.factory
+        )
+        try await harness.credentialHelper.savePassword("secret", for: pair.server.id)
+        await harness.model.load()
+
+        XCTAssertTrue(harness.model.beginNewWorkspace(for: pair.server.id))
+        harness.model.updateDraft { $0.sessionName = "fresh" }
+        _ = await harness.model.saveAndConnect()
+
+        XCTAssertEqual(factory.createdTargets.map(\.opening), [.create])
+        XCTAssertEqual(factory.createdTargets.first?.workspace.sessionName, "fresh")
+    }
+
     func testTrustHostKeyUpdatesTrustAndReconnectsActiveSession() async throws {
         let pair = makePasswordBackedServer()
         let server = pair.server
@@ -5130,6 +5171,7 @@ private extension TerminalRuntime {
 private final class RecordingTerminalScreenModelFactory: @unchecked Sendable {
     private(set) var createdKeys: [TerminalRuntimeAttemptKey] = []
     private(set) var createdModels: [TerminalRuntimeAttemptKey: TmuxScreenModel] = [:]
+    private(set) var createdTargets: [SessionTarget] = []
     private(set) var recordedUpdates: [TerminalRuntimeStateUpdate] = []
 
     var factory: RemuxRootModel.TerminalScreenModelFactory {
@@ -5171,6 +5213,7 @@ private final class RecordingTerminalScreenModelFactory: @unchecked Sendable {
         )
         createdKeys.append(key)
         createdModels[key] = model
+        createdTargets.append(target)
         return model
     }
 }
