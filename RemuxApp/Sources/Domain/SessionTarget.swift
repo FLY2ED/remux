@@ -159,6 +159,15 @@ enum SessionBackend: String, Codable, Sendable {
         case .herdr: "default"
         }
     }
+
+    /// The oldest version Remux runs. For tmux it's the oldest the terminal library's control-mode client
+    /// accepts: it closes the session on anything older.
+    var minimumSupportedVersion: String {
+        switch self {
+        case .tmux: "3.1"
+        case .herdr: HerdrVersion.minimumSupported.description
+        }
+    }
 }
 
 /// Names a session on a server. Session names are only unique per backend, so
@@ -272,6 +281,8 @@ struct TerminalDisconnectReason: Equatable, Sendable {
         case transportIO
         case serverUnreachable
         case authentication
+        /// Tailscale asked to verify the connection, and it wasn't verified in time.
+        case verificationExpired
         case hostKey
         case profile
         /// The session's program isn't installed on the server, or can't be run there.
@@ -289,6 +300,8 @@ struct TerminalDisconnectReason: Equatable, Sendable {
                 "server_unreachable"
             case .authentication:
                 "authentication"
+            case .verificationExpired:
+                "verification_expired"
             case .hostKey:
                 "host_key"
             case .profile:
@@ -308,6 +321,8 @@ struct TerminalDisconnectReason: Equatable, Sendable {
     }
 
     let kind: Kind
+    /// What went wrong. The session's screen shows it for a backend problem or an exit, whose words come from
+    /// where it happened; every other kind has the same words there each time, and this is for diagnostics.
     let message: String
     /// The server's own words, shown under `message`.
     let detail: String?
@@ -331,6 +346,7 @@ struct TerminalDisconnectReason: Equatable, Sendable {
             true
         case .serverUnreachable,
              .authentication,
+             .verificationExpired,
              .hostKey,
              .profile,
              .backendUnavailable,

@@ -37,6 +37,9 @@ enum HerdrConnectionError: Error, Equatable, LocalizedError {
     /// The server rejected the hello (`unsupported_generation`, `no_common_core`, `invalid_surface`,
     /// `invalid_hello`).
     case rejected(code: String, message: String)
+    /// The running server is older than Remux supports, as Herdr's client tells: it answers with the binary
+    /// welcome (no version), or lacks surface activation or health checks.
+    case outdated(serverVersion: String?)
     case incompatible(String)
     case handshakeTimedOut
     case wire(HerdrWireError)
@@ -54,6 +57,8 @@ enum HerdrConnectionError: Error, Equatable, LocalizedError {
         switch self {
         case .rejected(_, let message):
             return "Herdr refused the connection: \(message)"
+        case .outdated(let version):
+            return "This Herdr server\(version.map { " (\($0))" } ?? "") needs an update."
         case .incompatible(let reason):
             return "This Herdr server isn't compatible with Remux: \(reason)."
         case .handshakeTimedOut:
@@ -305,7 +310,7 @@ actor HerdrConnection {
                 // A server older than the endpoint protocol answers with the binary welcome; Herdr's
                 // client says to update it.
                 if case .unused(tag: 0) = message {
-                    throw HerdrConnectionError.incompatible("its Herdr needs an update")
+                    throw HerdrConnectionError.outdated(serverVersion: nil)
                 }
                 guard case .control(let kind, let data) = message,
                       kind == HerdrControlKind.welcome,
@@ -341,7 +346,7 @@ actor HerdrConnection {
               welcome.capabilities.contains("health_check"),
               welcome.methods.contains(surfaceSetMethod)
         else {
-            throw HerdrConnectionError.incompatible("its Herdr \(welcome.serverVersion) needs an update")
+            throw HerdrConnectionError.outdated(serverVersion: welcome.serverVersion)
         }
     }
 

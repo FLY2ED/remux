@@ -68,6 +68,19 @@ enum RemoteProgramCommand {
         return lines.first { !$0.isEmpty && $0 != readyMarker } ?? ""
     }
 
+    /// What a run that ended before the ready marker printed last: the login shell's or the server's startup
+    /// files' own words. The cause is usually at the end, after any greeting, and a shell's error can take a
+    /// few lines (fish names the file and line, then marks the spot). nil when it printed nothing.
+    static func startupMessage(in output: String) -> String? {
+        let lines = output.split(whereSeparator: \.isNewline)
+            .map { String($0.reversed().drop(while: \.isWhitespace).reversed()) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return nil }
+        return lines.suffix(startupMessageLineLimit).joined(separator: "\n")
+    }
+
+    private static let startupMessageLineLimit = 6
+
     /// Skips a stream up to the end of the ready marker's line, as Herdr's client does with its own: the
     /// first line that is exactly the marker, optionally ending in a carriage return.
     struct ReadyLine: Equatable, Sendable {

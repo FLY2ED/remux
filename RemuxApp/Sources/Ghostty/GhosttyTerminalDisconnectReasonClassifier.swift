@@ -18,7 +18,7 @@ enum GhosttyTerminalDisconnectReasonClassifier {
 
         if let tailscaleCheckError = error as? TailscaleSSHCheckError {
             return TerminalDisconnectReason(
-                kind: .authentication,
+                kind: .verificationExpired,
                 message: tailscaleCheckError.localizedDescription
             )
         }
@@ -42,8 +42,12 @@ enum GhosttyTerminalDisconnectReasonClassifier {
 
         if let sshError = error as? SSHTmuxControlTransportError {
             switch sshError {
-            case .remoteExit:
-                return TerminalDisconnectReason(kind: .remoteExit, message: sshError.localizedDescription)
+            case .remoteExit(_, let diagnostics):
+                return TerminalDisconnectReason(
+                    kind: .remoteExit,
+                    message: "The server closed the connection before tmux started.",
+                    detail: RemoteProgramCommand.startupMessage(in: diagnostics?.messages ?? "")
+                )
             case .channelRequestFailed:
                 return TerminalDisconnectReason(kind: .profile, message: message)
             case .closed:

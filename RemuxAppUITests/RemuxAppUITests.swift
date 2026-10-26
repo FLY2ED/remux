@@ -3647,8 +3647,7 @@ final class RemuxAppUITests: XCTestCase {
             .matching(identifier: "terminal.status.failed")
             .allElementsBoundByIndex
             .map { $0.label }
-        let expectedVerification = "Received \(expectedHostKey)"
-        guard failureLabels.contains(expectedVerification) else {
+        guard failureLabels.contains(expectedHostKey) else {
             XCTFail(
                 "Refusing live SSH host trust because Remux did not display the expected fingerprint."
             )

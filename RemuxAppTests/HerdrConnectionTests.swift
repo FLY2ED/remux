@@ -154,7 +154,7 @@ final class HerdrConnectionTests: XCTestCase {
             _ = try await HerdrConnection.open(transport: transport, hello: hello, appActive: false, timing: relaxed, onEvent: { _ in })
             XCTFail("opened")
         } catch let error as HerdrConnectionError {
-            XCTAssertEqual(error, .incompatible("its Herdr needs an update"))
+            XCTAssertEqual(error, .outdated(serverVersion: nil))
         }
     }
 
@@ -166,7 +166,7 @@ final class HerdrConnectionTests: XCTestCase {
             _ = try await HerdrConnection.open(transport: transport, hello: hello, appActive: false, timing: relaxed, onEvent: { _ in })
             XCTFail("opened")
         } catch let error as HerdrConnectionError {
-            XCTAssertEqual(error, .incompatible("its Herdr 0.9.3 needs an update"))
+            XCTAssertEqual(error, .outdated(serverVersion: "0.9.3"))
         }
     }
 
@@ -201,7 +201,7 @@ final class HerdrConnectionTests: XCTestCase {
                 XCTFail("opened")
             } catch let error as HerdrConnectionError {
                 XCTAssertEqual(error, .bridge(bridgeError))
-                XCTAssertEqual(error.terminalDisconnectReason(herdrPath: nil).kind, .backendUnavailable(.herdr))
+                XCTAssertEqual(error.terminalDisconnectReason(on: SavedServer(displayName: "Herdr Host", host: "herdr.example.test", username: "builder")).kind, .backendUnavailable(.herdr))
                 XCTAssertEqual(error.localizedDescription, bridgeError.errorDescription)
             }
         }

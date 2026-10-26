@@ -120,19 +120,32 @@ final class GhosttyTerminalDisconnectReasonClassifierTests: XCTestCase {
         ))
     }
 
-    /// The login shell failed before the script ran: not tmux's failure, and no internal text.
+    /// The login shell failed before the script ran: not tmux's failure, so it's an exit, with the end of
+    /// what the shell printed under it.
     func testALoginShellThatFailsIsAnExitNotTmuxUnavailable() {
-        for (status, output) in [
-            (127, "fish: Unknown command: export\r\n"),
-            (126, "fish: exec: /bin/sh: Permission denied\r\n"),
+        let fish = "fish: Unknown command: export\r\n~/.config/fish/config.fish (line 1):\r\nexport LANG=C\r\n^~~~~^\r\n"
+        for (status, output, words) in [
+            (127, fish, "fish: Unknown command: export\n~/.config/fish/config.fish (line 1):\nexport LANG=C\n^~~~~^"),
+            (126, "Welcome to lab\r\n\r\nfish: exec: /bin/sh: Permission denied  \r\n", "Welcome to lab\nfish: exec: /bin/sh: Permission denied"),
+            (1, "This account is currently not available.\n", "This account is currently not available."),
+            (1, (1...8).map { "line \($0)" }.joined(separator: "\n"), (3...8).map { "line \($0)" }.joined(separator: "\n")),
         ] {
             let reason = GhosttyTerminalDisconnectReasonClassifier.tmuxStartFailure(
                 SSHTmuxControlTransportError.remoteExit(status, diagnostics: diagnostics(messages: output)),
                 tmuxPath: nil
             )
-            XCTAssertEqual(reason.kind, .remoteExit)
-            XCTAssertEqual(reason.message, "The remote tmux control session exited with status \(status).")
+            XCTAssertEqual(reason, TerminalDisconnectReason(
+                kind: .remoteExit,
+                message: "The server closed the connection before tmux started.",
+                detail: words
+            ))
         }
+
+        let silent = GhosttyTerminalDisconnectReasonClassifier.tmuxStartFailure(
+            SSHTmuxControlTransportError.remoteExit(1, diagnostics: nil),
+            tmuxPath: nil
+        )
+        XCTAssertNil(silent.detail)
     }
 
     private func diagnostics(messages: String) -> SSHTmuxStartupDiagnostics {
@@ -171,12 +184,13 @@ final class GhosttyTerminalDisconnectReasonClassifierTests: XCTestCase {
         XCTAssertEqual(reason.kind, .serverUnreachable)
     }
 
-    func testTailscaleCheckTimeoutIsAuthenticationFailure() {
+    /// New credentials can't fix an expired Tailscale check, so it isn't an authentication failure.
+    func testTailscaleCheckTimeoutIsAnExpiredVerification() {
         let reason = GhosttyTerminalDisconnectReasonClassifier.transportStartFailure(
             TailscaleSSHCheckError.verificationTimedOut
         )
 
-        XCTAssertEqual(reason.kind, .authentication)
+        XCTAssertEqual(reason.kind, .verificationExpired)
         XCTAssertEqual(
             reason.message,
             TailscaleSSHCheckError.verificationTimedOut.localizedDescription

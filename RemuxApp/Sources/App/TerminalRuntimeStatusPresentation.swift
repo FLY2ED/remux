@@ -54,6 +54,8 @@ struct TerminalRuntimeStatusPresentation: Equatable, Sendable {
         switch reason.kind {
         case .authentication:
             "Auth Failed"
+        case .verificationExpired:
+            "Not Verified"
         case .serverUnreachable:
             "Unreachable"
         case .hostKey:

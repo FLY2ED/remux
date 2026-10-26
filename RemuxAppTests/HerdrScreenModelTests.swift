@@ -713,7 +713,7 @@ final class HerdrScreenModelTests: XCTestCase {
         }
         XCTAssertEqual(
             harness.states.last,
-            .disconnected(HerdrConnectionError.closed.terminalDisconnectReason(herdrPath: nil))
+            .disconnected(HerdrConnectionError.closed.terminalDisconnectReason(on: SavedServer(displayName: "Herdr Host", host: "herdr.example.test", username: "builder")))
         )
         XCTAssertEqual(harness.states.filter { $0.disconnectedReason != nil }.count, 1)
     }

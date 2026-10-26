@@ -55,7 +55,7 @@ final class BackendProblemTests: XCTestCase {
     }
 
     func testAnOldHerdr() {
-        let problem = BackendProblem.unsupportedVersion(HerdrVersion(major: 0, minor: 9, patch: 2))
+        let problem = BackendProblem.unsupportedVersion("0.9.2")
         XCTAssertEqual(problem.sessionRowLine(for: .herdr), "Herdr 0.9.2 is too old · Needs 0.9.3")
         XCTAssertEqual(problem.pathNote(for: .herdr), "Herdr 0.9.2 is installed. Remux needs 0.9.3 or later.")
         XCTAssertEqual(
@@ -63,6 +63,16 @@ final class BackendProblemTests: XCTestCase {
             "Herdr 0.9.2 on this server is too old. Remux needs 0.9.3 or later."
         )
         XCTAssertFalse(problem.isFixedByPath)
+    }
+
+    /// Ubuntu 20.04's tmux, as it reports its version.
+    func testAnOldTmux() {
+        let reason = BackendProblem.unsupportedVersion("3.0a").disconnectReason(for: .tmux)
+        XCTAssertEqual(reason, TerminalDisconnectReason(
+            kind: .backendUnavailable(.tmux),
+            message: "tmux 3.0a on this server is too old. Remux needs 3.1 or later."
+        ))
+        XCTAssertFalse(reason.allowsAutomaticReconnect)
     }
 
     /// Anything Edit Server or an update fixes leaves the backend unavailable, which doesn't reconnect on its
@@ -95,7 +105,7 @@ final class BackendProblemTests: XCTestCase {
                 discoveryError: HerdrSessionDiscoveryError.unsupportedVersion(HerdrVersion(major: 0, minor: 9, patch: 0)),
                 path: nil
             ),
-            .unsupportedVersion(HerdrVersion(major: 0, minor: 9, patch: 0))
+            .unsupportedVersion("0.9.0")
         )
         XCTAssertNil(BackendProblem(discoveryError: HerdrSessionDiscoveryError.incompleteOutput, path: nil))
         XCTAssertNil(BackendProblem(
