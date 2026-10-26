@@ -12,8 +12,8 @@ enum BackendProblem: Equatable, Sendable {
     case couldNotStart(path: String?, message: String)
     /// It ran and reported an error, in its own words; empty when it said nothing.
     case failed(String)
-    /// A Herdr older than the oldest one Remux supports.
-    case unsupportedVersion(HerdrVersion)
+    /// A version older than the backend's oldest supported one, as it reports its version.
+    case unsupportedVersion(String)
 
     /// `path` is the one set in Edit Server, nil for Automatic.
     init(_ failure: RemoteProgramFailure, path: String?) {
@@ -32,7 +32,7 @@ enum BackendProblem: Equatable, Sendable {
         if let failure = error as? RemoteProgramFailure {
             self.init(failure, path: path)
         } else if case .unsupportedVersion(let version)? = error as? HerdrSessionDiscoveryError {
-            self = .unsupportedVersion(version)
+            self = .unsupportedVersion(version.description)
         } else {
             return nil
         }
@@ -73,7 +73,7 @@ enum BackendProblem: Equatable, Sendable {
         case .couldNotStart: "Running \(name) failed · Check path"
         case .failed: "Running \(name) failed"
         case .unsupportedVersion(let version):
-            "Herdr \(version) is too old · Needs \(HerdrVersion.minimumSupported)"
+            "\(name) \(version) is too old · Needs \(backend.minimumSupportedVersion)"
         }
     }
 
@@ -85,7 +85,7 @@ enum BackendProblem: Equatable, Sendable {
         case .notAtPath: "Remux can't run \(name) from this path."
         case .couldNotStart, .failed: detail == nil ? "Running it failed." : "Running it failed:"
         case .unsupportedVersion(let version):
-            "Herdr \(version) is installed. Remux needs \(HerdrVersion.minimumSupported) or later."
+            "\(name) \(version) is installed. Remux needs \(backend.minimumSupportedVersion) or later."
         }
     }
 
@@ -102,7 +102,7 @@ enum BackendProblem: Equatable, Sendable {
         case .failed:
             "Running \(name) failed."
         case .unsupportedVersion(let version):
-            "Herdr \(version) on this server is too old. Remux needs \(HerdrVersion.minimumSupported) or later."
+            "\(name) \(version) on this server is too old. Remux needs \(backend.minimumSupportedVersion) or later."
         }
     }
 

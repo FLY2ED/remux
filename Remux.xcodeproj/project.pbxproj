@@ -216,6 +216,7 @@
 		AB2DBE12494A327FBC54FF9D /* GhosttyScrollDeltaBudgetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C09E9400D2638AE72F1CEBFB /* GhosttyScrollDeltaBudgetTests.swift */; };
 		ABFF88118BE80EBF9EFC7422 /* HerdrScreenModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7BA5C3FDAFAEB48FB30B6AA /* HerdrScreenModel.swift */; };
 		AC84CF9933D6859161CCB2A6 /* PaneTopologyLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F647060CF187F304EA04438 /* PaneTopologyLayoutTests.swift */; };
+		AF023B663D5D8E38A9B1B816 /* GhosttyRepairPanelContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0A34726D374767B49CD98BA /* GhosttyRepairPanelContent.swift */; };
 		B056E6334A9EFBDB7FA305B3 /* TerminalPreviewCandidateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66FB23E143EA43A7AB28A323 /* TerminalPreviewCandidateTests.swift */; };
 		B141F33B4F5EB338B2F6A18E /* ServerDeletionConfirmationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1D4A5A563B25A2532C6E58A /* ServerDeletionConfirmationTests.swift */; };
 		B3BF6CDA8110A71C8BDF0F85 /* GhosttyTmuxPrefixInputBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A510F3E8FC22231ACA4A8A99 /* GhosttyTmuxPrefixInputBuffer.swift */; };
@@ -259,6 +260,7 @@
 		D3A27BCC972E451CDB6113E1 /* ShortcutCollectionIconView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4A946B4CBB7E49BCAA7D52B /* ShortcutCollectionIconView.swift */; };
 		D4D164A1ADCB32103FFDE81E /* RemuxSessionLiveForwardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73C4CC8673D390A85EC1741D /* RemuxSessionLiveForwardTests.swift */; };
 		D5510B89C4BE9205DC25104C /* GhosttyDebugComposerDictationBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6E17D3CFD2103F3148C1EA6 /* GhosttyDebugComposerDictationBackend.swift */; };
+		D5A1D0CD9BB5A90AA8726A70 /* GhosttyRepairPanelContentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C3D3D2146E3A6E543AE91AB /* GhosttyRepairPanelContentTests.swift */; };
 		D5BC8B5AFF97FD9FDD27D04A /* TmuxTerminalSessionShutdownDrainTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C18E95DAAAF9312AED56CC0F /* TmuxTerminalSessionShutdownDrainTests.swift */; };
 		D6B81547DE2C2556B390C9C7 /* GhosttyRemoteAttachmentPathBuilderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F881DB2CF820F05DCDC2768 /* GhosttyRemoteAttachmentPathBuilderTests.swift */; };
 		D78DD9D2C761CC45DB856D42 /* GhosttyTopLevelSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88095738876B31835109065A /* GhosttyTopLevelSurface.swift */; };
@@ -385,6 +387,7 @@
 		1A97B9148DE55F10322BE8BD /* SessionTarget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTarget.swift; sourceTree = "<group>"; };
 		1C1E14053BB59257E3ADE068 /* herdr-03-handshake-rejections-nocodec.expected.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "herdr-03-handshake-rejections-nocodec.expected.json"; sourceTree = "<group>"; };
 		1C213354AFF78BDFCF71F3A2 /* HerdrServerMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HerdrServerMessage.swift; sourceTree = "<group>"; };
+		1C3D3D2146E3A6E543AE91AB /* GhosttyRepairPanelContentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttyRepairPanelContentTests.swift; sourceTree = "<group>"; };
 		1C5B9B46D85CC2D1FEBDBECE /* TerminalPreviewCandidate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPreviewCandidate.swift; sourceTree = "<group>"; };
 		1CCFEA70AB6AEF95B946201D /* RemuxTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = RemuxTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		1D61838FBF6D77DCC08DFD45 /* herdr-10-commands-A.expected.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "herdr-10-commands-A.expected.json"; sourceTree = "<group>"; };
@@ -608,6 +611,7 @@
 		CC6C8F232F1C4CE0D24511ED /* TmuxZoomOwnership.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TmuxZoomOwnership.swift; sourceTree = "<group>"; };
 		CFE401B861C30DA18E8BE1C9 /* ShortcutsSettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutsSettingsSheet.swift; sourceTree = "<group>"; };
 		D047E23F9EFC609398779342 /* RemuxSessionLiveForward.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemuxSessionLiveForward.swift; sourceTree = "<group>"; };
+		D0A34726D374767B49CD98BA /* GhosttyRepairPanelContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttyRepairPanelContent.swift; sourceTree = "<group>"; };
 		D0F40F9AB60AAE689848E606 /* herdr-03-handshake-rejections-zerosize.s2c.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = "herdr-03-handshake-rejections-zerosize.s2c.bin"; sourceTree = "<group>"; };
 		D20F57C8C6D3F75E3E07DDC9 /* RemuxRootModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemuxRootModel.swift; sourceTree = "<group>"; };
 		D2384307307FD685E621C2BB /* HerdrPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HerdrPresentation.swift; sourceTree = "<group>"; };
@@ -768,6 +772,7 @@
 				71B734F55FC22090646AD0D2 /* GhosttyPendingAttachmentTests.swift */,
 				A9BEEA4655420D5DCEDE5C23 /* GhosttyPhoneChromeLayoutTests.swift */,
 				3F881DB2CF820F05DCDC2768 /* GhosttyRemoteAttachmentPathBuilderTests.swift */,
+				1C3D3D2146E3A6E543AE91AB /* GhosttyRepairPanelContentTests.swift */,
 				A76BB5CC730EB26907A34E42 /* GhosttyRuntimeSurfaceTopologySnapshotTests.swift */,
 				C09E9400D2638AE72F1CEBFB /* GhosttyScrollDeltaBudgetTests.swift */,
 				4E84F774C17B5C4DB6B715A9 /* GhosttySurfaceKeyEventTests.swift */,
@@ -1111,6 +1116,7 @@
 				DAE4DA1C9532D675CB9E87C4 /* GhosttyPaneScrollContainerView.swift */,
 				054929B68D4D41AF41FF0D8D /* GhosttyPendingAttachment.swift */,
 				D4FB03D3718F47ECDF15AEC3 /* GhosttyQuickLookPreview.swift */,
+				D0A34726D374767B49CD98BA /* GhosttyRepairPanelContent.swift */,
 				DC3FA910C9C3B9A094B8497A /* GhosttyRuntimeSurfaceTopologySnapshot.swift */,
 				216C560F444E51EAEA88D748 /* GhosttyScrollPhysicsView.swift */,
 				B7C4481BDC2A74CA510A39D4 /* GhosttyShortcutSurfacePalette.swift */,
@@ -1414,6 +1420,7 @@
 				EE735F57D2057349C21C0A49 /* GhosttyPaneScrollContainerView.swift in Sources */,
 				71F19B3C954665ECD2B7D727 /* GhosttyPendingAttachment.swift in Sources */,
 				68F62C41042D69317C5A9FD3 /* GhosttyQuickLookPreview.swift in Sources */,
+				AF023B663D5D8E38A9B1B816 /* GhosttyRepairPanelContent.swift in Sources */,
 				161FAC78EFC0C0BBE4B67201 /* GhosttyRuntimeSurfaceTopologySnapshot.swift in Sources */,
 				51455760E7AFD296EE4D3B17 /* GhosttyRuntimeTrace.swift in Sources */,
 				E0787109BFFDE0C211C26BFB /* GhosttyScrollPhysicsView.swift in Sources */,
@@ -1563,6 +1570,7 @@
 				756630E292FD6FE5DA82F830 /* GhosttyPendingAttachmentTests.swift in Sources */,
 				557B4DE97A72EE7ED2097407 /* GhosttyPhoneChromeLayoutTests.swift in Sources */,
 				D6B81547DE2C2556B390C9C7 /* GhosttyRemoteAttachmentPathBuilderTests.swift in Sources */,
+				D5A1D0CD9BB5A90AA8726A70 /* GhosttyRepairPanelContentTests.swift in Sources */,
 				017C744C31F059189FA8E489 /* GhosttyRuntimeSurfaceTopologySnapshotTests.swift in Sources */,
 				AB2DBE12494A327FBC54FF9D /* GhosttyScrollDeltaBudgetTests.swift in Sources */,
 				14890862E5A8BFE9BE759DB0 /* GhosttySurfaceKeyEventTests.swift in Sources */,

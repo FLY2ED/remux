@@ -9,6 +9,7 @@ import UniformTypeIdentifiers
 struct GhosttySurfaceScreenPresentation: Equatable {
     let workspaceID: SavedWorkspace.ID
     let sessionName: String
+    let serverName: String
     let terminalTheme: TerminalTheme
     let toolbarKeys: TerminalToolbarKeys
     let loadingTitle: String
@@ -335,6 +336,7 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
                         GhosttySurfaceStatusOverlay(
                             projection: screenProjection.statusOverlay,
                             loadingTitle: presentation.loadingTitle,
+                            serverName: presentation.serverName,
                             onReconnect: onReconnect,
                             onUpdateCredentials: onUpdateCredentials,
                             onEditServer: onEditServer,

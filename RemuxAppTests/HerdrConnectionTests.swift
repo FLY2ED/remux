@@ -201,7 +201,7 @@ final class HerdrConnectionTests: XCTestCase {
                 XCTFail("opened")
             } catch let error as HerdrConnectionError {
                 XCTAssertEqual(error, .bridge(bridgeError))
-                XCTAssertEqual(error.terminalDisconnectReason(herdrPath: nil).kind, .backendUnavailable(.herdr))
+                XCTAssertEqual(error.terminalDisconnectReason(on: SavedServer(displayName: "Herdr Host", host: "herdr.example.test", username: "builder")).kind, .backendUnavailable(.herdr))
                 XCTAssertEqual(error.localizedDescription, bridgeError.errorDescription)
             }
         }

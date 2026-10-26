@@ -683,7 +683,7 @@ final class HerdrScreenModel {
 
     private func connectionEnded(_ attemptID: UInt64, _ error: HerdrConnectionError) {
         guard let attempt, attempt.id == attemptID else { return }
-        end(attempt, error.terminalDisconnectReason(herdrPath: herdrPath))
+        end(attempt, error.terminalDisconnectReason(on: target.server))
     }
 
     /// Ends the attempt and reports why. A connection Remux closes sends no `ended` event, so whoever
@@ -798,7 +798,7 @@ final class HerdrScreenModel {
             surfaces[paneID]?.renderer.failPresentation(message: Self.rendererFailureMessage)
         case .failed(let error, let connection):
             if let attempt, attempt.feed?.connection == connection {
-                end(attempt, error.terminalDisconnectReason(herdrPath: herdrPath))
+                end(attempt, error.terminalDisconnectReason(on: target.server))
             }
         }
         didChange()
@@ -993,18 +993,13 @@ final class HerdrScreenModel {
     private static let configurationFailureMessage =
         "Terminal renderer could not apply its current configuration. Reconnect to try again."
 
-    /// The Herdr path set in Edit Server, nil for Automatic: what a Herdr that can't run says depends on it.
-    private var herdrPath: String? {
-        target.server.herdrExecutablePath
-    }
-
     private func disconnectReason(openingBridgeFailedWith error: Error) -> TerminalDisconnectReason {
-        (error as? HerdrBridgeError)?.terminalDisconnectReason(herdrPath: herdrPath)
+        (error as? HerdrBridgeError)?.terminalDisconnectReason(on: target.server)
             ?? GhosttyTerminalDisconnectReasonClassifier.transportStartFailure(error)
     }
 
     private func disconnectReason(connectionFailedWith error: Error) -> TerminalDisconnectReason {
-        (error as? HerdrConnectionError)?.terminalDisconnectReason(herdrPath: herdrPath)
+        (error as? HerdrConnectionError)?.terminalDisconnectReason(on: target.server)
             ?? TerminalDisconnectReason(kind: .unknown, message: error.localizedDescription)
     }
 
@@ -1017,16 +1012,21 @@ final class HerdrScreenModel {
 }
 
 extension HerdrConnectionError {
-    /// `herdrPath` is the one set in Edit Server, nil for Automatic.
-    func terminalDisconnectReason(herdrPath: String?) -> TerminalDisconnectReason {
+    /// Why the session on `server` ended, as its screen tells it.
+    func terminalDisconnectReason(on server: SavedServer) -> TerminalDisconnectReason {
         let message = errorDescription ?? "The connection to Herdr failed."
         switch self {
         case .bridge(let error):
-            return error.terminalDisconnectReason(herdrPath: herdrPath)
+            return error.terminalDisconnectReason(on: server)
         case .closed, .transport, .unresponsive, .handshakeTimedOut:
             return TerminalDisconnectReason(kind: .transportIO, message: message)
-        case .serverShutdown:
-            return TerminalDisconnectReason(kind: .remoteExit, message: message)
+        case .serverShutdown(let reason):
+            // Herdr says why: it's shutting down, or a live update is handing over to a new server.
+            return TerminalDisconnectReason(
+                kind: .remoteExit,
+                message: "Herdr stopped on \(server.displayName).",
+                detail: reason.flatMap { $0.isEmpty ? nil : $0 }
+            )
         case .rejected, .incompatible, .wire:
             return TerminalDisconnectReason(kind: .runtime, message: message)
         }
@@ -1035,15 +1035,18 @@ extension HerdrConnectionError {
 
 extension HerdrBridgeError {
     /// The same whether opening the bridge failed or its first read reported the failure: the live bridge
-    /// opens before Herdr's executable is looked up. `herdrPath` is the one set in Edit Server, nil for
-    /// Automatic.
-    func terminalDisconnectReason(herdrPath: String?) -> TerminalDisconnectReason {
+    /// opens before Herdr's executable is looked up.
+    func terminalDisconnectReason(on server: SavedServer) -> TerminalDisconnectReason {
         let message = errorDescription ?? "The bridge to Herdr failed."
         switch self {
         case .program(let failure):
-            return BackendProblem(failure, path: herdrPath).disconnectReason(for: .herdr)
-        case .remoteExit:
-            return TerminalDisconnectReason(kind: .remoteExit, message: message)
+            return BackendProblem(failure, path: server.herdrExecutablePath).disconnectReason(for: .herdr)
+        case .remoteExit(_, let stderr):
+            return TerminalDisconnectReason(
+                kind: .remoteExit,
+                message: "The server closed the connection before Herdr started.",
+                detail: RemoteProgramCommand.startupMessage(in: stderr)
+            )
         case .channel:
             return TerminalDisconnectReason(kind: .transportIO, message: message)
         }

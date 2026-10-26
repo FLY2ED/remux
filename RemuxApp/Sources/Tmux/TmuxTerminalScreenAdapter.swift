@@ -1108,10 +1108,7 @@ extension TmuxSessionController.CloseReason {
     var terminalDisconnectReason: TerminalDisconnectReason {
         switch self {
         case .unsupportedVersion(let version):
-            TerminalDisconnectReason(
-                kind: .runtime,
-                message: "unsupported tmux version \(version) (requires 3.1+)"
-            )
+            BackendProblem.unsupportedVersion(version).disconnectReason(for: .tmux)
         }
     }
 }

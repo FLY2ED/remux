@@ -68,6 +68,14 @@ enum RemoteProgramCommand {
         return lines.first { !$0.isEmpty && $0 != readyMarker } ?? ""
     }
 
+    /// The first line a run that ended before the ready marker printed: the login shell's or the server's
+    /// startup files' own words. nil when it printed nothing.
+    static func startupMessage(in output: String) -> String? {
+        output.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty }
+    }
+
     /// Skips a stream up to the end of the ready marker's line, as Herdr's client does with its own: the
     /// first line that is exactly the marker, optionally ending in a carriage return.
     struct ReadyLine: Equatable, Sendable {

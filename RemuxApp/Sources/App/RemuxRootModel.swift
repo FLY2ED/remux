@@ -171,6 +171,7 @@ struct ActiveTerminalScreenEntry: Identifiable {
         self.presentation = GhosttySurfaceScreenPresentation(
             workspaceID: session.target.workspace.id,
             sessionName: session.target.workspace.sessionName,
+            serverName: session.target.server.displayName,
             terminalTheme: session.target.terminalSettings.theme,
             toolbarKeys: session.target.terminalSettings.toolbarKeys,
             loadingTitle: TerminalRuntimeStatusPresentation.projection(
@@ -2008,7 +2009,7 @@ final class RemuxRootModel: ObservableObject {
             return reason.message
         case .hostKey:
             return "Remux could not verify the SSH host key."
-        case .transportIO, .profile, .remoteExit, .runtime, .userClosed, .unknown:
+        case .verificationExpired, .transportIO, .profile, .remoteExit, .runtime, .userClosed, .unknown:
             return error.localizedDescription
         }
     }
@@ -2502,15 +2503,20 @@ final class RemuxRootModel: ObservableObject {
         case .applied(let state),
              .automaticReconnectStarted(_, let state),
              .automaticReconnectSkipped(_, let state):
+            var fields = [
+                "instanceID": update.instanceID.uuidString,
+                "source": update.source.traceLabel,
+                "state": state.traceLabel,
+                "workspaceID": update.workspaceID.uuidString,
+            ]
+            // Most kinds have the same words on the session's screen each time; this is what went wrong.
+            if let reason = state.disconnectedReason {
+                fields["reason"] = reason.message
+            }
             GhosttyRuntimeTrace.flowEventIfActive(
                 sessionOpenFlowID(update.workspaceID),
                 event: "model.runtimeState.applied",
-                fields: [
-                    "instanceID": update.instanceID.uuidString,
-                    "source": update.source.traceLabel,
-                    "state": state.traceLabel,
-                    "workspaceID": update.workspaceID.uuidString,
-                ]
+                fields: fields
             )
         }
 

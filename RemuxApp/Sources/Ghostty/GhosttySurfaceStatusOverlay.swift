@@ -5,6 +5,8 @@ struct GhosttySurfaceStatusOverlay: View {
 
     let projection: GhosttyTerminalStatusOverlayProjection
     let loadingTitle: String
+    /// The session's server, as Remux names it.
+    let serverName: String
     let onReconnect: () -> Void
     let onUpdateCredentials: () -> Void
     let onEditServer: () -> Void
@@ -62,8 +64,8 @@ struct GhosttySurfaceStatusOverlay: View {
                 .opacity(0.01)
                 .accessibilityIdentifier("terminal.status.ready")
 
-        case .failed(let message, let reason):
-            repairPanel(message: message, reason: reason)
+        case .failed(_, let reason):
+            repairPanel(GhosttyRepairPanelContent(reason: reason, serverName: serverName))
         }
     }
 
@@ -77,30 +79,22 @@ struct GhosttySurfaceStatusOverlay: View {
             .accessibilityIdentifier(accessibilityIdentifier)
     }
 
-    private func repairPanel(
-        message: String,
-        reason: TerminalDisconnectReason?
-    ) -> some View {
+    private func repairPanel(_ content: GhosttyRepairPanelContent) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(caption(for: reason))
-                    .font(.system(size: 10, weight: .semibold))
-                    .tracking(1.0)
-                    .foregroundStyle(GhosttySheetPalette.tertiary)
-
-                Text(title(for: reason))
+                Text(content.title)
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(GhosttySheetPalette.primary)
                     .lineLimit(1)
                     .truncationMode(.tail)
 
-                Text(displayMessage(for: reason, fallback: message))
+                Text(content.message)
                     .font(.system(size: 13, weight: .medium, design: .rounded))
                     .foregroundStyle(GhosttySheetPalette.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 2)
 
-                if let detail = reason?.detail {
+                if let detail = content.detail {
                     Text(detail)
                         .font(.system(size: 12, weight: .medium, design: .monospaced))
                         .foregroundStyle(GhosttySheetPalette.secondary)
@@ -110,8 +104,8 @@ struct GhosttySurfaceStatusOverlay: View {
                 }
             }
 
-            if let hostKeyVerification = hostKeyVerification(for: reason?.hostKeyChallenge) {
-                Text(hostKeyVerification)
+            if let hostKey = content.hostKey {
+                Text(hostKey)
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
                     .foregroundStyle(GhosttySheetPalette.secondary)
                     .lineLimit(2)
@@ -127,7 +121,19 @@ struct GhosttySurfaceStatusOverlay: View {
                 }
             }
 
-            repairActions(for: reason)
+            HStack(spacing: 12) {
+                ForEach(content.actions, id: \.accessibilityIdentifier) { action in
+                    GhosttyRepairActionButton(
+                        title: action.title,
+                        systemName: action.systemImage,
+                        accessibilityIdentifier: action.accessibilityIdentifier,
+                        chromeStyle: chromeStyle,
+                        isPrimary: action.isPrimary,
+                        action: handler(for: action.kind)
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(16)
         .frame(maxWidth: 560, alignment: .leading)
@@ -138,171 +144,14 @@ struct GhosttySurfaceStatusOverlay: View {
         .accessibilityIdentifier("terminal.status.failed")
     }
 
-    @ViewBuilder
-    private func repairActions(for reason: TerminalDisconnectReason?) -> some View {
-        if let challenge = reason?.hostKeyChallenge {
-            HStack(spacing: 12) {
-                GhosttyRepairActionButton(
-                    title: "Cancel",
-                    systemName: "xmark",
-                    accessibilityIdentifier: "terminal.status.hostKey.cancel",
-                    chromeStyle: chromeStyle,
-                    action: onCancel
-                )
-
-                if challenge.receivedKeyFingerprint != nil {
-                    GhosttyRepairActionButton(
-                        title: trustActionTitle(for: challenge),
-                        systemName: "checkmark.shield",
-                        accessibilityIdentifier: "terminal.status.hostKey.updateTrust",
-                        chromeStyle: chromeStyle,
-                        isPrimary: true,
-                        action: onTrustHostKey
-                    )
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } else if reason?.kind == .authentication {
-            HStack {
-                GhosttyRepairActionButton(
-                    title: "Update Credentials",
-                    systemName: "key",
-                    accessibilityIdentifier: "terminal.status.auth.updateCredentials",
-                    chromeStyle: chromeStyle,
-                    isPrimary: true,
-                    action: onUpdateCredentials
-                )
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } else if reason?.kind == .serverUnreachable || unavailableBackend(reason) != nil {
-            let identifierKind = unavailableBackend(reason)?.rawValue ?? "unreachable"
-            HStack(spacing: 12) {
-                GhosttyRepairActionButton(
-                    title: "Retry",
-                    systemName: "arrow.clockwise",
-                    accessibilityIdentifier: "terminal.status.\(identifierKind).retry",
-                    chromeStyle: chromeStyle,
-                    isPrimary: true,
-                    action: onReconnect
-                )
-
-                GhosttyRepairActionButton(
-                    title: "Edit Server",
-                    systemName: "slider.horizontal.3",
-                    accessibilityIdentifier: "terminal.status.\(identifierKind).editServer",
-                    chromeStyle: chromeStyle,
-                    action: onEditServer
-                )
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            HStack {
-                GhosttyRepairActionButton(
-                    title: "Reconnect",
-                    systemName: "arrow.clockwise",
-                    accessibilityIdentifier: "terminal.status.reconnect",
-                    chromeStyle: chromeStyle,
-                    isPrimary: true,
-                    action: onReconnect
-                )
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+    private func handler(for kind: GhosttyRepairPanelContent.Action.Kind) -> () -> Void {
+        switch kind {
+        case .cancel: onCancel
+        case .trustHostKey: onTrustHostKey
+        case .updateCredentials: onUpdateCredentials
+        case .retry, .reconnect: onReconnect
+        case .editServer: onEditServer
         }
-    }
-
-    private func unavailableBackend(_ reason: TerminalDisconnectReason?) -> SessionBackend? {
-        if case .backendUnavailable(let backend)? = reason?.kind {
-            return backend
-        }
-        return nil
-    }
-
-    private func title(for reason: TerminalDisconnectReason?) -> String {
-        if let challenge = reason?.hostKeyChallenge {
-            switch challenge.kind {
-            case .unknown:
-                return "Verify Server"
-            case .changed:
-                return "Host Key Changed"
-            }
-        }
-
-        if reason?.kind == .authentication {
-            return "Authentication Failed"
-        }
-
-        if reason?.kind == .serverUnreachable {
-            return "Server Unreachable"
-        }
-
-        if let backend = unavailableBackend(reason) {
-            return "\(backend.displayName) Unavailable"
-        }
-
-        return "Disconnected"
-    }
-
-    private func caption(for reason: TerminalDisconnectReason?) -> String {
-        if reason?.hostKeyChallenge != nil {
-            return "SECURITY"
-        }
-
-        if reason?.kind == .authentication {
-            return "AUTHENTICATION"
-        }
-
-        if reason?.kind == .serverUnreachable {
-            return "CONNECTION"
-        }
-
-        if let backend = unavailableBackend(reason) {
-            return backend.displayName.uppercased()
-        }
-
-        return "TERMINAL"
-    }
-
-    private func displayMessage(for reason: TerminalDisconnectReason?, fallback: String) -> String {
-        if let challenge = reason?.hostKeyChallenge {
-            switch challenge.kind {
-            case .unknown:
-                return "This is the first time Remux has seen the SSH host key for \(challenge.host). Trust it only if this fingerprint matches the server you expect."
-            case .changed:
-                return "The SSH host key for \(challenge.host) changed. Update trust only if this matches the server you expect."
-            }
-        }
-
-        if reason?.kind == .authentication {
-            return "The saved credentials were rejected. Update them to retry this session."
-        }
-
-        if reason?.kind == .serverUnreachable {
-            return "Remux could not reach the server. Check the address, port, network, or VPN."
-        }
-
-        return fallback
-    }
-
-    private func trustActionTitle(for challenge: SSHHostKeyTrustChallenge?) -> String {
-        guard let challenge else { return "Trust Server" }
-        switch challenge.kind {
-        case .unknown:
-            return "Trust Server"
-        case .changed:
-            return "Update Trust"
-        }
-    }
-
-    private func hostKeyVerification(for challenge: SSHHostKeyTrustChallenge?) -> String? {
-        guard let challenge else {
-            return nil
-        }
-
-        guard let fingerprint = challenge.receivedKeyFingerprint else {
-            return "Fingerprint unavailable. Trust is unavailable."
-        }
-
-        return "Received \(challenge.receivedKeyType) \(fingerprint)"
     }
 }
 
