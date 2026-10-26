@@ -56,6 +56,21 @@ final class GhosttyRepairPanelContentTests: XCTestCase {
         XCTAssertEqual(titles(content), ["Cancel"])
     }
 
+    /// A key Remux can't read, or trust that changed while connecting, has no key to review; reconnecting asks
+    /// again when there is one.
+    func testAHostKeyFailureWithoutAKeyToReviewSaysSo() {
+        for error in [
+            TrustedHostStoreError.invalidHostKey,
+            TrustedHostStoreError.staleHostKeyTrust(host: "lab.example.test"),
+        ] {
+            let content = panel(GhosttyTerminalDisconnectReasonClassifier.transportStartFailure(error))
+            XCTAssertEqual(content.title, "Disconnected", "\(error)")
+            XCTAssertEqual(content.message, "Remux couldn't verify this server's key.", "\(error)")
+            XCTAssertNil(content.hostKey)
+            XCTAssertEqual(titles(content), ["Reconnect"])
+        }
+    }
+
     func testRejectedCredentialsNameTheServer() {
         let content = panel(GhosttyTerminalDisconnectReasonClassifier.transportStartFailure(Failure("Permission denied")))
 
