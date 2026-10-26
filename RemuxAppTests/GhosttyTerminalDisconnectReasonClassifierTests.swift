@@ -120,13 +120,15 @@ final class GhosttyTerminalDisconnectReasonClassifierTests: XCTestCase {
         ))
     }
 
-    /// The login shell failed before the script ran: not tmux's failure, so it's an exit, with the shell's
-    /// first line under it.
+    /// The login shell failed before the script ran: not tmux's failure, so it's an exit, with the end of
+    /// what the shell printed under it.
     func testALoginShellThatFailsIsAnExitNotTmuxUnavailable() {
-        for (status, output, line) in [
-            (127, "fish: Unknown command: export\r\n~/.config/fish/config.fish (line 1):\r\n", "fish: Unknown command: export"),
-            (126, "\r\nfish: exec: /bin/sh: Permission denied\r\n", "fish: exec: /bin/sh: Permission denied"),
+        let fish = "fish: Unknown command: export\r\n~/.config/fish/config.fish (line 1):\r\nexport LANG=C\r\n^~~~~^\r\n"
+        for (status, output, words) in [
+            (127, fish, "fish: Unknown command: export\n~/.config/fish/config.fish (line 1):\nexport LANG=C\n^~~~~^"),
+            (126, "Welcome to lab\r\n\r\nfish: exec: /bin/sh: Permission denied  \r\n", "Welcome to lab\nfish: exec: /bin/sh: Permission denied"),
             (1, "This account is currently not available.\n", "This account is currently not available."),
+            (1, (1...8).map { "line \($0)" }.joined(separator: "\n"), (3...8).map { "line \($0)" }.joined(separator: "\n")),
         ] {
             let reason = GhosttyTerminalDisconnectReasonClassifier.tmuxStartFailure(
                 SSHTmuxControlTransportError.remoteExit(status, diagnostics: diagnostics(messages: output)),
@@ -135,7 +137,7 @@ final class GhosttyTerminalDisconnectReasonClassifierTests: XCTestCase {
             XCTAssertEqual(reason, TerminalDisconnectReason(
                 kind: .remoteExit,
                 message: "The server closed the connection before tmux started.",
-                detail: line
+                detail: words
             ))
         }
 

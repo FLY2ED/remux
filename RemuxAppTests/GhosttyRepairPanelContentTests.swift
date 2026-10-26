@@ -136,6 +136,43 @@ final class GhosttyRepairPanelContentTests: XCTestCase {
         XCTAssertNil(panel(HerdrConnectionError.serverShutdown(reason: nil).terminalDisconnectReason(on: Self.server)).detail)
     }
 
+    /// Herdr's client asks to update and restart a server older than it supports: the install may already be
+    /// new while the old server keeps running.
+    func testAnOldRunningHerdrSaysToUpdateAndRestartIt() {
+        let content = panel(HerdrConnectionError.outdated(serverVersion: "0.9.2").terminalDisconnectReason(on: Self.server))
+
+        XCTAssertEqual(content.title, "Herdr Unavailable")
+        XCTAssertEqual(content.message, "Herdr 0.9.2 is running on Lab. Update Herdr, then restart its server.")
+        XCTAssertEqual(titles(content), ["Retry", "Edit Server"])
+
+        XCTAssertEqual(
+            panel(HerdrConnectionError.outdated(serverVersion: nil).terminalDisconnectReason(on: Self.server)).message,
+            "An older Herdr is running on Lab. Update Herdr, then restart its server."
+        )
+    }
+
+    /// A Herdr that refuses the hello says why in its own words.
+    func testAHerdrThatDoesNotWorkWithRemuxSaysSo() {
+        let refused = panel(HerdrConnectionError.rejected(code: "unsupported_generation", message: "endpoint generation 1 is not supported")
+            .terminalDisconnectReason(on: Self.server))
+        XCTAssertEqual(refused.title, "Herdr Unavailable")
+        XCTAssertEqual(refused.message, "Herdr on Lab doesn't work with this version of Remux.")
+        XCTAssertEqual(refused.detail, "endpoint generation 1 is not supported")
+
+        let incompatible = panel(HerdrConnectionError.incompatible("it speaks endpoint generation 2").terminalDisconnectReason(on: Self.server))
+        XCTAssertEqual(incompatible.message, "Herdr on Lab doesn't work with this version of Remux.")
+        XCTAssertNil(incompatible.detail)
+    }
+
+    func testALoginShellThatFailsBeforeHerdrShowsTheServersWords() {
+        let content = panel(HerdrBridgeError.remoteExit(status: 1, stderr: "This account is currently not available.\n")
+            .terminalDisconnectReason(on: Self.server))
+
+        XCTAssertEqual(content.title, "Disconnected")
+        XCTAssertEqual(content.message, "The server closed the connection before Herdr started.")
+        XCTAssertEqual(content.detail, "This account is currently not available.")
+    }
+
     func testALostConnectionSaysSo() {
         let content = panel(TmuxSessionController.DetachReason.transportClosed.terminalDisconnectReason)
 
@@ -152,7 +189,8 @@ final class GhosttyRepairPanelContentTests: XCTestCase {
                 SSHTmuxControlTransportError.controlSessionNoResponse(.seconds(15))
             ),
             GhosttyTerminalDisconnectReasonClassifier.transportStartFailure(Failure("connection fizzled")),
-            HerdrConnectionError.incompatible("it uses other codecs").terminalDisconnectReason(on: Self.server),
+            HerdrConnectionError.wire(.invalidSurfaceUpdate("surface delta without a baseline"))
+                .terminalDisconnectReason(on: Self.server),
             nil,
         ]
         for reason in reasons {

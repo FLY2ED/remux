@@ -1027,9 +1027,33 @@ extension HerdrConnectionError {
                 message: "Herdr stopped on \(server.displayName).",
                 detail: reason.flatMap { $0.isEmpty ? nil : $0 }
             )
-        case .rejected, .incompatible, .wire:
+        case .outdated(let version):
+            // As Herdr's own client says: the install may already be new, and only the running server old.
+            let running = version.map { "Herdr \($0) is running" } ?? "An older Herdr is running"
+            return TerminalDisconnectReason(
+                kind: .backendUnavailable(.herdr),
+                message: "\(running) on \(server.displayName). Update Herdr, then restart its server."
+            )
+        case .rejected(_, let reason):
+            return TerminalDisconnectReason(
+                kind: .backendUnavailable(.herdr),
+                message: Self.incompatibleMessage(on: server),
+                detail: reason.isEmpty ? nil : reason
+            )
+        case .incompatible:
+            return TerminalDisconnectReason(
+                kind: .backendUnavailable(.herdr),
+                message: Self.incompatibleMessage(on: server)
+            )
+        case .wire:
             return TerminalDisconnectReason(kind: .runtime, message: message)
         }
+    }
+}
+
+extension HerdrConnectionError {
+    private static func incompatibleMessage(on server: SavedServer) -> String {
+        "Herdr on \(server.displayName) doesn't work with this version of Remux."
     }
 }
 
