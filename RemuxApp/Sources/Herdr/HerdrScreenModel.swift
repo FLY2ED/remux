@@ -166,6 +166,11 @@ final class HerdrScreenModel {
     private(set) var focusedPaneID: String?
     private var terminals: [String: HerdrRetainedTerminal] = [:]
     private var surfaces: [String: HerdrPaneSurface] = [:]
+    private var paneScrolls: [String: HerdrPaneScroll] = [:]
+    /// Where the current scroll gesture over each pane is, in the pane's points, and the travel not
+    /// yet a whole wheel step.
+    private var scrollPointers: [String: CGPoint] = [:]
+    private var wheelRemainders: [String: Double] = [:]
     private var presentationFailures: [String: TerminalDisconnectReason] = [:]
     private var creatingTerminals: Set<ObjectIdentifier> = []
     /// Ghostty gives a terminal one renderer at a time, so a replacement waits for these to close.
@@ -500,6 +505,62 @@ final class HerdrScreenModel {
         }
     }
 
+    // MARK: - Scrolling
+
+    /// History lines per wheel step, as Herdr's client sends by default. A program that reads the mouse,
+    /// or takes the wheel as arrow keys, gets one report or key per step instead.
+    static let wheelLines: UInt16 = 3
+
+    /// Where a scroll gesture over the pane is; its wheel steps are reported at that cell, as Herdr's
+    /// client reports the pointer's.
+    func setScrollPointer(_ point: CGPoint, inPane paneID: String) {
+        scrollPointers[paneID] = point
+    }
+
+    /// A scroll gesture's travel over a pane becomes Herdr wheel steps the way Ghostty turns travel into
+    /// lines for tmux: one step per cell height, the rest kept for the next. Herdr decides what a step
+    /// does: it scrolls the pane's history, or goes to the program as a wheel report or an arrow key. As
+    /// in Herdr's client, scrolling another pane focuses it.
+    func scroll(_ event: GhosttySurfaceMouseScrollEvent, inPane paneID: String) -> Bool {
+        let momentum = event.mods.momentum
+        if momentum == .began { wheelRemainders[paneID] = 0 }
+        defer {
+            if momentum == .ended || momentum == .cancelled { wheelRemainders[paneID] = nil }
+        }
+        guard let attempt = shownAttempt, let measurement, presentation(ofPane: paneID) == .ready,
+              let pane = layout?.panes.first(where: { $0.paneID == paneID })
+        else { return false }
+        if momentum == .began, paneID != focusedPaneID { _ = focusPane(paneID) }
+
+        let cellHeight = Double(measurement.cellMetrics.pixelHeight)
+        let travel = (wheelRemainders[paneID] ?? 0) + event.deltaY
+        let steps = (travel / cellHeight).rounded(.towardZero)
+        wheelRemainders[paneID] = travel - steps * cellHeight
+        guard steps != 0 else { return true }
+
+        let scale = measurement.cellMetrics.contentScale
+        let point = scrollPointers[paneID] ?? .zero
+        func cell(_ points: CGFloat, size: UInt32, count: UInt16) -> UInt16 {
+            let index = Int((Double(points) * scale / Double(max(size, 1))).rounded(.down))
+            return UInt16(min(max(index, 0), Int(max(count, 1)) - 1))
+        }
+        let wheel = HerdrMouseEvent(
+            kind: steps > 0 ? .scrollUp : .scrollDown,
+            column: cell(point.x, size: measurement.cellMetrics.pixelWidth, count: pane.innerRect.width),
+            row: cell(point.y, size: measurement.cellMetrics.pixelHeight, count: pane.innerRect.height),
+            lines: Self.wheelLines
+        )
+        let events = Array(repeating: HerdrInputEvent.mouse(wheel), count: Int(steps.magnitude))
+        return send(events, to: (attempt, paneID)) == .accepted
+    }
+
+    private func applyScroll(toPane paneID: String) {
+        guard let scroll = paneScrolls[paneID],
+              let managed = surfaces[paneID]?.renderer.managedSurface
+        else { return }
+        managed.setRemoteScroll(scroll.scrollState, route: scroll.route)
+    }
+
     private func inputFailed(_ attemptID: UInt64) {
         guard let attempt, attempt.id == attemptID, isCurrent(attempt), !attempt.ended else { return }
         terminalScreenAdapter.presentFailure(Self.inputFailureLabel)
@@ -832,6 +893,8 @@ final class HerdrScreenModel {
             let shown = Set(layout.panes.lazy.filter(\.hasTextArea).map(\.paneID))
             terminals = terminals.filter { shown.contains($0.key) }
             presentationFailures = presentationFailures.filter { shown.contains($0.key) }
+            scrollPointers = scrollPointers.filter { shown.contains($0.key) }
+            wheelRemainders = wheelRemainders.filter { shown.contains($0.key) }
             for paneID in Array(surfaces.keys) where !shown.contains(paneID) {
                 closeSurface(paneID)
             }
@@ -843,6 +906,13 @@ final class HerdrScreenModel {
                 }
             }
             reconcilePresentationActivity()
+        case .paneScroll(let scrolls):
+            paneScrolls = scrolls
+            for paneID in surfaces.keys {
+                applyScroll(toPane: paneID)
+            }
+            // Only the panes' scroll views follow it; the screen has nothing new to show.
+            return
         case .paneTerminalFailed(let paneID):
             presentationFailures[paneID] = Self.paneFailure
             surfaces[paneID]?.renderer.failPresentation(message: Self.paneFailure.message)
@@ -944,6 +1014,7 @@ final class HerdrScreenModel {
             let surface = HerdrPaneSurface(paneID: paneID, terminal: terminal, renderer: renderer)
             surfaces[paneID] = surface
             terminalScreenAdapter.makeScreenSurface(for: surface)
+            applyScroll(toPane: paneID)
             renderer.onPresentationChange = { [weak self] in self?.didChange() }
             // Settings and the pane's size may have changed while the renderer was being registered.
             if !renderer.applyTerminalConfiguration(theme: currentTerminalSettings.theme)
@@ -1133,5 +1204,25 @@ extension HerdrPaneLayout.Pane {
     /// A pane with no text area has no terminal.
     var hasTextArea: Bool {
         innerRect.width > 0 && innerRect.height > 0
+    }
+}
+
+extension HerdrPaneScroll {
+    /// Herdr routes a wheel step to a program that reads the mouse first, then to one on the alternate
+    /// screen as an arrow key, and otherwise scrolls the pane's history.
+    var route: GhosttySurfaceScrollRoute {
+        if mouseReporting { return .mouseReport }
+        if alternateScreenActive { return .altScreenCursor }
+        return .remoteHistory
+    }
+
+    var scrollState: GhosttySurfaceScrollState {
+        let fromBottom = min(linesFromBottom, maxLinesFromBottom)
+        return GhosttySurfaceScrollState(
+            total: maxLinesFromBottom + rows,
+            offset: maxLinesFromBottom - fromBottom,
+            len: rows,
+            cellOffset: 0
+        )
     }
 }

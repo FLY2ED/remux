@@ -1138,6 +1138,140 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertFalse(pasted)
     }
 
+    // MARK: - Scrolling
+
+    /// Herdr scrolls a pane's history and says where it is with each frame, so the pane's scroll view
+    /// takes the position and where a scroll goes from Herdr, not from the painted terminal: history to
+    /// Herdr with the indicator showing, a program that reads the mouse gets the wheel. Neither redraws
+    /// the screen, since the history grows with every line a program prints.
+    func testAPanesScrollingComesFromHerdrWithoutRedrawingTheScreen() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        let adapter = harness.model.terminalScreenAdapter
+        let ids = adapter.terminalScreenPresentationProjection.viewport.panes.map(\.id)
+        let lookup = adapter.terminalManagedSurfaceLookup
+        func serve(_ revision: UInt64, history: UInt64) async {
+            await session.bridge.serve(HerdrServerScript.surface(
+                projection: 1,
+                revision: revision,
+                lines: ["one two"],
+                panes: [
+                    .init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true, scroll: (6, history, 1)),
+                    .init(id: "w1:p2", x: 4, width: 3, height: 1, mouseReporting: true, alternateScreen: true),
+                ]
+            ))
+        }
+        await serve(2, history: 40)
+        try await harness.waitUntil("the scrolling didn't reach the panes") {
+            lookup.managedSurface(for: ids[0])?.scrollRoute == .remoteHistory
+                && lookup.managedSurface(for: ids[1])?.scrollRoute == .mouseReport
+        }
+        let history = try XCTUnwrap(lookup.managedSurface(for: ids[0]))
+        XCTAssertEqual(history.scrollState, GhosttySurfaceScrollState(total: 41, offset: 34, len: 1, cellOffset: 0))
+
+        let container = GhosttyPaneScrollContainerView(frame: CGRect(x: 0, y: 0, width: 300, height: 40))
+        _ = container.update(
+            surface: history,
+            displayScale: 3,
+            submitRouteForwardedMouseScroll: { _, _ in .sent },
+            submitRouteForwardedMousePosition: { _, _, _ in .sent }
+        )
+        container.layoutIfNeeded()
+        let scrollView = try XCTUnwrap(
+            container.subviews.compactMap { $0 as? UIScrollView }.first { !($0 is GhosttyScrollPhysicsView) }
+        )
+        XCTAssertFalse(scrollView.isScrollEnabled, "history scrolled locally instead of on Herdr")
+        XCTAssertTrue(scrollView.showsVerticalScrollIndicator)
+        XCTAssertGreaterThan(scrollView.contentSize.height, container.bounds.height)
+
+        var screenChanges = 0
+        let watch = adapter.objectWillChange.sink { screenChanges += 1 }
+        defer { watch.cancel() }
+        await serve(3, history: 41)
+        try await harness.waitUntil("the grown history didn't reach the pane") {
+            history.scrollState.total == 42
+        }
+        XCTAssertEqual(screenChanges, 0, "a change of scrolling alone redrew the screen")
+    }
+
+    /// A scroll gesture's travel becomes Herdr wheel steps as Ghostty makes lines of it for tmux: one
+    /// per cell height, the rest kept for the next, up or down with the travel, at the cell where the
+    /// gesture is, each carrying Herdr's three history lines.
+    func testAScrollGestureSendsWheelStepsToItsPane() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let pane = adapter.terminalScreenPresentationProjection.viewport.panes[0].id
+        let cellHeight = Double(try XCTUnwrap(harness.model.measurement).cellMetrics.pixelHeight)
+        func travel(
+            _ cells: Double,
+            _ momentum: GhosttySurfaceMouseScrollMods.Momentum = .changed
+        ) -> GhosttyMouseInputSubmissionOutcome {
+            adapter.sendMouseScroll(to: pane, GhosttySurfaceMouseScrollEvent(
+                deltaX: 0,
+                deltaY: cells * cellHeight,
+                mods: .init(precision: true, momentum: momentum)
+            ))
+        }
+
+        XCTAssertEqual(adapter.sendMousePosition(to: pane, CGPoint(x: 1, y: 1), mods: []), .sent)
+        XCTAssertEqual(travel(2.5, .began), .sent)
+        XCTAssertEqual(travel(0.6), .sent)
+        XCTAssertEqual(travel(-3.2), .sent)
+        XCTAssertEqual(travel(0, .ended), .sent)
+
+        let up = HerdrInputEvent.mouse(HerdrMouseEvent(kind: .scrollUp, column: 0, row: 0, lines: 3))
+        let down = HerdrInputEvent.mouse(HerdrMouseEvent(kind: .scrollDown, column: 0, row: 0, lines: 3))
+        var sent: [[UInt8]] = []
+        for _ in 0..<3 {
+            sent.append(try await nextWrite(session.bridge, from: &index, paneInput))
+        }
+        XCTAssertEqual(sent, [
+            frame("w1:p1", [up, up]),
+            frame("w1:p1", [up]),
+            frame("w1:p1", [down, down, down]),
+        ])
+    }
+
+    /// As in Herdr's client, scrolling another pane focuses it, and its steps go to it. A hidden session
+    /// takes no scrolling.
+    func testScrollingAnotherPaneFocusesItAndAHiddenSessionTakesNone() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let ids = adapter.terminalScreenPresentationProjection.viewport.panes.map(\.id)
+        let cellHeight = Double(try XCTUnwrap(harness.model.measurement).cellMetrics.pixelHeight)
+        let began = GhosttySurfaceMouseScrollEvent(
+            deltaX: 0,
+            deltaY: 1.2 * cellHeight,
+            mods: .init(precision: true, momentum: .began)
+        )
+
+        _ = adapter.sendMousePosition(to: ids[1], .zero, mods: [])
+        XCTAssertEqual(adapter.sendMouseScroll(to: ids[1], began), .sent)
+        var focused: String?
+        var input: [UInt8]?
+        while focused == nil || input == nil {
+            let write = try ClientWrite.decode(try await session.bridge.written(index))
+            index += 1
+            if let focus = paneFocus(write) { focused = focus.paneID }
+            if let sent = paneInput(write) { input = sent }
+        }
+        XCTAssertEqual(focused, "w1:p2")
+        XCTAssertEqual(input, frame("w1:p2", [.mouse(HerdrMouseEvent(kind: .scrollUp, column: 0, row: 0, lines: 3))]))
+
+        harness.model.setSelected(false)
+        XCTAssertEqual(adapter.sendMouseScroll(to: ids[0], began), .surfaceRejected)
+        try await Task.sleep(for: .milliseconds(100))
+        let written = await session.bridge.writtenCount
+        for position in index..<written {
+            let write = try ClientWrite.decode(try await session.bridge.written(position))
+            XCTAssertNil(paneInput(write), "a hidden session scrolled")
+        }
+    }
+
     /// A session shown with panes `w1:p1` and `w1:p2`, both drawn, its snapshot focusing `focusedPane`;
     /// returns its bridge and the index of the first write after the show. A test that moves the focus
     /// types into the other pane, which takes input only once it has drawn.

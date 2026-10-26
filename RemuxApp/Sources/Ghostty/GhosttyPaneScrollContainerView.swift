@@ -131,11 +131,18 @@ final class GhosttyPaneScrollContainerView: UIView, UIScrollViewDelegate, UIGest
     private static let momentumCatchTapWindow: TimeInterval = 0.4
 
     /// Per-route caps on reports per second of one gesture. Each mouse-report
-    /// tick makes the remote TUI repaint, so that cap stays low. An
-    /// alt-screen-cursor tick is one cursor key moving one line, so fast flicks
-    /// need a higher cap.
+    /// tick makes the remote TUI repaint, and each remote-history tick makes the
+    /// server send a new frame, so those caps stay low. An alt-screen-cursor tick
+    /// is one cursor key moving one line, so fast flicks need a higher cap.
     private static let maxMouseReportTicksPerSecond: Double = 60
     private static let maxAltScreenTicksPerSecond: Double = 150
+
+    /// When this view last forwarded a scroll. A server's history position that
+    /// changes soon after shows the scroll indicator; one that moves with new
+    /// output while nobody scrolls doesn't.
+    private var lastForwardedScrollAt: TimeInterval?
+    private var lastRemoteLinesFromBottom: UInt64?
+    private static let remoteScrollIndicatorWindow: TimeInterval = 1
 
 
     override init(frame: CGRect) {
@@ -372,7 +379,7 @@ final class GhosttyPaneScrollContainerView: UIView, UIScrollViewDelegate, UIGest
         lastAppliedScrollRoute = route
         let usesNativeViewportScroll = route == .viewport
         scrollView.isScrollEnabled = usesNativeViewportScroll
-        scrollView.showsVerticalScrollIndicator = usesNativeViewportScroll
+        scrollView.showsVerticalScrollIndicator = usesNativeViewportScroll || route == .remoteHistory
         physicsScrollView.panGestureRecognizer.isEnabled = !usesNativeViewportScroll
         if usesNativeViewportScroll {
             haltPhysicsScroll()
@@ -417,6 +424,22 @@ final class GhosttyPaneScrollContainerView: UIView, UIScrollViewDelegate, UIGest
             lastSentViewportScrollPosition = GhosttyPaneScrollGeometry.position(for: surface.scrollState)
             pinSurfaceToVisibleBounds()
         }
+        showRemoteScrollIndicatorIfScrolled(surface.scrollState)
+    }
+
+    private func showRemoteScrollIndicatorIfScrolled(_ state: GhosttySurfaceScrollState) {
+        guard surface?.scrollRoute == .remoteHistory else {
+            lastRemoteLinesFromBottom = nil
+            return
+        }
+        let linesFromBottom = state.maxRow - min(state.offset, state.maxRow)
+        defer { lastRemoteLinesFromBottom = linesFromBottom }
+        guard let lastRemoteLinesFromBottom, linesFromBottom != lastRemoteLinesFromBottom,
+              let lastForwardedScrollAt,
+              isPhysicsGestureActive
+                || CACurrentMediaTime() - lastForwardedScrollAt < Self.remoteScrollIndicatorWindow
+        else { return }
+        scrollView.flashScrollIndicators()
     }
 
     private func pinSurfaceToVisibleBounds() {
@@ -484,6 +507,8 @@ final class GhosttyPaneScrollContainerView: UIView, UIScrollViewDelegate, UIGest
     private func resetViewportScrollInteractionState() {
         isUserViewportScrolling = false
         lastSentViewportScrollPosition = nil
+        lastForwardedScrollAt = nil
+        lastRemoteLinesFromBottom = nil
         pendingContentOffset = nil
         invalidateDisplayLink()
     }
@@ -639,6 +664,7 @@ final class GhosttyPaneScrollContainerView: UIView, UIScrollViewDelegate, UIGest
         for event in events {
             _ = submitRouteForwardedMouseScroll(surface.id, event)
         }
+        if !events.isEmpty { lastForwardedScrollAt = now }
     }
 
     private func endPhysicsGesture(phase: GhosttySurfacePanGesture.Phase) {

@@ -28,6 +28,16 @@ struct HerdrPaneLayout: Equatable, Sendable {
     let hasPopup: Bool
 }
 
+/// Where a pane's history viewport is and what its program asks of the mouse, from Herdr's surface.
+struct HerdrPaneScroll: Equatable, Sendable {
+    /// Lines the viewport is above the bottom of the history, and how far up it can go.
+    let linesFromBottom: UInt64
+    let maxLinesFromBottom: UInt64
+    let rows: UInt64
+    let mouseReporting: Bool
+    let alternateScreenActive: Bool
+}
+
 /// What the engine tells its main-actor owner, in order.
 enum HerdrEngineUpdate: Sendable {
     /// A new terminal for a pane, already painted; the owner creates its renderer with a
@@ -36,6 +46,9 @@ enum HerdrEngineUpdate: Sendable {
     case paneTerminal(paneID: String, terminal: HerdrRetainedTerminal)
     /// Follows the terminals of the new panes it lists.
     case layout(HerdrPaneLayout)
+    /// Each listed pane's scrolling, whenever any of it changed. Kept out of the layout because the
+    /// history grows with every line a program prints.
+    case paneScroll([String: HerdrPaneScroll])
     /// Ghostty couldn't make or paint the pane's terminal. It isn't painted again until the pane leaves
     /// the layout or a new connection begins; a terminal it already had keeps its last frame.
     case paneTerminalFailed(paneID: String)
@@ -115,6 +128,7 @@ actor HerdrTerminalEngine {
     private var bootID: String?
     private var paintedSurface: PaintedSurface?
     private var layout: HerdrPaneLayout?
+    private var paneScrolls: [String: HerdrPaneScroll] = [:]
     private var cellWidthPx: UInt32
     private var cellHeightPx: UInt32
     private let makeProducer: ProducerFactory
@@ -228,6 +242,7 @@ actor HerdrTerminalEngine {
         panes = panes.filter { listed.contains($0.key) }
         failedPaneIDs.formIntersection(listed)
         publishLayout(of: surface, snapshot: snapshot)
+        publishScroll(of: surface)
     }
 
     private func paint(_ next: HerdrPanePainter.Painted, paneID: String) {
@@ -316,6 +331,22 @@ actor HerdrTerminalEngine {
         guard next != layout else { return }
         layout = next
         continuation.yield(.layout(next))
+    }
+
+    private func publishScroll(of surface: HerdrPaneSurfaceFrame) {
+        var next: [String: HerdrPaneScroll] = [:]
+        for pane in surface.panes {
+            next[pane.paneID] = HerdrPaneScroll(
+                linesFromBottom: pane.scroll?.offsetFromBottom ?? 0,
+                maxLinesFromBottom: pane.scroll?.maxOffsetFromBottom ?? 0,
+                rows: pane.scroll?.viewportRows ?? UInt64(pane.innerRect.height),
+                mouseReporting: pane.mouseReporting,
+                alternateScreenActive: pane.alternateScreenActive
+            )
+        }
+        guard next != paneScrolls else { return }
+        paneScrolls = next
+        continuation.yield(.paneScroll(next))
     }
 
     /// The pane's name as Herdr's pane navigator lists it within its tab: its manual label or its

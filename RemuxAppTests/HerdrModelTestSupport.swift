@@ -68,6 +68,10 @@ enum HerdrServerScript {
         let width: UInt16
         let height: UInt16
         var focused = false
+        /// The viewport's lines from the bottom, the most it can be, and the program's rows.
+        var scroll: (fromBottom: UInt64, max: UInt64, rows: UInt64)?
+        var mouseReporting = false
+        var alternateScreen = false
     }
 
     /// A recorded v0.9.3 welcome.
@@ -158,11 +162,18 @@ enum HerdrServerScript {
                 writer.u16(pane.height)
             }
             writer.optional(nil as UInt8?) { $0.u8($1) }
-            writer.optional(nil as UInt8?) { $0.u8($1) }
+            if let scroll = pane.scroll {
+                writer.u8(1)
+                writer.u64(scroll.fromBottom)
+                writer.u64(scroll.max)
+                writer.u64(scroll.rows)
+            } else {
+                writer.u8(0)
+            }
             writer.bool(pane.focused)
+            writer.bool(pane.mouseReporting)
             writer.bool(false)
-            writer.bool(false)
-            writer.bool(false)
+            writer.bool(pane.alternateScreen)
             writer.u32(0)
             writer.u32(0)
         }

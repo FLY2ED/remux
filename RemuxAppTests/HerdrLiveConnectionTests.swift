@@ -162,10 +162,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
     ) async throws {
         let session = try await openShownSession(version: version, through: wrap)
         let adapter = session.model.terminalScreenAdapter
-        let log = HerdrLiveReadLog(fixture: session.fixture, path: session.fixture.root + "/reads.log")
-        let program = #"stty raw -echo; printf '\033[?2004h'; exec perl -MTime::HiRes=time -e 'open(my $f, ">>", shift) or die; $f->autoflush(1); print $f "R\n"; while (sysread(STDIN, my $b, 65536)) { printf $f "%.1f %s\n", time * 1000, unpack("H*", $b) }' "#
-        XCTAssertEqual(session.model.sendText(program + log.path + "\r"), .accepted)
-        try await log.waitForStart()
+        let log = try await startReadLog(in: session, modes: #"\033[?2004h"#)
 
         let composer = GhosttyComposerModel()
         composer.draft = message
@@ -197,6 +194,118 @@ final class HerdrLiveConnectionTests: XCTestCase {
         }
         let gap = enter.milliseconds - reads[reads.count - 2].milliseconds
         XCTAssertGreaterThanOrEqual(gap, 150, "Enter came \(gap) ms after the paste on Herdr \(version)")
+    }
+
+    // MARK: - Scrolling
+
+    /// A scroll over a shell's output moves Herdr's history three lines a step, and the pane's scroll
+    /// view follows Herdr's position.
+    @MainActor
+    func testScrollingAShellMovesItsHistoryOnHerdr093() async throws {
+        try await checkScrollingMovesHistory(version: "0.9.3")
+    }
+
+    @MainActor
+    func testScrollingAShellMovesItsHistoryOnHerdr095() async throws {
+        try await checkScrollingMovesHistory(version: "0.9.5")
+    }
+
+    /// A full-screen program that doesn't read the mouse gets an arrow key for each step.
+    @MainActor
+    func testScrollingAFullScreenProgramSendsItArrowKeysOnHerdr093() async throws {
+        try await checkScrollingReachesTheProgram(version: "0.9.3", modes: #"\033[?1049h"#, route: .altScreenCursor, step: "\u{1b}[A")
+    }
+
+    @MainActor
+    func testScrollingAFullScreenProgramSendsItArrowKeysOnHerdr095() async throws {
+        try await checkScrollingReachesTheProgram(version: "0.9.5", modes: #"\033[?1049h"#, route: .altScreenCursor, step: "\u{1b}[A")
+    }
+
+    /// A program that reads the mouse gets a wheel report for each step, at the cell under the finger.
+    @MainActor
+    func testScrollingAProgramThatReadsTheMouseSendsItWheelReportsOnHerdr093() async throws {
+        try await checkScrollingReachesTheProgram(
+            version: "0.9.3",
+            modes: #"\033[?1049h\033[?1000h\033[?1006h"#,
+            route: .mouseReport,
+            step: "\u{1b}[<64;1;1M"
+        )
+    }
+
+    @MainActor
+    func testScrollingAProgramThatReadsTheMouseSendsItWheelReportsOnHerdr095() async throws {
+        try await checkScrollingReachesTheProgram(
+            version: "0.9.5",
+            modes: #"\033[?1049h\033[?1000h\033[?1006h"#,
+            route: .mouseReport,
+            step: "\u{1b}[<64;1;1M"
+        )
+    }
+
+    @MainActor
+    private func checkScrollingMovesHistory(version: String) async throws {
+        let session = try await openShownSession(version: version, through: { $0 })
+        let adapter = session.model.terminalScreenAdapter
+        let pane = try XCTUnwrap(adapter.terminalInteractionProjection.selectedActiveLeafID)
+        let surface = try XCTUnwrap(adapter.terminalManagedSurfaceLookup.managedSurface(for: pane))
+        XCTAssertEqual(session.model.sendText("seq 1 300\r"), .accepted)
+        try await waitUntil("the shell's history didn't grow", timeout: .seconds(15)) {
+            surface.scrollRoute == .remoteHistory && surface.scrollState.maxRow >= 100
+        }
+
+        try scroll(session, pane: pane, steps: 4)
+        try await waitUntil("Herdr didn't scroll the history", timeout: .seconds(15)) {
+            surface.scrollState.maxRow - surface.scrollState.offset == 12
+        }
+    }
+
+    @MainActor
+    private func checkScrollingReachesTheProgram(
+        version: String,
+        modes: String,
+        route: GhosttySurfaceScrollRoute,
+        step: String
+    ) async throws {
+        let session = try await openShownSession(version: version, through: { $0 })
+        let adapter = session.model.terminalScreenAdapter
+        let pane = try XCTUnwrap(adapter.terminalInteractionProjection.selectedActiveLeafID)
+        let surface = try XCTUnwrap(adapter.terminalManagedSurfaceLookup.managedSurface(for: pane))
+        let log = try await startReadLog(in: session, modes: modes)
+        try await waitUntil("the pane's scrolling didn't follow the program's modes", timeout: .seconds(15)) {
+            surface.scrollRoute == route
+        }
+
+        try scroll(session, pane: pane, steps: 2)
+        let expected = Array((step + step).utf8)
+        let reads = try await log.reads(until: { $0.flatMap(\.bytes).count >= expected.count })
+        XCTAssertEqual(reads.flatMap(\.bytes), expected, "Herdr \(version)")
+    }
+
+    /// A gesture at the pane's top-left cell whose travel makes `steps` wheel steps up.
+    @MainActor
+    private func scroll(_ session: ShownSession, pane: UUID, steps: Int) throws {
+        let adapter = session.model.terminalScreenAdapter
+        let cellHeight = Double(try XCTUnwrap(session.model.measurement).cellMetrics.pixelHeight)
+        XCTAssertEqual(adapter.sendMousePosition(to: pane, CGPoint(x: 2, y: 2), mods: []), .sent)
+        for momentum in [GhosttySurfaceMouseScrollMods.Momentum.began, .ended] {
+            let event = GhosttySurfaceMouseScrollEvent(
+                deltaX: 0,
+                deltaY: momentum == .began ? (Double(steps) + 0.5) * cellHeight : 0,
+                mods: .init(precision: true, momentum: momentum)
+            )
+            XCTAssertEqual(adapter.sendMouseScroll(to: pane, event), .sent)
+        }
+    }
+
+    /// Starts a program in the session's pane that logs what it reads with the time (`HerdrLiveReadLog`),
+    /// after writing `modes` to its terminal.
+    @MainActor
+    private func startReadLog(in session: ShownSession, modes: String) async throws -> HerdrLiveReadLog {
+        let log = HerdrLiveReadLog(fixture: session.fixture, path: session.fixture.root + "/reads.log")
+        let program = #"stty raw -echo; printf '"# + modes + #"'; exec perl -MTime::HiRes=time -e 'open(my $f, ">>", shift) or die; $f->autoflush(1); print $f "R\n"; while (sysread(STDIN, my $b, 65536)) { printf $f "%.1f %s\n", time * 1000, unpack("H*", $b) }' "#
+        XCTAssertEqual(session.model.sendText(program + log.path + "\r"), .accepted)
+        try await log.waitForStart()
+        return log
     }
 
     private struct ShownSession {

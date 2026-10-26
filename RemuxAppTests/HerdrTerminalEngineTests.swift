@@ -139,7 +139,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
                 switch update {
                 case .paneTerminal(let paneID, let terminal): terminals[paneID] = terminal
                 case .paneTerminalFailed, .rendererWakeFailed, .failed: XCTFail("\(fixture.name): \(update)")
-                case .layout: break
+                case .layout, .paneScroll: break
                 }
             }
             for pane in surface.panes where pane.innerRect.width > 0 && pane.innerRect.height > 0 {
@@ -180,6 +180,46 @@ final class HerdrTerminalEngineTests: XCTestCase {
 
         let error = await registrationError(engine: engine, paneID: "B", terminal: try XCTUnwrap(terminals["B"]))
         XCTAssertEqual(error, .terminalGone)
+        await engine.stop()
+    }
+
+    /// A pane's scrolling goes out on its own whenever it changes, never with a new layout: the history
+    /// grows with every line a program prints.
+    func testAPanesScrollingGoesOutWhenItChanges() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection()
+        await feed.receive(try Self.snapshot(revision: 1))
+        func surface(_ revision: UInt64, max: Int, mouse: Bool = false) throws -> HerdrSurfaceDecoder.Output {
+            .surface(try Self.surface(
+                revision: revision,
+                lines: ["one"],
+                panes: [Self.pane("P", x: 0, width: 3, height: 1, scroll: (0, max, 1), mouseReporting: mouse)]
+            ))
+        }
+        await feed.receive(try surface(1, max: 5))
+        _ = try await updates.nextLayout()
+        let first = try await updates.nextPaneScroll()
+        XCTAssertEqual(first, ["P": HerdrPaneScroll(
+            linesFromBottom: 0,
+            maxLinesFromBottom: 5,
+            rows: 1,
+            mouseReporting: false,
+            alternateScreenActive: false
+        )])
+
+        await feed.receive(try surface(2, max: 6))
+        guard case .paneScroll(let grown) = try await updates.next() else {
+            return XCTFail("the grown history didn't go out on its own")
+        }
+        XCTAssertEqual(grown["P"]?.maxLinesFromBottom, 6)
+
+        await feed.receive(try surface(3, max: 6))
+        await feed.receive(try surface(4, max: 6, mouse: true))
+        guard case .paneScroll(let reporting) = try await updates.next() else {
+            return XCTFail("an unchanged frame sent the scrolling again")
+        }
+        XCTAssertEqual(reporting["P"]?.mouseReporting, true)
         await engine.stop()
     }
 
@@ -276,6 +316,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await first.receive(.surface(try Self.surface(revision: 1, lines: ["one"], panes: panes)))
         let failed = try await updates.terminal(for: "P")
         _ = try await updates.nextLayout()
+        _ = try await updates.nextPaneScroll()
 
         producerFailure.isOn = true
         await first.receive(.patch(try Self.patch(
@@ -491,11 +532,23 @@ final class HerdrTerminalEngineTests: XCTestCase {
         }
     }
 
-    static func pane(_ id: String, x: Int, width: Int, height: Int, focused: Bool = false) -> String {
-        """
+    /// `scroll` is the viewport's lines from the bottom, the most it can be, and the program's rows.
+    static func pane(
+        _ id: String,
+        x: Int,
+        width: Int,
+        height: Int,
+        focused: Bool = false,
+        scroll: (fromBottom: Int, max: Int, rows: Int)? = nil,
+        mouseReporting: Bool = false
+    ) -> String {
+        let scrollJSON = scroll.map {
+            #"{"offset_from_bottom":\#($0.fromBottom),"max_offset_from_bottom":\#($0.max),"viewport_rows":\#($0.rows)}"#
+        } ?? "null"
+        return """
         {"pane_id":"\(id)","content_revision":1,"rect":{"x":\(x),"y":0,"width":\(width),"height":\(height)},
-         "inner_rect":{"x":\(x),"y":0,"width":\(width),"height":\(height)},"scrollbar_rect":null,"scroll":null,
-         "focused":\(focused),"mouse_reporting":false,"sgr_pixel_mouse":false,
+         "inner_rect":{"x":\(x),"y":0,"width":\(width),"height":\(height)},"scrollbar_rect":null,"scroll":\(scrollJSON),
+         "focused":\(focused),"mouse_reporting":\(mouseReporting),"sgr_pixel_mouse":false,
          "alternate_screen_active":false,"pixel_width":0,"pixel_height":0}
         """
     }
@@ -566,6 +619,12 @@ private final class UpdateLog {
     func nextLayout() async throws -> HerdrPaneLayout {
         while true {
             if case .layout(let layout) = try await next() { return layout }
+        }
+    }
+
+    func nextPaneScroll() async throws -> [String: HerdrPaneScroll] {
+        while true {
+            if case .paneScroll(let scrolls) = try await next() { return scrolls }
         }
     }
 

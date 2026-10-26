@@ -1693,7 +1693,7 @@ final class RemuxAppUITests: XCTestCase {
         captureLiveHerdrStep("1b-selection", in: configuration)
         terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.5)).tap()
 
-        // A Herdr screen takes no terminal input yet, so the keyboard comes up with the composer.
+        // The keyboard comes up with the composer, as on a tmux screen.
         let composerToggle = app.buttons["terminal.composer.toggle"]
         XCTAssertTrue(composerToggle.waitForExistence(timeout: 5))
         composerToggle.tap()
@@ -1732,6 +1732,15 @@ final class RemuxAppUITests: XCTestCase {
         waitForLiveTerminalReady(timeout: 30, expectedHostKey: configuration.expectedHostKey)
         assertLiveTerminalScreenshotContainsRenderedContent()
         captureLiveHerdrStep("5-back", in: configuration)
+
+        // A swipe down over the first pane scrolls its history back on Herdr. The harness reads
+        // Herdr's scroll position after the test, so the swipe's steps get time to go out first.
+        let firstPane = app.otherElements["terminal.screen"].firstMatch
+            .coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.3))
+        firstPane.press(forDuration: 0.05, thenDragTo: firstPane.withOffset(CGVector(dx: 0, dy: 240)))
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "the swipe's wheel steps go out")], timeout: 2)
+        XCTAssertEqual(app.state, .runningForeground)
+        captureLiveHerdrStep("6-scrolled", in: configuration)
     }
 
     private func captureLiveHerdrStep(_ name: String, in configuration: LiveHerdrConfiguration) {

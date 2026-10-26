@@ -63,6 +63,7 @@ final class GhosttyManagedSurface {
     private(set) var rendererRecoverySnapshot: CGImage?
     private(set) var scrollState: GhosttySurfaceScrollState
     private(set) var scrollRoute: GhosttySurfaceScrollRoute
+    private var remoteScroll: (state: GhosttySurfaceScrollState, route: GhosttySurfaceScrollRoute)?
     var onScrollStateChange: (() -> Void)?
     var onLocalSelectionGeometryChange: (() -> Void)?
     var onRendererRecoveryChange: (() -> Void)?
@@ -174,11 +175,19 @@ final class GhosttyManagedSurface {
 
     func refreshInteractionState() {
         let state = controlSurface.interactionState()
-        let changed = state.scrollState != scrollState || state.scrollRoute != scrollRoute
-        scrollState = state.scrollState
-        scrollRoute = state.scrollRoute
+        let scroll = remoteScroll ?? (state.scrollState, state.scrollRoute)
+        let changed = scroll.state != scrollState || scroll.route != scrollRoute
+        scrollState = scroll.state
+        scrollRoute = scroll.route
         if changed { onScrollStateChange?() }
         onLocalSelectionGeometryChange?()
+    }
+
+    /// For a pane its server scrolls, as Herdr's: the server's history position and where a scroll
+    /// goes replace the local terminal's, which only shows what the server painted.
+    func setRemoteScroll(_ state: GhosttySurfaceScrollState, route: GhosttySurfaceScrollRoute) {
+        remoteScroll = (state, route)
+        refreshInteractionState()
     }
 
     @discardableResult
