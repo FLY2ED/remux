@@ -882,7 +882,8 @@ final class HerdrScreenModel {
     /// A scroll gesture's travel over a pane becomes Herdr wheel steps the way Ghostty turns travel into
     /// lines for tmux: one step per cell height, the rest kept for the next. Herdr decides what a step
     /// does: it scrolls the pane's history, or goes to the program as a wheel report or an arrow key. As
-    /// in Herdr's client, scrolling another pane focuses it.
+    /// in Herdr's client, scrolling another pane focuses it. The wheel goes where any input goes
+    /// (`inputTarget(forPane:)`), placed in the pane's drawn area.
     func scroll(_ event: GhosttySurfaceMouseScrollEvent, inPane paneID: String) -> Bool {
         let momentum = event.mods.momentum
         // A cancelled gesture, as when the program's mouse mode changes, sends none of its travel.
@@ -894,7 +895,7 @@ final class HerdrScreenModel {
         defer {
             if momentum == .ended { wheelRemainders[paneID] = nil }
         }
-        guard let attempt = shownAttempt, let measurement, presentation(ofPane: paneID) == .ready,
+        guard let target = inputTarget(forPane: paneID), let measurement,
               let area = layout?.panes.first(where: { $0.paneID == paneID })?.innerRect
         else { return false }
         if momentum == .began, paneID != focusedPaneID { _ = focusPane(paneID) }
@@ -918,7 +919,7 @@ final class HerdrScreenModel {
             lines: Self.wheelLines
         )
         let events = Array(repeating: HerdrInputEvent.mouse(wheel), count: Int(steps.magnitude))
-        return send(events, to: (attempt, paneID)) == .accepted
+        return send(events, to: target) == .accepted
     }
 
     private func applyScroll(toPane paneID: String) {

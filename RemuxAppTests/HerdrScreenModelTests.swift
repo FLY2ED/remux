@@ -3588,6 +3588,37 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertTrue(delivered)
     }
 
+    /// A scroll goes as soon as the session takes input, as typing does, also before the pane's renderer
+    /// has shown its first frame: the wheel needs only the pane's drawn area to say where it is.
+    func testAScrollGoesBeforeThePaneHasDrawn() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge()
+        await bridge.serve(
+            try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1, panes: Self.tabPanes(["w1:p1"]))
+        )
+        harness.setScreenSize()
+        harness.model.setSelected(true)
+        var index = 0
+        let show = try await harness.nextSurfaceSet(bridge, from: &index)
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        await bridge.serve(try harness.shownSurface(projection: 1, revision: 1, lines: ["one"], panes: [Self.zoomedPane]))
+        try await harness.waitUntil("the pane's renderer wasn't created") { harness.model.paneSurface("w1:p1") != nil }
+        harness.model.paneSurface("w1:p1")?.renderer.suppressFirstPublicationForTesting = true
+        showInWindow(harness, panes: ["w1:p1"])
+        try await harness.waitUntil("the session didn't take input") { harness.model.isInputAvailable }
+        XCTAssertEqual(harness.model.presentation(ofPane: "w1:p1"), .awaitingFrame)
+
+        let adapter = harness.model.terminalScreenAdapter
+        let pane = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.panes.first?.id)
+        let cellHeight = Double(try XCTUnwrap(harness.model.measurement).cellMetrics.pixelHeight)
+        XCTAssertEqual(adapter.sendMousePosition(to: pane, CGPoint(x: 2, y: 2), mods: []), .sent)
+        let scroll = GhosttySurfaceMouseScrollEvent(deltaX: 0, deltaY: cellHeight * 1.5, mods: .init(precision: true, momentum: .began))
+        XCTAssertEqual(adapter.sendMouseScroll(to: pane, scroll), .sent)
+        let sent = try await nextWrite(bridge, from: &index, paneInput)
+        let wheel = HerdrMouseEvent(kind: .scrollUp, column: 0, row: 0, lines: HerdrScreenModel.wheelLines)
+        XCTAssertEqual(sent, frame("w1:p1", [.mouse(wheel)]))
+    }
+
     /// A composed message to a pane that isn't focused, on a tab Herdr shows zoomed, doesn't go, and the
     /// composer keeps it: Herdr takes input only for the focused pane of a zoomed tab and drops the rest
     /// while still answering the ping, so the message would be lost.
@@ -3869,7 +3900,8 @@ final class HerdrScreenModelTests: XCTestCase {
     ) async throws -> (bridge: FakeBridgeTransport, next: Int) {
         let bridge = try await harness.bridge()
         await bridge.serve(
-            try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1, focusedPane: focusedPane)
+            try HerdrServerScript.welcome()
+                + HerdrServerScript.snapshot(revision: 1, focusedPane: focusedPane, panes: Self.tabPanes(["w1:p1", "w1:p2"]))
         )
         let panes: [HerdrServerScript.Pane] = [
             .init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true),
