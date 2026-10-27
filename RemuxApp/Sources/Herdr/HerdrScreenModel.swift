@@ -83,6 +83,10 @@ final class HerdrScreenModel {
         var activatedRequest: UInt64?
         var activationDeadline: Task<Void, Never>?
         var ended = false
+        /// Whether its SSH connection may serve the next opening, as its retirement decided. A bridge or
+        /// connection that opens after the retirement closes the same way, so a path the retirement
+        /// doubted isn't offered again.
+        var reusable = true
         /// Whether the focused pane asks for every key as an escape code.
         var reportsAllKeys = false
         /// A `pane.focus` waits for Herdr's answer. Taps meanwhile wait for it, and only the newest is
@@ -146,8 +150,35 @@ final class HerdrScreenModel {
     /// closed before that if the screen has no size yet, and opened again once it has one.
     static let helloDeadline: Duration = .seconds(3)
 
+    /// When a session that has connected reconnects by itself, as Herdr's client retries every endpoint,
+    /// wake rules included (`endpoint/supervisor.rs`).
+    struct RecoveryTiming: Sendable {
+        /// The first retry after a drop; each failure in a row doubles it, up to `longestRetry`.
+        var firstRetry: Duration = .milliseconds(500)
+        var longestRetry: Duration = .seconds(120)
+        /// A drop this long after the connection's first snapshot in the foreground starts the delays over.
+        var stable: Duration = .seconds(60)
+        /// A server that needs attention (incompatible, or a snapshot Remux can't read) is tried again
+        /// this often.
+        var recheck: Duration = .seconds(30)
+        /// After the app comes back, delays are at most `wakeRetry` for `wakeWindow`.
+        var wakeWindow: Duration = .seconds(30)
+        var wakeRetry: Duration = .seconds(2)
+    }
+
+    /// What follows an attempt's end.
+    private enum Recovery {
+        /// A dropped connection: try again with growing delays, showing the last frame meanwhile.
+        case retry
+        /// The server needs attention: say why, and try again every `recheck`.
+        case recheck
+        /// The user has to act (sign-in, host key, Herdr missing), or the failure is Remux's own.
+        case none
+    }
+
     private let openBridge: BridgeOpener
     private let connectionTiming: HerdrConnection.Timing
+    private let recoveryTiming: RecoveryTiming
     private let onRuntimeStateChange: (TerminalRuntimeStateUpdate) -> Void
     private let engine: HerdrTerminalEngine
     private let makeRendererFence: RendererFenceFactory
@@ -161,6 +192,21 @@ final class HerdrScreenModel {
     private var attempt: Attempt?
     private var attemptCount: UInt64 = 0
     private var sizeWaiter: CheckedContinuation<Void, Never>?
+
+    /// Whether any connection reached its first snapshot. Only then does a failure reconnect by itself:
+    /// a session that never opened says why.
+    private var hasConnected = false
+    /// A retry is waiting or under way after a drop; the session reads as reconnecting meanwhile.
+    private var isReconnecting = false
+    /// Failed attempts since the last stable connection, which set the next delay.
+    private var failuresInARow = 0
+    /// When the next attempt is due. Kept while the app is in the background, whose timer stops.
+    private var recoveryDue: ContinuousClock.Instant?
+    private var recoveryTimer: Task<Void, Never>?
+    /// The current connection's first snapshot since it opened or the app came back, as Herdr's client
+    /// counts how long a connection stayed up: time in the background doesn't count.
+    private var readySince: ContinuousClock.Instant?
+    private var wokeAt: ContinuousClock.Instant?
 
     private(set) var isSelected = false
     private var appPhase = GhosttyAppLifecyclePhase.active
@@ -197,6 +243,7 @@ final class HerdrScreenModel {
         openBridge: @escaping BridgeOpener,
         onRuntimeStateChange: @escaping (TerminalRuntimeStateUpdate) -> Void,
         connectionTiming: HerdrConnection.Timing = HerdrConnection.Timing(),
+        recoveryTiming: RecoveryTiming = RecoveryTiming(),
         engine: HerdrTerminalEngine = HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1),
         makeRendererFence: @escaping RendererFenceFactory = {
             HerdrPaneRendererFence(engine: $0, paneID: $1, terminal: $2)
@@ -207,6 +254,7 @@ final class HerdrScreenModel {
         self.openBridge = openBridge
         self.onRuntimeStateChange = onRuntimeStateChange
         self.connectionTiming = connectionTiming
+        self.recoveryTiming = recoveryTiming
         self.engine = engine
         self.makeRendererFence = makeRendererFence
         currentTerminalSettings = target.terminalSettings
@@ -246,13 +294,43 @@ final class HerdrScreenModel {
     }
 
     /// The background hides the session; the app's other phases leave it on screen.
+    ///
+    /// In the background a waiting reconnect stops and a connection still opening is given up, as in
+    /// Herdr's client; an open one stays. Back from it, as in Herdr's client after a resume, a waiting
+    /// reconnect runs at once and delays are short for a while; an open connection is shown again at
+    /// once while it checks itself with a ping, and one that is gone fails its show or the ping.
     func handleAppLifecyclePhase(_ phase: GhosttyAppLifecyclePhase) {
         guard !stopped else { return }
+        let wasBackground = appPhase == .background
         appPhase = phase
+        if phase == .background, !wasBackground {
+            enterBackground()
+        } else if phase != .background, wasBackground {
+            leaveBackground()
+        }
         reconcilePresentationActivity()
         attempt?.ask(.appActive(phase != .background))
         reconcileVisibility()
         didChange()
+    }
+
+    private func enterBackground() {
+        recoveryTimer?.cancel()
+        recoveryTimer = nil
+        readySince = nil
+        guard let attempt, !attempt.ended, attempt.connection == nil else { return }
+        // Not a failure: it is opened again on return. Whether its path still works is unknown, so its
+        // SSH connection isn't offered to the next one, which would wait on a dead one; an opening under
+        // way closes its own the same way.
+        retire(attempt, reusable: false)
+        recoveryDue = recoveryDue ?? .now
+    }
+
+    private func leaveBackground() {
+        wokeAt = .now
+        guard recoveryDue != nil else { return }
+        recoveryDue = .now
+        startRecoveryTimer()
     }
 
     /// Live settings: the renderers take the new appearance in place, and Herdr gets the new colours.
@@ -287,7 +365,7 @@ final class HerdrScreenModel {
         do {
             measured = try runtime.measureTmuxViewportLayout(size: size, scale: scale)
         } catch {
-            if let attempt { end(attempt, Self.viewportFailure) }
+            if let attempt { end(attempt, Self.viewportFailure, recovery: .none) }
             return
         }
         guard let measured, measured != measurement else { return }
@@ -313,13 +391,22 @@ final class HerdrScreenModel {
     ///
     /// Returns false when the model can't open a connection, because its terminal runtime didn't start
     /// or it has stopped; the root then replaces it.
+    ///
+    /// A reconnect the user asks for runs now and starts the delays over, as in Herdr's client.
     @discardableResult
     func reconnect() -> Bool {
         guard !stopped, runtime != nil else { return false }
+        cancelRecovery()
+        isReconnecting = false
+        failuresInARow = 0
+        openAgain()
+        return true
+    }
+
+    private func openAgain() {
         if let attempt { retire(attempt) }
         startAttempt()
         retryFailedPanes()
-        return true
     }
 
     /// Closes the connection, lets the engine finish its event and free the pane producers, waits for
@@ -328,14 +415,15 @@ final class HerdrScreenModel {
     func stop() async {
         guard !stopped else { return }
         stopped = true
+        cancelRecovery()
         resumeSizeWaiter()
         if let attempt {
             attempt.finishOperations()
             attempt.task?.cancel()
             if let connection = attempt.connection {
-                await connection.close()
+                await connection.close(reusable: attempt.reusable)
             } else if let transport = attempt.transport {
-                await transport.close(reusable: true)
+                await transport.close(reusable: attempt.reusable)
             }
             // An opening still under way closes what it opened once it sees the stop.
             await attempt.task?.value
@@ -362,7 +450,8 @@ final class HerdrScreenModel {
 
     var runtimePhase: GhosttyTerminalRuntimePhase {
         if let failure { return .failed(message: failure.message, reason: failure) }
-        return attempt?.connection == nil ? .starting : .running
+        guard let attempt, !attempt.ended, attempt.connection != nil else { return .starting }
+        return .running
     }
 
     var isConnectionOpen: Bool {
@@ -370,9 +459,18 @@ final class HerdrScreenModel {
         return attempt.connection != nil && !attempt.ended
     }
 
+    /// The session reads as connected once its current connection has a snapshot and, while the session
+    /// is shown, a show completed on it. Until then the panes show the last connection's frame, which
+    /// takes no input.
+    var isConnectionReady: Bool {
+        guard let attempt, isCurrent(attempt), attempt.connection != nil, attempt.hasSnapshot else { return false }
+        return !attempt.requestedShown || attempt.activatedRequest != nil
+    }
+
     var stateTraceLabel: String {
         if stopped { return "released" }
         if failure != nil { return "ended" }
+        if isReconnecting { return "reconnecting" }
         guard let attempt, attempt.connection != nil else { return "connecting" }
         guard attempt.requestedShown else { return "hidden" }
         return attempt.isActivated ? "shown" : "showing"
@@ -405,7 +503,7 @@ final class HerdrScreenModel {
     }
 
     private var shownAttempt: Attempt? {
-        guard let attempt, isCurrent(attempt), !attempt.ended, attempt.connection != nil, attempt.isActivated
+        guard let attempt, isCurrent(attempt), attempt.connection != nil, attempt.isActivated
         else { return nil }
         return attempt
     }
@@ -480,7 +578,7 @@ final class HerdrScreenModel {
     /// Asks Herdr to focus the pane, as Herdr's client does on a click; keys follow the snapshot that
     /// reports the new focus. Returns false when the session can't take input.
     func focusPane(_ paneID: String) -> Bool {
-        guard let attempt, isCurrent(attempt), !attempt.ended, let connection = attempt.connection,
+        guard let attempt, isCurrent(attempt), let connection = attempt.connection,
               attempt.isActivated
         else { return false }
         if attempt.focusInFlight {
@@ -506,7 +604,7 @@ final class HerdrScreenModel {
 
     private func focusAnswered(attempt: Attempt, connection: HerdrConnection, failure: Error?) {
         attempt.focusInFlight = false
-        guard isCurrent(attempt), !attempt.ended else { return }
+        guard isCurrent(attempt) else { return }
         if let failure {
             let error = failure as? HerdrCommandError
                 ?? .failed(code: "invalid_response", message: failure.localizedDescription)
@@ -584,7 +682,7 @@ final class HerdrScreenModel {
     }
 
     private func inputFailed(_ attemptID: UInt64) {
-        guard let attempt, attempt.id == attemptID, isCurrent(attempt), !attempt.ended else { return }
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt) else { return }
         presentInputFailure()
     }
 
@@ -597,7 +695,7 @@ final class HerdrScreenModel {
 
     /// Herdr refused input, with its reason; the same refusal isn't repeated while it is on screen.
     private func inputRefused(_ attemptID: UInt64, message: String) {
-        guard let attempt, attempt.id == attemptID, isCurrent(attempt), !attempt.ended,
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt),
               notices.showsRefusedInput(message, bootID: layout?.bootID)
         else { return }
         terminalScreenAdapter.presentFailure(Self.inputFailureLabel)
@@ -610,11 +708,13 @@ final class HerdrScreenModel {
 
     // MARK: - Connection
 
-    private func startAttempt() {
+    /// A recheck keeps saying what needs attention until it connects.
+    private func startAttempt(keepingFailure: Bool = false) {
         attemptCount += 1
         let attempt = Attempt(id: attemptCount)
         self.attempt = attempt
-        failure = nil
+        readySince = nil
+        if !keepingFailure { failure = nil }
         attempt.task = Task { [weak self] in await self?.run(attempt) }
         reconcilePresentationActivity()
         didChange()
@@ -646,11 +746,11 @@ final class HerdrScreenModel {
             )
         } catch {
             guard isCurrent(attempt) else { return }
-            end(attempt, disconnectReason(connectionFailedWith: error))
+            end(attempt, disconnectReason(connectionFailedWith: error), recovery: Self.recovery(connectionFailedWith: error, opened: false))
             return
         }
-        guard isCurrent(attempt), !attempt.ended else {
-            await connection.close()
+        guard isCurrent(attempt) else {
+            await connection.close(reusable: attempt.reusable)
             return
         }
         attempt.transport = nil
@@ -694,11 +794,14 @@ final class HerdrScreenModel {
             transport = try await openBridge()
         } catch {
             // A cancelled opening releases what it claimed.
-            if isCurrent(attempt) { end(attempt, disconnectReason(openingBridgeFailedWith: error)) }
+            if isCurrent(attempt) {
+                let reason = disconnectReason(openingBridgeFailedWith: error)
+                end(attempt, reason, recovery: Self.recovery(openingBridgeFailedWith: error, reason: reason))
+            }
             return nil
         }
         guard isCurrent(attempt) else {
-            await transport.close(reusable: true)
+            await transport.close(reusable: attempt.reusable)
             return nil
         }
         attempt.transport = transport
@@ -786,8 +889,10 @@ final class HerdrScreenModel {
         }
     }
 
+    /// Whether `attempt` is the model's and still under way: an ended one's late events and a bridge
+    /// that opens after it ended are dropped.
     private func isCurrent(_ attempt: Attempt) -> Bool {
-        !stopped && self.attempt === attempt
+        !stopped && self.attempt === attempt && !attempt.ended
     }
 
     private var geometry: HerdrSurfaceGeometry? {
@@ -833,6 +938,7 @@ final class HerdrScreenModel {
 
     private func snapshotArrived(_ attemptID: UInt64, focusedPaneID: String?) {
         guard let attempt, attempt.id == attemptID, isCurrent(attempt) else { return }
+        if appPhase != .background, readySince == nil { readySince = .now }
         if focusedPaneID != self.focusedPaneID {
             self.focusedPaneID = focusedPaneID
             reconcilePresentationActivity()
@@ -840,41 +946,123 @@ final class HerdrScreenModel {
         }
         guard !attempt.hasSnapshot else { return }
         attempt.hasSnapshot = true
+        hasConnected = true
+        failure = nil
         reconcileVisibility()
+        readinessChanged()
+    }
+
+    /// A reconnect reads as one until the new connection is ready.
+    private func readinessChanged() {
+        if isConnectionReady { isReconnecting = false }
+        didChange()
     }
 
     private func connectionEnded(_ attemptID: UInt64, _ error: HerdrConnectionError) {
         guard let attempt, attempt.id == attemptID else { return }
-        end(attempt, error.terminalDisconnectReason(on: target.server))
+        end(attempt, error.terminalDisconnectReason(on: target.server), recovery: Self.recovery(connectionFailedWith: error, opened: true))
     }
 
     /// Ends the attempt and reports why. A connection Remux closes sends no `ended` event, so whoever
-    /// finds the reason reports it here.
-    private func end(_ attempt: Attempt, _ reason: TerminalDisconnectReason) {
-        guard isCurrent(attempt), !attempt.ended else { return }
-        failure = reason
-        retire(attempt)
+    /// finds the reason reports it here. `reusable` is false when Herdr didn't answer in time.
+    private func end(
+        _ attempt: Attempt,
+        _ reason: TerminalDisconnectReason,
+        recovery: Recovery,
+        reusable: Bool = true
+    ) {
+        guard isCurrent(attempt) else { return }
+        retire(attempt, reusable: reusable)
+        let stayedUp = readySince.map { ContinuousClock.now - $0 >= recoveryTiming.stable } ?? false
+        readySince = nil
+        // A session that never opened says why instead of retrying.
+        switch hasConnected ? recovery : .none {
+        case .retry:
+            failure = nil
+            isReconnecting = true
+            // A connection that stayed up starts the delays over, as in Herdr's client.
+            if stayedUp { failuresInARow = 0 }
+            failuresInARow += 1
+            scheduleRecovery(after: retryDelay())
+        case .recheck:
+            failure = reason
+            isReconnecting = false
+            scheduleRecovery(after: recoveryTiming.recheck)
+        case .none:
+            failure = reason
+            isReconnecting = false
+            cancelRecovery()
+        }
         reconcilePresentationActivity()
         didChange()
     }
 
-    private func retire(_ attempt: Attempt) {
+    /// 0.5 s after the first failure, doubling with each one in a row up to 2 min, and at most the wake
+    /// delay for a while after the app comes back.
+    private func retryDelay() -> Duration {
+        var delay = recoveryTiming.firstRetry
+        for _ in 1..<max(failuresInARow, 1) {
+            delay = min(delay * 2, recoveryTiming.longestRetry)
+        }
+        if let wokeAt, ContinuousClock.now < wokeAt + recoveryTiming.wakeWindow {
+            delay = min(delay, recoveryTiming.wakeRetry)
+        }
+        return delay
+    }
+
+    private func scheduleRecovery(after delay: Duration) {
+        recoveryDue = .now + delay
+        startRecoveryTimer()
+    }
+
+    /// The background stops the timer; the due time stays for the return.
+    private func startRecoveryTimer() {
+        recoveryTimer?.cancel()
+        guard appPhase != .background, let due = recoveryDue else { return }
+        recoveryTimer = Task { [weak self] in
+            try? await Task.sleep(until: due, clock: .continuous)
+            guard !Task.isCancelled else { return }
+            self?.recover()
+        }
+    }
+
+    private func recover() {
+        guard !stopped, appPhase != .background, recoveryDue != nil else { return }
+        recoveryDue = nil
+        recoveryTimer = nil
+        if let attempt { retire(attempt) }
+        startAttempt(keepingFailure: failure != nil)
+        retryFailedPanes()
+    }
+
+    private func cancelRecovery() {
+        recoveryTimer?.cancel()
+        recoveryTimer = nil
+        recoveryDue = nil
+    }
+
+    /// A connection Herdr didn't answer in time may be on a dead path, so it isn't `reusable`: its SSH
+    /// connection isn't offered to the next one, which would wait on it. Only the first retire counts, so
+    /// a later one can't offer a path an earlier one doubted.
+    private func retire(_ attempt: Attempt, reusable: Bool = true) {
+        guard !attempt.ended else { return }
         attempt.ended = true
+        attempt.reusable = reusable
         attempt.finishOperations()
         attempt.task?.cancel()
         attempt.activationDeadline?.cancel()
         if attempt === self.attempt { resumeSizeWaiter() }
         if let connection = attempt.connection {
-            Task { await connection.close() }
+            Task { await connection.close(reusable: reusable) }
         } else if let transport = attempt.transport {
-            Task { await transport.close(reusable: true) }
+            Task { await transport.close(reusable: reusable) }
         }
     }
 
     /// Shows the session while the root wants it on screen and hides it otherwise. Herdr takes the
     /// newest of a show and a hide, so each change is sent at once, even while the last is unanswered.
     private func reconcileVisibility() {
-        guard let attempt, isCurrent(attempt), !attempt.ended, attempt.hasSnapshot,
+        guard let attempt, isCurrent(attempt), attempt.hasSnapshot,
               attempt.connection != nil, let geometry
         else { return }
         let wanted = isSelected && appPhase != .background
@@ -905,20 +1093,21 @@ final class HerdrScreenModel {
     }
 
     private func activated(_ request: UInt64, connection: UInt64) {
-        guard let attempt, isCurrent(attempt), !attempt.ended, attempt.feed?.connection == connection,
+        guard let attempt, isCurrent(attempt), attempt.feed?.connection == connection,
               attempt.requestedShown, request == attempt.visibilityRequests
         else { return }
         attempt.activatedRequest = request
         attempt.activationDeadline?.cancel()
         attempt.activationDeadline = nil
+        readinessChanged()
     }
 
     private func activationTimedOut(_ attemptID: UInt64, request: UInt64) {
-        guard let attempt, attempt.id == attemptID, isCurrent(attempt), !attempt.ended,
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt),
               attempt.requestedShown, request == attempt.visibilityRequests, attempt.activatedRequest != request
         else { return }
         attempt.requestedShown = false
-        end(attempt, Self.activationTimeout)
+        end(attempt, Self.activationTimeout, recovery: .retry, reusable: false)
     }
 
     /// Herdr's client rolls a failed show back and stays on what it showed before; a Remux session
@@ -929,7 +1118,9 @@ final class HerdrScreenModel {
         else { return }
         if case .connectionEnded? = error as? HerdrCommandError { return }
         attempt.requestedShown = false
-        end(attempt, Self.disconnectReason(showFailedWith: error))
+        let answered: Bool
+        if case .timedOut? = error as? HerdrCommandError { answered = false } else { answered = true }
+        end(attempt, Self.disconnectReason(showFailedWith: error), recovery: .retry, reusable: answered)
     }
 
     /// Herdr stores a client's theme and uses it whenever that client is in front, so one full report
@@ -1005,7 +1196,7 @@ final class HerdrScreenModel {
             surfaces[paneID]?.renderer.failPresentation(message: Self.rendererFailureMessage)
         case .failed(let error, let connection):
             if let attempt, attempt.feed?.connection == connection {
-                end(attempt, error.terminalDisconnectReason(on: target.server))
+                end(attempt, error.terminalDisconnectReason(on: target.server), recovery: Self.recovery(connectionFailedWith: error, opened: true))
             }
         case .activated(let request, let connection):
             activated(request, connection: connection)
@@ -1169,7 +1360,9 @@ final class HerdrScreenModel {
         guard !stopped else { return }
         terminalScreenAdapter.objectWillChange.send()
         let readiness = terminalScreenAdapter.terminalScreenPresentationProjection.readiness
-        let state = TerminalReadinessProjector.runtimeState(readiness)
+        var state = TerminalReadinessProjector.runtimeState(readiness)
+        // Reconnecting by itself, the session keeps its last frame and says so until it is back.
+        if isReconnecting, state == .connecting { state = .reconnecting(.transportLoss) }
         let source: TerminalRuntimeStateUpdateSource = readiness.phase == .running ? .readiness : .runtime
         guard reportTracker.shouldReport(state: state, source: source) else { return }
         onRuntimeStateChange(TerminalRuntimeStateUpdate(
@@ -1216,6 +1409,53 @@ final class HerdrScreenModel {
     private func disconnectReason(connectionFailedWith error: Error) -> TerminalDisconnectReason {
         (error as? HerdrConnectionError)?.terminalDisconnectReason(on: target.server)
             ?? TerminalDisconnectReason(kind: .unknown, message: error.localizedDescription)
+    }
+
+    /// As Herdr's client sorts an endpoint's failures (`supervisor.rs`, `remote/saved.rs`): a dropped or
+    /// broken connection is retried, a server that can't talk to Remux needs attention. Remux leaves
+    /// sign-in, host key and a missing Herdr to the repair panel, whose actions fix them. `opened` says
+    /// whether the connection had opened before it failed.
+    private static func recovery(connectionFailedWith error: Error, opened: Bool) -> Recovery {
+        switch error as? HerdrConnectionError {
+        case .closed?, .transport?, .unresponsive?, .handshakeTimedOut?, .serverShutdown?:
+            return .retry
+        case .wire(.invalidControl(let kind))? where kind.hasPrefix("shell.snapshot."):
+            return .recheck
+        case .wire(.unnegotiatedSnapshot)?:
+            return .recheck
+        case .wire?:
+            return .retry
+        case .outdated?, .rejected?, .incompatible?:
+            return .recheck
+        case .bridge(let error)?:
+            return recovery(bridgeFailedWith: error, opened: opened)
+        case nil:
+            return .none
+        }
+    }
+
+    /// A bridge that exits once its connection is open is a drop, as Herdr's client retries any endpoint
+    /// that disconnects: Herdr's bridge exits by itself after a minute with nothing to carry, which an app
+    /// in the background can't prevent. One that exits while opening says why: Herdr is missing or
+    /// couldn't start.
+    private static func recovery(bridgeFailedWith error: HerdrBridgeError, opened: Bool) -> Recovery {
+        switch error {
+        case .remoteExit, .channel:
+            .retry
+        case .program:
+            opened ? .retry : .none
+        }
+    }
+
+    /// An SSH failure is retried when the server couldn't be reached or the link broke.
+    private static func recovery(openingBridgeFailedWith error: Error, reason: TerminalDisconnectReason) -> Recovery {
+        if let error = error as? HerdrBridgeError { return recovery(bridgeFailedWith: error, opened: false) }
+        switch reason.kind {
+        case .serverUnreachable, .transportIO, .unknown:
+            return .retry
+        default:
+            return .none
+        }
     }
 
     private static func disconnectReason(showFailedWith error: Error) -> TerminalDisconnectReason {

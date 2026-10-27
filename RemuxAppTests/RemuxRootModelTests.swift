@@ -4795,6 +4795,41 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertTrue(firstClosed)
     }
 
+    /// A Herdr session reconnects by itself, on Herdr's schedule, so the root doesn't reconnect it too
+    /// when it reports a lost connection.
+    func testTheRootLeavesAHerdrSessionsReconnectsToIt() async throws {
+        let pair = makePasswordBackedServer()
+        let workspace = SavedWorkspace(serverID: pair.server.id, backend: .herdr, sessionName: "agents")
+        let opener = RecordingHerdrBridgeOpener()
+        let harness = makeHarness(
+            servers: [pair.server],
+            workspaces: [workspace],
+            identities: [pair.identity],
+            herdrBridgeOpener: { target, _, _ in await opener.open(target) }
+        )
+        try await harness.credentialHelper.savePassword("secret", for: pair.server.id)
+        await harness.model.load()
+        await harness.model.connect(to: workspace.id)
+        let session = try XCTUnwrap(harness.model.activeSessions.first)
+        _ = try await opener.bridge(0)
+
+        let reason = TerminalDisconnectReason(kind: .transportIO, message: "The connection to Herdr closed.")
+        let outcome = harness.model.handleTerminalRuntimeStateUpdate(
+            TerminalRuntimeStateUpdate(
+                workspaceID: workspace.id,
+                instanceID: session.instanceID,
+                state: .disconnected(reason),
+                source: .runtime
+            )
+        )
+
+        XCTAssertEqual(outcome, .applied(.disconnected(reason)))
+        XCTAssertEqual(harness.model.activeSessions.first?.instanceID, session.instanceID)
+        try await Task.sleep(for: .milliseconds(200))
+        let opened = await opener.targets.count
+        XCTAssertEqual(opened, 1)
+    }
+
     /// A Herdr model made before its server was edited isn't reconnected in place: the reconnect
     /// replaces it, as for tmux, and the new bridge opens with the edited profile.
     func testHerdrReconnectAfterAServerEditReplacesTheModel() async throws {

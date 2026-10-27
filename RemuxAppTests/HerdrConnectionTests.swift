@@ -102,6 +102,20 @@ final class HerdrConnectionTests: XCTestCase {
         XCTAssertEqual(reusable, false)
     }
 
+    /// A cancelled open can't tell whether the path works either: the SSH connection isn't reused.
+    func testACancelledOpenClosesWithoutReusingTheConnection() async throws {
+        let transport = FakeBridgeTransport()
+        let (sentHello, relaxedTiming) = (hello, timing())
+        let opening = Task {
+            try await HerdrConnection.open(transport: transport, hello: sentHello, appActive: false, timing: relaxedTiming, onEvent: { _ in })
+        }
+        _ = try await transport.written(0)
+        opening.cancel()
+        _ = await opening.result
+        let reusable = await transport.closedReusable
+        XCTAssertEqual(reusable, false)
+    }
+
     /// The deadline covers the hello too: a write that never completes still times out.
     func testAStalledHelloTimesOutAndCloses() async throws {
         let transport = FakeBridgeTransport()
@@ -672,9 +686,8 @@ final class HerdrConnectionTests: XCTestCase {
         XCTAssertEqual(kinds, ["bell", "ended(unresponsive)"])
     }
 
-    /// An alive check follows the same rule, also with the app in the background, where the health check
-    /// isn't running: before anything has come since the welcome it keeps waiting, and once the server
-    /// has sent something an unanswered check ends the connection.
+    /// An alive check follows the same rule: before anything has come since the welcome it keeps
+    /// waiting, and once the server has sent something an unanswered check ends the connection.
     func testConfirmAliveWaitsUntilTheServerHasSentSomething() async throws {
         let transport = FakeBridgeTransport()
         await transport.serve(HerdrWire.frame(try Self.frames(Self.recording("herdr-01-handshake-all-caps-A"))[0]))
@@ -682,7 +695,7 @@ final class HerdrConnectionTests: XCTestCase {
         let connection = try await HerdrConnection.open(
             transport: transport,
             hello: hello,
-            appActive: false,
+            appActive: true,
             timing: timing(unansweredPing: .milliseconds(100)),
             onEvent: events.record
         )
@@ -702,8 +715,7 @@ final class HerdrConnectionTests: XCTestCase {
         XCTAssertEqual(kinds, ["bell", "ended(unresponsive)"])
     }
 
-    /// Messages without a snapshot don't extend the first-snapshot limit, even with the app in the
-    /// background, where the health check isn't running.
+    /// Messages without a snapshot don't extend the first-snapshot limit for an alive check either.
     func testConfirmAliveGivesUpWhenNoSnapshotCameInTime() async throws {
         let transport = FakeBridgeTransport()
         await transport.serve(HerdrWire.frame(try Self.frames(Self.recording("herdr-01-handshake-all-caps-A"))[0]))
@@ -711,7 +723,7 @@ final class HerdrConnectionTests: XCTestCase {
         let connection = try await HerdrConnection.open(
             transport: transport,
             hello: hello,
-            appActive: false,
+            appActive: true,
             timing: timing(unansweredPing: .milliseconds(300), firstSnapshot: .milliseconds(400)),
             onEvent: events.record
         )
@@ -751,13 +763,52 @@ final class HerdrConnectionTests: XCTestCase {
             surfaceActive: true,
             timing: timing(unansweredPing: .milliseconds(200))
         )
+        await connection.setAppActive(true)
         async let alive = connection.confirmAlive()
-        _ = try await transport.written(1)
+        _ = try await transport.written(2)
         await transport.serve(Self.pong("not-this-one"))
         let answered = await alive
         XCTAssertFalse(answered)
         let last = await events.waitForEnd().last?.kind
         XCTAssertEqual(last, "ended(unresponsive)")
+    }
+
+    /// Back from the background, as Herdr's client after a resume, a ping goes out at once instead of
+    /// after the next silence.
+    func testComingBackPingsAtOnce() async throws {
+        let (connection, transport, _) = try await openedSession(surfaceActive: true)
+        await connection.setAppActive(true)
+        _ = try await transport.written(1)
+        await connection.setAppActive(false)
+        await connection.setAppActive(true)
+        let ping = try Self.control(try await transport.written(2))
+        XCTAssertEqual(ping.kind, HerdrControlKind.healthPing)
+        await connection.setAppActive(false)
+    }
+
+    /// In the background an alive check doesn't run out: a suspended phone reads nothing, so a reply may
+    /// be waiting unread. Back in the foreground its limit starts over, and its reply answers it.
+    func testAnAliveCheckWaitsOutTheBackground() async throws {
+        let (connection, transport, events) = try await openedSession(
+            surfaceActive: true,
+            timing: timing(unansweredPing: .milliseconds(100))
+        )
+        await transport.serve(HerdrWire.frame([9, 1]))
+        await events.waitForCount(2)
+        let answer = AnswerBox()
+        let check = Task { await answer.set(await connection.confirmAlive()) }
+        let ping = try Self.control(try await transport.written(1))
+        try await Task.sleep(for: .milliseconds(400))
+        let ended = await events.hasEnded
+        XCTAssertFalse(ended, "the check ran out in the background")
+
+        await connection.setAppActive(true)
+        _ = try await transport.written(2)
+        await transport.serve(Self.pong(ping.data))
+        await check.value
+        let answered = await answer.value
+        XCTAssertEqual(answered, true)
+        await connection.setAppActive(false)
     }
 
     // MARK: - Closing

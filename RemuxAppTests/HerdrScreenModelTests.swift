@@ -24,6 +24,7 @@ final class HerdrScreenModelTests: XCTestCase {
     private func makeHarness(
         settings: TerminalSettings = .default,
         timing: HerdrConnection.Timing = HerdrConnection.Timing(),
+        recovery: HerdrScreenModel.RecoveryTiming = HerdrScreenModel.RecoveryTiming(),
         failingOpenWith error: Error? = nil,
         bridgeOpeningTakes: Duration = .zero,
         producerFailure: ProducerFailure? = nil,
@@ -32,6 +33,7 @@ final class HerdrScreenModelTests: XCTestCase {
         let harness = await HerdrModelHarness(
             settings: settings,
             timing: timing,
+            recovery: recovery,
             failingOpenWith: error,
             bridgeOpeningTakes: bridgeOpeningTakes,
             producerFailure: producerFailure,
@@ -229,7 +231,8 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(written, index + 12)
     }
 
-    /// A show Herdr doesn't answer ends the connection, and the failure is reported.
+    /// A show Herdr doesn't answer ends the connection, and the session reconnects by itself. The path
+    /// may be dead, so the reconnect doesn't get the same SSH connection, which it would wait on.
     func testAShowHerdrDoesNotAnswerEndsTheConnection() async throws {
         var timing = HerdrConnection.Timing()
         timing.activation = .milliseconds(200)
@@ -239,13 +242,14 @@ final class HerdrScreenModelTests: XCTestCase {
         harness.setScreenSize()
         harness.model.setSelected(true)
 
-        try await harness.waitUntil("the failed show wasn't reported") {
-            harness.states.last?.disconnectedReason != nil
+        try await harness.waitUntil("the failed show didn't start a reconnect") {
+            harness.states.last == .reconnecting(.transportLoss)
         }
-        XCTAssertEqual(harness.states.last?.disconnectedReason?.kind, .transportIO)
-        XCTAssertTrue(harness.model.isDisconnected)
-        // The failure is reported at once; the close follows it.
         try await harness.waitUntil("the connection wasn't closed") { await bridge.isClosed }
+        let reusable = await bridge.closedReusable
+        XCTAssertEqual(reusable, false)
+        _ = try await harness.bridge(1)
+        XCTAssertFalse(harness.states.contains { $0.disconnectedReason != nil }, "\(harness.states)")
     }
 
     /// Shown again, the session keeps its last frame and reads as connected, but takes no input until
@@ -287,8 +291,8 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(harness.states.last, .connected)
     }
 
-    /// A show Herdr answers without sending a frame in time is rolled back: the connection ends, as for
-    /// a show Herdr doesn't answer.
+    /// A show Herdr answers without sending a frame in time is rolled back: the connection ends and the
+    /// session reconnects, as for a show Herdr doesn't answer.
     func testAShowWithoutAFrameInTimeEndsTheConnection() async throws {
         var timing = HerdrConnection.Timing()
         timing.activation = .milliseconds(300)
@@ -302,11 +306,11 @@ final class HerdrScreenModelTests: XCTestCase {
         await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
 
         try await harness.waitUntil("the show that didn't complete wasn't rolled back") {
-            harness.states.last?.disconnectedReason != nil
+            harness.states.last == .reconnecting(.transportLoss)
         }
-        XCTAssertEqual(harness.states.last?.disconnectedReason?.kind, .transportIO)
-        XCTAssertEqual(harness.states.last?.disconnectedReason?.message, "Herdr didn't show the session in time.")
-        XCTAssertTrue(harness.model.isDisconnected)
+        try await harness.waitUntil("the connection wasn't closed") { await bridge.isClosed }
+        _ = try await harness.bridge(1)
+        XCTAssertFalse(harness.states.contains { $0.disconnectedReason != nil }, "\(harness.states)")
     }
 
     // MARK: - Panes
@@ -414,8 +418,8 @@ final class HerdrScreenModelTests: XCTestCase {
     }
 
     /// A frame left behind by a lost connection shows no live cursor: the focused pane is unfocused
-    /// while the connection is down, as Herdr's client hides its cursor while its session is offline,
-    /// and focused again once a new connection is open.
+    /// while the session reconnects, as Herdr's client hides its cursor while its session is offline,
+    /// and focused again once the new connection is open.
     func testThePaneIsUnfocusedWhileTheConnectionIsDown() async throws {
         let harness = await makeHarness()
         let first = try await harness.bridge(0)
@@ -438,14 +442,13 @@ final class HerdrScreenModelTests: XCTestCase {
         try await harness.waitUntil("the pane wasn't focused while connected") { managed.isFocused }
 
         await first.finishServing()
-        try await harness.waitUntil("the lost connection wasn't reported") {
-            harness.states.last?.disconnectedReason != nil
+        try await harness.waitUntil("the lost connection didn't start a reconnect") {
+            harness.states.last == .reconnecting(.transportLoss)
         }
         XCTAssertFalse(managed.isFocused)
 
-        harness.model.reconnect()
-        XCTAssertFalse(managed.isFocused, "nothing is live before the new connection opens")
         let second = try await harness.bridge(1)
+        XCTAssertFalse(managed.isFocused, "nothing is live before the new connection opens")
         await second.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1) + frame)
         try await harness.waitUntil("the pane wasn't focused again") { managed.isFocused }
     }
@@ -747,11 +750,15 @@ final class HerdrScreenModelTests: XCTestCase {
 
     // MARK: - Failures
 
-    /// A grid Remux can't index ends the connection Remux-side; the model closes it and reports it.
+    /// A grid Remux can't index ends the connection Remux-side; the model closes it, and a session that
+    /// hasn't connected yet says why instead of reconnecting.
     func testAnUnindexableSurfaceClosesTheConnectionAndIsReported() async throws {
-        let harness = await makeHarness()
+        var recovery = HerdrScreenModel.RecoveryTiming()
+        recovery.firstRetry = .milliseconds(50)
+        let harness = await makeHarness(recovery: recovery)
         let bridge = try await harness.bridge()
-        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        // Herdr's surfaces are checked before the snapshot they're drawn against.
+        await bridge.serve(try HerdrServerScript.welcome())
         await bridge.serve(HerdrServerScript.surface(
             projection: 1,
             revision: 1,
@@ -768,14 +775,19 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(reason.message, HerdrWireError.invalidSurfaceUpdate("surface pane lies outside the frame").errorDescription)
         XCTAssertEqual(harness.stateLog.updates.last?.source, .runtime)
         try await harness.waitUntil("the connection wasn't closed") { await bridge.isClosed }
+        try await Task.sleep(for: .milliseconds(300))
+        let opened = await harness.bridges.opened.count
+        XCTAssertEqual(opened, 1, "a session that never connected reconnected")
     }
 
-    /// The connection's own end is reported once, with its reason, also when it ends while `open` is
-    /// still returning.
+    /// A connection that ends before its first snapshot is reported once, with its reason, also when it
+    /// ends while `open` is still returning; the session doesn't reconnect by itself.
     func testAConnectionThatEndsIsReported() async throws {
-        let harness = await makeHarness()
+        var recovery = HerdrScreenModel.RecoveryTiming()
+        recovery.firstRetry = .milliseconds(50)
+        let harness = await makeHarness(recovery: recovery)
         let bridge = try await harness.bridge()
-        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        await bridge.serve(try HerdrServerScript.welcome())
         await bridge.finishServing()
         harness.setScreenSize()
 
@@ -786,7 +798,10 @@ final class HerdrScreenModelTests: XCTestCase {
             harness.states.last,
             .disconnected(HerdrConnectionError.closed.terminalDisconnectReason(on: SavedServer(displayName: "Herdr Host", host: "herdr.example.test", username: "builder")))
         )
+        try await Task.sleep(for: .milliseconds(300))
         XCTAssertEqual(harness.states.filter { $0.disconnectedReason != nil }.count, 1)
+        let opened = await harness.bridges.opened.count
+        XCTAssertEqual(opened, 1, "a session that never connected reconnected")
     }
 
     func testABridgeThatCannotStartIsReported() async throws {
@@ -933,6 +948,430 @@ final class HerdrScreenModelTests: XCTestCase {
         }
         XCTAssertFalse(model.paneSurface("w1:p1")?.terminal === failedTerminal)
         XCTAssertEqual(model.presentation(ofPane: "w1:p1"), .pending)
+    }
+
+    // MARK: - Reconnecting by itself
+
+    /// A session that has connected reconnects by itself when its connection drops, shown or hidden, as
+    /// Herdr's client retries every endpoint: it reads as reconnecting with its last frame, each failure
+    /// in a row doubles the delay up to the longest, and the next connection brings it back.
+    func testADroppedConnectionReconnectsByItselfWithGrowingDelays() async throws {
+        var recovery = HerdrScreenModel.RecoveryTiming()
+        recovery.firstRetry = .milliseconds(200)
+        recovery.longestRetry = .milliseconds(400)
+        let harness = await makeHarness(recovery: recovery)
+        let first = try await connectedSession(harness, lines: ["one"])
+
+        var droppedAt = ContinuousClock.now
+        await first.finishServing()
+        try await harness.waitUntil("the drop didn't start a reconnect") {
+            harness.states.last == .reconnecting(.transportLoss)
+        }
+        XCTAssertEqual(harness.shownRows(), ["w1:p1": ["one"]])
+        var delays: [Duration] = []
+        for index in 1...3 {
+            let bridge = try await harness.bridge(index)
+            let starts = await harness.bridges.openingsStartedAt
+            delays.append(starts[index] - droppedAt)
+            droppedAt = ContinuousClock.now
+            await bridge.finishServing()
+        }
+        XCTAssertGreaterThanOrEqual(delays[0], .milliseconds(200))
+        XCTAssertGreaterThanOrEqual(delays[1], .milliseconds(400))
+        XCTAssertGreaterThanOrEqual(delays[2], .milliseconds(400))
+        XCTAssertLessThan(delays[2], .milliseconds(800), "the delay grew past the longest")
+
+        let last = try await harness.bridge(4)
+        await last.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        await last.serve(HerdrServerScript.surface(projection: 1, revision: 1, lines: ["two"], panes: Self.onePane))
+        try await harness.waitUntil("the session didn't come back") {
+            harness.shownRows() == ["w1:p1": ["two"]] && harness.model.stateTraceLabel == "hidden"
+        }
+        XCTAssertFalse(harness.states.contains { $0.disconnectedReason != nil }, "\(harness.states)")
+    }
+
+    /// Delays start over once a connection has stayed up a while, as in Herdr's client: a drop after
+    /// that waits the first delay again, not the one the earlier failures had reached.
+    func testDelaysStartOverOnceAConnectionStaysUp() async throws {
+        var recovery = HerdrScreenModel.RecoveryTiming()
+        recovery.firstRetry = .milliseconds(300)
+        recovery.stable = .milliseconds(300)
+        let harness = await makeHarness(recovery: recovery)
+        let first = try await connectedSession(harness, lines: ["one"])
+        await first.finishServing()
+        let second = try await harness.bridge(1)
+        await second.finishServing()
+
+        let third = try await harness.bridge(2)
+        await third.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        try await harness.waitUntil("the session didn't come back") { harness.model.stateTraceLabel == "hidden" }
+        try await Task.sleep(for: .milliseconds(600))
+        let droppedAt = ContinuousClock.now
+        await third.finishServing()
+
+        _ = try await harness.bridge(3)
+        let starts = await harness.bridges.openingsStartedAt
+        XCTAssertGreaterThanOrEqual(starts[3] - droppedAt, .milliseconds(300))
+        XCTAssertLessThan(starts[3] - droppedAt, .milliseconds(1000), "the delays didn't start over")
+    }
+
+    /// Herdr's bridge exits by itself after a minute with nothing to carry, as it does while the app is
+    /// in the background, with status 1 and nothing after the ready marker. Once the connection is open
+    /// that is a drop: the session reconnects by itself, as Herdr's client does.
+    func testABridgeThatExitsAfterTheConnectionOpenedReconnects() async throws {
+        var recovery = HerdrScreenModel.RecoveryTiming()
+        recovery.firstRetry = .milliseconds(50)
+        let harness = await makeHarness(recovery: recovery)
+        let first = try await connectedSession(harness, lines: ["one"])
+
+        await first.finishServing(throwing: HerdrBridgeError.program(.failed("")))
+        try await harness.waitUntil("the bridge's exit didn't start a reconnect") {
+            harness.states.last == .reconnecting(.transportLoss)
+        }
+        _ = try await harness.bridge(1)
+        XCTAssertFalse(harness.states.contains { $0.disconnectedReason != nil }, "\(harness.states)")
+    }
+
+    /// A server whose snapshot Remux can't read needs attention: the session says why, keeps saying it
+    /// while the server is checked again every so often, and is back once a connection works.
+    func testAServerThatNeedsAttentionSaysWhyAndIsCheckedAgain() async throws {
+        var recovery = HerdrScreenModel.RecoveryTiming()
+        recovery.recheck = .milliseconds(300)
+        let harness = await makeHarness(recovery: recovery)
+        let first = try await connectedSession(harness, lines: ["one"])
+
+        await first.serve(Self.unreadableSnapshot())
+        try await harness.waitUntil("the reason wasn't shown") { harness.states.last?.disconnectedReason != nil }
+        let reason = try XCTUnwrap(harness.states.last?.disconnectedReason)
+        XCTAssertEqual(
+            reason,
+            HerdrConnectionError.wire(.invalidControl(kind: HerdrControlKind.snapshot)).terminalDisconnectReason(on: SavedServer(displayName: "Herdr Host", host: "herdr.example.test", username: "builder"))
+        )
+
+        let second = try await harness.bridge(1)
+        XCTAssertEqual(harness.states.last?.disconnectedReason, reason, "the reason went away before the server was back")
+        await second.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        try await harness.waitUntil("the session didn't come back") {
+            harness.model.stateTraceLabel == "hidden" && harness.states.last?.disconnectedReason == nil
+        }
+    }
+
+    /// In the background a waiting reconnect stops, keeping its time; back in the foreground, one that
+    /// came due meanwhile runs at once.
+    func testTheBackgroundHoldsAReconnectAndTheForegroundRunsItAtOnce() async throws {
+        var recovery = HerdrScreenModel.RecoveryTiming()
+        recovery.firstRetry = .milliseconds(500)
+        let harness = await makeHarness(recovery: recovery)
+        let first = try await connectedSession(harness, lines: ["one"])
+        await first.finishServing()
+        try await harness.waitUntil("the drop didn't start a reconnect") {
+            harness.states.last == .reconnecting(.transportLoss)
+        }
+
+        harness.model.handleAppLifecyclePhase(.background)
+        try await Task.sleep(for: .milliseconds(800))
+        let openedInTheBackground = await harness.bridges.opened.count
+        XCTAssertEqual(openedInTheBackground, 1)
+
+        let foregroundAt = ContinuousClock.now
+        harness.model.handleAppLifecyclePhase(.active)
+        _ = try await harness.bridge(1)
+        let starts = await harness.bridges.openingsStartedAt
+        XCTAssertLessThan(starts[1] - foregroundAt, .milliseconds(400), "the due reconnect waited")
+    }
+
+    /// Back in the foreground a waiting reconnect runs at once even before it is due, as Herdr's client
+    /// does after a resume.
+    func testTheForegroundRunsAWaitingReconnectBeforeItIsDue() async throws {
+        var recovery = HerdrScreenModel.RecoveryTiming()
+        recovery.firstRetry = .seconds(30)
+        let harness = await makeHarness(recovery: recovery)
+        let first = try await connectedSession(harness, lines: ["one"])
+        await first.finishServing()
+        try await harness.waitUntil("the drop didn't start a reconnect") {
+            harness.states.last == .reconnecting(.transportLoss)
+        }
+
+        harness.model.handleAppLifecyclePhase(.background)
+        try await Task.sleep(for: .milliseconds(100))
+        let foregroundAt = ContinuousClock.now
+        harness.model.handleAppLifecyclePhase(.active)
+        _ = try await harness.bridge(1)
+        let starts = await harness.bridges.openingsStartedAt
+        XCTAssertLessThan(starts[1] - foregroundAt, .milliseconds(400), "the reconnect waited for its delay")
+    }
+
+    /// Time in the background doesn't count as a connection staying up, as in Herdr's client: a drop
+    /// soon after coming back keeps the delay the failures before had reached.
+    func testTimeInTheBackgroundDoesNotCountAsStayingUp() async throws {
+        var recovery = HerdrScreenModel.RecoveryTiming()
+        recovery.firstRetry = .milliseconds(200)
+        recovery.stable = .milliseconds(300)
+        let harness = await makeHarness(recovery: recovery)
+        let first = try await connectedSession(harness, lines: ["one"])
+        await first.finishServing()
+        let second = try await harness.bridge(1)
+        await second.finishServing()
+
+        let third = try await harness.bridge(2)
+        await third.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        try await harness.waitUntil("the session didn't come back") { harness.model.stateTraceLabel == "hidden" }
+        harness.model.handleAppLifecyclePhase(.background)
+        try await Task.sleep(for: .milliseconds(600))
+        harness.model.handleAppLifecyclePhase(.active)
+        let droppedAt = ContinuousClock.now
+        await third.finishServing()
+
+        _ = try await harness.bridge(3)
+        let starts = await harness.bridges.openingsStartedAt
+        XCTAssertGreaterThanOrEqual(starts[3] - droppedAt, .milliseconds(700), "the background counted as staying up")
+    }
+
+    /// Going to the background gives up a reconnect still opening, as Herdr's client does; the
+    /// foreground opens it again at once.
+    func testTheBackgroundGivesUpAReconnectStillOpening() async throws {
+        var recovery = HerdrScreenModel.RecoveryTiming()
+        recovery.firstRetry = .milliseconds(50)
+        let harness = await makeHarness(recovery: recovery, bridgeOpeningTakes: .milliseconds(500))
+        let first = try await connectedSession(harness, lines: ["one"])
+        await first.finishServing()
+        try await harness.waitUntil("the reconnect didn't start opening") {
+            await harness.bridges.openingsStartedAt.count == 2
+        }
+
+        harness.model.handleAppLifecyclePhase(.background)
+        try await Task.sleep(for: .milliseconds(800))
+        let openedInTheBackground = await harness.bridges.opened.count
+        let openingsInTheBackground = await harness.bridges.openingsStartedAt.count
+        XCTAssertEqual(openedInTheBackground, 1, "the opening wasn't given up")
+        XCTAssertEqual(openingsInTheBackground, 2)
+
+        let foregroundAt = ContinuousClock.now
+        harness.model.handleAppLifecyclePhase(.active)
+        try await harness.waitUntil("the foreground didn't open it again") {
+            await harness.bridges.openingsStartedAt.count == 3
+        }
+        let starts = await harness.bridges.openingsStartedAt
+        XCTAssertLessThan(starts[2] - foregroundAt, .milliseconds(400), "the reconnect waited")
+        XCTAssertFalse(harness.states.contains { $0.disconnectedReason != nil }, "\(harness.states)")
+    }
+
+    /// Going to the background while a connection waits for Herdr's welcome gives it up without offering
+    /// its SSH connection to the next one: whether that path still works is unknown.
+    func testTheBackgroundGivesUpAnOpeningWithoutReusingItsConnection() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge(0)
+        harness.setScreenSize()
+        _ = try await harness.writes(bridge, count: 1)
+
+        harness.model.handleAppLifecyclePhase(.background)
+        try await harness.waitUntil("the opening wasn't given up") { await bridge.isClosed }
+        let reusable = await bridge.closedReusable
+        XCTAssertEqual(reusable, false)
+    }
+
+    /// A connection that opens as the app goes to the background, before the model has taken it, is
+    /// given up the same way: its SSH connection isn't offered to the next one.
+    func testTheBackgroundGivesUpAConnectionOpenedMeanwhileWithoutReusingIt() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge(0)
+        harness.setScreenSize()
+        _ = try await harness.writes(bridge, count: 1)
+
+        // Once the connection reads past the welcome its opening has returned, and it resumes only after
+        // the background is handled.
+        await bridge.serve(try HerdrServerScript.welcome())
+        XCTAssertTrue(Self.holdMainActor { await bridge.reads >= 2 })
+        // The bridge takes the first close it gets, so the background's own close of the bridge waits
+        // until the opening's close has come.
+        DispatchQueue.main.async { _ = Self.holdMainActor { await bridge.isClosed } }
+        harness.model.handleAppLifecyclePhase(.background)
+
+        try await harness.waitUntil("the connection wasn't given up") { await bridge.isClosed }
+        let reusable = await bridge.closedReusable
+        XCTAssertEqual(reusable, false)
+    }
+
+    /// A bridge whose opening returns after the background gave its attempt up isn't offered to the next
+    /// opening either.
+    func testABridgeOpenedAfterTheBackgroundGaveItsAttemptUpIsNotReused() async throws {
+        let harness = await makeHarness(bridgeOpeningTakes: .milliseconds(200))
+        let bridges = harness.bridges
+        try await harness.waitUntil("the opening didn't start") { await bridges.openingsStartedAt.count == 1 }
+
+        XCTAssertTrue(Self.holdMainActor { await bridges.opened.count == 1 })
+        harness.model.handleAppLifecyclePhase(.background)
+
+        let bridge = try await harness.bridge(0)
+        try await harness.waitUntil("the late bridge wasn't closed") { await bridge.isClosed }
+        let reusable = await bridge.closedReusable
+        XCTAssertEqual(reusable, false)
+    }
+
+    /// A bridge whose opening returns after a reconnect replaced its attempt keeps its SSH connection for
+    /// the next opening, as that attempt's own bridge would.
+    func testABridgeOpenedAfterAReconnectReplacedItsAttemptIsReused() async throws {
+        let harness = await makeHarness(bridgeOpeningTakes: .milliseconds(200))
+        let bridges = harness.bridges
+        try await harness.waitUntil("the opening didn't start") { await bridges.openingsStartedAt.count == 1 }
+
+        XCTAssertTrue(Self.holdMainActor { await bridges.opened.count == 1 })
+        XCTAssertTrue(harness.model.reconnect())
+
+        let bridge = try await harness.bridge(0)
+        try await harness.waitUntil("the late bridge wasn't closed") { await bridge.isClosed }
+        let reusable = await bridge.closedReusable
+        XCTAssertEqual(reusable, true)
+    }
+
+    /// Back from the background, a connection that stayed open is shown again at once and checks itself
+    /// with a ping meanwhile, as Herdr's client does after a resume: neither waits for the other.
+    func testComingBackShowsTheSessionAtOnceAndPingsTheConnection() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        var index = session.next
+        harness.model.handleAppLifecyclePhase(.background)
+        let hide = try await harness.nextSurfaceSet(session.bridge, from: &index)
+        XCTAssertFalse(hide.active)
+
+        harness.model.handleAppLifecyclePhase(.active)
+        var pinged = false
+        var shown = false
+        while !(pinged && shown) {
+            let write = try ClientWrite.decode(try await session.bridge.written(index))
+            index += 1
+            if ping(write) != nil { pinged = true }
+            if write.isSurfaceSet { shown = true }
+        }
+    }
+
+    /// A connection that doesn't answer on the way back is gone: the session reconnects.
+    func testComingBackReconnectsWhenTheConnectionDoesNotAnswer() async throws {
+        var timing = HerdrConnection.Timing()
+        timing.unansweredPing = .milliseconds(300)
+        let harness = await makeHarness(timing: timing)
+        let session = try await shownSession(harness)
+        var index = session.next
+        harness.model.handleAppLifecyclePhase(.background)
+        _ = try await harness.nextSurfaceSet(session.bridge, from: &index)
+
+        harness.model.handleAppLifecyclePhase(.active)
+        try await harness.waitUntil("the silent connection didn't start a reconnect") {
+            harness.states.last == .reconnecting(.transportLoss)
+        }
+        _ = try await harness.bridge(1)
+    }
+
+    /// A shown session that reconnects reads as reconnecting, and takes no input, until the new
+    /// connection completes its show: until then the panes show the last connection's frame.
+    func testAReconnectReadsAsReconnectingUntilTheNewConnectionIsShown() async throws {
+        var recovery = HerdrScreenModel.RecoveryTiming()
+        recovery.firstRetry = .milliseconds(50)
+        let harness = await makeHarness(recovery: recovery)
+        let session = try await shownSession(harness)
+        await session.bridge.finishServing()
+        try await harness.waitUntil("the drop didn't start a reconnect") {
+            harness.states.last == .reconnecting(.transportLoss)
+        }
+
+        let second = try await harness.bridge(1)
+        await second.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        var index = 0
+        let show = try await harness.nextSurfaceSet(second, from: &index)
+        XCTAssertTrue(show.active)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(harness.states.last, .reconnecting(.transportLoss), "\(harness.states)")
+        XCTAssertFalse(harness.model.isInputAvailable)
+
+        let panes: [HerdrServerScript.Pane] = [
+            .init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true),
+            .init(id: "w1:p2", x: 4, width: 3, height: 1),
+        ]
+        await second.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        await second.serve(try harness.shownSurface(projection: 1, revision: 2, lines: ["one two"], panes: panes))
+        try await harness.waitUntil("the session didn't come back") { harness.states.last == .connected }
+        XCTAssertTrue(harness.model.isInputAvailable)
+    }
+
+    /// A reconnect the user asks for also starts the delays over, as in Herdr's client: when it fails,
+    /// the next try waits the first delay, not the one the failures before had reached.
+    func testAReconnectTheUserAsksForStartsTheDelaysOver() async throws {
+        var recovery = HerdrScreenModel.RecoveryTiming()
+        recovery.firstRetry = .milliseconds(100)
+        let harness = await makeHarness(recovery: recovery)
+        let first = try await connectedSession(harness, lines: ["one"])
+        await first.finishServing()
+        for index in 1...3 {
+            try await harness.bridge(index).finishServing()
+        }
+        // Four failures in a row: the next try would wait 0.8 s.
+        try await Task.sleep(for: .milliseconds(100))
+
+        XCTAssertTrue(harness.model.reconnect())
+        let asked = try await harness.bridge(4)
+        let failedAt = ContinuousClock.now
+        await asked.finishServing()
+        _ = try await harness.bridge(5)
+        let starts = await harness.bridges.openingsStartedAt
+        XCTAssertLessThan(starts[5] - failedAt, .milliseconds(500), "the delays didn't start over")
+    }
+
+    /// A reconnect the user asks for runs at once instead of waiting out the delay.
+    func testAReconnectTheUserAsksForSkipsTheWait() async throws {
+        var recovery = HerdrScreenModel.RecoveryTiming()
+        recovery.firstRetry = .seconds(30)
+        let harness = await makeHarness(recovery: recovery)
+        let first = try await connectedSession(harness, lines: ["one"])
+        await first.finishServing()
+        try await harness.waitUntil("the drop didn't start a reconnect") {
+            harness.states.last == .reconnecting(.transportLoss)
+        }
+
+        XCTAssertTrue(harness.model.reconnect())
+        let second = try await harness.bridge(1)
+        await second.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        try await harness.waitUntil("the session didn't come back") { harness.model.stateTraceLabel == "hidden" }
+    }
+
+    private static let onePane: [HerdrServerScript.Pane] = [.init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true)]
+
+    /// A hidden session on its first bridge, connected, its one pane painted with `lines`.
+    private func connectedSession(_ harness: HerdrModelHarness, lines: [String]) async throws -> FakeBridgeTransport {
+        let bridge = try await harness.bridge(0)
+        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        await bridge.serve(HerdrServerScript.surface(projection: 1, revision: 1, lines: lines, panes: Self.onePane))
+        harness.setScreenSize()
+        try await harness.waitUntil("the session didn't connect") {
+            harness.shownRows() == ["w1:p1": lines] && harness.model.stateTraceLabel == "hidden"
+        }
+        return bridge
+    }
+
+    /// Keeps the main actor busy, as other work on it would, until `condition` holds or three seconds
+    /// pass; returns whether it held. Whatever resumes on the main actor meanwhile runs only after the
+    /// caller's next synchronous steps.
+    private nonisolated static func holdMainActor(until condition: @escaping @Sendable () async -> Bool) -> Bool {
+        let held = DispatchSemaphore(value: 0)
+        let poll = Task.detached {
+            while !(await condition()) {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            held.signal()
+        }
+        guard held.wait(timeout: .now() + 3) == .success else {
+            poll.cancel()
+            return false
+        }
+        return true
+    }
+
+    /// A snapshot whose data Remux can't read.
+    private static func unreadableSnapshot() -> [UInt8] {
+        var writer = HerdrWireWriter()
+        writer.variant(20)
+        writer.string(HerdrControlKind.snapshot)
+        writer.string("{}")
+        return HerdrWire.frame(writer.bytes)
     }
 
     // MARK: - Input

@@ -25,7 +25,7 @@ final class HerdrPipelineTests: XCTestCase {
     }
 
     /// The welcome, the snapshot and every surface can arrive in the same read; the model paints them,
-    /// and keeps the last frame when the stream ends.
+    /// and keeps the last frame when the stream ends, reconnecting by itself.
     func testASessionArrivingWithTheWelcomeIsPaintedAsHerdrSentIt() async throws {
         let recording = "herdr-04-patch-and-delta-A"
         let harness = await makeHarness()
@@ -35,7 +35,7 @@ final class HerdrPipelineTests: XCTestCase {
         harness.setScreenSize()
 
         try await assertPanesShowHerdrsCells(harness, recording: recording)
-        XCTAssertEqual(harness.states.last, .disconnected(HerdrConnectionError.closed.terminalDisconnectReason(on: SavedServer(displayName: "Herdr Host", host: "herdr.example.test", username: "builder"))))
+        XCTAssertEqual(harness.states.last, .reconnecting(.transportLoss))
     }
 
     /// Connected hidden as Herdr's client connects, the session is shown once selected, and painted as
@@ -83,16 +83,18 @@ final class HerdrPipelineTests: XCTestCase {
         await bridge.finishServing()
 
         try await assertPanesShowHerdrsCells(harness, recording: recording)
-        XCTAssertEqual(harness.model.stateTraceLabel, "ended")
+        XCTAssertEqual(harness.model.stateTraceLabel, "reconnecting")
     }
 
-    /// A surface the decoder can't apply ends the connection; the model reports it as a wire failure.
+    /// A surface the decoder can't apply ends the connection; before the first snapshot the model
+    /// reports it as a wire failure.
     func testASurfaceTheDecoderCannotApplyIsReportedAsAWireFailure() async throws {
         let frames = try HerdrConnectionTests.frames(HerdrConnectionTests.recording("herdr-04-patch-and-delta-A"))
         let harness = await makeHarness()
         let bridge = try await harness.bridge()
-        // The deltas without the full surface they build on.
-        await bridge.serve((frames[0...3] + frames[9...]).flatMap(HerdrWire.frame))
+        // The deltas without the full surface they build on, and without the snapshots, after which the
+        // session would reconnect instead.
+        await bridge.serve(([frames[0], frames[1], frames[3]] + frames[11...]).flatMap(HerdrWire.frame))
         harness.setScreenSize()
 
         try await harness.waitUntil("the failure wasn't reported") {

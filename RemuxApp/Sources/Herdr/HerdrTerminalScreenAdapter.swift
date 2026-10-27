@@ -161,11 +161,12 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
 
     func setViewportStabilityHint(stable: Bool) {}
 
-    /// The session reads as ready once its focused pane is presented, so the root sees it connect.
+    /// The session reads as ready once its connection is ready and its focused pane is presented, so the
+    /// root sees it connect.
     var terminalScreenPresentationProjection: GhosttyTerminalScreenPresentationProjection {
         let projection = GhosttyTerminalPresentationProjector.terminalScreenPresentationProjection(
             phase: runtimePhase,
-            transportWritable: model?.isConnectionOpen ?? false,
+            transportWritable: model?.isConnectionReady ?? false,
             commandFailureMessage: commandFailure.message,
             debugStatus: stateTraceLabel,
             registryDebugSummary: "herdr session",

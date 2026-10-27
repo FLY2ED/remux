@@ -2475,6 +2475,9 @@ final class RemuxRootModel: ObservableObject {
               selectedID == update.workspaceID else {
             return nil
         }
+        // A Herdr session reconnects by itself, on Herdr's schedule.
+        let key = TerminalRuntimeAttemptKey(workspaceID: update.workspaceID, instanceID: update.instanceID)
+        if case .herdr? = terminalRuntimes[key] { return nil }
         guard let reason = update.state.disconnectedReason,
               reason.allowsAutomaticReconnect else {
             return nil
