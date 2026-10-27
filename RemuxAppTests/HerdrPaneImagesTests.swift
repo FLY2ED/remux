@@ -76,6 +76,37 @@ final class HerdrPaneImagesTests: XCTestCase {
         XCTAssertTrue(drawn.contains("a=t,") && drawn.contains("a=p,"))
     }
 
+    /// A placement whose image is replaced keeps the old image, which stays in the terminal, until the new
+    /// bytes arrive; then the old image is deleted. A replacement that also moved doesn't keep it.
+    func testAReplacedImageKeepsTheOldOneUntilItsBytesArrive() throws {
+        var store = HerdrImageStore()
+        var images = HerdrPaneImages()
+        let replacement = HerdrTerminalEngineTests.image(pane: "P", version: 8)
+        let first = try scene(placing: [(1, 0)], bytes: true)
+        store.receive(first)
+        _ = images.update(to: try paneScene(first), from: store)
+
+        let replaced = try scene(placing: [(1, 0)], bytes: false, image: replacement)
+        store.receive(replaced)
+        let waiting = images.update(to: try paneScene(replaced), from: store)
+        XCTAssertEqual(waiting, [], "the old image stays placed and uploaded")
+
+        let arrived = try scene(placing: [(1, 0)], bytes: true, image: replacement)
+        store.receive(arrived)
+        let swap = text(images.update(to: try paneScene(arrived), from: store))
+        XCTAssertTrue(swap.contains("a=t,") && swap.contains("a=p,i=2,"), swap)
+        XCTAssertTrue(swap.contains("a=d,d=I,i=1,"), "the old image goes once the new one shows: \(swap)")
+
+        var moving = HerdrPaneImages()
+        var movingStore = HerdrImageStore()
+        movingStore.receive(first)
+        _ = moving.update(to: try paneScene(first), from: movingStore)
+        let moved = try scene(placing: [(3, 0)], bytes: false, image: replacement)
+        movingStore.receive(moved)
+        let gone = text(moving.update(to: try paneScene(moved), from: movingStore))
+        XCTAssertTrue(gone.contains("a=d,d=I,i=1,") && !gone.contains("a=p,"), gone)
+    }
+
     /// Only a placement inside the pane's text area is drawn; its image is still kept.
     func testAPlacementOutsideItsPaneIsNotDrawn() throws {
         let outside = try scene(placing: [(7, 0)], bytes: true)
@@ -86,10 +117,10 @@ final class HerdrPaneImagesTests: XCTestCase {
 
     // MARK: - Fixtures
 
-    /// The test image placed in pane P over 2×1 cells at each (x, y).
-    private func scene(placing cells: [(Int, Int)], bytes: Bool) throws -> HerdrGraphicsScene {
+    /// The test image, or `image`, placed in pane P over 2×1 cells at each (x, y).
+    private func scene(placing cells: [(Int, Int)], bytes: Bool, image: String? = nil) throws -> HerdrGraphicsScene {
         try decode(HerdrTerminalEngineTests.scene(
-            placing: image,
+            placing: image ?? self.image,
             at: cells.map { (x: $0.0, y: $0.1, columns: 2, rows: 1) },
             sendingBytes: bytes
         ))

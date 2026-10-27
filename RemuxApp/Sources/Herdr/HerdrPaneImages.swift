@@ -39,7 +39,8 @@ struct HerdrImageStore {
 struct HerdrPaneImages {
     /// A placement in the pane's cells, with Herdr's source crop, pixel offsets and stacking order.
     struct Placement: Equatable, Sendable {
-        let asset: HerdrGraphicsAssetKey
+        var asset: HerdrGraphicsAssetKey
+        let logicalPlacementID: UInt32
         let column: UInt16
         let row: UInt16
         let columns: UInt32
@@ -51,6 +52,7 @@ struct HerdrPaneImages {
         let xOffset: UInt32
         let yOffset: UInt32
         let z: Int32
+        let scrollbackOffset: UInt32
     }
 
     /// What one frame asks of a pane: its placements, and every image Herdr keeps for it, placed or
@@ -80,6 +82,7 @@ struct HerdrPaneImages {
                 else { continue }
                 placements.append(Placement(
                     asset: placement.asset,
+                    logicalPlacementID: placement.logicalPlacementID,
                     column: column,
                     row: row,
                     columns: placement.cols,
@@ -90,7 +93,8 @@ struct HerdrPaneImages {
                     sourceHeight: placement.sourceHeight,
                     xOffset: placement.xOffset,
                     yOffset: placement.yOffset,
-                    z: placement.z
+                    z: placement.z,
+                    scrollbackOffset: placement.scrollbackOffset
                 ))
             }
             kept.formUnion(scene.retainedAssets.filter(isPane))
@@ -118,15 +122,12 @@ struct HerdrPaneImages {
     }
 
     /// The commands that make the terminal show `scene`, uploading the images it lacks from `store`; empty
-    /// when it already does. A placement whose bytes haven't arrived is left out until they do. The
-    /// commands keep the cursor where they found it, as Herdr's client writes its graphics between
-    /// DECSC and DECRC (`client/frame_output.rs`).
+    /// when it already does. A placement whose bytes haven't arrived is left out until they do, except
+    /// one that only replaces the image of a placement the terminal shows: that one keeps showing the
+    /// old image meanwhile, which stays in the terminal. The commands keep the cursor where they found
+    /// it, as Herdr's client writes its graphics between DECSC and DECRC (`client/frame_output.rs`).
     mutating func update(to scene: Scene, from store: HerdrImageStore) -> [UInt8] {
-        var commands: [UInt8] = []
-        for (key, imageID) in imageIDs where !scene.kept.contains(key) {
-            Self.append("a=d,d=I,i=\(imageID),q=2", to: &commands)
-            imageIDs[key] = nil
-        }
+        var uploads: [UInt8] = []
         var drawn: [Shown] = []
         for placement in scene.placements {
             if let imageID = imageIDs[placement.asset] {
@@ -134,10 +135,19 @@ struct HerdrPaneImages {
             } else if let data = store[placement.asset] {
                 lastImageID += 1
                 imageIDs[placement.asset] = lastImageID
-                Self.appendUpload(placement.asset, data: data, imageID: lastImageID, to: &commands)
+                Self.appendUpload(placement.asset, data: data, imageID: lastImageID, to: &uploads)
                 drawn.append(Shown(imageID: lastImageID, placement: placement))
+            } else if let previous = shownPlacement(replacedBy: placement) {
+                drawn.append(previous)
             }
         }
+        let drawnImages = Set(drawn.map(\.placement.asset))
+        var commands: [UInt8] = []
+        for (key, imageID) in imageIDs where !scene.kept.contains(key) && !drawnImages.contains(key) {
+            Self.append("a=d,d=I,i=\(imageID),q=2", to: &commands)
+            imageIDs[key] = nil
+        }
+        commands += uploads
         if drawn != shown || placesAll {
             for (index, old) in shown.enumerated() where index >= drawn.count || drawn[index].imageID != old.imageID {
                 Self.append("a=d,d=i,i=\(old.imageID),p=\(index + 1),q=2", to: &commands)
@@ -150,6 +160,21 @@ struct HerdrPaneImages {
         }
         guard !commands.isEmpty else { return [] }
         return Self.saveCursor + commands + Self.restoreCursor
+    }
+
+    /// The placement the terminal shows that `placement` differs from only by its image, the same
+    /// source's earlier pixels, while those are still in the terminal. Herdr may send a replaced image's
+    /// bytes in a later frame, and its client shows the old image until then, but only on a placement
+    /// with everything else unchanged, so never at cells from before a scroll or resize
+    /// (`kitty_graphics/surface.rs`, `refresh_display_scene`).
+    private func shownPlacement(replacedBy placement: Placement) -> Shown? {
+        shown.first { old in
+            var candidate = old.placement
+            candidate.asset = placement.asset
+            return old.placement.asset.source == placement.asset.source
+                && candidate == placement
+                && imageIDs[old.placement.asset] == old.imageID
+        }
     }
 
     // MARK: - Encoding

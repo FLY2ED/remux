@@ -577,6 +577,60 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// Herdr can send a replaced image's bytes in a later frame, past its per-message budget. Until they
+    /// arrive, a placement that is otherwise the same keeps showing the image it had, as in Herdr's
+    /// client; then it shows the new one.
+    func testAReplacedImageShowsTheOldOneUntilItsBytesArrive() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection()
+        let old = Self.image(pane: "P", version: 7)
+        let new = Self.image(pane: "P", version: 8)
+        let marker = Self.image(pane: "P", id: 9)
+        let lines = ["one     ", "two     ", "three   ", "four    "]
+        let panes = [Self.pane("P", x: 0, width: 8, height: 4)]
+        await feed.receive(try Self.snapshot(revision: 1))
+        await feed.receive(.surface(try Self.surface(
+            revision: 1,
+            lines: lines,
+            panes: panes,
+            graphics: Self.scene([(image: old, x: 2, y: 0, columns: 4, rows: 2, pixel: Self.red)])
+        )))
+        let renderer = try await makeRenderer(
+            engine: engine, paneID: "P", terminal: try await updates.terminal(for: "P"), columns: 8, rows: 4
+        )
+        let before = try await cellColor(of: renderer, column: 4, row: 1, until: \.isRed)
+        XCTAssertTrue(before.isRed, "\(before)")
+
+        // The marker, whose bytes come with this frame, shows once the frame is drawn.
+        await feed.receive(.surface(try Self.surface(
+            revision: 2,
+            lines: lines,
+            panes: panes,
+            graphics: Self.scene([
+                (image: new, x: 2, y: 0, columns: 4, rows: 2, pixel: nil),
+                (image: marker, x: 0, y: 3, columns: 2, rows: 1, pixel: Self.green),
+            ])
+        )))
+        let drawn = try await cellColor(of: renderer, column: 1, row: 3, until: \.isGreen)
+        XCTAssertTrue(drawn.isGreen, "the frame with the replacement: \(drawn)")
+        let waiting = try await cellColor(of: renderer, column: 4, row: 1, until: { _ in true })
+        XCTAssertTrue(waiting.isRed, "the old image while the new bytes are on their way: \(waiting)")
+
+        await feed.receive(.surface(try Self.surface(
+            revision: 3,
+            lines: lines,
+            panes: panes,
+            graphics: Self.scene([
+                (image: new, x: 2, y: 0, columns: 4, rows: 2, pixel: Self.green),
+                (image: marker, x: 0, y: 3, columns: 2, rows: 1, pixel: nil),
+            ])
+        )))
+        let replaced = try await cellColor(of: renderer, column: 4, row: 1, until: \.isGreen)
+        XCTAssertTrue(replaced.isGreen, "the new image once its bytes arrive: \(replaced)")
+        await engine.stop()
+    }
+
     // MARK: - Fence and stop
 
     /// One registered surface per pane; a closed renderer is unregistered before its surface is freed,
@@ -836,24 +890,42 @@ final class HerdrTerminalEngineTests: XCTestCase {
 
     /// The key of a solid red 2×2 RGBA image from terminal image 7 of pane `pane`.
     static func redImage(pane: String) -> String {
-        #"{"source":{"Terminal":{"target":{"Pane":{"pane_id":"\#(pane)"}},"image_id":7}},"#
-            + #""image_width":2,"image_height":2,"format":"Rgba","data_len":16,"data_fingerprint":7}"#
+        image(pane: pane)
     }
 
-    /// A scene placing `image` at each of `cells` (in the frame's cells), carrying its bytes or not.
+    /// The key of a solid 2×2 RGBA image from terminal image `id` of pane `pane`. A new `version` is
+    /// that image replaced: the same source with other contents.
+    static func image(pane: String, id: Int = 7, version: Int = 7) -> String {
+        #"{"source":{"Terminal":{"target":{"Pane":{"pane_id":"\#(pane)"}},"image_id":\#(id)}},"#
+            + #""image_width":2,"image_height":2,"format":"Rgba","data_len":16,"data_fingerprint":\#(version)}"#
+    }
+
+    static let red = "255,0,0,255"
+    static let green = "0,255,0,255"
+
+    /// A scene placing the red `image` at each of `cells` (in the frame's cells), carrying its bytes or not.
     static func scene(
         placing image: String,
         at cells: [(x: Int, y: Int, columns: Int, rows: Int)],
         sendingBytes: Bool
     ) -> String {
-        let pixels = Array(repeating: "255,0,0,255", count: 4).joined(separator: ",")
-        let assets = sendingBytes ? #"[{"key":\#(image),"data":[\#(pixels)]}]"# : "[]"
-        let placements = cells.enumerated().map { index, cell in
-            #"{"asset":\#(image),"logical_placement_id":\#(index + 1),"x":\#(cell.x),"y":\#(cell.y),"#
-                + #""cols":\#(cell.columns),"rows":\#(cell.rows),"source_x":0,"source_y":0,"source_width":0,"#
+        scene(cells.map { (image: image, x: $0.x, y: $0.y, columns: $0.columns, rows: $0.rows, pixel: sendingBytes ? red : nil) })
+    }
+
+    /// A scene placing each image at its cells, carrying the bytes of those given a `pixel` colour.
+    static func scene(_ placed: [(image: String, x: Int, y: Int, columns: Int, rows: Int, pixel: String?)]) -> String {
+        var sent = Set<String>()
+        let assets = placed.compactMap { item -> String? in
+            guard let pixel = item.pixel, sent.insert(item.image).inserted else { return nil }
+            return #"{"key":\#(item.image),"data":[\#(Array(repeating: pixel, count: 4).joined(separator: ","))]}"#
+        }
+        let placements = placed.enumerated().map { index, item in
+            #"{"asset":\#(item.image),"logical_placement_id":\#(index + 1),"x":\#(item.x),"y":\#(item.y),"#
+                + #""cols":\#(item.columns),"rows":\#(item.rows),"source_x":0,"source_y":0,"source_width":0,"#
                 + #""source_height":0,"x_offset":0,"y_offset":0,"z":0,"scrollback_offset":0}"#
         }
-        return #"{"assets":\#(assets),"placements":[\#(placements.joined(separator: ","))],"retained_assets":[]}"#
+        return #"{"assets":[\#(assets.joined(separator: ","))],"placements":[\#(placements.joined(separator: ","))],"#
+            + #""retained_assets":[]}"#
     }
 
     /// A scene that places nothing and keeps `image`, as Herdr keeps an image whose pane is out of view.
@@ -870,6 +942,7 @@ struct RendererColor: Equatable {
 
     /// The red of the test images, through Ghostty's colour handling.
     var isRed: Bool { red > 200 && green < 80 && blue < 80 }
+    var isGreen: Bool { green > 200 && red < 80 && blue < 80 }
 }
 
 /// The engine's updates, read in order through the stream's one iterator.
