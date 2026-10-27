@@ -6,10 +6,13 @@ import Foundation
 /// the same turn as the answer or snapshot that frees it.
 ///
 /// The order is one rule: the current view request's steps first, in order; then every other command (a
-/// selection read, a link question, the zoom button, the pane sheet's layout question) in the order asked.
-/// A request that replaces another drops only the steps that one hadn't sent; the other commands still go.
-/// A step waiting for the snapshot that shows where the step before it took the session holds the lane.
-/// `client_shell.surface.set` isn't a command here: Herdr answers it even while a command is in flight.
+/// selection read, a link question, the zoom button, the pane sheet's layout question) in the order asked;
+/// then the finale, as the session leaves the screen or closes. A request that replaces another drops only
+/// the steps that one hadn't sent; the other commands still go. A hide or a close ends the current request
+/// and fails the commands waiting, so its finale is the last thing sent. A step or finale waiting for the
+/// snapshot that shows where the step before it took the session holds the lane.
+/// `client_shell.surface.set` isn't a command here: Herdr answers it even while a command is in flight
+/// (`endpoint_requests.rs` checks for it before `endpoint_busy`).
 struct HerdrCommandLane {
     /// A step of the current view request. The engine decides what each sends, if anything, as it goes.
     enum Step: Equatable, Sendable {
@@ -40,8 +43,7 @@ struct HerdrCommandLane {
             /// sheet's question for a tab's layout, which doesn't. Each goes only while no request is in
             /// progress and `pane` is focused, since a zoom focuses its pane.
             case zoom(pane: String, zoomed: Bool, reportsFailure: Bool)
-            /// Remux's zoom off the tab on screen, as the session leaves the screen or closes; `closed` once
-            /// it is answered or fails.
+            /// The finale's zoom off the tab on screen; `closed` once it is answered or fails.
             case unzoom(pane: String, closed: (@Sendable () -> Void)?)
             /// Anything else, whose caller gets its answer; it goes only while the session is shown.
             case other(answered: @Sendable (Result<HerdrCommandReply, HerdrCommandError>) -> Void)
@@ -64,6 +66,13 @@ struct HerdrCommandLane {
         }
     }
 
+    /// How the session leaves: Remux's zoom off the tab on screen, if it made one, then the hide view
+    /// request `request` sends, or the connection's close once the unzoom is answered.
+    enum Finale {
+        case hide(request: UInt64)
+        case close(done: @Sendable () -> Void)
+    }
+
     /// The command Herdr is answering, and the reply's chunks so far.
     struct InFlight {
         let id: String
@@ -71,12 +80,16 @@ struct HerdrCommandLane {
         /// The newest snapshot's revision when it went out.
         let sentAfter: UInt64
         var data: [UInt8] = []
+        /// The snapshots that came while it was in flight.
+        var snapshots: [HerdrSnapshot] = []
     }
 
     /// The current view request's steps not yet sent.
     private(set) var steps: [Step] = []
     private var stepsRequest: UInt64?
     private var waiting: [Command] = []
+    /// The finale, once the session leaves; it goes when nothing else waits.
+    var finale: Finale?
     private(set) var inFlight: InFlight?
 
     var isIdle: Bool { inFlight == nil }
@@ -128,6 +141,10 @@ struct HerdrCommandLane {
         inFlight = InFlight(id: id, item: item, sentAfter: revision)
     }
 
+    mutating func record(_ snapshot: HerdrSnapshot) {
+        inFlight?.snapshots.append(snapshot)
+    }
+
     /// A chunk of the reply to the command in flight; the whole reply once its last chunk is in, which
     /// frees the lane. A chunk of any other request is dropped, as a late reply to a command that timed
     /// out.
@@ -167,13 +184,14 @@ struct HerdrCommandLane {
     }
 
     /// Everything in the lane, emptied when the connection ends.
-    mutating func takeAll() -> (inFlight: InFlight?, waiting: [Command]) {
+    mutating func takeAll() -> (inFlight: InFlight?, waiting: [Command], finale: Finale?) {
         defer {
             inFlight = nil
             steps.removeAll()
             stepsRequest = nil
             waiting.removeAll()
+            finale = nil
         }
-        return (inFlight, waiting)
+        return (inFlight, waiting, finale)
     }
 }

@@ -1127,6 +1127,17 @@ final class HerdrLiveConnectionTests: XCTestCase {
         }
         window.isHidden = false
         try await waitUntil("the session didn't take input", timeout: .seconds(20)) { model.isInputAvailable }
+        // The composer sends only to a pane whose renderer has shown its first frame, which on a cold
+        // simulator can come well after the session takes input.
+        let presentations = { model.layout?.panes.filter(\.hasTextArea).map { model.presentation(ofPane: $0.paneID) } ?? [] }
+        do {
+            try await waitUntil("", timeout: .seconds(20)) {
+                let shown = presentations()
+                return !shown.isEmpty && shown.allSatisfy { $0 == .ready }
+            }
+        } catch {
+            throw HerdrLiveError(description: "the panes didn't draw: \(presentations())")
+        }
         return ShownSession(fixture: fixture, model: model)
     }
 

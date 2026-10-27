@@ -100,7 +100,7 @@ final class HerdrScreenModel {
     ///
     /// Its task opens the connection, then carries out the operations one at a time, in the order they
     /// were asked for. Herdr takes the newest of a show and a hide, so that order is the session's
-    /// state. No operation waits for Herdr's answer, so a hide goes out while a show is unanswered.
+    /// state. No operation waits for Herdr's answer, so a hide is asked while a show is unanswered.
     @MainActor
     private final class Attempt {
         let id: UInt64
@@ -1193,6 +1193,8 @@ final class HerdrScreenModel {
                 await feed.receive(output)
             case .ended(let error):
                 await model.connectionEnded(attemptID, error)
+                // Also after a stop, which takes no more of the attempt's events.
+                await feed.ended()
             case .inputRefused(let message):
                 Task { @MainActor in model.inputRefused(attemptID, message: message) }
             case .keyboardReportAll(let enabled):
@@ -1402,8 +1404,9 @@ final class HerdrScreenModel {
     }
 
     /// Shows the session while the root wants it on screen and hides it otherwise. Herdr takes the
-    /// newest of a show and a hide, so each change is sent at once, even while the last is unanswered.
-    /// A pane asked for goes right after the show, as part of it.
+    /// newest of a show and a hide, so each change is asked at once, even while the last is unanswered:
+    /// a show goes out at once, and a hide once the command in flight is answered, after Remux's zoom
+    /// comes off. A pane asked for goes right after the show, as part of it.
     private func reconcileVisibility() {
         guard let attempt, isCurrent(attempt), attempt.isOpen, attempt.hasSnapshot, let geometry
         else { return }
