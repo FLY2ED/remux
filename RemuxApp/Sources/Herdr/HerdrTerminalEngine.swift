@@ -28,6 +28,8 @@ struct HerdrPaneLayout: Equatable, Sendable {
     let rows: UInt16
     /// The tab's panes in Herdr's order, as the snapshot lists them, also those the frame doesn't draw.
     let panes: [Pane]
+    /// The lines Herdr draws around and between the panes, which the crop leaves out of the panes.
+    let borders: [HerdrBorderLine]
     /// Whether a popup is open over the tab. It takes the tab's input meanwhile.
     let hasPopup: Bool
 }
@@ -65,6 +67,9 @@ enum HerdrEngineUpdate: Sendable {
     /// Herdr acknowledged, at the requested size and showing the zoom the show carried, is painted.
     /// Follows that frame's layout.
     case activated(request: UInt64, connection: UInt64)
+    /// The frame on screen now was drawn against snapshot `projectionRevision` and shows these panes,
+    /// whose agents the user can see. Comes before that frame's layout.
+    case presented(bootID: String, projectionRevision: UInt64, paneIDs: Set<String>, connection: UInt64)
 }
 
 /// One connection's way into the engine. Once a later connection begins, this one's events are
@@ -145,6 +150,12 @@ actor HerdrTerminalEngine {
         }
     }
 
+    private struct PresentedFrame: Equatable {
+        let bootID: String
+        let projectionRevision: UInt64
+        let paneIDs: Set<String>
+    }
+
     /// A show in progress, as Herdr's client tracks one (`activation/model.rs`): only frames that arrive
     /// after it began count, so the last frame from before a hide never completes it.
     private struct Activation {
@@ -220,6 +231,8 @@ actor HerdrTerminalEngine {
         let terminal: HerdrRetainedTerminal
         /// What the terminal shows: the last paint Ghostty accepted.
         var painted: HerdrPanePainter.Painted
+        /// The images the terminal holds and shows, as of that paint.
+        var images: HerdrPaneImages
         var renderer: HerdrRendererSurface?
     }
 
@@ -228,11 +241,15 @@ actor HerdrTerminalEngine {
     /// The connection whose events are painted; zero until the first begins.
     private var connection: UInt64 = 0
     private var presentation = HerdrPresentation()
+    /// Kept across connections: its keys name their bytes, and each scene keeps only what Herdr counts
+    /// as delivered.
+    private var images = HerdrImageStore()
     private var panes: [String: Pane] = [:]
     /// Listed panes whose terminal Ghostty couldn't make or paint, until the next connection.
     private var failedPaneIDs: Set<String> = []
     private var bootID: String?
     private var paintedSurface: PaintedSurface?
+    private var presentedFrame: PresentedFrame?
     private var activation: Activation?
     /// Frames are drawn as they come, except after a hide and during a show carrying Remux's zoom. Frames
     /// Herdr sends as a hide goes out show what leaving did, such as undoing the zoom, so the frame from
@@ -241,6 +258,11 @@ actor HerdrTerminalEngine {
     private var holdsFrames = false
     private var layout: HerdrPaneLayout?
     private var paneScrolls: [String: HerdrPaneScroll] = [:]
+    /// Herdr's border lines in the frame painted last. A patch never changes them, since
+    /// `HerdrPresentation` takes only patches inside the panes' text areas and scrollbar columns, so
+    /// they are read again only once a surface or a snapshot may have changed what is presented.
+    private var borders: [HerdrBorderLine] = []
+    private var bordersMayHaveChanged = true
     private var cellWidthPx: UInt32
     private var cellHeightPx: UInt32
     private let makeProducer: ProducerFactory
@@ -267,6 +289,7 @@ actor HerdrTerminalEngine {
         if state == .failed { state = .running }
         presentation = HerdrPresentation()
         paintedSurface = nil
+        presentedFrame = nil
         activation = nil
         holdsFrames = false
         failedPaneIDs.removeAll()
@@ -354,6 +377,7 @@ actor HerdrTerminalEngine {
         guard state == .running, connection == self.connection else { return }
         presentation.receive(snapshot)
         activation?.record(snapshot)
+        bordersMayHaveChanged = true
         paintPresented()
     }
 
@@ -361,6 +385,7 @@ actor HerdrTerminalEngine {
         guard state == .running, connection == self.connection else { return }
         switch output {
         case .surface(let surface):
+            images.receive(surface.graphics)
             do {
                 try presentation.receive(surface)
             } catch {
@@ -368,6 +393,7 @@ actor HerdrTerminalEngine {
                 continuation.yield(.failed(.wire(error), connection: connection))
                 return
             }
+            bordersMayHaveChanged = true
         case .patch(let patch):
             // A rejected patch leaves the current frame until the next full surface.
             _ = presentation.receive(patch)
@@ -433,17 +459,32 @@ actor HerdrTerminalEngine {
         for pane in surface.panes {
             paint(
                 HerdrPanePainter.Painted(frame: surface.frame, area: pane.innerRect, cursor: cursor),
+                images: HerdrPaneImages.Scene(surface.graphics, pane: pane),
                 paneID: pane.paneID
             )
         }
         let listed = Set(surface.panes.map(\.paneID))
         panes = panes.filter { listed.contains($0.key) }
         failedPaneIDs.formIntersection(listed)
+        if bordersMayHaveChanged {
+            borders = HerdrBorderLine.lines(in: surface)
+            bordersMayHaveChanged = false
+        }
+        let frame = PresentedFrame(bootID: surface.bootID, projectionRevision: surface.projectionRevision, paneIDs: listed)
+        if frame != presentedFrame {
+            presentedFrame = frame
+            continuation.yield(.presented(
+                bootID: frame.bootID,
+                projectionRevision: frame.projectionRevision,
+                paneIDs: frame.paneIDs,
+                connection: connection
+            ))
+        }
         publishLayout(of: surface, snapshot: snapshot)
         publishScroll(of: surface)
     }
 
-    private func paint(_ next: HerdrPanePainter.Painted, paneID: String) {
+    private func paint(_ next: HerdrPanePainter.Painted, images scene: HerdrPaneImages.Scene, paneID: String) {
         let area = next.area
         guard area.width > 0, area.height > 0 else {
             // A pane with no text area has no terminal; it gets a new one when it has room again.
@@ -453,12 +494,13 @@ actor HerdrTerminalEngine {
         }
         guard !failedPaneIDs.contains(paneID) else { return }
         guard var pane = panes[paneID] else {
-            createPane(paneID: paneID, painted: next)
+            createPane(paneID: paneID, painted: next, images: scene)
             return
         }
         let result: ghostty_terminal_producer_result_e
         if pane.painted.area.width == area.width, pane.painted.area.height == area.height {
             let bytes = HerdrPanePainter.update(from: pane.painted, to: next)
+                + pane.images.update(to: scene, from: images)
             guard !bytes.isEmpty else {
                 pane.painted = next
                 panes[paneID] = pane
@@ -466,12 +508,13 @@ actor HerdrTerminalEngine {
             }
             result = pane.producer.feed(bytes)
         } else {
+            pane.images.terminalResized()
             result = pane.producer.resizeAndFeed(
                 columns: area.width,
                 rows: area.height,
                 cellWidthPx: cellWidthPx,
                 cellHeightPx: cellHeightPx,
-                bytes: HerdrPanePainter.repaint(next)
+                bytes: HerdrPanePainter.repaint(next) + pane.images.update(to: scene, from: images)
             )
         }
         guard result == GHOSTTY_TERMINAL_PRODUCER_RESULT_OK else {
@@ -483,7 +526,7 @@ actor HerdrTerminalEngine {
         panes[paneID] = pane
     }
 
-    private func createPane(paneID: String, painted: HerdrPanePainter.Painted) {
+    private func createPane(paneID: String, painted: HerdrPanePainter.Painted, images scene: HerdrPaneImages.Scene) {
         let producer: any HerdrPaneProducing
         let terminal: HerdrRetainedTerminal
         do {
@@ -494,18 +537,19 @@ actor HerdrTerminalEngine {
             return
         }
         // The cell size goes in with the first paint, before the terminal is shown.
+        var paneImages = HerdrPaneImages()
         let result = producer.resizeAndFeed(
             columns: painted.area.width,
             rows: painted.area.height,
             cellWidthPx: cellWidthPx,
             cellHeightPx: cellHeightPx,
-            bytes: HerdrPanePainter.repaint(painted)
+            bytes: HerdrPanePainter.repaint(painted) + paneImages.update(to: scene, from: images)
         )
         guard result == GHOSTTY_TERMINAL_PRODUCER_RESULT_OK else {
             fail(paneID: paneID)
             return
         }
-        panes[paneID] = Pane(producer: producer, terminal: terminal, painted: painted)
+        panes[paneID] = Pane(producer: producer, terminal: terminal, painted: painted, images: paneImages)
         continuation.yield(.paneTerminal(paneID: paneID, terminal: terminal))
     }
 
@@ -530,6 +574,7 @@ actor HerdrTerminalEngine {
                     path: Self.path(ofPane: paneID, in: snapshot)
                 )
             },
+            borders: borders,
             hasPopup: surface.popup != nil
         )
         guard next != layout else { return }

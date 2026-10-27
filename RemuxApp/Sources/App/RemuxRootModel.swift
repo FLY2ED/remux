@@ -486,11 +486,16 @@ final class RemuxRootModel: ObservableObject {
     @Published private(set) var connectionSetup: ConnectionSetupState?
     @Published private(set) var library: ConnectionLibrarySnapshot = .empty
     @Published private(set) var serverOrderSaveFailed = false
-    @Published private(set) var terminalSettings: TerminalSettings = .default
+    @Published private(set) var terminalSettings: TerminalSettings = .default {
+        didSet { Haptic.follow(terminalSettings) }
+    }
     @Published private(set) var terminalSettingsSaveFailed = false
     @Published private(set) var activeSessions: [ActiveTerminalSession] = []
     @Published private(set) var isSetupActionInProgress = false
     @Published private(set) var sessionDiscoveries: [SavedServer.ID: ServerSessionDiscovery] = [:]
+
+    /// The notifications of every open Herdr session, shown one at a time over whatever is on screen.
+    let herdrNotifications = HerdrNotificationCenter()
 
     var setupSessionID: UUID? {
         currentSetupID
@@ -545,6 +550,9 @@ final class RemuxRootModel: ObservableObject {
             }
         )
         self.terminalScreenModelFactory = terminalScreenModelFactory ?? Self.makeDefaultTerminalScreenModel
+        herdrNotifications.sessions = { [weak self] workspaceID in
+            self?.herdrNotificationState(of: workspaceID)
+        }
     }
 
     deinit {
@@ -1668,6 +1676,50 @@ final class RemuxRootModel: ObservableObject {
         )
     }
 
+    /// A tapped notification banner opens its session, at its pane when it names one, as Herdr's client
+    /// goes to a notification's pane on its machine. The banner goes either way.
+    func openHerdrNotification(_ banner: HerdrNotificationPolicy.Banner) {
+        herdrNotifications.dismiss(banner.id)
+        let workspaceID = banner.origin.workspaceID
+        guard let session = RemuxActiveSessionCollection.session(workspaceID, in: activeSessions) else { return }
+        if let paneID = banner.notification.paneID,
+           case .herdr(let model)? = terminalRuntimes[TerminalRuntimeAttemptKey(session: session)] {
+            model.reveal(paneID: paneID, bootID: banner.origin.bootID)
+        }
+        showActiveSession(workspaceID)
+    }
+
+    private func herdrNotificationState(of workspaceID: SavedWorkspace.ID) -> HerdrNotificationSessionState? {
+        guard let session = RemuxActiveSessionCollection.session(workspaceID, in: activeSessions),
+              case .herdr(let model)? = terminalRuntimes[TerminalRuntimeAttemptKey(session: session)]
+        else { return nil }
+        return model.notificationState
+    }
+
+    /// Only the session's current model speaks for it; a replaced one's late events are dropped.
+    private func handleHerdrNotification(
+        _ event: HerdrScreenModel.NotificationEvent,
+        from key: TerminalRuntimeAttemptKey
+    ) {
+        guard terminalRuntimes[key] != nil,
+              let session = RemuxActiveSessionCollection.session(key.workspaceID, in: activeSessions)
+        else { return }
+        switch event {
+        case .received(let notification, let bootID, let place):
+            herdrNotifications.receive(notification, from: HerdrNotificationPolicy.Origin(
+                workspaceID: key.workspaceID,
+                sessionName: session.target.workspace.sessionName,
+                serverName: session.target.server.displayName,
+                bootID: bootID,
+                place: place
+            ))
+        case .serverRestarted:
+            herdrNotifications.retire(key.workspaceID)
+        case .bell:
+            herdrNotifications.ringBell()
+        }
+    }
+
     /// Whether two targets reach the same Herdr session the same way. Terminal settings don't count:
     /// a running model takes them live.
     private static func opensTheSameHerdrBridge(_ lhs: SessionTarget, _ rhs: SessionTarget) -> Bool {
@@ -2401,7 +2453,10 @@ final class RemuxRootModel: ObservableObject {
                 openBridge: { [dependencies] in
                     try await dependencies.openHerdrBridge(for: target)
                 },
-                onRuntimeStateChange: onRuntimeStateChange
+                onRuntimeStateChange: onRuntimeStateChange,
+                onNotification: { [weak self] event in
+                    self?.handleHerdrNotification(event, from: key)
+                }
             ))
         }
         terminalRuntimes[key] = runtime
@@ -2450,8 +2505,10 @@ final class RemuxRootModel: ObservableObject {
         where shouldStop: (TerminalRuntimeAttemptKey, TerminalRuntime) -> Bool
     ) {
         let removed = terminalRuntimes.filter(shouldStop)
-        for key in removed.keys {
+        for (key, runtime) in removed {
             terminalRuntimes[key] = nil
+            // As Herdr's client drops a machine's notifications when it lets the machine go.
+            if case .herdr = runtime { herdrNotifications.retire(key.workspaceID) }
         }
         for runtime in removed.values {
             // Teardown ordering (surface unregister/free before terminal

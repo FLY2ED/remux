@@ -939,6 +939,47 @@ final class HerdrConnectionTests: XCTestCase {
         XCTAssertEqual(kinds, ["snapshot", "snapshot"])
     }
 
+    /// A snapshot carries the agent completions Herdr sent just before it, as the recorded server sends
+    /// them, for its own boot and revision: a snapshot sent without them carries none, they never carry
+    /// over to a later snapshot, and an older revision arriving late doesn't replace newer ones.
+    func testASnapshotCarriesTheAgentCompletionsSentForIt() async throws {
+        let recorded = try Self.frames(Self.recording("herdr-12-notification-A"))
+        guard case .control(let kind, let data) = try HerdrServerMessage.decode(recorded[2]),
+              case .snapshot(let first) = try HerdrEndpointControl.parse(kind: kind, data: data)
+        else { return XCTFail("the recording's third message isn't its snapshot") }
+        let boot = first.bootID
+        let transport = FakeBridgeTransport()
+        await transport.serve(recorded[0..<3].flatMap(HerdrWire.frame))
+        let events = EventRecorder()
+        let connection = try await HerdrConnection.open(
+            transport: transport, hello: hello, appActive: false, timing: relaxed, onEvent: events.record
+        )
+        addTeardownBlock {
+            await events.release()
+            await connection.close()
+        }
+
+        await transport.serve(
+            HerdrServerScript.agentCompletions(revision: 2, boot: boot, ["w1:p1": 5])
+                + HerdrServerScript.snapshot(revision: 2, boot: boot)
+                + HerdrServerScript.snapshot(revision: 3, boot: boot)
+                + HerdrServerScript.agentCompletions(revision: 5, boot: boot, ["w1:p1": 7])
+                + HerdrServerScript.snapshot(revision: 4, boot: boot)
+                + HerdrServerScript.snapshot(revision: 5, boot: boot)
+                + HerdrServerScript.agentCompletions(revision: 6, boot: "another", ["w1:p1": 8])
+                + HerdrServerScript.snapshot(revision: 6, boot: boot)
+                + HerdrServerScript.agentCompletions(revision: 8, boot: boot, ["w1:p1": 9])
+                + HerdrServerScript.agentCompletions(revision: 7, boot: boot, ["w1:p1": 1])
+                + HerdrServerScript.snapshot(revision: 8, boot: boot)
+        )
+        await events.waitForCount(7)
+        let completions = await events.events.compactMap { event -> [String: UInt64]?? in
+            guard case .snapshot(_, let completions) = event else { return nil }
+            return completions
+        }
+        XCTAssertEqual(completions, [[:], ["w1:p1": 5], nil, nil, nil, nil, ["w1:p1": 9]])
+    }
+
     /// An end found by another part of the connection (here a failed write) is reported only after the
     /// screen has taken the message it holds.
     func testTheEndIsReportedAfterTheScreenTakesWhatItHolds() async throws {

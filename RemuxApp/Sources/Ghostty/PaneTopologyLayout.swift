@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-/// Normalizes tmux pane geometry into equal-weight topology tiles.
+/// Normalizes pane geometry into equal-weight topology tiles.
 enum PaneTopologyLayout {
     struct Pane: Equatable {
         let id: UUID
@@ -148,7 +148,8 @@ enum PaneTopologyLayout {
                 let secondStart = second.map {
                     axis == .horizontal ? $0.frame.x : $0.frame.y
                 }.min() ?? 0
-                // Groups may touch: tmux keeps a separator between panes, Herdr's layout may not.
+                // Panes may touch: Herdr leaves no space between panes when its borders and gaps are
+                // off.
                 if firstEnd <= UInt64(secondStart) {
                     return (first, second)
                 }

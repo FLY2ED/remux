@@ -65,6 +65,7 @@ enum HerdrServerScript {
     struct Pane {
         let id: String
         let x: UInt16
+        var y: UInt16 = 0
         let width: UInt16
         let height: UInt16
         var focused = false
@@ -72,6 +73,8 @@ enum HerdrServerScript {
         var scroll: (fromBottom: UInt64, max: UInt64, rows: UInt64)?
         var mouseReporting = false
         var alternateScreen = false
+        /// The pane with Herdr's borders around its text area, when it has any.
+        var rect: (x: UInt16, y: UInt16, width: UInt16, height: UInt16)?
     }
 
     /// A recorded v0.9.3 welcome.
@@ -81,25 +84,90 @@ enum HerdrServerScript {
 
     /// `panes` and `agents` are the snapshot's JSON entries, made with `snapshotPane` and
     /// `snapshotAgent`.
+    /// The focused tab is labelled `tabLabel` and is `zoomed` or not; `otherTabs` are further tabs of
+    /// workspace `w1`, by id, each named after its id and unzoomed. Workspace `w1` is listed when it has a
+    /// label.
     static func snapshot(
         revision: UInt64,
         boot: String = "boot",
+        workspaceLabel: String? = nil,
         tabLabel: String = "main",
         zoomed: Bool = false,
+        focusedTab: String = "t1",
+        otherTabs: [String] = [],
         focusedPane: String? = "w1:p1",
         panes: [String] = [],
         agents: [String] = []
     ) -> [UInt8] {
+        let tabs = ([(focusedTab, tabLabel, true)] + otherTabs.map { ($0, $0, false) }).enumerated().map { index, tab in
+            """
+            {"tab_id":"\(tab.0)","workspace_id":"w1","number":\(index + 1),"label":"\(tab.1)","custom_label":true,
+             "zoomed":\(tab.2 && zoomed),"focused":\(tab.2),"agent_status":"idle"}
+            """
+        }
+        let workspaces = workspaceLabel.map { label in
+            """
+            {"workspace_id":"w1","active_tab_id":"\(focusedTab)","number":1,"label":"\(label)","custom_label":true,
+             "focused":true,"agent_status":"idle"}
+            """
+        }
         let json = """
-        {"boot_id":"\(boot)","revision":\(revision),"focused_workspace_id":"w1","focused_tab_id":"t1",
-         "focused_pane_id":\(json(focusedPane)),"workspaces":[],"tabs":[{"tab_id":"t1","workspace_id":"w1","number":1,
-         "label":"\(tabLabel)","custom_label":true,"zoomed":\(zoomed),"focused":true,"agent_status":"idle"}],
+        {"boot_id":"\(boot)","revision":\(revision),"focused_workspace_id":"w1","focused_tab_id":"\(focusedTab)",
+         "focused_pane_id":\(json(focusedPane)),"workspaces":[\(workspaces ?? "")],"tabs":[\(tabs.joined(separator: ","))],
          "panes":[\(panes.joined(separator: ","))],"agents":[\(agents.joined(separator: ","))]}
         """
+        return control(HerdrControlKind.snapshot, json)
+    }
+
+    /// `endpoint.agent-completions.v1`, as Herdr sends it before the snapshot of the same revision.
+    static func agentCompletions(revision: UInt64, boot: String = "boot", _ completions: [String: UInt64]) -> [UInt8] {
+        let entries = completions.sorted { $0.key < $1.key }.map { #""\#($0.key)":\#($0.value)"# }
+        return control(
+            HerdrControlKind.agentCompletions,
+            #"{"boot_id":"\#(boot)","revision":\#(revision),"completions":{\#(entries.joined(separator: ","))}}"#
+        )
+    }
+
+    /// A `SemanticNotification`, laid out as Herdr's server sends an agent's.
+    static func notification(
+        _ kind: HerdrSemanticNotification.Kind,
+        title: String,
+        body: String? = nil,
+        agent: String? = nil,
+        workspace: String? = nil,
+        tab: String? = nil,
+        pane: String? = nil
+    ) -> [UInt8] {
+        var writer = HerdrWireWriter()
+        writer.variant(14)
+        switch kind {
+        case .needsAttention: writer.variant(0)
+        case .finished: writer.variant(1)
+        case .updateInstalled: writer.variant(2)
+        case .custom: writer.variant(3)
+        }
+        writer.string(title)
+        writer.optional(body) { $0.string($1) }
+        writer.optional(nil as UInt32?) { $0.variant($1) }
+        for field in [agent, workspace, tab, pane] {
+            writer.optional(field) { $0.string($1) }
+        }
+        writer.optional(nil as UInt32?) { $0.variant($1) }
+        return HerdrWire.frame(writer.bytes)
+    }
+
+    static func bell(count: UInt16 = 1) -> [UInt8] {
+        var writer = HerdrWireWriter()
+        writer.variant(9)
+        writer.u16(count)
+        return HerdrWire.frame(writer.bytes)
+    }
+
+    private static func control(_ kind: String, _ data: String) -> [UInt8] {
         var writer = HerdrWireWriter()
         writer.variant(20)
-        writer.string(HerdrControlKind.snapshot)
-        writer.string(json)
+        writer.string(kind)
+        writer.string(data)
         return HerdrWire.frame(writer.bytes)
     }
 
@@ -122,13 +190,16 @@ enum HerdrServerScript {
         title: String? = nil,
         terminalTitleStripped: String? = nil,
         agent: String? = nil,
-        displayAgent: String? = nil
+        displayAgent: String? = nil,
+        tab: String = "t1",
+        status: HerdrAgentStatus = .working,
+        stateChange: UInt64 = 1
     ) -> String {
         """
-        {"pane_id":"\(paneID)","workspace_id":"w1","tab_id":"t1","name":\(json(name)),
+        {"pane_id":"\(paneID)","workspace_id":"w1","tab_id":"\(tab)","name":\(json(name)),
          "display_agent":\(json(displayAgent)),"agent":\(json(agent)),"title":\(json(title)),
-         "terminal_title":null,"terminal_title_stripped":\(json(terminalTitleStripped)),"agent_status":"working",
-         "state_change_seq":1,
+         "terminal_title":null,"terminal_title_stripped":\(json(terminalTitleStripped)),
+         "agent_status":"\(status.rawValue)","state_change_seq":\(stateChange),
          "state_labels":[],"tokens":[],"focused":false}
         """
     }
@@ -137,30 +208,32 @@ enum HerdrServerScript {
         value.map { #""\#($0)""# } ?? "null"
     }
 
-    /// A full surface of the given lines, all of one width, with every pane's text area on row 0 down,
-    /// and a one-cell popup for the terminal `popup` names, if any.
+    /// A full surface of the given lines, all of one width, and a one-cell popup for the terminal
+    /// `popup` names, if any. A cell whose symbol `foreground` lists has that colour.
     static func surface(
         boot: String = "boot",
         projection: UInt64,
         revision: UInt64,
         lines: [String],
         panes: [Pane],
-        popup: String? = nil
+        popup: String? = nil,
+        foreground: [Character: UInt32] = [:]
     ) -> [UInt8] {
         var writer = HerdrWireWriter()
         writer.variant(13)
         writer.string(boot)
         writer.u64(projection)
         writer.u64(revision)
-        frame(lines, to: &writer)
+        frame(lines, foreground: foreground, to: &writer)
         writer.array(panes) { writer, pane in
             writer.string(pane.id)
             writer.u64(1)
-            for _ in 0..<2 {
-                writer.u16(pane.x)
-                writer.u16(0)
-                writer.u16(pane.width)
-                writer.u16(pane.height)
+            let textArea = (x: pane.x, y: pane.y, width: pane.width, height: pane.height)
+            for rect in [pane.rect ?? textArea, textArea] {
+                writer.u16(rect.x)
+                writer.u16(rect.y)
+                writer.u16(rect.width)
+                writer.u16(rect.height)
             }
             writer.optional(nil as UInt8?) { $0.u8($1) }
             if let scroll = pane.scroll {
@@ -196,12 +269,16 @@ enum HerdrServerScript {
         return HerdrWire.frame(writer.bytes)
     }
 
-    private static func frame(_ lines: [String], to writer: inout HerdrWireWriter) {
+    private static func frame(
+        _ lines: [String],
+        foreground: [Character: UInt32] = [:],
+        to writer: inout HerdrWireWriter
+    ) {
         let width = lines.first?.count ?? 0
         precondition(lines.allSatisfy { $0.count == width })
         writer.array(Array(lines.joined())) { writer, character in
             writer.string(String(character))
-            writer.u32(0)
+            writer.u32(foreground[character] ?? 0)
             writer.u32(0)
             writer.u16(0)
             writer.bool(false)
@@ -464,6 +541,7 @@ final class HerdrModelHarness {
 
     final class StateLog {
         var updates: [TerminalRuntimeStateUpdate] = []
+        var notifications: [HerdrScreenModel.NotificationEvent] = []
     }
 
     let bridges: Bridges
@@ -502,6 +580,7 @@ final class HerdrModelHarness {
             sessionInstanceID: UUID(),
             openBridge: { try await bridges.open() },
             onRuntimeStateChange: { stateLog.updates.append($0) },
+            onNotification: { stateLog.notifications.append($0) },
             connectionTiming: timing,
             recoveryTiming: recovery,
             engine: producerFailure.map {

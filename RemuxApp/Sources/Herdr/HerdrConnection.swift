@@ -17,7 +17,8 @@ protocol HerdrBridgeTransport: Sendable {
 
 /// What a connection hands to its screen, in wire order. Events can arrive before `open` returns.
 enum HerdrConnectionEvent: Sendable {
-    case snapshot(HerdrSnapshot)
+    /// With the agent completions Herdr sent for exactly this snapshot, when it sent them.
+    case snapshot(HerdrSnapshot, completions: [String: UInt64]?)
     /// A full surface or a patch, decoded from every surface message in wire order, also while
     /// hidden.
     case surface(HerdrSurfaceDecoder.Output)
@@ -198,6 +199,8 @@ actor HerdrConnection {
     private var splitter: HerdrFrameSplitter
     private var decoder: HerdrSurfaceDecoder
     private var bootID: String?
+    /// The newest agent completions, waiting for the snapshot they belong to.
+    private var pendingCompletions: HerdrAgentCompletions?
     private var isActive = false
     /// Counts shows and hides. Herdr keeps one surface switch per connection and the last request
     /// sets it, so a failed show rolls back only while it is still the newest request.
@@ -304,8 +307,9 @@ actor HerdrConnection {
             if case .success = await timer.result {
                 throw HerdrConnectionError.handshakeTimedOut
             }
-            await transport.close(reusable: true)
-            throw Task.isCancelled ? CancellationError() : Self.connectionError(error)
+            let cancelled = Task.isCancelled
+            await transport.close(reusable: !cancelled)
+            throw cancelled ? CancellationError() : Self.connectionError(error)
         }
         let connection = HerdrConnection(
             transport: transport,
@@ -460,7 +464,9 @@ actor HerdrConnection {
             case .snapshot(let snapshot):
                 bootID = snapshot.bootID
                 snapshotRevision = snapshot.revision
-                await onEvent(.snapshot(snapshot))
+                await onEvent(.snapshot(snapshot, completions: takeCompletions(for: snapshot)))
+            case .agentCompletions(let completions):
+                receive(completions)
             case .surfaceReuse(let reuse):
                 await onEvent(.surface(try decoder.decode(.reuse(reuse))))
             case .surfaceDelta(let delta):
@@ -496,6 +502,26 @@ actor HerdrConnection {
             // no terminal sounds.
             break
         }
+    }
+
+    /// As Herdr's client keeps them (`endpoint_agent_state.rs`): the newest unless an older revision of
+    /// the same boot arrives late.
+    private func receive(_ completions: HerdrAgentCompletions) {
+        if let pending = pendingCompletions, pending.bootID == completions.bootID,
+           pending.revision >= completions.revision {
+            return
+        }
+        pendingCompletions = completions
+    }
+
+    /// Every snapshot takes the waiting completions; they count only for the snapshot they were sent
+    /// with.
+    private func takeCompletions(for snapshot: HerdrSnapshot) -> [String: UInt64]? {
+        defer { pendingCompletions = nil }
+        guard let pending = pendingCompletions, pending.bootID == snapshot.bootID,
+              pending.revision == snapshot.revision
+        else { return nil }
+        return pending.completions
     }
 
     // MARK: - Writing

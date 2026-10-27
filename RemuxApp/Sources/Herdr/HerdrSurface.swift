@@ -330,8 +330,8 @@ struct HerdrPopupSurface: Equatable, Sendable, Decodable {
 
 // MARK: - Graphics scene
 
-enum HerdrGraphicsSource: Equatable, Sendable, Decodable {
-    enum Target: Equatable, Sendable, Decodable {
+enum HerdrGraphicsSource: Hashable, Sendable, Decodable {
+    enum Target: Hashable, Sendable, Decodable {
         case pane(paneID: String)
         case popup(terminalID: String)
 
@@ -422,13 +422,13 @@ enum HerdrGraphicsSource: Equatable, Sendable, Decodable {
     }
 }
 
-enum HerdrImageFormat: String, Equatable, Sendable, Decodable {
+enum HerdrImageFormat: String, Hashable, Sendable, Decodable {
     case rgb = "Rgb"
     case rgba = "Rgba"
     case png = "Png"
 }
 
-struct HerdrGraphicsAssetKey: Equatable, Sendable, Decodable {
+struct HerdrGraphicsAssetKey: Hashable, Sendable, Decodable {
     let source: HerdrGraphicsSource
     let imageWidth: UInt32
     let imageHeight: UInt32

@@ -106,6 +106,7 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
                 windowGrid: nil,
                 cellMetrics: model?.measurement?.cellMetrics,
                 panes: [],
+                paneLines: [],
                 focusedSurfaceID: nil,
                 isServerZoomed: false,
                 windowCount: 0
@@ -140,9 +141,30 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
             windowGrid: GhosttyTerminalGridSize(columns: UInt32(layout.columns), rows: UInt32(layout.rows)),
             cellMetrics: model.measurement?.cellMetrics,
             panes: panes,
+            paneLines: layout.borders.map { Self.paneLine($0, colors: model.terminalColors) },
             focusedSurfaceID: presentedSurfaceID,
             isServerZoomed: zoomed,
             windowCount: 1
+        )
+    }
+
+    /// As thin as Herdr's box-drawing glyphs show in a terminal.
+    static let borderWidth: CGFloat = 1
+
+    /// Herdr's border line where its glyphs are, in the colour Herdr gave it. Ends in the middle of a
+    /// cell reach on, as the glyphs' strokes meet in a corner.
+    static func paneLine(_ border: HerdrBorderLine, colors: GhosttyTerminalColors?) -> GhosttyPaneLine {
+        let ink = border.color.foregroundRGB(in: colors).map {
+            GhosttyPaneLine.Ink.color(red: $0.red, green: $0.green, blue: $0.blue)
+        }
+        return GhosttyPaneLine(
+            orientation: border.axis == .horizontal ? .horizontal : .vertical,
+            position: CGFloat(border.track) + 0.5,
+            start: CGFloat(border.start) / 2,
+            end: CGFloat(border.end) / 2,
+            ink: ink ?? .separator,
+            width: borderWidth,
+            cap: .square
         )
     }
 

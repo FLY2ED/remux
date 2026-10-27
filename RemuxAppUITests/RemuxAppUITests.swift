@@ -34,6 +34,11 @@ final class RemuxAppUITests: XCTestCase {
         let expectedHostKey: String
         /// Where each step's screenshot is written as well, when set.
         var captureDirectory: String?
+        /// The panes of the session's tab, when the pane picker should be checked for a tile each.
+        var paneCount: Int?
+        /// Where the notification test asks the harness for each change on the server, by writing
+        /// `<step>.request`; that test is skipped without it.
+        var stepDirectory: String?
     }
 
     private struct LiveSSHCleanupHarnessError: Error, CustomStringConvertible {
@@ -748,6 +753,23 @@ final class RemuxAppUITests: XCTestCase {
         }
         XCTAssertTrue(legacyRSAHostKeys.waitForExistence(timeout: 2))
         XCTAssertEqual(legacyRSAHostKeys.label, "Allow older RSA host keys")
+    }
+
+    func testSettingsShowHapticsSwitchesOnByDefault() {
+        launchSimulatorApp()
+        XCTAssertTrue(app.buttons["library.settings"].waitForExistence(timeout: 5))
+        app.buttons["library.settings"].tap()
+
+        let bellsAndAgents = app.switches["settings.haptics.bells-and-agents"]
+        let keysAndButtons = app.switches["settings.haptics.keys-and-buttons"]
+        for _ in 0..<3 where !keysAndButtons.isHittable {
+            settingsForm.swipeUp()
+        }
+        XCTAssertTrue(bellsAndAgents.waitForExistence(timeout: 2))
+        XCTAssertTrue(keysAndButtons.waitForExistence(timeout: 2))
+        XCTAssertEqual(bellsAndAgents.value as? String, "1")
+        XCTAssertEqual(keysAndButtons.value as? String, "1")
+        attachScreenshot(named: "settings-haptics")
     }
 
     func testFreshPhoneInstallShowsMultipaneZoomDefaultEnabled() {
@@ -1660,36 +1682,17 @@ final class RemuxAppUITests: XCTestCase {
     /// screen, with the keyboard opening and closing over them, and the tab stays unzoomed over Home and
     /// back. Skipped without REMUX_LIVE_HERDR_UI_CONFIG.
     func testLiveHerdrSessionWhenConfigured() throws {
-        guard let path = ProcessInfo.processInfo.environment["REMUX_LIVE_HERDR_UI_CONFIG"], !path.isEmpty else {
-            throw XCTSkip("Set REMUX_LIVE_HERDR_UI_CONFIG to run the live Herdr UI test.")
-        }
-        let configuration = try JSONDecoder().decode(
-            LiveHerdrConfiguration.self,
-            from: Data(contentsOf: URL(fileURLWithPath: path))
-        )
-        app.launchEnvironment["REMUX_DEBUG_SEED_CONNECTION"] = "1"
-        app.launchEnvironment["REMUX_DEBUG_SERVER_NAME"] = configuration.displayName ?? "Live Herdr"
-        app.launchEnvironment["REMUX_DEBUG_SERVER_HOST"] = configuration.host
-        app.launchEnvironment["REMUX_DEBUG_SERVER_PORT"] = configuration.port ?? "22"
-        app.launchEnvironment["REMUX_DEBUG_SERVER_USERNAME"] = configuration.username
-        app.launchEnvironment["REMUX_DEBUG_CREDENTIALS_FILE"] = path
-        app.launchEnvironment["REMUX_DEBUG_HERDR_SESSION"] = configuration.sessionName
-        app.launchEnvironment["REMUX_DEBUG_HERDR_EXECUTABLE_PATH"] = configuration.herdrExecutablePath
-        if let tmuxExecutablePath = configuration.tmuxExecutablePath {
-            app.launchEnvironment["REMUX_DEBUG_TMUX_EXECUTABLE_PATH"] = tmuxExecutablePath
-        }
-        app.launchEnvironment["REMUX_DEBUG_EPHEMERAL_STORAGE"] = "1"
-        launchedLiveSSHApp = true
-        app.launch()
+        let configuration = try launchLiveHerdrApp()
 
         openFirstSavedSession()
         waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
         assertLiveTerminalScreenshotContainsRenderedContent()
         captureLiveHerdrStep("1-session", in: configuration)
 
-        // Zoomed on open, as "Zoom multipane windows" is on by default on a phone; turned off from Panes,
-        // the tab's panes are on screen for the rest of the test.
-        let zoom = openHerdrPanesZoomSwitch()
+        // Zoomed on open, as "Zoom multipane windows" is on by default on a phone, with every pane in the
+        // pane picker; turned off from Panes, the tab's panes are on screen for the rest of the test.
+        let paneCount = configuration.paneCount ?? 3
+        let zoom = openHerdrPanesZoomSwitch(paneCount: paneCount)
         XCTAssertEqual(zoom.value as? String, "1", "The multi-pane tab should open zoomed.")
         captureLiveHerdrStep("1a-panes-zoomed", in: configuration)
         zoom.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
@@ -1749,8 +1752,14 @@ final class RemuxAppUITests: XCTestCase {
         assertLiveTerminalScreenshotContainsRenderedContent()
         captureLiveHerdrStep("5-back", in: configuration)
 
-        // The tab the user unzoomed isn't zoomed again on the way back.
-        XCTAssertEqual(openHerdrPanesZoomSwitch().value as? String, "0", "The tab should stay unzoomed.")
+        // The tab the user unzoomed isn't zoomed again on the way back, and the pane picker maps every pane
+        // from Herdr's frame, however close Herdr's border settings put them.
+        XCTAssertEqual(
+            openHerdrPanesZoomSwitch(paneCount: paneCount).value as? String,
+            "0",
+            "The tab should stay unzoomed."
+        )
+        captureLiveHerdrStep("5a-pane-picker", in: configuration)
         app.buttons["terminal.panes.close"].tap()
         RunLoop.current.run(until: Date().addingTimeInterval(1))
 
@@ -1764,18 +1773,14 @@ final class RemuxAppUITests: XCTestCase {
         captureLiveHerdrStep("6-scrolled", in: configuration)
     }
 
-    /// Opens Panes over a Herdr session whose tab has three panes, and returns its Zoom switch.
-    private func openHerdrPanesZoomSwitch() -> XCUIElement {
-        let panes = app.buttons["terminal.panes"]
-        XCTAssertTrue(panes.waitForExistence(timeout: 10))
-        panes.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["terminal.panes.sheet"].waitForExistence(timeout: 8))
-        let tiles = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "terminal.pane.tile."))
+    /// Opens Panes over a Herdr session whose tab has `paneCount` panes, checks that the pane picker maps
+    /// every one, also while the tab is zoomed, and returns its Zoom switch.
+    private func openHerdrPanesZoomSwitch(paneCount: Int) -> XCUIElement {
+        openPanesSheet()
         XCTAssertTrue(
-            tiles.element(boundBy: 2).waitForExistence(timeout: 8),
-            "Panes should list every pane of the tab, also while it is zoomed."
+            waitForPanePickerTileCount(paneCount, timeout: 10),
+            "The pane picker should map every pane of the tab, also while it is zoomed."
         )
-        XCTAssertEqual(tiles.count, 3)
         let zoom = app.switches["terminal.pane.zoom"]
         XCTAssertTrue(zoom.waitForExistence(timeout: 8))
         return zoom
@@ -1788,6 +1793,132 @@ final class RemuxAppUITests: XCTestCase {
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
         return false
+    }
+
+    /// Herdr's notifications on a live server whose session has a three-pane tab (workspace `remux`) and a
+    /// second tab, `build`, with one agent pane. An agent waiting in the other tab shows a banner above the
+    /// open Sessions sheet; tapping it closes the sheet and takes the phone to that tab. An agent finishing
+    /// while Home is on screen shows a banner naming the server and session over Home; tapping it opens
+    /// the session at that agent's pane. A banner above the Panes sheet closes it too, and both sheets open
+    /// again afterwards. A bell in the session on screen vibrates and draws nothing. A banner over a server
+    /// form being filled in only goes away when tapped, keeping the typing. The harness makes each change on
+    /// the server when the test asks: `attention`, `finished`, `attention-again`, `bell`, `attention-form`.
+    func testLiveHerdrNotificationsWhenConfigured() throws {
+        let configuration = try launchLiveHerdrApp(requiringSteps: true)
+        let banner = app.descendants(matching: .any)["herdr.notification.banner"].firstMatch
+        let panes = app.buttons.matching(identifier: "terminal.panes").firstMatch
+        let sessionsSheet = app.otherElements["terminal.sessions.sheet"]
+        let panesSheet = elementWithIdentifier("terminal.panes.sheet")
+
+        openFirstSavedSession()
+        waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
+        XCTAssertTrue(waitForLabel(of: panes, "Panes, 3 panes", timeout: 10))
+        captureLiveHerdrStep("n1-session", in: configuration)
+
+        openSessionSwitcherFromTerminal()
+        XCTAssertTrue(sessionsSheet.waitForExistence(timeout: 5))
+        try requestLiveHerdrStep("attention", in: configuration)
+        XCTAssertTrue(banner.waitForExistence(timeout: 20), "No banner for the agent waiting in the other tab.")
+        XCTAssertEqual(banner.label, "claude waiting, remux › build")
+        captureLiveHerdrStep("n2-banner-over-sessions-sheet", in: configuration)
+        banner.tap()
+        XCTAssertTrue(sessionsSheet.waitForNonExistence(timeout: 5), "The tap didn't close the Sessions sheet.")
+        XCTAssertTrue(waitForLabel(of: panes, "Panes, 1 pane", timeout: 10), "The tap didn't go to the other tab.")
+        XCTAssertFalse(banner.exists)
+        captureLiveHerdrStep("n3-tapped-other-tab", in: configuration)
+        openSessionSwitcherFromTerminal()
+        XCTAssertTrue(sessionsSheet.waitForExistence(timeout: 5), "The Sessions sheet didn't open again.")
+        app.buttons["terminal.sessions.close"].tap()
+        XCTAssertTrue(sessionsSheet.waitForNonExistence(timeout: 5))
+
+        openHomeFromTerminal()
+        try requestLiveHerdrStep("finished", in: configuration)
+        XCTAssertTrue(banner.waitForExistence(timeout: 20), "No banner over Home for the agent that finished.")
+        XCTAssertEqual(banner.label, "claude done, Herdr live · remux-ui · remux › 1")
+        captureLiveHerdrStep("n4-banner-over-home", in: configuration)
+        banner.tap()
+        waitForLiveTerminalReady(timeout: 30, expectedHostKey: configuration.expectedHostKey)
+        XCTAssertTrue(waitForLabel(of: panes, "Panes, 3 panes", timeout: 10), "The tap didn't open the agent's tab.")
+        captureLiveHerdrStep("n5-tapped-from-home", in: configuration)
+
+        panes.tap()
+        XCTAssertTrue(panesSheet.waitForExistence(timeout: 5))
+        try requestLiveHerdrStep("attention-again", in: configuration)
+        XCTAssertTrue(banner.waitForExistence(timeout: 20), "No banner above the Panes sheet.")
+        captureLiveHerdrStep("n5b-banner-over-panes-sheet", in: configuration)
+        banner.tap()
+        XCTAssertTrue(panesSheet.waitForNonExistence(timeout: 5), "The tap didn't close the Panes sheet.")
+        XCTAssertTrue(waitForLabel(of: panes, "Panes, 1 pane", timeout: 10), "The tap didn't go to the other tab.")
+        panes.tap()
+        XCTAssertTrue(panesSheet.waitForExistence(timeout: 5), "The Panes sheet didn't open again.")
+        app.buttons["terminal.panes.close"].tap()
+        XCTAssertTrue(panesSheet.waitForNonExistence(timeout: 5))
+
+        try requestLiveHerdrStep("bell", in: configuration)
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "the bell arrives")], timeout: 3)
+        captureLiveHerdrStep("n6-bell", in: configuration)
+
+        openHomeFromTerminal()
+        let addServer = app.buttons["library.add-server"]
+        XCTAssertTrue(addServer.waitForExistence(timeout: 5))
+        addServer.tap()
+        let serverName = app.textFields["connection.name"]
+        XCTAssertTrue(serverName.waitForExistence(timeout: 5))
+        serverName.tap()
+        serverName.typeText("Draft server")
+        try requestLiveHerdrStep("attention-form", in: configuration)
+        XCTAssertTrue(banner.waitForExistence(timeout: 20), "No banner over the server form.")
+        XCTAssertEqual(banner.label, "claude waiting, Herdr live · remux-ui · remux › build")
+        captureLiveHerdrStep("n7-banner-over-server-form", in: configuration)
+        banner.tap()
+        XCTAssertTrue(banner.waitForNonExistence(timeout: 5), "The tap didn't put the banner away.")
+        XCTAssertTrue(serverName.exists, "The tap closed the server form.")
+        XCTAssertEqual(serverName.value as? String, "Draft server", "The typing in the server form was lost.")
+        captureLiveHerdrStep("n8-form-kept", in: configuration)
+        app.buttons["connection.cancel"].tap()
+        XCTAssertTrue(serverName.waitForNonExistence(timeout: 5))
+    }
+
+    private func waitForLabel(of element: XCUIElement, _ label: String, timeout: TimeInterval) -> Bool {
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", label),
+            object: element
+        )
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func requestLiveHerdrStep(_ step: String, in configuration: LiveHerdrConfiguration) throws {
+        let directory = try XCTUnwrap(configuration.stepDirectory)
+        try Data().write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(step).request"))
+    }
+
+    /// Launches the app with the live Herdr configuration's server saved, for a test that opens it.
+    private func launchLiveHerdrApp(requiringSteps: Bool = false) throws -> LiveHerdrConfiguration {
+        guard let path = ProcessInfo.processInfo.environment["REMUX_LIVE_HERDR_UI_CONFIG"], !path.isEmpty else {
+            throw XCTSkip("Set REMUX_LIVE_HERDR_UI_CONFIG to run the live Herdr UI test.")
+        }
+        let configuration = try JSONDecoder().decode(
+            LiveHerdrConfiguration.self,
+            from: Data(contentsOf: URL(fileURLWithPath: path))
+        )
+        if requiringSteps, configuration.stepDirectory == nil {
+            throw XCTSkip("Set stepDirectory in the live Herdr configuration to run the notification test.")
+        }
+        app.launchEnvironment["REMUX_DEBUG_SEED_CONNECTION"] = "1"
+        app.launchEnvironment["REMUX_DEBUG_SERVER_NAME"] = configuration.displayName ?? "Live Herdr"
+        app.launchEnvironment["REMUX_DEBUG_SERVER_HOST"] = configuration.host
+        app.launchEnvironment["REMUX_DEBUG_SERVER_PORT"] = configuration.port ?? "22"
+        app.launchEnvironment["REMUX_DEBUG_SERVER_USERNAME"] = configuration.username
+        app.launchEnvironment["REMUX_DEBUG_CREDENTIALS_FILE"] = path
+        app.launchEnvironment["REMUX_DEBUG_HERDR_SESSION"] = configuration.sessionName
+        app.launchEnvironment["REMUX_DEBUG_HERDR_EXECUTABLE_PATH"] = configuration.herdrExecutablePath
+        if let tmuxExecutablePath = configuration.tmuxExecutablePath {
+            app.launchEnvironment["REMUX_DEBUG_TMUX_EXECUTABLE_PATH"] = tmuxExecutablePath
+        }
+        app.launchEnvironment["REMUX_DEBUG_EPHEMERAL_STORAGE"] = "1"
+        launchedLiveSSHApp = true
+        app.launch()
+        return configuration
     }
 
     private func captureLiveHerdrStep(_ name: String, in configuration: LiveHerdrConfiguration) {
