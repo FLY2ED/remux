@@ -35,6 +35,20 @@
                ReferencedContainer = "container:Remux.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "AB8207F2544D6BF9946D8F01"
+               BuildableName = "RemuxUITests.xctest"
+               BlueprintName = "RemuxUITests"
+               ReferencedContainer = "container:Remux.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
