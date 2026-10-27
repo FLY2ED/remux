@@ -507,22 +507,23 @@ final class HerdrConnectionTests: XCTestCase {
         _ = try await focus
     }
 
-    /// A command for a tab goes only while the newest snapshot has that tab on screen, whether it would
-    /// go at once or after the command in flight: a zoom focuses its target, so one for a tab another
-    /// client has since left would take the session back.
-    func testACommandForATabNoLongerOnScreenIsNotSent() async throws {
+    /// A command for a pane goes only while the newest snapshot has that pane focused, whether it would go
+    /// at once or after the command in flight: a zoom focuses its target, so one for a pane another
+    /// client has since moved away from, on its tab or to another, would take the session back.
+    func testACommandForAPaneNoLongerFocusedIsNotSent() async throws {
         let (connection, transport, events) = try await openedSession(surfaceActive: true)
         let boot = "68169-1791562319387415000"
-        await transport.serve(HerdrServerScript.snapshot(revision: 100, boot: boot, focusedTab: "t1"))
+        await transport.serve(HerdrServerScript.snapshot(revision: 100, boot: boot, focusedPane: "w1:p1"))
         await events.waitForCount(2)
         async let first = connection.command("worktree.list", params: [String: String]())
         let firstRequest = try Self.request(try await transport.written(1))
         let waiting = Task {
-            try await connection.command("pane.zoom", params: ["pane_id": "w1:p1", "mode": "on"], onTab: "t1")
+            try await connection.command("pane.zoom", params: ["pane_id": "w1:p1", "mode": "on"], whileFocused: "w1:p1")
         }
         try await Task.sleep(for: .milliseconds(30))
 
-        await transport.serve(HerdrServerScript.snapshot(revision: 101, boot: boot, focusedTab: "t2"))
+        // Another client focuses the tab's other pane.
+        await transport.serve(HerdrServerScript.snapshot(revision: 101, boot: boot, focusedPane: "w1:p2"))
         await events.waitForCount(3)
         await transport.serve(Self.reply(id: firstRequest.id, json: #"{"type":"ok"}"#))
         _ = try await first
@@ -533,7 +534,7 @@ final class HerdrConnectionTests: XCTestCase {
             XCTAssertEqual(error, .notSent)
         }
         do {
-            _ = try await connection.command("pane.zoom", params: ["pane_id": "w1:p1", "mode": "on"], onTab: "t1")
+            _ = try await connection.command("pane.zoom", params: ["pane_id": "w1:p1", "mode": "on"], whileFocused: "w1:p1")
             XCTFail("sent")
         } catch let error as HerdrCommandError {
             XCTAssertEqual(error, .notSent)
@@ -1271,9 +1272,9 @@ extension HerdrConnection {
     }
 
     /// `sendCommandWhileShown`, waiting for the reply's JSON.
-    func command(_ method: String, params: some Encodable & Sendable, onTab tabID: String? = nil) async throws -> Data {
+    func command(_ method: String, params: some Encodable & Sendable, whileFocused paneID: String? = nil) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
-            sendCommandWhileShown(method, params: params, onTab: tabID) { continuation.resume(with: $0.map(\.json)) }
+            sendCommandWhileShown(method, params: params, whileFocused: paneID) { continuation.resume(with: $0.map(\.json)) }
         }
     }
 

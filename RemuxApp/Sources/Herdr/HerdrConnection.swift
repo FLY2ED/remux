@@ -218,8 +218,8 @@ actor HerdrConnection {
     /// Made again with the welcome's encodings.
     private var decoder = HerdrSurfaceDecoder(deltaNegotiated: false, scrollNegotiated: false)
     private var bootID: String?
-    /// The tab on screen in the newest snapshot.
-    private var focusedTabID: String?
+    /// The pane Herdr has focused in the newest snapshot.
+    private var focusedPaneID: String?
     /// The newest agent completions, waiting for the snapshot they belong to.
     private var pendingCompletions: HerdrAgentCompletions?
     private var isActive = false
@@ -267,8 +267,8 @@ actor HerdrConnection {
     private struct QueuedCommand {
         let method: String
         let params: any Encodable & Sendable
-        /// The tab it is for, when it goes only while that tab is on screen.
-        let tabID: String?
+        /// The pane it is for, when it goes only while Herdr has that pane focused.
+        let paneID: String?
         let answered: CommandAnswered
     }
 
@@ -442,7 +442,7 @@ actor HerdrConnection {
             switch try HerdrEndpointControl.parse(kind: kind, data: data) {
             case .snapshot(let snapshot):
                 bootID = snapshot.bootID
-                focusedTabID = snapshot.focusedTabID
+                focusedPaneID = snapshot.focusedPaneID
                 snapshotRevision = snapshot.revision
                 await onEvent(.snapshot(snapshot, completions: takeCompletions(for: snapshot)))
             case .agentCompletions(let completions):
@@ -533,7 +533,8 @@ actor HerdrConnection {
     /// caller sending its calls one after another can send a hide behind it while it is unanswered.
     /// `answered` gets the projection floor from `surface.set`, which the next full surface reaches, or
     /// why the show failed. Herdr answers a show even while a command is in flight; how long to wait for
-    /// the answer is the caller's.
+    /// it is the caller's, and one Herdr leaves unanswered is retired after Herdr's command time, so a
+    /// show the session has since replaced doesn't wait for ever.
     func sendShow(_ geometry: HerdrSurfaceGeometry, answered: @escaping @Sendable (Result<UInt64, Error>) -> Void) {
         guard !ended else {
             answered(.failure(HerdrCommandError.connectionEnded))
@@ -547,7 +548,7 @@ actor HerdrConnection {
             return
         }
         isActive = true
-        register(request.id, waiter: .show(answered: answered), holdsLane: false, timeout: nil,
+        register(request.id, waiter: .show(answered: answered), holdsLane: false, timeout: timing.command,
                  method: Self.surfaceSetMethod,
                  sending: [.shellResize(Self.atLeastOneCell(geometry)), request.message, .focus(true)])
     }
@@ -560,7 +561,7 @@ actor HerdrConnection {
         guard !ended, let request = try? surfaceSet(active: false) else { return }
         isActive = false
         dropWaitingCommands { _ in true }
-        register(request.id, waiter: nil, holdsLane: false, timeout: nil,
+        register(request.id, waiter: nil, holdsLane: false, timeout: timing.command,
                  method: Self.surfaceSetMethod, sending: [.focus(false), request.message])
     }
 
@@ -673,15 +674,19 @@ actor HerdrConnection {
     ///
     /// Sends a command only if it can go at once: the session is shown and no command is in flight.
     /// Returns whether it went, once it is queued behind everything sent before it; `answered` gets its
-    /// reply, or its failure within `timeout` (Herdr's command timeout unless given). Herdr refuses a command while another is in flight or while the session is hidden
-    /// (`endpoint_requests.rs`), so one that would have to wait isn't sent.
+    /// reply, or its failure within `timeout` (Herdr's command timeout unless given). Herdr refuses a
+    /// command while another is in flight or while the session is hidden (`endpoint_requests.rs`), so one
+    /// that would have to wait isn't sent. With `paneID`, it goes only while Herdr has that pane focused.
     func sendCommandIfIdle(
         _ method: String,
         params: some Encodable & Sendable,
+        whileFocused paneID: String? = nil,
         timeout: Duration? = nil,
         answered: @escaping CommandAnswered
     ) -> Bool {
-        guard !ended, isActive, !laneBusy, negotiated?.methods.contains(method) == true else { return false }
+        guard !ended, isActive, !laneBusy, negotiated?.methods.contains(method) == true,
+              paneID.map({ $0 == focusedPaneID }) ?? true
+        else { return false }
         laneBusy = true
         guard send(method, params: params, timeout: timeout, answered: answered) else {
             releaseLane()
@@ -694,10 +699,11 @@ actor HerdrConnection {
     func commandIfIdle(
         _ method: String,
         params: some Encodable & Sendable,
+        whileFocused paneID: String? = nil,
         timeout: Duration? = nil
     ) async -> Result<Data, Error>? {
         await withCheckedContinuation { continuation in
-            let sent = sendCommandIfIdle(method, params: params, timeout: timeout) { result in
+            let sent = sendCommandIfIdle(method, params: params, whileFocused: paneID, timeout: timeout) { result in
                 continuation.resume(returning: result.map(\.json))
             }
             if !sent { continuation.resume(returning: nil) }
@@ -706,20 +712,21 @@ actor HerdrConnection {
 
     /// Sends a command for the session on screen: at once if no command is in flight, else once the lane
     /// frees, unless a hide (`sendHide`) or its owner (`dropWaitingCommands`) drops it first. With
-    /// `tabID`, it goes only while the newest snapshot has that tab on screen: a `pane.zoom` focuses its
-    /// target, so one for a tab another client has since left would take the session back. `answered`
-    /// gets its reply, or why it failed or didn't go: `notSent` for one the session no longer wants.
+    /// `paneID`, it goes only while the newest snapshot has that pane focused, checked as it goes out: a
+    /// `pane.zoom` focuses its target, so one for a pane another client has since moved away from would
+    /// take the session back. `answered` gets its reply, or why it failed or didn't go: `notSent` for one
+    /// the session no longer wants.
     func sendCommandWhileShown(
         _ method: String,
         params: some Encodable & Sendable,
-        onTab tabID: String? = nil,
+        whileFocused paneID: String? = nil,
         answered: @escaping CommandAnswered
     ) {
         guard !ended else { return answered(.failure(HerdrCommandError.connectionEnded)) }
         guard negotiated?.methods.contains(method) == true else {
             return answered(.failure(HerdrCommandError.unsupported(method: method)))
         }
-        guard isActive, tabID.map({ $0 == focusedTabID }) ?? true else {
+        guard isActive, paneID.map({ $0 == focusedPaneID }) ?? true else {
             return answered(.failure(HerdrCommandError.notSent))
         }
         guard laneBusy else {
@@ -730,7 +737,7 @@ actor HerdrConnection {
             }
             return
         }
-        waitingCommands.append(QueuedCommand(method: method, params: params, tabID: tabID, answered: answered))
+        waitingCommands.append(QueuedCommand(method: method, params: params, paneID: paneID, answered: answered))
     }
 
     /// The `method` commands still waiting for the lane don't go: what they were for has been replaced.
@@ -827,12 +834,12 @@ actor HerdrConnection {
         }
     }
 
-    /// Passes the lane straight to the next waiting command. One that can't be sent, or whose tab is no
-    /// longer on screen, passes it on to the one after it.
+    /// Passes the lane straight to the next waiting command. One that can't be sent, or whose pane Herdr
+    /// no longer has focused, passes it on to the one after it.
     private func releaseLane() {
         while !waitingCommands.isEmpty {
             let command = waitingCommands.removeFirst()
-            if command.tabID.map({ $0 == focusedTabID }) ?? true,
+            if command.paneID.map({ $0 == focusedPaneID }) ?? true,
                send(command.method, params: command.params, timeout: nil, answered: command.answered) {
                 return
             }

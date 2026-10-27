@@ -76,6 +76,11 @@ enum HerdrEngineUpdate: Sendable {
     case activated(request: UInt64, connection: UInt64)
     /// View request `request` didn't complete within its time.
     case timedOut(request: UInt64, connection: UInt64)
+    /// Herdr answered the focus of the current view request `request`: why it failed, or nil when it
+    /// worked. Reported only while `request` is current, in order with its other events.
+    case focusAnswered(request: UInt64, failure: HerdrCommandError?, connection: UInt64)
+    /// Herdr refused the show of the current view request `request`, for `reason`.
+    case showRefused(request: UInt64, reason: String, connection: UInt64)
     /// The frame on screen now was drawn against snapshot `projectionRevision` and shows these panes,
     /// whose agents the user can see. Comes before that frame's layout.
     case presented(bootID: String, projectionRevision: UInt64, paneIDs: Set<String>, connection: UInt64)
@@ -104,11 +109,11 @@ struct HerdrEngineFeed: Sendable {
         await engine.acknowledge(show: show, floor: floor, connection: connection)
     }
 
-    func showFailed(_ show: UInt64) async -> Bool {
-        await engine.showFailed(show, connection: connection)
+    func showRefused(_ show: UInt64, reason: String) async {
+        await engine.showRefused(show, reason: reason, connection: connection)
     }
 
-    func focused(request: UInt64, answer: HerdrTerminalEngine.CommandAnswer?) async -> Bool {
+    func focused(request: UInt64, answer: Result<HerdrTerminalEngine.CommandAnswer, HerdrCommandError>) async {
         await engine.focused(request: request, answer: answer, connection: connection)
     }
 
@@ -209,12 +214,13 @@ actor HerdrTerminalEngine {
     /// frame on screen, which a move that changes nothing completes on. Only frames that arrive after a
     /// show began count, so the last frame from before a hide never completes it.
     private struct ViewRequest {
-        /// Its focus is out; it is answered and the snapshot isn't at the pane yet; it is where it goes and
-        /// waits for its owner's last step; or its last command is answered (nil: nothing to wait for).
+        /// Its focus is out; it is answered and the snapshot isn't at the pane yet; it is where it goes, the
+        /// pane Herdr has focused, and waits for its owner's last step; or its last command is answered
+        /// (nil: nothing to wait for).
         enum Progress {
             case going
             case arriving(CommandAnswer)
-            case reached(CommandAnswer?)
+            case reached(CommandAnswer?, focused: String?)
             case answered(CommandAnswer?)
         }
 
@@ -252,17 +258,20 @@ actor HerdrTerminalEngine {
         /// from after it went out that showed what it asked for. Herdr answers through a separate thread, so
         /// another client can change the place before the answer arrives.
         func past(_ answer: CommandAnswer) -> HerdrSnapshot? {
-            snapshots.first { $0.revision > answer.answeredAfter || ($0.revision > answer.sentAfter && answer.reached($0)) }
+            snapshots.first {
+                $0.revision > answer.answeredAfter || ($0.revision > answer.sentAfter && answer.target.isShown(in: $0))
+            }
         }
 
-        /// Whether a frame drawn against `snapshot` completes the request. As in Herdr's client, it does once
-        /// the last command is answered and the snapshot shows what the command asked for, whether that
-        /// snapshot came before the answer or after it; or once Herdr's state is past the command, as when
-        /// another client's split ends a zoom.
-        func admits(_ snapshot: HerdrSnapshot) -> Bool {
+        /// Whether `surface`, drawn against `snapshot`, completes the request. As in Herdr's client, it does
+        /// once the last command is answered and both show what it asked for, whether that snapshot came
+        /// before the answer or after it. A snapshot elsewhere completes it only once Herdr's state is past
+        /// the command (overtaken), as when another client's split ends a zoom or takes the session to
+        /// another pane: nothing of the request's own is left to hide.
+        func admits(_ snapshot: HerdrSnapshot, drawnAs surface: HerdrPaneSurfaceFrame) -> Bool {
             guard case .answered(let answer) = progress else { return false }
             guard let answer else { return true }
-            if answer.reached(snapshot) { return true }
+            if answer.target.isShown(in: snapshot) { return answer.target.isDrawn(in: surface) }
             return past(answer).map { snapshot.revision >= $0.revision } ?? false
         }
     }
@@ -272,8 +281,36 @@ actor HerdrTerminalEngine {
         /// The revisions of the newest snapshot when the command went out and when its answer came.
         let sentAfter: UInt64
         let answeredAfter: UInt64
-        /// Whether a snapshot shows what the command asked for: the pane focused, the tab zoomed.
-        let reached: @Sendable (HerdrSnapshot) -> Bool
+        /// What the command asked Herdr to show.
+        let target: Target
+    }
+
+    /// What a view request's command asks Herdr to show, as Herdr's client matches an activation's
+    /// target (`activation.rs` `target_matches`): the snapshot and the frame drawn against it both show
+    /// the pane focused.
+    enum Target: Sendable, Equatable {
+        case pane(String)
+        /// The pane, on its tab zoomed or not, as a `pane.zoom` focuses its target.
+        case zoom(pane: String, tabID: String, zoomed: Bool)
+
+        func isShown(in snapshot: HerdrSnapshot) -> Bool {
+            switch self {
+            case .pane(let pane):
+                return snapshot.focusedPaneID == pane
+            case .zoom(let pane, let tabID, let zoomed):
+                // A tab that is gone has nothing left to show.
+                guard let tab = snapshot.tabs.first(where: { $0.tabID == tabID }) else { return true }
+                return tab.zoomed == zoomed && snapshot.focusedPaneID == pane
+            }
+        }
+
+        func isDrawn(in surface: HerdrPaneSurfaceFrame) -> Bool {
+            let pane: String
+            switch self {
+            case .pane(let id), .zoom(let id, _, _): pane = id
+            }
+            return surface.panes.contains { $0.paneID == pane && $0.focused }
+        }
     }
 
     /// A request's last step, as its owner took it after `reached`.
@@ -406,7 +443,7 @@ actor HerdrTerminalEngine {
                 rows: max(rows, 1),
                 pane: pane,
                 zooms: true,
-                progress: pane == nil ? .reached(nil) : .going
+                progress: pane == nil ? .reached(nil, focused: snapshot?.focusedPaneID) : .going
             )
         case .moved(let pane, let fromAnotherTab, let columns, let rows):
             guard let current = request, current.kind != .hide else { return nil }
@@ -463,52 +500,71 @@ actor HerdrTerminalEngine {
         completeIfReady()
     }
 
-    /// Whether Herdr's refusal of `show` concerns the current request: that show, or a move that took it
-    /// over.
-    fileprivate func showFailed(_ show: UInt64, connection: UInt64) -> Bool {
-        state == .running && connection == self.connection && request?.show == show
+    /// Herdr refused `show`. Its owner hears of it, in order with the request's other events, only while
+    /// the refused show is the current request's: that show, or a move that took it over.
+    fileprivate func showRefused(_ show: UInt64, reason: String, connection: UInt64) {
+        guard state == .running, connection == self.connection, let request, request.show == show else { return }
+        continuation.yield(.showRefused(request: request.id, reason: reason, connection: connection))
     }
 
-    /// Herdr answered the focus of `id`, or it failed or didn't go (nil). Returns whether `id` is the
-    /// current request; the answer of any other changes nothing. One that failed leaves the session where
-    /// Herdr has it, which the request has then reached.
-    fileprivate func focused(request id: UInt64, answer: CommandAnswer?, connection: UInt64) -> Bool {
+    /// Herdr's answer to the focus of `id`, or why it failed or didn't go. The answer of any request but
+    /// the current one changes nothing and isn't reported. One that failed leaves the session where Herdr
+    /// has it, which the request has then reached.
+    fileprivate func focused(
+        request id: UInt64,
+        answer: Result<CommandAnswer, HerdrCommandError>,
+        connection: UInt64
+    ) {
         guard state == .running, connection == self.connection, var request, request.id == id, request.inProgress,
               case .going = request.progress
-        else { return false }
-        if let answer {
+        else { return }
+        switch answer {
+        case .success(let answer):
+            continuation.yield(.focusAnswered(request: id, failure: nil, connection: connection))
             request.progress = .arriving(answer)
             self.request = request
             arrive()
-        } else {
-            request.progress = .reached(nil)
+        case .failure(let failure):
+            continuation.yield(.focusAnswered(request: id, failure: failure, connection: connection))
+            let snapshot = presentation.snapshot
+            request.progress = .reached(nil, focused: snapshot?.focusedPaneID)
             self.request = request
-            continuation.yield(.reached(request: id, zooms: request.zooms, snapshot: presentation.snapshot, connection: connection))
+            continuation.yield(.reached(request: id, zooms: request.zooms, snapshot: snapshot, connection: connection))
         }
-        return true
     }
 
-    /// Once the focus is answered: the newest snapshot at the pane, by this request or any other way,
-    /// means the request is where it goes, and waits for its last step. A snapshot past the focus
-    /// elsewhere means another client has since taken the session there: the request ends as Herdr shows
-    /// it, with nothing more of its own to hide, and isn't zoomed.
+    /// Follows Herdr's newest snapshot once the focus is answered. The snapshot at the pane, by this
+    /// request or any other way, means the request is where it goes, and waits for its last step. Herdr's
+    /// state past the focus elsewhere, or the pane reached losing focus before the last step, means another
+    /// client has since taken the session there: the request is overtaken, ends as Herdr shows it, with
+    /// nothing more of its own to hide, and isn't zoomed.
     private func arrive() {
-        guard var request, request.inProgress, case .arriving(let answer) = request.progress else { return }
-        if let snapshot = presentation.snapshot, answer.reached(snapshot) {
-            request.progress = .reached(answer)
-            self.request = request
-            continuation.yield(.reached(request: request.id, zooms: request.zooms, snapshot: snapshot, connection: connection))
-        } else if request.past(answer) != nil {
-            request.progress = .answered(answer)
+        guard var request, request.inProgress, let snapshot = presentation.snapshot else { return }
+        switch request.progress {
+        case .arriving(let answer):
+            if answer.target.isShown(in: snapshot) {
+                request.progress = .reached(answer, focused: snapshot.focusedPaneID)
+                self.request = request
+                continuation.yield(.reached(request: request.id, zooms: request.zooms, snapshot: snapshot, connection: connection))
+            } else if request.past(answer) != nil {
+                request.progress = .answered(answer)
+                self.request = request
+                completeIfReady()
+            }
+        case .reached(let arrival, let focused) where snapshot.focusedPaneID != focused:
+            request.progress = .answered(arrival)
             self.request = request
             completeIfReady()
+        default:
+            break
         }
     }
 
-    /// Whether `id` is current and waits for its last step, which may go only then.
+    /// Whether `id` is current and waits for its last step, with the pane it reached still the one Herdr
+    /// has focused: only then may that step go.
     fileprivate func awaitsLastStep(_ id: UInt64, connection: UInt64) -> Bool {
         guard state == .running, connection == self.connection, let request, request.id == id, request.inProgress,
-              case .reached = request.progress
+              case .reached(_, let focused) = request.progress, presentation.snapshot?.focusedPaneID == focused
         else { return false }
         return true
     }
@@ -523,7 +579,7 @@ actor HerdrTerminalEngine {
     /// zoom, which it completes on, or on that when the zoom failed or didn't go.
     fileprivate func finish(request id: UInt64, with step: LastStep, connection: UInt64) {
         guard state == .running, connection == self.connection, var request, request.id == id, request.inProgress,
-              case .reached(let arrival) = request.progress
+              case .reached(let arrival, _) = request.progress
         else { return }
         switch step {
         case .nothing:
@@ -553,7 +609,7 @@ actor HerdrTerminalEngine {
               surface.projectionRevision == received.projectionRevision,
               received.projectionRevision >= floor,
               received.columns == request.columns, received.rows == request.rows,
-              request.admits(snapshot)
+              request.admits(snapshot, drawnAs: surface)
         else { return }
         self.request?.completed = true
         self.request?.snapshots.removeAll()

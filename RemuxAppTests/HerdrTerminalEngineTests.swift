@@ -244,7 +244,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
         let feed = await engine.beginConnection(1)
-        let one = [Self.pane("P", x: 0, width: 4, height: 2)]
+        let one = [Self.pane("P", x: 0, width: 4, height: 2, focused: true)]
         let two = [Self.pane("P", x: 0, width: 2, height: 2), Self.pane("Q", x: 2, width: 2, height: 2)]
 
         await feed.receive(try Self.tabSnapshot(revision: 1, zoomed: false))
@@ -302,8 +302,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         XCTAssertEqual(move.pane, "R")
         await feed.receive(try Self.tabSnapshot(revision: 2, zoomed: false))
         await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["o t ", "w o "], panes: two)))
-        let focusCounted = await feed.focused(request: move.request, answer: Self.focusAnswer("R", sentAfter: 1, answeredAfter: 2))
-        XCTAssertTrue(focusCounted)
+        await feed.focused(request: move.request, answer: .success(Self.focusAnswer("R", sentAfter: 1, answeredAfter: 2)))
         await feed.receive(try Self.tabSnapshot(revision: 3, zoomed: false, focusedPane: "R"))
         await feed.receive(.surface(try Self.surface(projection: 3, revision: 3, lines: ["a b ", "c d "], panes: two)))
         let reached = try await updates.nextReached()
@@ -311,16 +310,25 @@ final class HerdrTerminalEngineTests: XCTestCase {
         XCTAssertTrue(reached.zooms)
         await feed.zoomed(request: move.request, answer: Self.zoomAnswer(sentAfter: 3, answeredAfter: 3, focusedPane: "R"))
         await feed.receive(try Self.tabSnapshot(revision: 4, zoomed: true, focusedPane: "R"))
-        await feed.receive(.surface(try Self.surface(projection: 4, revision: 4, lines: ["new ", "tab "], panes: one)))
+        await feed.receive(.surface(try Self.surface(
+            projection: 4,
+            revision: 4,
+            lines: ["new ", "tab "],
+            panes: [Self.pane("R", x: 0, width: 4, height: 2, focused: true)]
+        )))
+        guard case .paneTerminal("R", _) = try await updates.next(),
+              case .layout(let reached) = try await updates.next()
+        else { return XCTFail("a frame from before the move's zoom was drawn") }
+        XCTAssertEqual(reached.panes.map(\.paneID), ["R"])
+        _ = try await updates.nextPaneScroll()
         guard case .activated(move.request, _) = try await updates.next() else {
-            return XCTFail("a frame from before the move's zoom was drawn")
+            return XCTFail("the move didn't complete on the zoomed frame")
         }
 
         let failing = try await start(feed, .moved(pane: "S", fromAnotherTab: false, columns: 4, rows: 2))
         await feed.receive(try Self.tabSnapshot(revision: 5, zoomed: false, focusedPane: "R"))
         await feed.receive(.surface(try Self.surface(projection: 5, revision: 5, lines: ["o t ", "w o "], panes: two)))
-        let failureCounted = await feed.focused(request: failing.request, answer: nil)
-        XCTAssertTrue(failureCounted)
+        await feed.focused(request: failing.request, answer: .failure(.failed(code: "pane_not_found", message: "pane not found")))
         let reachedFailing = try await updates.nextReached().request
         XCTAssertEqual(reachedFailing, failing.request)
         await feed.finish(request: failing.request)
@@ -328,6 +336,8 @@ final class HerdrTerminalEngineTests: XCTestCase {
         while true {
             if case .activated(failing.request, _) = try await updates.next() { break }
         }
+        XCTAssertEqual(updates.focusAnswers.map(\.request), [move.request, failing.request])
+        XCTAssertNotNil(updates.focusAnswers.last?.failure)
         await engine.stop()
     }
 
@@ -338,15 +348,15 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
         let feed = await engine.beginConnection(1)
-        let two = [Self.pane("P", x: 0, width: 2, height: 2), Self.pane("Q", x: 2, width: 2, height: 2)]
+        let two = [Self.pane("P", x: 0, width: 2, height: 2, focused: true), Self.pane("Q", x: 2, width: 2, height: 2)]
+        let atQ = [Self.pane("P", x: 0, width: 2, height: 2), Self.pane("Q", x: 2, width: 2, height: 2, focused: true)]
         try await shown(feed, updates, snapshot: Self.tabSnapshot(revision: 1, zoomed: false), panes: two)
 
         let move = try await start(feed, .moved(pane: "Q", fromAnotherTab: false, columns: 4, rows: 2))
         await feed.receive(try Self.tabSnapshot(revision: 2, zoomed: false, focusedPane: "Q"))
-        await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["o t ", "w o "], panes: two)))
+        await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["o t ", "w o "], panes: atQ)))
         try await Task.sleep(for: .milliseconds(50))
-        let focusCounted = await feed.focused(request: move.request, answer: Self.focusAnswer("Q", sentAfter: 1, answeredAfter: 2))
-        XCTAssertTrue(focusCounted)
+        await feed.focused(request: move.request, answer: .success(Self.focusAnswer("Q", sentAfter: 1, answeredAfter: 2)))
         let reachedMove = try await updates.nextReached().request
         XCTAssertEqual(reachedMove, move.request)
         await feed.finish(request: move.request)
@@ -364,24 +374,22 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let updates = UpdateLog(engine)
         let feed = await engine.beginConnection(1)
         let one = [Self.pane("P", x: 0, width: 4, height: 2)]
-        let two = [Self.pane("P", x: 0, width: 2, height: 2), Self.pane("Q", x: 2, width: 2, height: 2)]
+        let two = [Self.pane("P", x: 0, width: 2, height: 2), Self.pane("Q", x: 2, width: 2, height: 2, focused: true)]
         try await shown(feed, updates, snapshot: Self.tabSnapshot(revision: 1, zoomed: true), panes: one)
 
         // The next snapshot is in, its frame not yet.
         await feed.receive(try Self.tabSnapshot(revision: 2, zoomed: true))
-        let older = try await start(feed, .moved(pane: "Q", fromAnotherTab: true, columns: 4, rows: 2))
-        let newer = try await start(feed, .moved(pane: "R", fromAnotherTab: false, columns: 4, rows: 2))
-        let olderFocus = await feed.focused(request: older.request, answer: Self.focusAnswer("Q", sentAfter: 2, answeredAfter: 2))
-        XCTAssertFalse(olderFocus, "a replaced request's focus counted")
+        let older = try await start(feed, .moved(pane: "R", fromAnotherTab: true, columns: 4, rows: 2))
+        let newer = try await start(feed, .moved(pane: "Q", fromAnotherTab: false, columns: 4, rows: 2))
+        await feed.focused(request: older.request, answer: .success(Self.focusAnswer("R", sentAfter: 2, answeredAfter: 2)))
         let olderAwaits = await feed.awaitsLastStep(older.request)
         XCTAssertFalse(olderAwaits)
         await feed.zoomed(request: older.request, answer: nil)
         await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["one ", "two "], panes: one)))
-        await feed.receive(try Self.tabSnapshot(revision: 3, zoomed: false, focusedPane: "R"))
+        await feed.receive(try Self.tabSnapshot(revision: 3, zoomed: false, focusedPane: "Q"))
         await feed.receive(.surface(try Self.surface(projection: 3, revision: 3, lines: ["o t ", "w o "], panes: two)))
         try await Task.sleep(for: .milliseconds(50))
-        let newerFocus = await feed.focused(request: newer.request, answer: Self.focusAnswer("R", sentAfter: 2, answeredAfter: 3))
-        XCTAssertTrue(newerFocus)
+        await feed.focused(request: newer.request, answer: .success(Self.focusAnswer("Q", sentAfter: 2, answeredAfter: 3)))
         let reached = try await updates.nextReached()
         XCTAssertEqual(reached.request, newer.request)
         XCTAssertTrue(reached.zooms, "the newer move didn't carry the zoom of the one it took over")
@@ -392,6 +400,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         XCTAssertEqual(shown.panes.map(\.paneID), ["P", "Q"])
         _ = try await updates.nextPaneScroll()
         guard case .activated(newer.request, _) = try await updates.next() else { return XCTFail("the newer request didn't complete") }
+        XCTAssertEqual(updates.focusAnswers.map(\.request), [newer.request], "a replaced request's focus was reported")
         await engine.stop()
     }
 
@@ -406,8 +415,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         try await shown(feed, updates, snapshot: Self.tabSnapshot(revision: 1, zoomed: true), panes: one)
 
         let move = try await start(feed, .moved(pane: "B", fromAnotherTab: true, columns: 4, rows: 2))
-        let focusCounted = await feed.focused(request: move.request, answer: Self.focusAnswer("B", sentAfter: 1, answeredAfter: 1))
-        XCTAssertTrue(focusCounted)
+        await feed.focused(request: move.request, answer: .success(Self.focusAnswer("B", sentAfter: 1, answeredAfter: 1)))
         await feed.receive(try Self.tabSnapshot(revision: 2, zoomed: false, focusedPane: "C"))
         await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["else", "wher"], panes: other)))
         _ = try await updates.terminal(for: "C")
@@ -416,6 +424,84 @@ final class HerdrTerminalEngineTests: XCTestCase {
         }
         XCTAssertTrue(updates.reached.isEmpty, "the overtaken move was reported reached")
         await engine.stop()
+    }
+
+    /// As in Herdr's client, the frame completing a move must draw its pane focused, not only the snapshot
+    /// say so: a frame drawn against a snapshot at the pane that still shows another pane focused doesn't
+    /// complete it.
+    func testAMoveCompletesOnlyOnAFrameDrawingItsPaneFocused() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection(1)
+        let atP = [Self.pane("P", x: 0, width: 2, height: 2, focused: true), Self.pane("Q", x: 2, width: 2, height: 2)]
+        let atQ = [Self.pane("P", x: 0, width: 2, height: 2), Self.pane("Q", x: 2, width: 2, height: 2, focused: true)]
+        try await shown(feed, updates, snapshot: Self.tabSnapshot(revision: 1, zoomed: false), panes: atP)
+
+        let move = try await start(feed, .moved(pane: "Q", fromAnotherTab: false, columns: 4, rows: 2))
+        await feed.focused(request: move.request, answer: .success(Self.focusAnswer("Q", sentAfter: 1, answeredAfter: 1)))
+        await feed.receive(try Self.tabSnapshot(revision: 2, zoomed: false, focusedPane: "Q"))
+        // A frame against that snapshot that draws only P, focused, as the tab looked before.
+        await feed.receive(.surface(try Self.surface(
+            projection: 2,
+            revision: 2,
+            lines: ["one ", "two "],
+            panes: [Self.pane("P", x: 0, width: 4, height: 2, focused: true)]
+        )))
+        _ = try await updates.nextReached()
+        await feed.finish(request: move.request)
+        try await Task.sleep(for: .milliseconds(50))
+        await feed.receive(.surface(try Self.surface(projection: 2, revision: 3, lines: ["o t ", "w o "], panes: atQ)))
+        // The completing frame lays the tab out as before the move, so it brings no new layout.
+        guard case .activated(move.request, _) = try await updates.next() else {
+            return XCTFail("the move completed on a frame that didn't draw its pane focused")
+        }
+        await engine.stop()
+    }
+
+    /// A move at its pane whose pane another client moves away from before its last step is overtaken: its
+    /// zoom may no longer go, and it ends as Herdr shows the session.
+    func testAReachedMoveWhosePaneLosesFocusIsOvertaken() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection(1)
+        let atP = [Self.pane("P", x: 0, width: 2, height: 2, focused: true), Self.pane("Q", x: 2, width: 2, height: 2)]
+        try await shown(feed, updates, snapshot: Self.tabSnapshot(revision: 1, zoomed: false), panes: atP)
+
+        let move = try await start(feed, .moved(pane: "Q", fromAnotherTab: true, columns: 4, rows: 2))
+        await feed.focused(request: move.request, answer: .success(Self.focusAnswer("Q", sentAfter: 1, answeredAfter: 1)))
+        await feed.receive(try Self.tabSnapshot(revision: 2, zoomed: false, focusedPane: "Q"))
+        let reached = try await updates.nextReached()
+        XCTAssertTrue(reached.zooms)
+        let awaitsBefore = await feed.awaitsLastStep(move.request)
+        XCTAssertTrue(awaitsBefore)
+        await feed.receive(try Self.tabSnapshot(revision: 3, zoomed: false, focusedPane: "P"))
+        let awaitsAfter = await feed.awaitsLastStep(move.request)
+        XCTAssertFalse(awaitsAfter, "the zoom of a pane another client moved away from may still go")
+        await feed.receive(.surface(try Self.surface(projection: 3, revision: 2, lines: ["o t ", "w o "], panes: atP)))
+        while true {
+            if case .activated(move.request, _) = try await updates.next() { break }
+        }
+        await engine.stop()
+    }
+
+    /// Herdr's refusal of a show is reported only while that show is the current request's, in order with
+    /// its other events; a refusal of a show a hide replaced isn't.
+    func testOnlyTheCurrentShowsRefusalIsReported() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection(1)
+        await feed.receive(try Self.tabSnapshot(revision: 1, zoomed: false))
+        let replaced = try await start(feed, .shown(columns: 4, rows: 2, pane: nil))
+        _ = try await start(feed, .hidden)
+        await feed.showRefused(replaced.request, reason: "refused")
+        let current = try await start(feed, .shown(columns: 4, rows: 2, pane: nil))
+        let move = try await start(feed, .moved(pane: "Q", fromAnotherTab: false, columns: 4, rows: 2))
+        await feed.showRefused(current.request, reason: "refused")
+        await engine.stop()
+        let refused = await updates.drain().compactMap { update -> UInt64? in
+            if case .showRefused(let request, _, _) = update { request } else { nil }
+        }
+        XCTAssertEqual(refused, [move.request])
     }
 
     /// A request that doesn't complete in its time says so, once; a completed one, a replaced one and a
@@ -529,7 +615,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
                 switch update {
                 case .paneTerminal(let paneID, let terminal): terminals[paneID] = terminal
                 case .paneTerminalFailed, .rendererWakeFailed, .failed: XCTFail("\(fixture.name): \(update)")
-                case .layout, .paneScroll, .started, .reached, .activated, .timedOut, .presented: break
+                case .layout, .paneScroll, .started, .reached, .activated, .timedOut, .focusAnswered, .showRefused, .presented: break
                 }
             }
             for pane in surface.panes where pane.innerRect.width > 0 && pane.innerRect.height > 0 {
@@ -1179,9 +1265,11 @@ final class HerdrTerminalEngineTests: XCTestCase {
 
     /// Herdr's answer zooming tab `t1` on `focusedPane`, sent and answered after the given snapshots.
     static func zoomAnswer(sentAfter: UInt64, answeredAfter: UInt64, focusedPane: String = "P") -> HerdrTerminalEngine.CommandAnswer {
-        HerdrTerminalEngine.CommandAnswer(sentAfter: sentAfter, answeredAfter: answeredAfter) { snapshot in
-            snapshot.tabs.first { $0.tabID == "t1" }?.zoomed == true && snapshot.focusedPaneID == focusedPane
-        }
+        HerdrTerminalEngine.CommandAnswer(
+            sentAfter: sentAfter,
+            answeredAfter: answeredAfter,
+            target: .zoom(pane: focusedPane, tabID: "t1", zoomed: true)
+        )
     }
 
     /// A view request the engine started; the test fails if it didn't.
@@ -1215,7 +1303,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
 
     /// Herdr's answer focusing `paneID`, sent and answered after the given snapshots.
     static func focusAnswer(_ paneID: String, sentAfter: UInt64, answeredAfter: UInt64) -> HerdrTerminalEngine.CommandAnswer {
-        HerdrTerminalEngine.CommandAnswer(sentAfter: sentAfter, answeredAfter: answeredAfter) { $0.focusedPaneID == paneID }
+        HerdrTerminalEngine.CommandAnswer(sentAfter: sentAfter, answeredAfter: answeredAfter, target: .pane(paneID))
     }
 
     static func cells(_ text: String) -> [HerdrCell] {
@@ -1338,6 +1426,8 @@ private final class UpdateLog {
     private var presented: [(bootID: String, projectionRevision: UInt64, paneIDs: Set<String>)] = []
     /// The requests the engine reported reached, in order.
     private(set) var reached: [(request: UInt64, zooms: Bool)] = []
+    /// The focus answers the engine reported, in order.
+    private(set) var focusAnswers: [(request: UInt64, failure: HerdrCommandError?)] = []
 
     init(_ engine: HerdrTerminalEngine) {
         iterator = engine.updates.makeAsyncIterator()
@@ -1355,6 +1445,8 @@ private final class UpdateLog {
                 continue
             case .reached(let request, let zooms, _, _):
                 reached.append((request, zooms))
+            case .focusAnswered(let request, let failure, _):
+                focusAnswers.append((request, failure))
             default:
                 return update
             }
@@ -1370,6 +1462,8 @@ private final class UpdateLog {
                 presented.append((bootID, revision, paneIDs))
             case .reached(let request, let zooms, _, _):
                 reached.append((request, zooms))
+            case .focusAnswered(let request, let failure, _):
+                focusAnswers.append((request, failure))
             default:
                 continue
             }
