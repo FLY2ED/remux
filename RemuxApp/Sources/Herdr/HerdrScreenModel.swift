@@ -226,6 +226,8 @@ final class HerdrScreenModel {
     private(set) var layout: HerdrPaneLayout?
     /// The newest snapshot, kept across a reconnect until the new connection's first.
     private var snapshot: HerdrSnapshot?
+    /// The frame on screen: the connection and snapshot revision it was drawn against, and its panes.
+    private var presentedFrame: (connection: UInt64, bootID: String, projectionRevision: UInt64, paneIDs: Set<String>)?
     private var agents = HerdrAgentPresentation()
     /// A pane to go to once the session is shown, and the server boot its id belongs to.
     private var pendingReveal: (paneID: String, bootID: String?)?
@@ -356,6 +358,9 @@ final class HerdrScreenModel {
         reconcilePresentationActivity()
         attempt?.ask(.appActive(phase != .background))
         reconcileVisibility()
+        // Back in front, the user sees the frame on screen, as Herdr's client acknowledges its surface
+        // when its terminal regains focus (`shell/input.rs`).
+        if phase == .active { acknowledgeShownAgents() }
         didChange()
     }
 
@@ -1057,10 +1062,15 @@ final class HerdrScreenModel {
     }
 
     /// The panes on screen show their agents as they are now, as Herdr's client counts a pane it
-    /// presents while its terminal has focus as seen.
+    /// presents while its terminal has focus as seen (`endpoint_agent_state.rs` `acknowledge_surface`):
+    /// only a frame drawn against the newest snapshot shows its agents, so an older frame still on screen
+    /// acknowledges nothing.
     private func acknowledgeShownAgents() {
-        guard appPhase == .active, shownAttempt != nil, let layout, layout.bootID == snapshot?.bootID else { return }
-        agents.acknowledge(panes: Set(layout.panes.map(\.paneID)))
+        guard appPhase == .active, let attempt = shownAttempt, let frame = presentedFrame,
+              frame.connection == attempt.feed?.connection, let snapshot,
+              frame.bootID == snapshot.bootID, frame.projectionRevision == snapshot.revision
+        else { return }
+        agents.acknowledge(panes: frame.paneIDs)
     }
 
     /// A reconnect reads as one until the new connection is ready.
@@ -1292,7 +1302,11 @@ final class HerdrScreenModel {
                 }
             }
             reconcilePresentationActivity()
+        case .presented(let bootID, let projectionRevision, let paneIDs, let connection):
+            presentedFrame = (connection, bootID, projectionRevision, paneIDs)
             acknowledgeShownAgents()
+            // Only what counts as seen follows it; the screen has nothing new to show.
+            return
         case .paneScroll(let scrolls):
             paneScrolls = scrolls
             for paneID in surfaces.keys {

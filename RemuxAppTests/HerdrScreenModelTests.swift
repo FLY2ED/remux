@@ -2118,22 +2118,94 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(harness.model.notificationState?.isShown, true)
     }
 
-    /// An agent whose pane is on this phone's screen when it finishes has been seen, so it reads as idle.
-    func testAnAgentFinishingOnScreenReadsAsSeen() async throws {
-        let harness = await makeHarness()
-        let session = try await shownSession(harness)
-        await session.bridge.serve(
+    private static let shownPanes: [HerdrServerScript.Pane] = [
+        .init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true),
+        .init(id: "w1:p2", x: 4, width: 3, height: 1),
+    ]
+    /// The same panes with `w1:p2` narrower, so the frame's layout shows when it has been taken.
+    private static let narrowedPanes: [HerdrServerScript.Pane] = [
+        .init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true),
+        .init(id: "w1:p2", x: 4, width: 2, height: 1),
+    ]
+
+    /// Agent `w1:p2` working at revision 2 with its frame on screen, then finished at revision 3.
+    private func finishOnScreen(
+        _ harness: HerdrModelHarness,
+        _ bridge: FakeBridgeTransport,
+        finishedFrame: Bool
+    ) async throws {
+        let workingFrame = try harness.shownSurface(projection: 2, revision: 3, lines: ["one two"], panes: Self.shownPanes)
+        let finished = try harness.shownSurface(projection: 3, revision: 4, lines: ["one tw"], panes: Self.narrowedPanes)
+        await bridge.serve(
             HerdrServerScript.snapshot(revision: 2, agents: [
                 HerdrServerScript.snapshotAgent("w1:p2", status: .working, stateChange: 3),
             ])
+                + workingFrame
                 + HerdrServerScript.agentCompletions(revision: 3, ["w1:p2": 4])
                 + HerdrServerScript.snapshot(revision: 3, agents: [
                     HerdrServerScript.snapshotAgent("w1:p2", status: .idle, stateChange: 4),
                 ])
+                + (finishedFrame ? finished : [])
         )
-        try await harness.waitUntil("the agent's state didn't arrive") {
-            harness.model.notificationState?.agentStatuses["w1:p2"] == .idle
+        if finishedFrame {
+            // The frame's layout follows the frame's acknowledgement, so it is in once the layout is.
+            try await harness.waitUntil("the finished agent's frame didn't arrive") {
+                harness.model.layout?.panes.first { $0.paneID == "w1:p2" }?.innerRect.width == 2
+            }
+        } else {
+            try await harness.waitUntil("the finished agent's snapshot didn't arrive") {
+                [.done, .idle].contains(harness.model.notificationState?.agentStatuses["w1:p2"])
+            }
         }
+    }
+
+    /// An agent whose pane is on screen in a frame drawn after it finished has been seen, so it reads as
+    /// idle, as in Herdr's client.
+    func testAnAgentFinishingOnScreenReadsAsSeen() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        try await finishOnScreen(harness, session.bridge, finishedFrame: true)
+        XCTAssertEqual(harness.model.notificationState?.agentStatuses["w1:p2"], .idle)
+    }
+
+    /// Only a frame drawn against the newest snapshot shows its agents, as Herdr's client checks: when an
+    /// agent finishes as the user goes to another tab, the frame still on screen is the old tab's, and the
+    /// new tab's frame doesn't show the agent, so it stays done.
+    func testAnOlderFrameStillOnScreenDoesNotSeeANewerSnapshot() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        try await finishOnScreen(harness, session.bridge, finishedFrame: false)
+        XCTAssertEqual(harness.model.notificationState?.agentStatuses["w1:p2"], .done)
+
+        let otherTab = try harness.shownSurface(
+            projection: 4,
+            revision: 4,
+            lines: ["three"],
+            panes: [.init(id: "w1:p3", x: 0, width: 5, height: 1, focused: true)]
+        )
+        await session.bridge.serve(
+            HerdrServerScript.snapshot(revision: 4, focusedTab: "t2", focusedPane: "w1:p3", agents: [
+                HerdrServerScript.snapshotAgent("w1:p2", status: .idle, stateChange: 4),
+            ])
+                + otherTab
+        )
+        try await harness.waitUntil("the other tab's frame didn't arrive") {
+            harness.model.layout?.panes.map(\.paneID) == ["w1:p3"]
+        }
+        XCTAssertEqual(harness.model.notificationState?.agentStatuses["w1:p2"], .done)
+    }
+
+    /// Back in front, the user sees the frame on screen, as Herdr's client acknowledges its surface when
+    /// its terminal regains focus: a completion drawn while the app was inactive counts as seen then.
+    func testComingBackToTheAppSeesTheFrameOnScreen() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        harness.model.handleAppLifecyclePhase(.inactive)
+        try await finishOnScreen(harness, session.bridge, finishedFrame: true)
+        XCTAssertEqual(harness.model.notificationState?.agentStatuses["w1:p2"], .done)
+
+        harness.model.handleAppLifecyclePhase(.active)
+        XCTAssertEqual(harness.model.notificationState?.agentStatuses["w1:p2"], .idle)
     }
 
     /// A bell rings the session on screen, as Ghostty's bell border, until the user types or the session

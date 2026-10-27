@@ -107,6 +107,34 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// What the screen shows, for counting agents as seen: each frame drawn against a new snapshot reports
+    /// that snapshot's revision and its panes once, and a frame waiting for its snapshot reports nothing
+    /// until that snapshot is in.
+    func testAFrameOfANewSnapshotReportsThePanesItShows() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection()
+        let two = [Self.pane("A", x: 0, width: 2, height: 1), Self.pane("B", x: 3, width: 2, height: 1)]
+        await feed.receive(try Self.snapshot(revision: 1))
+        await feed.receive(.surface(try Self.surface(revision: 1, lines: ["ab cd"], panes: two)))
+        let first = try await updates.nextPresented()
+        XCTAssertEqual(first.projectionRevision, 1)
+        XCTAssertEqual(first.paneIDs, ["A", "B"])
+
+        await feed.receive(.surface(try Self.surface(revision: 2, lines: ["xy cd"], panes: two)))
+        await feed.receive(.surface(try Self.surface(
+            projection: 2,
+            revision: 3,
+            lines: ["three"],
+            panes: [Self.pane("C", x: 0, width: 5, height: 1)]
+        )))
+        await feed.receive(try Self.snapshot(revision: 2))
+        let second = try await updates.nextPresented()
+        XCTAssertEqual(second.projectionRevision, 2)
+        XCTAssertEqual(second.paneIDs, ["C"])
+        await engine.stop()
+    }
+
     /// A frame can arrive before Herdr's answer to the show; the answer then completes it. A resize while
     /// the show is in progress needs a frame at the new size, as Herdr's client drops its evidence.
     func testAFrameBeforeTheAnswerCountsAndAResizeNeedsAFrameAtTheNewSize() async throws {
@@ -235,7 +263,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
                 switch update {
                 case .paneTerminal(let paneID, let terminal): terminals[paneID] = terminal
                 case .paneTerminalFailed, .rendererWakeFailed, .failed: XCTFail("\(fixture.name): \(update)")
-                case .layout, .paneScroll, .activated: break
+                case .layout, .paneScroll, .activated, .presented: break
                 }
             }
             for pane in surface.panes where pane.innerRect.width > 0 && pane.innerRect.height > 0 {
@@ -396,8 +424,14 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await second.receive(.surface(try Self.surface(revision: 1, lines: ["two"], panes: panes)))
         XCTAssertEqual(rows(of: renderer, columns: 3, rows: 1), ["two"])
         await engine.stop()
+        // Only the new connection's frame is reported as what the screen shows.
         let rest = await updates.drain()
-        XCTAssertTrue(rest.isEmpty, "the same panes need no new terminals or layout: \(rest)")
+        XCTAssertTrue(
+            rest.allSatisfy {
+                if case .presented(_, _, ["P"], let connection) = $0 { connection == second.connection } else { false }
+            },
+            "the same panes need no new terminals or layout: \(rest)"
+        )
         XCTAssertEqual(layout.tab, nil)
     }
 
@@ -680,16 +714,33 @@ final class HerdrTerminalEngineTests: XCTestCase {
 
 /// The engine's updates, read in order through the stream's one iterator.
 @MainActor
+/// The engine's updates in order. `next` leaves out the frames reported as presented, which only the
+/// model's acknowledgement of seen agents reads; `nextPresented` reads them.
 private final class UpdateLog {
     private var iterator: AsyncStream<HerdrEngineUpdate>.AsyncIterator
+    private var presented: [(bootID: String, projectionRevision: UInt64, paneIDs: Set<String>)] = []
 
     init(_ engine: HerdrTerminalEngine) {
         iterator = engine.updates.makeAsyncIterator()
     }
 
     func next() async throws -> HerdrEngineUpdate {
-        guard let update = await nextOrEnd() else { throw UpdateLogError.finished }
-        return update
+        while true {
+            guard let update = await nextOrEnd() else { throw UpdateLogError.finished }
+            guard case .presented(let bootID, let revision, let paneIDs, _) = update else { return update }
+            presented.append((bootID, revision, paneIDs))
+        }
+    }
+
+    /// The next frame reported as presented, passing over any other update.
+    func nextPresented() async throws -> (bootID: String, projectionRevision: UInt64, paneIDs: Set<String>) {
+        while presented.isEmpty {
+            guard let update = await nextOrEnd() else { throw UpdateLogError.finished }
+            if case .presented(let bootID, let revision, let paneIDs, _) = update {
+                presented.append((bootID, revision, paneIDs))
+            }
+        }
+        return presented.removeFirst()
     }
 
     /// The rest of the updates, once the engine has stopped.
