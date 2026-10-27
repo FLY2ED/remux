@@ -1844,19 +1844,29 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertTrue(sessionsSheet.waitForExistence(timeout: 5))
         let workspaceRows = app.descendants(matching: .any).matching(identifier: "terminal.sessions.herdr-workspace")
         XCTAssertTrue(workspaceRows.firstMatch.waitForExistence(timeout: 5), "The session on screen didn't list its workspaces.")
-        XCTAssertEqual(workspaceRows.count, 5)
         let current = workspaceRows.matching(NSPredicate(format: "label == %@", "Workspace api, 2 tabs, current workspace"))
         XCTAssertEqual(current.count, 1)
         captureLiveHerdrStep("w6-sessions-sheet", in: configuration)
+        // The list makes only the rows it shows, so the workspaces are read as it scrolls.
         let sessionList = app.descendants(matching: .any)["terminal.sessions.list"]
         let newWorkspace = elementWithIdentifier("terminal.sessions.herdr-workspace.new")
+        var listed = Set(workspaceRows.allElementsBoundByIndex.map { $0.label })
         for _ in 0..<4 where !newWorkspace.exists || !newWorkspace.isHittable {
             sessionList.swipeUp()
+            listed.formUnion(workspaceRows.allElementsBoundByIndex.map { $0.label })
         }
         XCTAssertTrue(newWorkspace.isHittable, "The session on screen didn't offer New Workspace.")
+        XCTAssertEqual(listed, [
+            "Workspace remux, 2 tabs", "Workspace api, 2 tabs, current workspace", "Workspace web, 1 tab",
+            "Workspace notes, 1 tab", "Workspace infra, 1 tab",
+        ], "The session on screen didn't list its 5 workspaces.")
         captureLiveHerdrStep("w6b-sessions-sheet-scrolled", in: configuration)
 
-        workspaceRows.matching(NSPredicate(format: "label BEGINSWITH %@", "Workspace web,")).firstMatch.tap()
+        let web = workspaceRows.matching(NSPredicate(format: "label BEGINSWITH %@", "Workspace web,")).firstMatch
+        for _ in 0..<4 where !web.exists || !web.isHittable {
+            sessionList.swipeDown()
+        }
+        web.tap()
         XCTAssertTrue(sessionsSheet.waitForNonExistence(timeout: 5))
         XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 1", timeout: 10))
         XCTAssertTrue(waitForLabel(of: panes, "Panes, 1 pane", timeout: 10), "The workspace row didn't go to web.")
