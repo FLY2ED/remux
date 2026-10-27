@@ -1883,9 +1883,9 @@ final class RemuxAppUITests: XCTestCase {
 
     /// Herdr's agents on a live server whose session has the fixture's three-pane tab (workspace `remux`),
     /// with agent `claude` working in it, and a second tab, `build`, whose two panes each have an agent: one
-    /// waiting, and one working that finishes when the test asks (`finish`). Panes adds the agent's state to
+    /// blocked, and one working that finishes when the test asks (`finish`). Panes adds the agent's state to
     /// its tile, Tabs shows the tab's agent, and Sessions the session's most urgent one. The Agents list has
-    /// every agent, with Waiting and Done filters; the finished agent's row opens its pane, where it counts as
+    /// every agent, with Blocked and Done filters; the finished agent's row opens its pane, where it counts as
     /// seen.
     func testLiveHerdrAgentsWhenConfigured() throws {
         let configuration = try launchLiveHerdrApp(requiringSteps: true)
@@ -1917,7 +1917,7 @@ final class RemuxAppUITests: XCTestCase {
             agents.tap()
         }
         let working = "claude, remux › 1, working"
-        let waiting = "claude, remux › build, waiting"
+        let blocked = "claude, remux › build, blocked"
         let done = "claude, remux › build, done"
 
         openFirstSavedSession()
@@ -1947,7 +1947,7 @@ final class RemuxAppUITests: XCTestCase {
         openSessionSwitcherFromTerminal()
         XCTAssertTrue(sessionsSheet.waitForExistence(timeout: 5))
         XCTAssertTrue(
-            element("terminal.sessions.active-session", labelContaining: "agent waiting").waitForExistence(timeout: 5),
+            element("terminal.sessions.active-session", labelContaining: "agent blocked").waitForExistence(timeout: 5),
             "The session's row didn't show its most urgent agent."
         )
         captureLiveHerdrStep("a3-sessions", in: configuration)
@@ -1955,16 +1955,16 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertTrue(sessionsSheet.waitForNonExistence(timeout: 5))
 
         showAgents()
-        XCTAssertTrue(waitForAgentRows([working, waiting, done]), "Agents didn't list every agent.")
+        XCTAssertTrue(waitForAgentRows([working, blocked, done]), "Agents didn't list every agent.")
         captureLiveHerdrStep("a4-agents", in: configuration)
-        app.buttons["terminal.agents.filter.waiting"].tap()
-        XCTAssertTrue(waitForAgentRows([waiting]), "Waiting didn't show only the waiting agent.")
-        captureLiveHerdrStep("a5-agents-waiting", in: configuration)
+        app.buttons["terminal.agents.filter.blocked"].tap()
+        XCTAssertTrue(waitForAgentRows([blocked]), "Blocked didn't show only the blocked agent.")
+        captureLiveHerdrStep("a5-agents-blocked", in: configuration)
         app.buttons["terminal.agents.filter.done"].tap()
         XCTAssertTrue(waitForAgentRows([done]), "Done didn't show only the finished agent.")
         captureLiveHerdrStep("a6-agents-done", in: configuration)
         app.buttons["terminal.agents.filter.all"].tap()
-        XCTAssertTrue(waitForAgentRows([working, waiting, done]))
+        XCTAssertTrue(waitForAgentRows([working, blocked, done]))
 
         agentRow(done).tap()
         XCTAssertTrue(sessionsSheet.waitForNonExistence(timeout: 5), "The row didn't close the Sessions sheet.")
@@ -1972,8 +1972,8 @@ final class RemuxAppUITests: XCTestCase {
         captureLiveHerdrStep("a7-opened-agent", in: configuration)
         openPanesSheet()
         XCTAssertTrue(
-            element("terminal.pane.tile.", labelContaining: "waiting").waitForExistence(timeout: 10),
-            "The waiting agent's pane tile didn't name its state."
+            element("terminal.pane.tile.", labelContaining: "blocked").waitForExistence(timeout: 10),
+            "The blocked agent's pane tile didn't name its state."
         )
         XCTAssertTrue(
             element("terminal.pane.tile.", labelContaining: "idle").waitForExistence(timeout: 10),
@@ -1984,7 +1984,7 @@ final class RemuxAppUITests: XCTestCase {
 
         showAgents()
         XCTAssertTrue(
-            waitForAgentRows([working, waiting, "claude, remux › build, idle"]),
+            waitForAgentRows([working, blocked, "claude, remux › build, idle"]),
             "The agent that finished wasn't seen once its pane was on screen."
         )
         captureLiveHerdrStep("a9-agents-after-seen", in: configuration)

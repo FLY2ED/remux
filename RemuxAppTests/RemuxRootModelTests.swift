@@ -4920,11 +4920,11 @@ final class RemuxRootModelTests: XCTestCase {
     /// banner does.
     func testAnAgentsRowOpensItsSessionAtItsPane() async throws {
         let (harness, workspace, bridge) = try await connectedHerdrSession(agentStatus: .blocked)
-        let listed = await waitUntil(timeout: 3) { harness.model.herdrAgents.sessions[workspace.id] != nil }
+        let listed = await waitUntil(timeout: 3) { harness.model.herdrAgents(of: workspace.id)?.agents.isEmpty == false }
         XCTAssertTrue(listed, "the session's agents weren't listed")
-        let agents = try XCTUnwrap(harness.model.herdrAgents.sessions[workspace.id])
+        let agents = try XCTUnwrap(harness.model.herdrAgents(of: workspace.id))
         XCTAssertEqual(agents.agents.map(\.paneID), ["w1:p3"])
-        XCTAssertEqual(agents.status(ofTab: "t2"), .waiting)
+        XCTAssertEqual(agents.status(ofTab: "t2"), .blocked)
         await harness.model.showLibrary()
         // Leaving for Home hides the session; the tap's writes follow the hide's.
         var beforeTap = 0
@@ -4946,7 +4946,7 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertLessThan(show, focus)
 
         harness.model.disconnectActiveSession(workspace.id)
-        XCTAssertNil(harness.model.herdrAgents.sessions[workspace.id])
+        XCTAssertNil(harness.model.herdrAgents(of: workspace.id))
     }
 
     /// Nothing shows for the tab on screen; a session's banner goes when the session is closed.

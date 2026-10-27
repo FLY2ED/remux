@@ -177,9 +177,10 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
     let newSessionContent: () -> NewSessionContent
     let onRefresh: () -> Void
     let discoveries: [SavedServer.ID: ServerSessionDiscovery]
-    @ObservedObject var herdrAgents: HerdrAgentDirectory
+    /// An open Herdr session's agents, which the sheet follows as they change.
+    let herdrAgents: (SavedWorkspace.ID) -> HerdrAgentPresentation?
     /// Opens a Herdr session at an agent's pane: the session, the pane and the server boot its id is from.
-    let onOpenHerdrAgent: (SavedWorkspace.ID, String, String) -> Void
+    let onOpenHerdrAgent: (SavedWorkspace.ID, String, String?) -> Void
 
     @State private var path: [Route] = []
     @State private var showsAllRecentSessions = false
@@ -251,7 +252,7 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
                 SessionAgentsList(
                     projection: SessionAgentsProjection(
                         activeSessions: projection.activeSessions,
-                        agents: herdrAgents.sessions
+                        agents: herdrAgents
                     ),
                     filter: $agentFilter,
                     onOpen: openAgent
@@ -277,7 +278,7 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
         }
     }
 
-    private func openAgent(_ session: SessionAgentsProjection.Session, _ agent: HerdrSessionAgents.Agent) {
+    private func openAgent(_ session: SessionAgentsProjection.Session, _ agent: HerdrAgentPresentation.Agent) {
         Haptic.selection()
         onOpenHerdrAgent(session.id, agent.paneID, session.bootID)
         dismiss()
@@ -400,7 +401,7 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
         } label: {
             ActiveSessionSwitcherRow(
                 session: session,
-                agentStatus: herdrAgents.sessions[session.id]?.status,
+                agentStatus: herdrAgents(session.id)?.status,
                 chromeStyle: chromeStyle
             )
         }

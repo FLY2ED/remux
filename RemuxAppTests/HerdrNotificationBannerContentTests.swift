@@ -44,7 +44,7 @@ final class HerdrNotificationBannerContentTests: XCTestCase {
 
     /// An agent's dot is its state's, an update's or a custom one's Herdr's accent.
     func testTheDotIsTheAgentsState() throws {
-        XCTAssertEqual(content(try banner(.needsAttention, "a needs attention"), shown: true).dot, .status(.waiting))
+        XCTAssertEqual(content(try banner(.needsAttention, "a needs attention"), shown: true).dot, .status(.blocked))
         XCTAssertEqual(content(try banner(.finished, "a finished"), shown: true).dot, .status(.done))
         XCTAssertEqual(content(try banner(.custom, "c"), shown: true).dot, .accent)
     }

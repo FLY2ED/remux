@@ -245,7 +245,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
     // MARK: - Agents
 
     /// Herdr's agent states reach the sheets as the phone shows them: an agent in another tab working, then
-    /// waiting, in its own word once its labels give one, then done, which it stays until its pane is on
+    /// blocked, in its own word once its labels give one, then done, which it stays until its pane is on
     /// screen, and the tab shows its state throughout.
     @MainActor
     func testAgentsReachTheSheetsAsThePhoneShowsThemOnHerdr093() async throws {
@@ -288,33 +288,33 @@ final class HerdrLiveConnectionTests: XCTestCase {
         }
         func state(is expected: TerminalAgentState, _ failure: String) async throws {
             try await waitUntil(failure, timeout: .seconds(15)) {
-                session.model.sessionAgents?.state(ofPane: agent) == expected
+                session.model.agents.state(ofPane: agent) == expected
             }
         }
 
         try await report("working")
         try await state(is: TerminalAgentState(.working), "the agent didn't show working")
-        let tab = try XCTUnwrap(session.model.sessionAgents?.agents.first { $0.paneID == agent }?.tabID)
-        XCTAssertEqual(session.model.sessionAgents?.status(ofTab: tab), .working)
+        let tab = try XCTUnwrap(session.model.agents.agents.first { $0.paneID == agent }?.tabID)
+        XCTAssertEqual(session.model.agents.status(ofTab: tab), .working)
 
         try await report("blocked")
-        try await state(is: TerminalAgentState(.waiting), "the agent didn't show waiting")
+        try await state(is: TerminalAgentState(.blocked), "the agent didn't show blocked")
         _ = try await herdr([
             "pane", "report-metadata", agent, "--source", "remux-live", "--agent", "claude",
             "--state-label", "blocked=needs review",
         ])
-        try await state(is: TerminalAgentState(.waiting, word: "needs review"), "the agent's own word didn't show")
-        XCTAssertEqual(session.model.sessionAgents?.status(ofTab: tab), .waiting)
+        try await state(is: TerminalAgentState(.blocked, word: "needs review"), "the agent's own word didn't show")
+        XCTAssertEqual(session.model.agents.status(ofTab: tab), .blocked)
 
         try await report("working")
         try await state(is: TerminalAgentState(.working), "the agent didn't show working again")
         try await report("idle")
         try await state(is: TerminalAgentState(.done), "the agent that finished off screen didn't show done")
-        XCTAssertEqual(session.model.sessionAgents?.status(ofTab: tab), .done)
+        XCTAssertEqual(session.model.agents.status(ofTab: tab), .done)
 
         XCTAssertTrue(session.model.focusPane(agent))
         try await state(is: TerminalAgentState(.idle), "the agent's pane on screen didn't count as seen")
-        XCTAssertEqual(session.model.sessionAgents?.status(ofTab: tab), .idle)
+        XCTAssertEqual(session.model.agents.status(ofTab: tab), .idle)
     }
 
     // MARK: - Health

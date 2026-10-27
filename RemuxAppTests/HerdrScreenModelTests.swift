@@ -3333,9 +3333,8 @@ final class HerdrScreenModelTests: XCTestCase {
 
     // MARK: - Agents in the sheets
 
-    /// The sheets get the session's agents when what they show of them changes: a snapshot that changes
-    /// only a pane's directory isn't handed on, an agent's new state is.
-    func testTheSheetsGetTheSessionsAgentsWhenTheyChange() async throws {
+    /// The session's agents follow its snapshots, placed by the snapshot's workspace and tab names.
+    func testTheSessionsAgentsFollowItsSnapshots() async throws {
         let harness = await makeHarness()
         let bridge = try await connectedSession(harness, lines: ["one"])
         func snapshot(_ revision: UInt64, cwd: String, status: HerdrAgentStatus) -> [UInt8] {
@@ -3354,20 +3353,18 @@ final class HerdrScreenModelTests: XCTestCase {
             )
         }
         await bridge.serve(snapshot(2, cwd: "/src", status: .working))
-        try await harness.waitUntil("the working agent wasn't handed on") {
-            harness.stateLog.agents.last?.state(ofPane: "w1:p3")?.status == .working
+        try await harness.waitUntil("the working agent didn't show") {
+            harness.model.agents.state(ofPane: "w1:p3")?.status == .working
         }
-        let reports = harness.stateLog.agents.count
 
         await bridge.serve(snapshot(3, cwd: "/src/app", status: .working) + snapshot(4, cwd: "/src/app", status: .blocked))
-        try await harness.waitUntil("the waiting agent wasn't handed on") {
-            harness.stateLog.agents.last?.state(ofPane: "w1:p3")?.status == .waiting
+        try await harness.waitUntil("the blocked agent didn't show") {
+            harness.model.agents.state(ofPane: "w1:p3")?.status == .blocked
         }
-        XCTAssertEqual(harness.stateLog.agents.count, reports + 1)
-        let agents = try XCTUnwrap(harness.model.sessionAgents)
-        XCTAssertEqual(agents, harness.stateLog.agents.last)
+        let agents = harness.model.agents
         XCTAssertEqual(agents.agents.map(\.place), ["remux › t2"])
-        XCTAssertEqual(agents.status(ofTab: "t2"), .waiting)
+        XCTAssertEqual(agents.bootID, "boot")
+        XCTAssertEqual(agents.status(ofTab: "t2"), .blocked)
         XCTAssertNil(agents.status(ofTab: "t1"))
     }
 
@@ -3379,7 +3376,7 @@ final class HerdrScreenModelTests: XCTestCase {
         await session.bridge.serve(HerdrServerScript.snapshot(revision: 2, agents: [
             HerdrServerScript.snapshotAgent("w1:p2", status: .working, stateChange: 2),
         ]))
-        try await harness.waitUntil("the agent wasn't shown") { harness.model.sessionAgents?.status != nil }
+        try await harness.waitUntil("the agent wasn't shown") { harness.model.agents.status != nil }
 
         let adapter = harness.model.terminalScreenAdapter
         let window = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection().windows.first)
@@ -3394,15 +3391,14 @@ final class HerdrScreenModelTests: XCTestCase {
         let harness = await makeHarness()
         let session = try await shownSession(harness)
         try await finishOnScreen(harness, session.bridge, finishedFrame: false)
-        XCTAssertEqual(harness.model.sessionAgents?.status(ofTab: "t1"), .done)
+        XCTAssertEqual(harness.model.agents.status(ofTab: "t1"), .done)
 
         await session.bridge.serve(
             try harness.shownSurface(projection: 3, revision: 4, lines: ["one tw"], panes: Self.narrowedPanes)
         )
         try await harness.waitUntil("the finished agent's frame wasn't seen") {
-            harness.stateLog.agents.last?.status(ofTab: "t1") == .idle
+            harness.model.agents.status(ofTab: "t1") == .idle
         }
-        XCTAssertEqual(harness.model.sessionAgents?.status(ofTab: "t1"), .idle)
     }
 
     /// Each bell Herdr rings in the session on screen is handed on; one that comes after the session left

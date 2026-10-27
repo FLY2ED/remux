@@ -215,7 +215,7 @@ private struct RemuxWorkspaceShell: View {
                 },
                 onRefresh: model.refreshSessions,
                 discoveries: model.sessionDiscoveries,
-                herdrAgents: model.herdrAgents,
+                herdrAgents: model.herdrAgents(of:),
                 onOpenHerdrAgent: { workspaceID, paneID, bootID in
                     model.openHerdrSession(workspaceID, atPane: paneID, bootID: bootID)
                 }

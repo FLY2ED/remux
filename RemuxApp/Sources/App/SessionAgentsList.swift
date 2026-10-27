@@ -1,15 +1,15 @@
 import SwiftUI
 
-/// Which agents the Agents list shows.
+/// Which agents the Agents list shows, by Herdr's names for its agent filters (`client/shell/overlays.rs`).
 enum SessionAgentsFilter: CaseIterable, Hashable {
     case all
-    case waiting
+    case blocked
     case done
 
     var title: String {
         switch self {
         case .all: "All"
-        case .waiting: "Waiting"
+        case .blocked: "Blocked"
         case .done: "Done"
         }
     }
@@ -17,7 +17,7 @@ enum SessionAgentsFilter: CaseIterable, Hashable {
     func includes(_ status: TerminalAgentStatus) -> Bool {
         switch self {
         case .all: true
-        case .waiting: status == .waiting
+        case .blocked: status == .blocked
         case .done: status == .done
         }
     }
@@ -32,8 +32,8 @@ struct SessionAgentsProjection: Equatable {
         let title: String
         let runtimeState: TerminalRuntimeState
         /// The server boot the agents' pane ids belong to.
-        let bootID: String
-        let agents: [HerdrSessionAgents.Agent]
+        let bootID: String?
+        let agents: [HerdrAgentPresentation.Agent]
 
         /// Not connected, so its agents' states may be out of date; Herdr's list dims them.
         var isStale: Bool {
@@ -43,16 +43,20 @@ struct SessionAgentsProjection: Equatable {
 
     let sessions: [Session]
 
-    init(activeSessions: [ActiveSessionSwitcherItem], agents: [SavedWorkspace.ID: HerdrSessionAgents]) {
+    /// `agents` gives an open Herdr session's agents.
+    init(
+        activeSessions: [ActiveSessionSwitcherItem],
+        agents: (SavedWorkspace.ID) -> HerdrAgentPresentation?
+    ) {
         sessions = activeSessions.compactMap { session in
-            guard let sessionAgents = agents[session.id], !sessionAgents.agents.isEmpty else { return nil }
+            guard let presentation = agents(session.id), !presentation.agents.isEmpty else { return nil }
             let isDefault = session.sessionName == HerdrNotificationBannerContent.defaultSessionName
             return Session(
                 id: session.id,
                 title: isDefault ? session.serverName : "\(session.serverName) · \(session.sessionName)",
                 runtimeState: session.runtimeState,
-                bootID: sessionAgents.bootID,
-                agents: sessionAgents.agents
+                bootID: presentation.bootID,
+                agents: presentation.agents
             )
         }
     }
@@ -79,14 +83,14 @@ struct SessionAgentsProjection: Equatable {
     }
 }
 
-/// The Sessions sheet's Agents list: filters for every agent, those waiting and those done, then each
+/// The Sessions sheet's Agents list: filters for every agent, those blocked and those done, then each
 /// session's agents under its name. A row opens the agent's pane.
 struct SessionAgentsList: View {
     @Environment(\.ghosttyTerminalChromeStyle) private var chromeStyle
 
     let projection: SessionAgentsProjection
     @Binding var filter: SessionAgentsFilter
-    let onOpen: (SessionAgentsProjection.Session, HerdrSessionAgents.Agent) -> Void
+    let onOpen: (SessionAgentsProjection.Session, HerdrAgentPresentation.Agent) -> Void
 
     var body: some View {
         let sessions = projection.sessions(filter)
@@ -156,7 +160,7 @@ struct SessionAgentsList: View {
     private var emptyResults: some View {
         let title = switch filter {
         case .all: "No Agents"
-        case .waiting: "No Agents Waiting"
+        case .blocked: "No Agents Blocked"
         case .done: "No Agents Done"
         }
         return ContentUnavailableView {
@@ -171,7 +175,7 @@ struct SessionAgentsList: View {
 
 /// One agent: its dot, its name over its place, and its state.
 private struct SessionAgentRow: View {
-    let agent: HerdrSessionAgents.Agent
+    let agent: HerdrAgentPresentation.Agent
     let session: SessionAgentsProjection.Session
 
     var body: some View {

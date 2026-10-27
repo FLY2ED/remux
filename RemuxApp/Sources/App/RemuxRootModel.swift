@@ -496,8 +496,6 @@ final class RemuxRootModel: ObservableObject {
 
     /// The notifications of every open Herdr session, shown one at a time over whatever is on screen.
     let herdrNotifications = HerdrNotificationCenter()
-    /// The agents of every open Herdr session.
-    let herdrAgents = HerdrAgentDirectory()
 
     var setupSessionID: UUID? {
         currentSetupID
@@ -1695,6 +1693,14 @@ final class RemuxRootModel: ObservableObject {
         showActiveSession(workspaceID)
     }
 
+    /// An open Herdr session's agents.
+    func herdrAgents(of workspaceID: SavedWorkspace.ID) -> HerdrAgentPresentation? {
+        guard let session = RemuxActiveSessionCollection.session(workspaceID, in: activeSessions),
+              case .herdr(let model)? = terminalRuntimes[TerminalRuntimeAttemptKey(session: session)]
+        else { return nil }
+        return model.agents
+    }
+
     private func herdrNotificationState(of workspaceID: SavedWorkspace.ID) -> HerdrNotificationSessionState? {
         guard let session = RemuxActiveSessionCollection.session(workspaceID, in: activeSessions),
               case .herdr(let model)? = terminalRuntimes[TerminalRuntimeAttemptKey(session: session)]
@@ -2462,11 +2468,6 @@ final class RemuxRootModel: ObservableObject {
                 onRuntimeStateChange: onRuntimeStateChange,
                 onNotification: { [weak self] event in
                     self?.handleHerdrNotification(event, from: key)
-                },
-                onAgentsChange: { [weak self] agents in
-                    // A replaced model's late report isn't the session's.
-                    guard let self, terminalRuntimes[key] != nil else { return }
-                    herdrAgents.update(agents, of: key.workspaceID)
                 }
             ))
         }
@@ -2519,10 +2520,7 @@ final class RemuxRootModel: ObservableObject {
         for (key, runtime) in removed {
             terminalRuntimes[key] = nil
             // As Herdr's client drops a machine's notifications when it lets the machine go.
-            if case .herdr = runtime {
-                herdrNotifications.retire(key.workspaceID)
-                herdrAgents.update(nil, of: key.workspaceID)
-            }
+            if case .herdr = runtime { herdrNotifications.retire(key.workspaceID) }
         }
         for runtime in removed.values {
             // Teardown ordering (surface unregister/free before terminal

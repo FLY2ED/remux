@@ -547,7 +547,6 @@ final class HerdrModelHarness {
     final class StateLog {
         var updates: [TerminalRuntimeStateUpdate] = []
         var notifications: [HerdrScreenModel.NotificationEvent] = []
-        var agents: [HerdrSessionAgents] = []
     }
 
     let bridges: Bridges
@@ -587,7 +586,6 @@ final class HerdrModelHarness {
             openBridge: { try await bridges.open() },
             onRuntimeStateChange: { stateLog.updates.append($0) },
             onNotification: { stateLog.notifications.append($0) },
-            onAgentsChange: { stateLog.agents.append($0) },
             connectionTiming: timing,
             recoveryTiming: recovery,
             engine: producerFailure.map {

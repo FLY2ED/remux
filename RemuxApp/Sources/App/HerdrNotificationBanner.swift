@@ -25,7 +25,7 @@ struct HerdrNotificationBannerContent: Equatable {
         switch notification.kind {
         case .needsAttention:
             title = Self.title(notification.title, replacing: " needs attention", with: " waiting")
-            dot = .status(.waiting)
+            dot = .status(.blocked)
             message = nil
         case .finished:
             title = Self.title(notification.title, replacing: " finished", with: " done")

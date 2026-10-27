@@ -392,11 +392,8 @@ final class SessionSwitcherProjectionTests: XCTestCase {
         )
     }
 
-    private func agents(_ statuses: [(pane: String, status: HerdrAgentStatus)]) throws -> HerdrSessionAgents {
-        let snapshot = try HerdrSnapshotJSON.twoWorkspaces(agents: statuses.map {
-            HerdrServerScript.snapshotAgent($0.pane, agent: "claude", status: $0.status)
-        })
-        return HerdrSessionAgents(snapshot, statuses: Dictionary(uniqueKeysWithValues: statuses.map { ($0.pane, $0.status) }))
+    private func agents(_ statuses: [(pane: String, status: HerdrAgentStatus)]) throws -> HerdrAgentPresentation {
+        try HerdrSnapshotJSON.presentation(statuses)
     }
 
     /// The Agents list has the open Herdr sessions with agents, in the Sessions list's order, each named by
@@ -407,13 +404,14 @@ final class SessionSwitcherProjectionTests: XCTestCase {
         let quiet = item(.herdr, "notes", on: "devbox")
         let training = item(.herdr, "train", on: "gpu-box", .reconnecting(.transportLoss))
         let unreported = item(.herdr, "fresh", on: "gpu-box")
+        let agents = [
+            devbox.id: try agents([("w1:p2", .blocked), ("w1:p1", .working)]),
+            quiet.id: try agents([]),
+            training.id: try agents([("w1:p1", .done)]),
+        ]
         let projection = SessionAgentsProjection(
             activeSessions: [tmux, devbox, quiet, training, unreported],
-            agents: [
-                devbox.id: try agents([("w1:p2", .blocked), ("w1:p1", .working)]),
-                quiet.id: try agents([]),
-                training.id: try agents([("w1:p1", .done)]),
-            ]
+            agents: { agents[$0] }
         )
         XCTAssertEqual(projection.sessions.map(\.id), [devbox.id, training.id])
         XCTAssertEqual(projection.sessions.map(\.title), ["devbox", "gpu-box · train"])
@@ -422,22 +420,20 @@ final class SessionSwitcherProjectionTests: XCTestCase {
         XCTAssertEqual(projection.sessions.map(\.isStale), [false, true])
     }
 
-    /// Waiting and Done show only those agents, and only the sessions that have them; each filter counts its
+    /// Blocked and Done show only those agents, and only the sessions that have them; each filter counts its
     /// agents.
     func testTheAgentsFiltersShowAndCountWaitingAndDoneAgents() throws {
         let devbox = item(.herdr, "default", on: "devbox")
         let training = item(.herdr, "train", on: "gpu-box")
-        let projection = SessionAgentsProjection(
-            activeSessions: [devbox, training],
-            agents: [
-                devbox.id: try agents([("w1:p1", .blocked), ("w1:p2", .working), ("w1:p3", .idle)]),
-                training.id: try agents([("w1:p1", .done), ("w1:p2", .blocked)]),
-            ]
-        )
+        let agents = [
+            devbox.id: try agents([("w1:p1", .blocked), ("w1:p2", .working), ("w1:p3", .idle)]),
+            training.id: try agents([("w1:p1", .done), ("w1:p2", .blocked)]),
+        ]
+        let projection = SessionAgentsProjection(activeSessions: [devbox, training], agents: { agents[$0] })
         XCTAssertEqual(projection.count(.all), 5)
-        XCTAssertEqual(projection.count(.waiting), 2)
+        XCTAssertEqual(projection.count(.blocked), 2)
         XCTAssertEqual(projection.count(.done), 1)
-        XCTAssertEqual(projection.sessions(.waiting).map { $0.agents.map(\.paneID) }, [["w1:p1"], ["w1:p2"]])
+        XCTAssertEqual(projection.sessions(.blocked).map { $0.agents.map(\.paneID) }, [["w1:p1"], ["w1:p2"]])
         XCTAssertEqual(projection.sessions(.done).map(\.id), [training.id])
         XCTAssertEqual(projection.sessions(.done).first?.agents.map(\.paneID), ["w1:p1"])
         XCTAssertEqual(projection.sessions(.all), projection.sessions)

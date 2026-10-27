@@ -12,21 +12,19 @@ enum TerminalAgentStatus: Int, Comparable, Sendable {
     /// Finished work no one has looked at on this phone yet.
     case done
     /// Needs the user: a question, or a permission to grant.
-    case waiting
+    case blocked
 
     static func < (lhs: Self, rhs: Self) -> Bool {
         lhs.rawValue < rhs.rawValue
     }
 
-    /// Herdr's words for the states (`client/shell/agent_sidebar.rs` `sidebar_status_text`), with one
-    /// word across the phone for an agent that needs the user: "waiting", as Herdr's phone layout says in
-    /// its notifications (`client/shell/notifications.rs`), and as Remux's banner and filter say.
+    /// Herdr's words for the states (`client/shell/agent_sidebar.rs` `sidebar_status_text`).
     var word: String {
         switch self {
         case .unknown, .idle: "idle"
         case .working: "working"
         case .done: "done"
-        case .waiting: "waiting"
+        case .blocked: "blocked"
         }
     }
 }

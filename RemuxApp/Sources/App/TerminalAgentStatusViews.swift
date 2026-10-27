@@ -9,7 +9,7 @@ extension TerminalAgentStatus {
     var color: Color {
         let (dark, light): (UIColor, UIColor) = switch self {
         case .working: (Self.rgb(249, 226, 175), Self.rgb(223, 142, 29))
-        case .waiting: (Self.rgb(243, 139, 168), Self.rgb(210, 15, 57))
+        case .blocked: (Self.rgb(243, 139, 168), Self.rgb(210, 15, 57))
         case .done: (Self.rgb(148, 226, 213), Self.rgb(23, 146, 153))
         case .idle: (Self.rgb(166, 227, 161), Self.rgb(64, 160, 43))
         case .unknown: (Self.rgb(108, 112, 134), Self.rgb(156, 160, 176))
