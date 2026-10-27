@@ -928,9 +928,11 @@ private final class GhosttyCompositeViewportContainerView: UIView,
                 else { return }
                 self.onPreviewSelection?(surface.id, candidate)
             })
-        } else if previewSelectionContext.externalLink(for: selectedText) != nil {
+        } else if let host = previewSelectionContext.externalLink(for: selectedText)?.host {
+            // Naming the host shows where a link goes when an OSC 8 target or
+            // userinfo makes its visible text say otherwise.
             actions.append(UIAction(
-                title: "Open Link",
+                title: "Open \(host)",
                 image: UIImage(systemName: "safari")
             ) { [weak self] _ in
                 guard let self,

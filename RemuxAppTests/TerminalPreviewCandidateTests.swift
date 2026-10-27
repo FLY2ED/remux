@@ -211,6 +211,12 @@ final class TerminalPreviewCandidateTests: XCTestCase {
             "https://github.com/h3nock/remux/pull/1"
         )
         XCTAssertNil(context.candidate(for: "the PR"))
+        XCTAssertEqual(
+            TerminalExternalLink.url(
+                selection: "https://github.com@example.com/login"
+            )?.host,
+            "example.com"
+        )
         XCTAssertNil(context.externalLink(for: "the PR edited"))
 
         context.selectionDidChange()
