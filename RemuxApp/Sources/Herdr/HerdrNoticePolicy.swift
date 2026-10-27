@@ -32,11 +32,11 @@ struct HerdrNoticePolicy {
     }
 
     /// Whether `method`'s failure is shown. A connection that ended says nothing here: the session
-    /// reconnects.
+    /// reconnects; nor does a command dropped because the session left the screen.
     mutating func shows(_ method: String, failedWith error: HerdrCommandError, bootID: String?) -> Bool {
         let boot = bootID ?? Self.noBoot
         switch error {
-        case .connectionEnded:
+        case .connectionEnded, .notSent:
             return false
         case .failed(let code, _) where Self.silentCodes.contains(code):
             return false

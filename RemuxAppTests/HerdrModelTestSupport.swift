@@ -65,6 +65,7 @@ enum HerdrServerScript {
     struct Pane {
         let id: String
         let x: UInt16
+        var y: UInt16 = 0
         let width: UInt16
         let height: UInt16
         var focused = false
@@ -72,6 +73,8 @@ enum HerdrServerScript {
         var scroll: (fromBottom: UInt64, max: UInt64, rows: UInt64)?
         var mouseReporting = false
         var alternateScreen = false
+        /// The pane with Herdr's borders around its text area, when it has any.
+        var rect: (x: UInt16, y: UInt16, width: UInt16, height: UInt16)?
     }
 
     /// A recorded v0.9.3 welcome.
@@ -81,15 +84,18 @@ enum HerdrServerScript {
 
     /// `panes` and `agents` are the snapshot's JSON entries, made with `snapshotPane` and
     /// `snapshotAgent`.
-    /// The focused tab is labelled `tabLabel`; `otherTabs` are further tabs of workspace `w1`, by id, each
-    /// named after its id. Workspace `w1` is listed when it has a label.
+    /// The focused tab is labelled `tabLabel` and is `zoomed` or not; `otherTabs` are further tabs of
+    /// workspace `w1`, by id, each named after its id, and zoomed when in `zoomedOtherTabs`. Workspace `w1`
+    /// is listed when it has a label.
     static func snapshot(
         revision: UInt64,
         boot: String = "boot",
         workspaceLabel: String? = nil,
         tabLabel: String = "main",
+        zoomed: Bool = false,
         focusedTab: String = "t1",
         otherTabs: [String] = [],
+        zoomedOtherTabs: [String] = [],
         focusedPane: String? = "w1:p1",
         panes: [String] = [],
         agents: [String] = []
@@ -97,7 +103,7 @@ enum HerdrServerScript {
         let tabs = ([(focusedTab, tabLabel, true)] + otherTabs.map { ($0, $0, false) }).enumerated().map { index, tab in
             """
             {"tab_id":"\(tab.0)","workspace_id":"w1","number":\(index + 1),"label":"\(tab.1)","custom_label":true,
-             "zoomed":false,"focused":\(tab.2),"agent_status":"idle"}
+             "zoomed":\(tab.2 ? zoomed : zoomedOtherTabs.contains(tab.0)),"focused":\(tab.2),"agent_status":"idle"}
             """
         }
         let workspaces = workspaceLabel.map { label in
@@ -203,30 +209,32 @@ enum HerdrServerScript {
         value.map { #""\#($0)""# } ?? "null"
     }
 
-    /// A full surface of the given lines, all of one width, with every pane's text area on row 0 down,
-    /// and a one-cell popup for the terminal `popup` names, if any.
+    /// A full surface of the given lines, all of one width, and a one-cell popup for the terminal
+    /// `popup` names, if any. A cell whose symbol `foreground` lists has that colour.
     static func surface(
         boot: String = "boot",
         projection: UInt64,
         revision: UInt64,
         lines: [String],
         panes: [Pane],
-        popup: String? = nil
+        popup: String? = nil,
+        foreground: [Character: UInt32] = [:]
     ) -> [UInt8] {
         var writer = HerdrWireWriter()
         writer.variant(13)
         writer.string(boot)
         writer.u64(projection)
         writer.u64(revision)
-        frame(lines, to: &writer)
+        frame(lines, foreground: foreground, to: &writer)
         writer.array(panes) { writer, pane in
             writer.string(pane.id)
             writer.u64(1)
-            for _ in 0..<2 {
-                writer.u16(pane.x)
-                writer.u16(0)
-                writer.u16(pane.width)
-                writer.u16(pane.height)
+            let textArea = (x: pane.x, y: pane.y, width: pane.width, height: pane.height)
+            for rect in [pane.rect ?? textArea, textArea] {
+                writer.u16(rect.x)
+                writer.u16(rect.y)
+                writer.u16(rect.width)
+                writer.u16(rect.height)
             }
             writer.optional(nil as UInt8?) { $0.u8($1) }
             if let scroll = pane.scroll {
@@ -262,12 +270,16 @@ enum HerdrServerScript {
         return HerdrWire.frame(writer.bytes)
     }
 
-    private static func frame(_ lines: [String], to writer: inout HerdrWireWriter) {
+    private static func frame(
+        _ lines: [String],
+        foreground: [Character: UInt32] = [:],
+        to writer: inout HerdrWireWriter
+    ) {
         let width = lines.first?.count ?? 0
         precondition(lines.allSatisfy { $0.count == width })
         writer.array(Array(lines.joined())) { writer, character in
             writer.string(String(character))
-            writer.u32(0)
+            writer.u32(foreground[character] ?? 0)
             writer.u32(0)
             writer.u16(0)
             writer.bool(false)
@@ -294,10 +306,34 @@ enum HerdrServerScript {
         return HerdrWire.frame(writer.bytes)
     }
 
-    static func surfaceSetReply(id: String, active: Bool) -> [UInt8] {
+    /// Herdr's answer to a `pane.zoom` on tab `t1`, as v0.9.3 sends it: `changed` says whether the zoom
+    /// changed, and `panes` where every pane of the tab sits, the first focused, also while it's zoomed.
+    static func zoomReply(
+        id: String,
+        changed: Bool,
+        zoomed: Bool,
+        tab: String = "t1",
+        panes: [(id: String, x: UInt16, y: UInt16, width: UInt16, height: UInt16)]
+    ) -> [UInt8] {
+        let focused = panes.first?.id ?? ""
+        let rects = panes.map { pane in
+            "{\"focused\":\(pane.id == focused),\"pane_id\":\"\(pane.id)\",\"rect\":{\"height\":\(pane.height),"
+                + "\"width\":\(pane.width),\"x\":\(pane.x),\"y\":\(pane.y)}}"
+        }
+        let reason = changed ? "" : ",\"reason\":\"\(zoomed ? "already_zoomed" : "already_unzoomed")\""
+        let zoom = "{\"changed\":\(changed),\"zoom_changed\":\(changed),\"focus_changed\":false\(reason),"
+            + "\"pane_id\":\"\(focused)\",\"focused_pane_id\":\"\(focused)\",\"zoomed\":\(zoomed),"
+            + "\"layout\":{\"workspace_id\":\"w1\",\"tab_id\":\"\(tab)\",\"zoomed\":\(zoomed),"
+            + "\"area\":{\"x\":0,\"y\":0,\"width\":80,\"height\":24},\"focused_pane_id\":\"\(focused)\","
+            + "\"panes\":[\(rects.joined(separator: ","))],\"splits\":[]}}"
+        return HerdrConnectionTests.reply(id: id, json: "{\"type\":\"pane_zoom\",\"zoom\":\(zoom)}")
+    }
+
+    /// Herdr's answer to a show or hide; a show's `projection` is the floor its frame must reach.
+    static func surfaceSetReply(id: String, active: Bool, projection: UInt64 = 1) -> [UInt8] {
         HerdrConnectionTests.reply(
             id: id,
-            json: #"{"type":"client_shell_surface_set","active":\#(active),"projection_revision":1}"#
+            json: #"{"type":"client_shell_surface_set","active":\#(active),"projection_revision":\#(projection)}"#
         )
     }
 }
@@ -312,6 +348,8 @@ enum ClientWrite: Equatable {
     /// A pane input message, as framed.
     case paneInput([UInt8])
     case paneFocus(id: String, paneID: String)
+    /// A `pane.zoom`, with its mode: "on" or "off".
+    case paneZoom(id: String, paneID: String, mode: String)
     case ping(data: String)
     case other(tag: UInt32, kind: String)
 
@@ -345,13 +383,15 @@ enum ClientWrite: Equatable {
             return .paneInput(frame)
         case 15:
             let request = try HerdrConnectionTests.request(frame)
-            if request.method == HerdrScreenModel.paneFocusMethod {
+            if request.method == HerdrScreenModel.paneFocusMethod || request.method == "pane.zoom" {
                 _ = try reader.string()
                 let json = try XCTUnwrap(
                     JSONSerialization.jsonObject(with: Data(try reader.string().utf8)) as? [String: Any]
                 )
                 let params = try XCTUnwrap(json["params"] as? [String: String])
-                return .paneFocus(id: request.id, paneID: try XCTUnwrap(params["pane_id"]))
+                let paneID = try XCTUnwrap(params["pane_id"])
+                guard request.method == "pane.zoom" else { return .paneFocus(id: request.id, paneID: paneID) }
+                return .paneZoom(id: request.id, paneID: paneID, mode: try XCTUnwrap(params["mode"]))
             }
             guard request.method == HerdrConnection.surfaceSetMethod else {
                 return .other(tag: tag, kind: request.method)
@@ -573,6 +613,7 @@ final class HerdrModelHarness {
     /// A frame of `lines` at the size a show asks for, padded with blanks: Herdr answers a show with a
     /// frame at the client's size, and only such a frame completes the show.
     func shownSurface(
+        boot: String = "boot",
         projection: UInt64,
         revision: UInt64,
         lines: [String],
@@ -582,7 +623,7 @@ final class HerdrModelHarness {
         let columns = Int(viewport.columns)
         let padded = lines.map { $0.padding(toLength: columns, withPad: " ", startingAt: 0) }
             + Array(repeating: String(repeating: " ", count: columns), count: max(Int(viewport.rows) - lines.count, 0))
-        return HerdrServerScript.surface(projection: projection, revision: revision, lines: padded, panes: panes)
+        return HerdrServerScript.surface(boot: boot, projection: projection, revision: revision, lines: padded, panes: panes)
     }
 
     /// The bridge's writes from `index` on, decoded, once there are `count` of them.
@@ -627,11 +668,11 @@ final class HerdrModelHarness {
     func shownRows() -> [String: [String]] {
         var shown: [String: [String]] = [:]
         for pane in model.layout?.panes ?? [] where pane.hasTextArea {
-            guard let surface = model.paneSurface(pane.paneID) else { continue }
+            guard let surface = model.paneSurface(pane.paneID), let area = pane.innerRect else { continue }
             shown[pane.paneID] = RendererText.rows(
                 of: surface.renderer,
-                columns: Int(pane.innerRect.width),
-                rows: Int(pane.innerRect.height)
+                columns: Int(area.width),
+                rows: Int(area.height)
             )
         }
         return shown

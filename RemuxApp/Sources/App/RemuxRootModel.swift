@@ -144,7 +144,8 @@ enum TerminalRuntime {
         }
     }
 
-    /// Herdr keeps nothing of Remux's on the server for a stop to undo or hand on.
+    /// A Herdr stop undoes Remux's zoom for either reason: Herdr's zoom has no owner, so a new attempt
+    /// can't take it over.
     func stop(_ reason: TerminalRuntimeStopReason) async {
         switch self {
         case .tmux(let model): await model.stop(reason)

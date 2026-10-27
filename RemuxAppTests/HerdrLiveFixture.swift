@@ -69,12 +69,14 @@ final class HerdrLiveFixture: @unchecked Sendable {
             .appendingPathComponent("HerdrLiveFixture-\(id)")
     }
 
-    /// Creates the folder and the wrapper for Herdr `version`. The caller owns the fixture and must
-    /// `tearDown()` it. A failed setup leaves nothing on the host: the script creates the folder only if
-    /// it doesn't exist and removes it again when a later step fails.
+    /// Creates the folder and the wrapper for Herdr `version`, with `ui` as the `[ui]` settings of its
+    /// config (TOML lines). The caller owns the fixture and must `tearDown()` it. A failed setup leaves
+    /// nothing on the host: the script creates the folder only if it doesn't exist and removes it again
+    /// when a later step fails.
     static func start(
         _ configuration: HerdrLiveConfiguration,
-        version: String = "0.9.3"
+        version: String = "0.9.3",
+        ui: [String] = []
     ) async throws -> HerdrLiveFixture {
         guard let binary = configuration.herdrBinaries[version], let digests = releaseDigests[version] else {
             throw XCTSkip("Add Herdr \(version) to herdrBinaries to run this live Herdr test.")
@@ -83,7 +85,7 @@ final class HerdrLiveFixture: @unchecked Sendable {
         do {
             let setup = try await fixture.runScript(
                 setupScript(version: version, digests: digests),
-                arguments: [fixture.root, binary]
+                arguments: [fixture.root, binary, (["[ui]"] + ui).joined(separator: "\n")]
             )
             guard setup.exitStatus == 0 else {
                 throw HerdrLiveError(
@@ -193,8 +195,8 @@ final class HerdrLiveFixture: @unchecked Sendable {
     }
 
     /// Checks the binary against the pinned release digest, then writes the folder and the wrapper. The
-    /// config turns off Herdr's update checks and gives panes a plain non-login `/bin/sh` with a `$ `
-    /// prompt, so pane output doesn't depend on the host's shell setup. The wrapper starts in the
+    /// config turns off Herdr's update checks, gives panes a plain non-login `/bin/sh` with a `$ `
+    /// prompt, so pane output doesn't depend on the host's shell setup, and ends with the `[ui]` table. The wrapper starts in the
     /// isolated HOME, because the server opens its first pane in the directory it starts from.
     private static func setupScript(version: String, digests: [String: String]) -> String {
         let digestCases = digests
@@ -205,6 +207,7 @@ final class HerdrLiveFixture: @unchecked Sendable {
         set -eu
         root=$(printf %b "$1")
         binary=$(printf %b "$2")
+        ui=$(printf %b "$3")
         case "$binary" in *"'"*) echo "the Herdr binary path can't contain a single quote" >&2; exit 5 ;; esac
         case "$(uname -sm)" in \#(digestCases) *) echo "no pinned Herdr digest for $(uname -sm)" >&2; exit 3 ;; esac
         if command -v sha256sum > /dev/null 2>&1; then have=$(sha256sum "$binary" | cut -d " " -f 1); else have=$(shasum -a 256 "$binary" | cut -d " " -f 1); fi
@@ -213,7 +216,7 @@ final class HerdrLiveFixture: @unchecked Sendable {
         mkdir "$root"
         trap 'rm -rf -- "$root"' EXIT
         mkdir "$root/home" "$root/config" "$root/state" "$root/data" "$root/runtime" "$root/tmp"
-        printf '%s\n' '[update]' 'version_check = false' 'manifest_check = false' '' '[terminal]' 'default_shell = "/bin/sh"' 'shell_mode = "non_login"' > "$root/herdr.toml"
+        printf '%s\n' '[update]' 'version_check = false' 'manifest_check = false' '' '[terminal]' 'default_shell = "/bin/sh"' 'shell_mode = "non_login"' '' "$ui" > "$root/herdr.toml"
         {
           echo '#!/bin/sh'
           echo "cd '$root/home' || exit 1"

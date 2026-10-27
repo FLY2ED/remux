@@ -517,6 +517,33 @@ final class HerdrConnectionTests: XCTestCase {
         _ = try await next
     }
 
+    /// A command's reply says where it fell among the snapshots: the newest one when it went out, for a
+    /// command that waited for the lane the newest as the lane freed, and the newest when its reply came.
+    func testACommandsReplySaysWhichSnapshotsCameBeforeItWentAndBeforeItsReply() async throws {
+        let (connection, transport, events) = try await openedSession(surfaceActive: true)
+        let boot = "68169-1791562319387415000"
+        async let first = connection.command("worktree.list", params: [String: String]())
+        let firstRequest = try Self.request(try await transport.written(1))
+        let (replies, answered) = AsyncStream.makeStream(of: Result<HerdrCommandReply, Error>.self)
+        let sent = await connection.sendCommandWhileShown("pane.focus", params: ["pane_id": "w1:p1"]) {
+            answered.yield($0)
+        }
+        XCTAssertTrue(sent)
+
+        await transport.serve(HerdrServerScript.snapshot(revision: 100, boot: boot))
+        await events.waitForCount(2)
+        await transport.serve(Self.reply(id: firstRequest.id, json: #"{"type":"ok"}"#))
+        _ = try await first
+        let request = try Self.request(try await transport.written(2))
+        XCTAssertEqual(request.method, "pane.focus")
+        await transport.serve(HerdrServerScript.snapshot(revision: 101, boot: boot))
+        await transport.serve(Self.reply(id: request.id, json: #"{"type":"ok"}"#))
+        var iterator = replies.makeAsyncIterator()
+        let next = await iterator.next()
+        let reply = try XCTUnwrap(next).get()
+        XCTAssertEqual([reply.sentAfter, reply.answeredAfter], [100, 101])
+    }
+
     func testAMethodTheServerDoesNotAdvertiseFailsAlone() async throws {
         let (connection, _, events) = try await openedSession(surfaceActive: true)
         do {

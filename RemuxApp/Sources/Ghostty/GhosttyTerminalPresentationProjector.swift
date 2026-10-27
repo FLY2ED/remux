@@ -227,18 +227,68 @@ struct GhosttyTerminalGridRect: Equatable, Sendable {
     let rows: UInt32
 }
 
+/// A line the screen draws over the space between or around panes, in window-grid cells. The backend
+/// lays its lines out: tmux's between panes, Herdr's where Herdr draws its pane borders.
+struct GhosttyPaneLine: Equatable, Sendable {
+    enum Orientation: Equatable, Sendable {
+        case vertical
+        case horizontal
+    }
+
+    enum Ink: Equatable, Sendable {
+        /// The theme's separator colour.
+        case separator
+        /// The theme's accent, which marks the focused pane.
+        case focus
+        case color(red: UInt8, green: UInt8, blue: UInt8)
+    }
+
+    enum Cap: Equatable, Sendable {
+        /// The line stops at `start` and `end`.
+        case butt
+        /// Each end reaches half the line's width further, so two lines that end in the middle of one
+        /// cell, as a box's corner does, meet without a notch.
+        case square
+    }
+
+    let orientation: Orientation
+    /// The middle of the line across it: a column for a vertical line, a row for a horizontal one.
+    let position: CGFloat
+    let start: CGFloat
+    let end: CGFloat
+    let ink: Ink
+    /// In points.
+    let width: CGFloat
+    let cap: Cap
+
+    func frame(origin: CGPoint, cellSize: CGSize) -> CGRect {
+        let overhang = cap == .square ? width / 2 : 0
+        switch orientation {
+        case .vertical:
+            return CGRect(
+                x: origin.x + position * cellSize.width - width / 2,
+                y: origin.y + start * cellSize.height - overhang,
+                width: width,
+                height: (end - start) * cellSize.height + 2 * overhang
+            )
+        case .horizontal:
+            return CGRect(
+                x: origin.x + start * cellSize.width - overhang,
+                y: origin.y + position * cellSize.height - width / 2,
+                width: (end - start) * cellSize.width + 2 * overhang,
+                height: width
+            )
+        }
+    }
+}
+
 /// One internal tmux pane boundary expressed in window-grid coordinates.
 ///
 /// `firstPaneID` is the pane on the left of a vertical separator or above a
 /// horizontal separator. `secondPaneID` is the pane on the other side. The
 /// separator is presentation-only: it never changes either pane's grid rect.
 struct GhosttyPaneSeparatorSegment: Equatable, Sendable {
-    enum Orientation: Equatable, Sendable {
-        case vertical
-        case horizontal
-    }
-
-    let orientation: Orientation
+    let orientation: GhosttyPaneLine.Orientation
     let position: CGFloat
     let start: CGFloat
     let end: CGFloat
@@ -258,37 +308,52 @@ struct GhosttyPaneSeparatorSegment: Equatable, Sendable {
             ? start..<midpoint
             : midpoint..<end
     }
-
-    func frame(
-        origin: CGPoint,
-        cellSize: CGSize,
-        lineWidth: CGFloat,
-        range: Range<CGFloat>? = nil
-    ) -> CGRect {
-        let range = range ?? start..<end
-        switch orientation {
-        case .vertical:
-            return CGRect(
-                x: origin.x + position * cellSize.width - lineWidth / 2,
-                y: origin.y + range.lowerBound * cellSize.height,
-                width: lineWidth,
-                height: (range.upperBound - range.lowerBound) * cellSize.height
-            )
-        case .horizontal:
-            return CGRect(
-                x: origin.x + range.lowerBound * cellSize.width,
-                y: origin.y + position * cellSize.height - lineWidth / 2,
-                width: (range.upperBound - range.lowerBound) * cellSize.width,
-                height: lineWidth
-            )
-        }
-    }
 }
 
+/// tmux's pane dividers: one line in the middle of each 1-cell border between two panes, and over it
+/// a thicker accent line along the focused pane's side.
 enum GhosttyPaneSeparatorLayout {
     struct Pane: Equatable, Sendable {
         let id: UUID
         let frame: GhosttyTerminalGridRect
+    }
+
+    static let separatorWidth: CGFloat = 1
+    static let focusedSeparatorWidth: CGFloat = 2
+
+    /// The lines for the panes shown in a window: every separator, then the focused pane's accents.
+    static func lines(for panes: [GhosttyTerminalViewportPresentationProjection.Pane]) -> [GhosttyPaneLine] {
+        let visible = panes.compactMap { pane in
+            pane.visibleFrame.map { Pane(id: pane.id, frame: $0) }
+        }
+        let separators = segments(for: visible)
+        let focusedPaneID = panes.first { $0.visibleFrame != nil && $0.isFocused }?.id
+        let focused = separators.compactMap { separator in
+            separator.focusedRange(focusedPaneID: focusedPaneID, paneCount: visible.count).map {
+                line(separator, from: $0.lowerBound, to: $0.upperBound, ink: .focus, width: focusedSeparatorWidth)
+            }
+        }
+        return separators.map {
+            line($0, from: $0.start, to: $0.end, ink: .separator, width: separatorWidth)
+        } + focused
+    }
+
+    private static func line(
+        _ separator: GhosttyPaneSeparatorSegment,
+        from start: CGFloat,
+        to end: CGFloat,
+        ink: GhosttyPaneLine.Ink,
+        width: CGFloat
+    ) -> GhosttyPaneLine {
+        GhosttyPaneLine(
+            orientation: separator.orientation,
+            position: separator.position,
+            start: start,
+            end: end,
+            ink: ink,
+            width: width,
+            cap: .butt
+        )
     }
 
     static func segments(for panes: [Pane]) -> [GhosttyPaneSeparatorSegment] {
@@ -352,7 +417,7 @@ enum GhosttyPaneSeparatorLayout {
     }
 
     private static func makeSegment(
-        orientation: GhosttyPaneSeparatorSegment.Orientation,
+        orientation: GhosttyPaneLine.Orientation,
         first: Pane,
         second: Pane,
         position: UInt32,
@@ -437,6 +502,7 @@ struct GhosttyTerminalViewportPresentationProjection: Equatable {
         windowGrid: nil,
         cellMetrics: nil,
         panes: [],
+        paneLines: [],
         focusedSurfaceID: nil,
         isServerZoomed: false,
         windowCount: 0
@@ -445,6 +511,8 @@ struct GhosttyTerminalViewportPresentationProjection: Equatable {
     let windowGrid: GhosttyTerminalGridSize?
     let cellMetrics: GhosttyTerminalCellDisplayMetrics?
     let panes: [Pane]
+    /// Drawn in order over the space between and around the panes.
+    let paneLines: [GhosttyPaneLine]
     let focusedSurfaceID: UUID?
     let isServerZoomed: Bool
     let windowCount: Int

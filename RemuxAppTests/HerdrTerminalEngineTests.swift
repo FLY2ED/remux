@@ -201,6 +201,79 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// Frames Herdr sends after a hide, such as the one showing a zoom the leave undid, aren't drawn: the
+    /// frame from before the hide stays until the next show completes, whose frame is drawn.
+    func testFramesAfterAHideWaitForTheNextShow() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection()
+        let one = [Self.pane("P", x: 0, width: 4, height: 2)]
+        let two = [Self.pane("P", x: 0, width: 2, height: 2), Self.pane("Q", x: 2, width: 2, height: 2)]
+        await feed.receive(try Self.snapshot(revision: 1))
+        await feed.receive(.surface(try Self.surface(revision: 1, lines: ["one ", "two "], panes: one)))
+        _ = try await updates.nextLayout()
+        _ = try await updates.nextPaneScroll()
+
+        await feed.endActivation()
+        await feed.receive(try Self.snapshot(revision: 2))
+        await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["o t ", "w o "], panes: two)))
+        await feed.beginActivation(request: 1, columns: 4, rows: 2)
+        await feed.acknowledgeActivation(request: 1, floor: 3)
+        await feed.receive(try Self.snapshot(revision: 3))
+        await feed.receive(.surface(try Self.surface(projection: 3, revision: 3, lines: ["one ", "two "], panes: one)))
+
+        guard case .activated(1, _) = try await updates.next() else {
+            return XCTFail("a frame that came after the hide was drawn")
+        }
+        await engine.stop()
+    }
+
+    /// A show carrying Remux's zoom completes once Herdr has answered the zoom, on a frame from after it:
+    /// Herdr's frame for the show from before the zoom isn't drawn, whether the answer comes before the
+    /// zoomed frame or after it. A zoom that didn't go or changed nothing holds nothing.
+    func testAShowCarryingAZoomCompletesOnAFrameFromAfterTheZoom() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection()
+        let one = [Self.pane("P", x: 0, width: 4, height: 2)]
+        let two = [Self.pane("P", x: 0, width: 2, height: 2), Self.pane("Q", x: 2, width: 2, height: 2)]
+
+        await feed.beginActivation(request: 1, columns: 4, rows: 2, zoomed: true)
+        await feed.acknowledgeActivation(request: 1, floor: 1)
+        await feed.receive(try Self.tabSnapshot(revision: 1, zoomed: false))
+        await feed.receive(.surface(try Self.surface(revision: 1, lines: ["o t ", "w o "], panes: two)))
+        await feed.settleZoom(request: 1, answer: Self.zoomAnswer(sentAfter: 0, answeredAfter: 1))
+        await feed.receive(try Self.tabSnapshot(revision: 2, zoomed: true))
+        await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["one ", "two "], panes: one)))
+        guard case .paneTerminal("P", _) = try await updates.next(),
+              case .layout(let shown) = try await updates.next()
+        else { return XCTFail("the show's frame from before the zoom was drawn") }
+        XCTAssertEqual(shown.panes.map(\.paneID), ["P"])
+        _ = try await updates.nextPaneScroll()
+        guard case .activated(1, _) = try await updates.next() else { return XCTFail("the show didn't complete") }
+
+        await feed.endActivation()
+        await feed.beginActivation(request: 2, columns: 4, rows: 2, zoomed: true)
+        await feed.acknowledgeActivation(request: 2, floor: 3)
+        await feed.receive(try Self.tabSnapshot(revision: 3, zoomed: true))
+        await feed.receive(.surface(try Self.surface(projection: 3, revision: 3, lines: ["one ", "two "], panes: one)))
+        await feed.settleZoom(request: 2, answer: Self.zoomAnswer(sentAfter: 2, answeredAfter: 3))
+        guard case .activated(2, _) = try await updates.next() else {
+            return XCTFail("an answer after the zoomed frame didn't complete the show")
+        }
+
+        await feed.endActivation()
+        await feed.beginActivation(request: 3, columns: 4, rows: 2, zoomed: true)
+        await feed.acknowledgeActivation(request: 3, floor: 4)
+        await feed.receive(try Self.tabSnapshot(revision: 4, zoomed: true))
+        await feed.receive(.surface(try Self.surface(projection: 4, revision: 4, lines: ["one ", "two "], panes: one)))
+        await feed.settleZoom(request: 3, answer: nil)
+        guard case .activated(3, _) = try await updates.next() else {
+            return XCTFail("a zoom that didn't go held the show")
+        }
+        await engine.stop()
+    }
+
     /// A pane whose text area changes size is resized and repainted at once: none of its old text
     /// survives beside the new content.
     func testAResizedPaneIsRepaintedAtItsNewSize() async throws {
@@ -866,6 +939,22 @@ final class HerdrTerminalEngineTests: XCTestCase {
 
     static func snapshot(revision: UInt64, boot: String = "boot") throws -> HerdrSnapshot {
         try HerdrPresentationTests.snapshot(revision: revision, boot: boot)
+    }
+
+    /// A snapshot whose focused tab `t1` is `zoomed` or not.
+    static func tabSnapshot(revision: UInt64, zoomed: Bool) throws -> HerdrSnapshot {
+        let json = """
+        {"boot_id":"boot","revision":\(revision),"focused_workspace_id":"w1","focused_tab_id":"t1",
+         "focused_pane_id":"P","workspaces":[],"tabs":[{"tab_id":"t1","workspace_id":"w1","number":1,
+         "label":"main","custom_label":true,"zoomed":\(zoomed),"focused":true,"agent_status":"idle"}],
+         "panes":[],"agents":[]}
+        """
+        return try JSONDecoder().decode(HerdrSnapshot.self, from: Data(json.utf8))
+    }
+
+    /// Herdr's answer zooming tab `t1`, sent and answered after the given snapshots.
+    static func zoomAnswer(sentAfter: UInt64, answeredAfter: UInt64) -> HerdrTerminalEngine.ZoomAnswer {
+        HerdrTerminalEngine.ZoomAnswer(tabID: "t1", zoomed: true, sentAfter: sentAfter, answeredAfter: answeredAfter)
     }
 
     static func cells(_ text: String) -> [HerdrCell] {

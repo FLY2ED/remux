@@ -8,9 +8,9 @@ extension GhosttyTopLevelNoun {
 
 /// Presents a `HerdrScreenModel`'s tab through the `GhosttyTerminalScreenModeling` boundary so
 /// `GhosttySurfaceScreen` renders it: one top-level for the tab, one leaf for each pane with a text
-/// area, laid out on the tab's cell grid. The model owns all state; this maps it to the screen's
-/// projections and stable ids, and passes typing and pane focus to it. Other topology actions aren't
-/// offered.
+/// area, laid out on the tab's cell grid, and while the tab is zoomed a leaf for each of its panes. The
+/// model owns all state; this maps it to the screen's projections and stable ids, and passes typing,
+/// pane focus and zoom to it. Other topology actions aren't offered.
 @MainActor
 final class HerdrTerminalScreenAdapter: ObservableObject {
     private weak var model: HerdrScreenModel?
@@ -60,20 +60,23 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
 
     private func paneID(for surfaceID: UUID) -> String? {
         guard let paneID = paneIDsBySurfaceID[surfaceID],
-              model?.layout?.panes.contains(where: { $0.paneID == paneID && $0.hasTextArea }) == true
+              listedPanes.contains(where: { $0.paneID == paneID })
         else { return nil }
         return paneID
     }
 
     // MARK: Projections
 
-    private var shownPanes: [HerdrPaneLayout.Pane] {
-        model?.layout?.panes.filter(\.hasTextArea) ?? []
+    /// The panes the screen lists: those the frame draws, and while the tab is zoomed every pane of it,
+    /// so the pane sheet shows them all and can unzoom the tab. Only drawn panes have a surface.
+    private var listedPanes: [HerdrPaneLayout.Pane] {
+        guard let layout = model?.layout else { return [] }
+        return layout.tab?.zoomed == true ? layout.panes : layout.panes.filter(\.hasTextArea)
     }
 
     /// The model's focused pane, once it is laid out.
     private var focusedPaneID: String? {
-        guard let paneID = model?.focusedPaneID, shownPanes.contains(where: { $0.paneID == paneID }) else {
+        guard let paneID = model?.focusedPaneID, listedPanes.contains(where: { $0.paneID == paneID }) else {
             return nil
         }
         return paneID
@@ -91,7 +94,7 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
         let tab = GhosttyTopLevelSurface(
             id: id,
             name: layout.tab?.label ?? "",
-            leafIDs: shownPanes.map { surfaceID(forPane: $0.paneID) },
+            leafIDs: listedPanes.map { surfaceID(forPane: $0.paneID) },
             focusedLeafID: focusedPaneID.map { surfaceID(forPane: $0) }
         )
         return GhosttyRuntimeSurfaceTopologySnapshot(topLevels: [tab], selectedTopLevelID: id)
@@ -103,22 +106,32 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
                 windowGrid: nil,
                 cellMetrics: model?.measurement?.cellMetrics,
                 panes: [],
+                paneLines: [],
                 focusedSurfaceID: nil,
                 isServerZoomed: false,
                 windowCount: 0
             )
         }
-        let panes = shownPanes.map { pane in
-            let frame = GhosttyTerminalGridRect(
-                x: UInt32(pane.innerRect.x),
-                y: UInt32(pane.innerRect.y),
-                columns: UInt32(pane.innerRect.width),
-                rows: UInt32(pane.innerRect.height)
+        func gridRect(_ rect: HerdrSurfaceRect) -> GhosttyTerminalGridRect {
+            GhosttyTerminalGridRect(
+                x: UInt32(rect.x),
+                y: UInt32(rect.y),
+                columns: UInt32(rect.width),
+                rows: UInt32(rect.height)
             )
+        }
+        let zoomed = layout.tab?.zoomed == true
+        // The pane sheet's map shows where each pane sits. A zoomed tab's frame draws one pane, so the
+        // places come from the newest full layout of the tab; a pane without one leaves the map out.
+        let panes = listedPanes.compactMap { pane -> GhosttyTerminalViewportPresentationProjection.Pane? in
+            let drawn = pane.hasTextArea ? pane.innerRect.map(gridRect) : nil
+            guard let place = (zoomed ? model.mapRect(ofPane: pane.paneID).map(gridRect) : nil) ?? drawn else {
+                return nil
+            }
             return GhosttyTerminalViewportPresentationProjection.Pane(
                 id: surfaceID(forPane: pane.paneID),
-                normalFrame: frame,
-                visibleFrame: frame,
+                normalFrame: place,
+                visibleFrame: drawn,
                 isFocused: pane.paneID == focusedPaneID,
                 currentCommand: pane.name,
                 currentPath: pane.path
@@ -128,9 +141,30 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
             windowGrid: GhosttyTerminalGridSize(columns: UInt32(layout.columns), rows: UInt32(layout.rows)),
             cellMetrics: model.measurement?.cellMetrics,
             panes: panes,
+            paneLines: layout.borders.map { Self.paneLine($0, colors: model.terminalColors) },
             focusedSurfaceID: presentedSurfaceID,
-            isServerZoomed: false,
+            isServerZoomed: zoomed,
             windowCount: 1
+        )
+    }
+
+    /// As thin as Herdr's box-drawing glyphs show in a terminal.
+    static let borderWidth: CGFloat = 1
+
+    /// Herdr's border line where its glyphs are, in the colour Herdr gave it. Ends in the middle of a
+    /// cell reach on, as the glyphs' strokes meet in a corner.
+    static func paneLine(_ border: HerdrBorderLine, colors: GhosttyTerminalColors?) -> GhosttyPaneLine {
+        let ink = border.color.foregroundRGB(in: colors).map {
+            GhosttyPaneLine.Ink.color(red: $0.red, green: $0.green, blue: $0.blue)
+        }
+        return GhosttyPaneLine(
+            orientation: border.axis == .horizontal ? .horizontal : .vertical,
+            position: CGFloat(border.track) + 0.5,
+            start: CGFloat(border.start) / 2,
+            end: CGFloat(border.end) / 2,
+            ink: ink ?? .separator,
+            width: borderWidth,
+            cap: .square
         )
     }
 
@@ -302,7 +336,11 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
 
     func claimActiveTmuxViewportIfNeeded() {}
 
-    func refreshPaneMetadata(inTopLevel id: UUID) {}
+    /// The pane sheet is opening over the tab: a zoomed tab's map may lack places Herdr can report.
+    func refreshPaneMetadata(inTopLevel id: UUID) {
+        guard let model, let layout = model.layout, topLevelID(for: layout) == id else { return }
+        model.fillTabMapIfNeeded()
+    }
 
     func focusPane(_ id: UUID) -> GhosttyTerminalActionOutcome {
         guard let paneID = paneID(for: id), model?.focusPane(paneID) == true else {
@@ -330,7 +368,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func setFocusedPaneZoomed(_ zoomed: Bool) -> GhosttyTerminalActionOutcome {
-        .missingTarget(.focusedPane)
+        model?.setFocusedPaneZoomed(zoomed) == true ? .queued : .missingTarget(.focusedPane)
     }
 
     func closePane(_ id: UUID) -> GhosttyTerminalActionOutcome {
@@ -380,12 +418,12 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
                     guard let self,
                           let paneID = self.paneID(for: leafID),
                           let surface = self.model?.paneSurface(paneID),
-                          let pane = self.model?.layout?.panes.first(where: { $0.paneID == paneID }),
+                          let area = self.model?.layout?.panes.first(where: { $0.paneID == paneID })?.innerRect,
                           !surface.renderer.isClosing
                     else { return nil }
                     return await surface.renderer.capturePickerPreview(
-                        columns: UInt32(pane.innerRect.width),
-                        rows: UInt32(pane.innerRect.height),
+                        columns: UInt32(area.width),
+                        rows: UInt32(area.height),
                         budget: budget
                     )
                 },
