@@ -2003,8 +2003,8 @@ private struct TerminalSettingsView: View {
             } footer: {
                 Text(
                     "tmux windows and Herdr tabs with more than one pane show one pane at a time. "
-                        + "Change it for one from Panes. Remux undoes its zoom when you end a tmux session "
-                        + "or leave a Herdr session."
+                        + "To see all of a window's or tab's panes, turn Zoom off in Panes. Remux undoes its "
+                        + "zoom when you end a tmux session or leave a Herdr session."
                 )
             }
             .libraryHomeListRowSurface()
