@@ -151,6 +151,7 @@
 		71929CA0D4AE6FC5FA464C4B /* TerminalPreviewFileLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7C60C2A339E149300CA7177 /* TerminalPreviewFileLoader.swift */; };
 		71A9C4A6F7EB0180FB724585 /* herdr-03-handshake-rejections-gen2.s2c.bin in Resources */ = {isa = PBXBuildFile; fileRef = 883FA954E4FEA571964B773B /* herdr-03-handshake-rejections-gen2.s2c.bin */; };
 		71CC1415715E9ECCD4C80EA2 /* GhosttyTerminalPresentationProjectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4671F22C07201C31912267E9 /* GhosttyTerminalPresentationProjectorTests.swift */; };
+		71E53FBD9A8CC23CD5E34216 /* HerdrZoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1E9BB59D56FB73580742A11 /* HerdrZoom.swift */; };
 		71F19B3C954665ECD2B7D727 /* GhosttyPendingAttachment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 054929B68D4D41AF41FF0D8D /* GhosttyPendingAttachment.swift */; };
 		724E5F92CC1E85BCC204495E /* TmuxZoomOwnership.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC6C8F232F1C4CE0D24511ED /* TmuxZoomOwnership.swift */; };
 		732B5BDE7864F92B7BAF1570 /* herdr-12-notification-A.c2s.bin in Resources */ = {isa = PBXBuildFile; fileRef = 4B2DE576BED4561CF82FE0A5 /* herdr-12-notification-A.c2s.bin */; };
@@ -646,6 +647,7 @@
 		E05107088F3540B7C04D2007 /* GhosttyTerminalResponderViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttyTerminalResponderViewTests.swift; sourceTree = "<group>"; };
 		E0B4E47DA0DBB84F1301E14C /* GhosttyTerminalViewportCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttyTerminalViewportCoordinator.swift; sourceTree = "<group>"; };
 		E1E986C5E0A55FCDDE19B140 /* SSHPublicKeyInstallerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHPublicKeyInstallerTests.swift; sourceTree = "<group>"; };
+		E1E9BB59D56FB73580742A11 /* HerdrZoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HerdrZoom.swift; sourceTree = "<group>"; };
 		E3A4228D3F3885A93C87FD75 /* GhosttyAttachmentInteractiveImagePreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttyAttachmentInteractiveImagePreview.swift; sourceTree = "<group>"; };
 		E4A946B4CBB7E49BCAA7D52B /* ShortcutCollectionIconView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutCollectionIconView.swift; sourceTree = "<group>"; };
 		E4B1B6B563022EB3643DF42A /* herdr-03-handshake-rejections-badjson.expected.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "herdr-03-handshake-rejections-badjson.expected.json"; sourceTree = "<group>"; };
@@ -907,6 +909,7 @@
 				2B9BEDE9AAC2DD4552C28F67 /* HerdrTerminalEngine.swift */,
 				B48BCD9B1FDCD4C806DAFDE3 /* HerdrTerminalScreenAdapter.swift */,
 				1356EA036D03B39B6861B039 /* HerdrWire.swift */,
+				E1E9BB59D56FB73580742A11 /* HerdrZoom.swift */,
 			);
 			path = Herdr;
 			sourceTree = "<group>";
@@ -1474,6 +1477,7 @@
 				4B6AEF6D7727180D52B7F0CD /* HerdrTerminalEngine.swift in Sources */,
 				F638D6251C79702A6AEAC41D /* HerdrTerminalScreenAdapter.swift in Sources */,
 				24F364DBCE26024831B6F42D /* HerdrWire.swift in Sources */,
+				71E53FBD9A8CC23CD5E34216 /* HerdrZoom.swift in Sources */,
 				6959353E0AAA65D244C5B077 /* JSONFileStore.swift in Sources */,
 				69B6BE62C46DCA6C8CA9BFBD /* PanePreviewLayout.swift in Sources */,
 				021F179B9FAE8CD2AACFEA2A /* PaneTopologyLayout.swift in Sources */,

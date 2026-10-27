@@ -1,12 +1,13 @@
 import Foundation
 import GhosttyKit
 
-/// The panes the engine last painted for one connection's tab, in the frame's cells.
+/// The tab the engine last painted for one connection, and its panes, in the frame's cells.
 struct HerdrPaneLayout: Equatable, Sendable {
     struct Pane: Equatable, Sendable {
         let paneID: String
-        /// The pane's text area: its terminal's size, and where it sits in the frame.
-        let innerRect: HerdrSurfaceRect
+        /// The pane's text area: its terminal's size, and where it sits in the frame. Nil for a pane the
+        /// frame doesn't draw, as a zoomed tab draws only its focused pane.
+        let innerRect: HerdrSurfaceRect?
         /// The pane's name as Herdr's pane navigator lists it, from the snapshot.
         var name = ""
         /// The directory of the pane's foreground program, else of its shell; empty when unknown.
@@ -17,12 +18,15 @@ struct HerdrPaneLayout: Equatable, Sendable {
     struct Tab: Equatable, Sendable {
         let tabID: String
         let label: String
+        /// Whether the tab is zoomed: the frame then draws only its focused pane.
+        let zoomed: Bool
     }
 
     let bootID: String
     let tab: Tab?
     let columns: UInt16
     let rows: UInt16
+    /// The tab's panes in Herdr's order, as the snapshot lists them, also those the frame doesn't draw.
     let panes: [Pane]
     /// Whether a popup is open over the tab. It takes the tab's input meanwhile.
     let hasPopup: Bool
@@ -391,19 +395,25 @@ actor HerdrTerminalEngine {
         continuation.yield(.paneTerminal(paneID: paneID, terminal: terminal))
     }
 
+    /// The tab's panes come from the snapshot, which lists a zoomed tab's undrawn panes too, in Herdr's
+    /// order; a drawn pane it doesn't list follows them.
     private func publishLayout(of surface: HerdrPaneSurfaceFrame, snapshot: HerdrSnapshot) {
         let tab = snapshot.tabs.first { $0.tabID == snapshot.focusedTabID }
+        var paneIDs = tab.map { tab in snapshot.panes.filter { $0.tabID == tab.tabID }.map(\.paneID) } ?? []
+        for pane in surface.panes where !paneIDs.contains(pane.paneID) {
+            paneIDs.append(pane.paneID)
+        }
         let next = HerdrPaneLayout(
             bootID: surface.bootID,
-            tab: tab.map { HerdrPaneLayout.Tab(tabID: $0.tabID, label: $0.label) },
+            tab: tab.map { HerdrPaneLayout.Tab(tabID: $0.tabID, label: $0.label, zoomed: $0.zoomed) },
             columns: surface.frame.width,
             rows: surface.frame.height,
-            panes: surface.panes.map {
+            panes: paneIDs.map { paneID in
                 HerdrPaneLayout.Pane(
-                    paneID: $0.paneID,
-                    innerRect: $0.innerRect,
-                    name: Self.name(ofPane: $0.paneID, in: snapshot),
-                    path: Self.path(ofPane: $0.paneID, in: snapshot)
+                    paneID: paneID,
+                    innerRect: surface.panes.first { $0.paneID == paneID }?.innerRect,
+                    name: Self.name(ofPane: paneID, in: snapshot),
+                    path: Self.path(ofPane: paneID, in: snapshot)
                 )
             },
             hasPopup: surface.popup != nil

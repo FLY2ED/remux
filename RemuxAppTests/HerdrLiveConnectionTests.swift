@@ -129,6 +129,119 @@ final class HerdrLiveConnectionTests: XCTestCase {
         XCTAssertEqual(session.model.sendText("true\r"), .accepted)
     }
 
+    // MARK: - Zoom
+
+    /// With "Zoom multipane windows" on, Herdr zooms the two-pane tab on screen as the session is shown,
+    /// the pane sheet maps both panes from Herdr's answer, and leaving the screen, or ending the session,
+    /// unzooms it, as Herdr itself reports.
+    @MainActor
+    func testATabIsZoomedWhileShownOnHerdr093() async throws {
+        try await checkTabIsZoomedWhileShown(version: "0.9.3")
+    }
+
+    @MainActor
+    func testATabIsZoomedWhileShownOnHerdr095() async throws {
+        try await checkTabIsZoomedWhileShown(version: "0.9.5")
+    }
+
+    /// A zoom another client made stays when the session leaves the screen.
+    @MainActor
+    func testAZoomMadeElsewhereStaysOnHerdr093() async throws {
+        let session = try await openShownSession(version: "0.9.3", settings: Self.zooming, through: { $0 })
+        let panes = try await split(session)
+        try await herdrZoom(session, pane: panes.focused, on: true)
+        try await zoomState(session, pane: panes.focused, is: true)
+        session.model.setSelected(false)
+        session.model.setSelected(true)
+        try await waitUntil("the session wasn't shown again", timeout: .seconds(10)) { session.model.isInputAvailable }
+        session.model.setSelected(false)
+        try await Task.sleep(for: .seconds(1))
+        try await zoomState(session, pane: panes.focused, is: true)
+    }
+
+    @MainActor
+    private func checkTabIsZoomedWhileShown(version: String) async throws {
+        let session = try await openShownSession(version: version, settings: Self.zooming, through: { $0 })
+        let panes = try await split(session)
+        // The split happened while shown; the setting zooms the tab on screen as it is shown.
+        try await zoomState(session, pane: panes.focused, is: false)
+        session.model.setSelected(false)
+        session.model.setSelected(true)
+        try await zoomState(session, pane: panes.focused, is: true)
+        let adapter = session.model.terminalScreenAdapter
+        try await waitUntil("the pane sheet didn't map both panes", timeout: .seconds(10)) {
+            guard let topLevel = adapter.selectedPaneSheetPresentationProjection()?.topLevelID else { return false }
+            let sheet = adapter.paneSelectionSheetRenderProjection(topLevelID: topLevel)
+            return sheet.isServerZoomed && sheet.panes.count == 2 && sheet.panes.allSatisfy { $0.frame != nil }
+        }
+
+        session.model.setSelected(false)
+        try await zoomState(session, pane: panes.focused, is: false)
+
+        session.model.setSelected(true)
+        try await zoomState(session, pane: panes.focused, is: true)
+        try await waitUntil("the session wasn't shown again", timeout: .seconds(10)) { session.model.isInputAvailable }
+        await session.model.stop()
+        try await zoomState(session, pane: panes.focused, is: false)
+    }
+
+    private static var zooming: TerminalSettings {
+        var settings = TerminalSettings.default
+        settings.zoomMultipaneWindowsByDefault = true
+        return settings
+    }
+
+    /// Splits the session's first pane from another client, keeping the focus, and returns the panes once
+    /// the session's frame draws both.
+    @MainActor
+    private func split(_ session: ShownSession) async throws -> (focused: String, other: String) {
+        let focused = try XCTUnwrap(session.model.focusedPaneID)
+        let split = try await session.fixture.herdr(
+            ["pane", "split", focused, "--direction", "right", "--no-focus"],
+            trace: RemuxTransportStartupTrace(flowID: "herdr-live-zoom")
+        )
+        XCTAssertEqual(split.exitStatus, 0, String(decoding: split.stderr, as: UTF8.self))
+        try await waitUntil("the split pane wasn't drawn", timeout: .seconds(10)) {
+            (session.model.layout?.panes.filter(\.hasTextArea).count ?? 0) == 2
+        }
+        let other = try XCTUnwrap(session.model.layout?.panes.first { $0.paneID != focused }?.paneID)
+        return (focused, other)
+    }
+
+    @MainActor
+    private func herdrZoom(_ session: ShownSession, pane: String, on: Bool) async throws {
+        let result = try await session.fixture.herdr(
+            ["pane", "zoom", pane, on ? "--on" : "--off"],
+            trace: RemuxTransportStartupTrace(flowID: "herdr-live-zoom")
+        )
+        XCTAssertEqual(result.exitStatus, 0, String(decoding: result.stderr, as: UTF8.self))
+    }
+
+    /// Waits until Herdr reports `pane`'s tab zoomed or not, as its own `pane layout` tells it.
+    @MainActor
+    private func zoomState(_ session: ShownSession, pane: String, is zoomed: Bool) async throws {
+        struct Reply: Decodable {
+            struct Result: Decodable {
+                struct Layout: Decodable { let zoomed: Bool }
+                let layout: Layout
+            }
+
+            let result: Result
+        }
+        let deadline = ContinuousClock.now + .seconds(10)
+        var last: Bool?
+        while ContinuousClock.now < deadline {
+            let result = try await session.fixture.herdr(
+                ["pane", "layout", "--pane", pane],
+                trace: RemuxTransportStartupTrace(flowID: "herdr-live-zoom")
+            )
+            last = try? JSONDecoder().decode(Reply.self, from: result.stdout).result.layout.zoomed
+            if last == zoomed { return }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        throw HerdrLiveError(description: "Herdr reported the tab zoomed \(String(describing: last)), not \(zoomed)")
+    }
+
     // MARK: - Health
 
     /// Herdr's health rule against a real server, with short limits: a quiet connection is pinged after
@@ -346,6 +459,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
     @MainActor
     private func openShownSession(
         version: String,
+        settings: TerminalSettings = .default,
         through wrap: @escaping @Sendable (any HerdrBridgeTransport) -> any HerdrBridgeTransport
     ) async throws -> ShownSession {
         let fixture = try await HerdrLiveFixture.start(try HerdrLiveConfiguration.load(), version: version)
@@ -371,7 +485,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
                     identityID: server.identityID,
                     displayLabel: server.displayName
                 ),
-                terminalSettings: .default
+                terminalSettings: settings
             ),
             sessionInstanceID: UUID(),
             openBridge: {

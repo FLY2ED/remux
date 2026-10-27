@@ -47,7 +47,8 @@ final class HerdrScreenModel {
 
     /// What the model asks of the connection and the engine, in the order it asks.
     private enum Operation: Sendable {
-        case show(HerdrSurfaceGeometry, request: UInt64)
+        /// `zoom`, when given, is the pane whose tab the show zooms, behind the show.
+        case show(HerdrSurfaceGeometry, request: UInt64, zoom: String?)
         case hide
         case resize(HerdrSurfaceGeometry)
         case theme([HerdrHostThemeUpdate])
@@ -212,9 +213,13 @@ final class HerdrScreenModel {
     private var sizeKnownSince: ContinuousClock.Instant?
 
     private(set) var layout: HerdrPaneLayout?
+    /// The newest snapshot Herdr sent, kept across a reconnect until the next one's first.
+    private var snapshot: HerdrSnapshot?
     /// The pane keys go to and the screen highlights: the newest snapshot's focused pane, as in
     /// Herdr's client. A pane can be focused before its first frame arrives.
     private(set) var focusedPaneID: String?
+    private var ownedZoom = HerdrOwnedZoom()
+    private var tabMap: HerdrTabMap?
     private var terminals: [String: HerdrRetainedTerminal] = [:]
     private var surfaces: [String: HerdrPaneSurface] = [:]
     private var paneScrolls: [String: HerdrPaneScroll] = [:]
@@ -408,11 +413,25 @@ final class HerdrScreenModel {
     /// Closes the connection, lets the engine finish its event and free the pane producers, waits for
     /// renderers still being created, then closes every renderer, which unregisters it from the engine
     /// before freeing it, and releases the Ghostty app once every renderer closed anywhere is freed.
+    ///
+    /// A session on screen first takes off the zoom Remux made, as leaving the screen does, and waits for
+    /// Herdr's answer within Herdr's time for a show, so the unzoom isn't lost with the connection. A new
+    /// attempt can't take the zoom over, since Herdr's zoom has no owner. Closing the connection then hides
+    /// the session on the server.
     func stop() async {
         guard !stopped else { return }
+        let unzoom = attempt.flatMap { isCurrent($0) ? $0.connection : nil }
+            .flatMap { connection in paneToUnzoom.map { (connection, $0) } }
         stopped = true
         cancelRecovery()
         resumeSizeWaiter()
+        if let (connection, paneID) = unzoom {
+            _ = await connection.commandIfIdle(
+                Self.paneZoomMethod,
+                params: Self.zoomParams(paneID, zoomed: false),
+                timeout: connectionTiming.activation
+            )
+        }
         if let attempt {
             attempt.finishOperations()
             attempt.task?.cancel()
@@ -602,11 +621,7 @@ final class HerdrScreenModel {
         attempt.focusInFlight = false
         guard isCurrent(attempt) else { return }
         if let failure {
-            let error = failure as? HerdrCommandError
-                ?? .failed(code: "invalid_response", message: failure.localizedDescription)
-            if notices.shows(Self.paneFocusMethod, failedWith: error, bootID: layout?.bootID) {
-                terminalScreenAdapter.presentFailure(Self.focusFailureLabel)
-            }
+            presentFailure(of: Self.paneFocusMethod, label: Self.focusFailureLabel, failure)
         } else {
             notices.succeeded(Self.paneFocusMethod, bootID: layout?.bootID)
         }
@@ -614,6 +629,100 @@ final class HerdrScreenModel {
             attempt.waitingFocus = nil
             requestFocus(next, attempt: attempt, connection: connection)
         }
+    }
+
+    private func presentFailure(of method: String, label: String, _ failure: Error) {
+        let error = failure as? HerdrCommandError
+            ?? .failed(code: "invalid_response", message: failure.localizedDescription)
+        if notices.shows(method, failedWith: error, bootID: layout?.bootID) {
+            terminalScreenAdapter.presentFailure(label)
+        }
+    }
+
+    // MARK: - Zoom
+
+    /// The pane sheet's zoom button: Herdr zooms or unzooms the focused pane's tab. Returns false when the
+    /// session can't take it.
+    func setFocusedPaneZoomed(_ zoomed: Bool) -> Bool {
+        guard let attempt, isCurrent(attempt), let connection = attempt.connection, attempt.isActivated,
+              let paneID = focusedPaneID
+        else { return false }
+        requestZoom(paneID, zoomed: zoomed, connection: connection, reportingFailure: true)
+        return true
+    }
+
+    /// Asks Herdr to zoom or unzoom `paneID`'s tab, after the commands already asked for. Every
+    /// `pane.zoom` focuses its target first, so this is the focused pane. A failure is shown only for the
+    /// user's own zoom.
+    private func requestZoom(
+        _ paneID: String,
+        zoomed: Bool,
+        connection: HerdrConnection,
+        reportingFailure: Bool
+    ) {
+        guard let bootID = snapshot?.bootID else { return }
+        Task { [weak self] in
+            let answer: Result<Data, Error>
+            do {
+                answer = .success(try await connection.command(
+                    Self.paneZoomMethod,
+                    params: Self.zoomParams(paneID, zoomed: zoomed)
+                ))
+            } catch {
+                answer = .failure(error)
+            }
+            self?.zoomAnswered(answer, bootID: bootID, reportingFailure: reportingFailure)
+        }
+    }
+
+    /// The setting zooms the tab on screen as the session is shown: the focused pane, when the tab has
+    /// more than one pane. It is asked even when the tab is zoomed already: Herdr's answer says whether
+    /// Remux changed anything, and where the tab's panes sit for the pane sheet's map.
+    private var paneToZoomOnShow: String? {
+        guard currentTerminalSettings.zoomMultipaneWindowsByDefault, let snapshot,
+              let tabID = snapshot.focusedTabID, let paneID = snapshot.focusedPaneID,
+              snapshot.panes.count(where: { $0.tabID == tabID }) > 1
+        else { return nil }
+        return paneID
+    }
+
+    /// The pane to unzoom the zoom Remux made with as the session leaves the screen, if it made one on
+    /// the tab on screen.
+    private var paneToUnzoom: String? {
+        snapshot.flatMap(ownedZoom.paneToUnzoom(in:))
+    }
+
+    /// Herdr's answer records or forgets the zoom Remux made, and gives the tab's map; an answer that
+    /// comes after the stop changes nothing.
+    private func zoomAnswered(_ answer: Result<Data, Error>, bootID: String, reportingFailure: Bool) {
+        guard !stopped else { return }
+        let result: HerdrPaneZoomResult
+        do {
+            result = try HerdrPaneZoomResult(reply: try answer.get())
+        } catch {
+            if reportingFailure { presentFailure(of: Self.paneZoomMethod, label: Self.zoomFailureLabel, error) }
+            return
+        }
+        if reportingFailure { notices.succeeded(Self.paneZoomMethod, bootID: bootID) }
+        ownedZoom.record(result, bootID: bootID)
+        tabMap = HerdrTabMap(
+            bootID: bootID,
+            tabID: result.layout.tabID,
+            rects: Dictionary(result.layout.panes.map { ($0.paneID, $0.rect) }) { first, _ in first }
+        )
+        didChange()
+    }
+
+    /// Where `paneID` sits in the tab on screen, for the pane sheet's map: from the newest full layout of
+    /// the tab Herdr reported.
+    func mapRect(ofPane paneID: String) -> HerdrSurfaceRect? {
+        guard let layout, let tab = layout.tab, let tabMap, tabMap.bootID == layout.bootID, tabMap.tabID == tab.tabID
+        else { return nil }
+        return tabMap.rects[paneID]
+    }
+
+    static func zoomParams(_ paneID: String, zoomed: Bool) -> [String: String] {
+        ["pane_id": paneID, "mode": zoomed ? "on" : "off"]
     }
 
     // MARK: - Scrolling
@@ -644,7 +753,7 @@ final class HerdrScreenModel {
             if momentum == .ended { wheelRemainders[paneID] = nil }
         }
         guard let attempt = shownAttempt, let measurement, presentation(ofPane: paneID) == .ready,
-              let pane = layout?.panes.first(where: { $0.paneID == paneID })
+              let area = layout?.panes.first(where: { $0.paneID == paneID })?.innerRect
         else { return false }
         if momentum == .began, paneID != focusedPaneID { _ = focusPane(paneID) }
 
@@ -662,8 +771,8 @@ final class HerdrScreenModel {
         }
         let wheel = HerdrMouseEvent(
             kind: steps > 0 ? .scrollUp : .scrollDown,
-            column: cell(point.x, size: measurement.cellMetrics.pixelWidth, count: pane.innerRect.width),
-            row: cell(point.y, size: measurement.cellMetrics.pixelHeight, count: pane.innerRect.height),
+            column: cell(point.x, size: measurement.cellMetrics.pixelWidth, count: area.width),
+            row: cell(point.y, size: measurement.cellMetrics.pixelHeight, count: area.height),
             lines: Self.wheelLines
         )
         let events = Array(repeating: HerdrInputEvent.mouse(wheel), count: Int(steps.magnitude))
@@ -813,7 +922,7 @@ final class HerdrScreenModel {
         attemptID: UInt64
     ) async {
         switch operation {
-        case .show(let geometry, let request):
+        case .show(let geometry, let request, let zoom):
             await feed.beginActivation(request: request, columns: geometry.cols, rows: geometry.rows)
             await connection.sendShow(geometry) { [weak self] result in
                 switch result {
@@ -823,7 +932,22 @@ final class HerdrScreenModel {
                     Task { @MainActor [weak self] in self?.showFailed(attemptID, request: request, error: error) }
                 }
             }
+            // Behind the show, so Herdr takes it from a client on screen.
+            if let zoom { requestZoom(zoom, zoomed: true, connection: connection, reportingFailure: false) }
         case .hide:
+            // The zoom Remux made comes off first, while Herdr still takes commands from this client. It
+            // goes only if no command is in flight: one that waited for the lane would hold the hide back,
+            // so the zoom then stays, as when the app can't clean up at all.
+            if let paneID = paneToUnzoom, let bootID = snapshot?.bootID {
+                _ = await connection.sendCommandIfIdle(
+                    Self.paneZoomMethod,
+                    params: Self.zoomParams(paneID, zoomed: false)
+                ) { [weak self] answer in
+                    Task { @MainActor [weak self] in
+                        self?.zoomAnswered(answer, bootID: bootID, reportingFailure: false)
+                    }
+                }
+            }
             // The session is off screen and takes no input either way; a hide Herdr doesn't confirm
             // leaves only its stale foreground on the server.
             await feed.endActivation()
@@ -870,7 +994,7 @@ final class HerdrScreenModel {
             switch event {
             case .snapshot(let snapshot):
                 await feed.receive(snapshot)
-                Task { @MainActor in model.snapshotArrived(attemptID, focusedPaneID: snapshot.focusedPaneID) }
+                Task { @MainActor in model.snapshotArrived(attemptID, snapshot) }
             case .surface(let output):
                 await feed.receive(output)
             case .ended(let error):
@@ -932,11 +1056,13 @@ final class HerdrScreenModel {
         sizeWaiter = nil
     }
 
-    private func snapshotArrived(_ attemptID: UInt64, focusedPaneID: String?) {
+    private func snapshotArrived(_ attemptID: UInt64, _ snapshot: HerdrSnapshot) {
         guard let attempt, attempt.id == attemptID, isCurrent(attempt) else { return }
         if appPhase != .background, readySince == nil { readySince = .now }
-        if focusedPaneID != self.focusedPaneID {
-            self.focusedPaneID = focusedPaneID
+        self.snapshot = snapshot
+        ownedZoom.reconcile(with: snapshot)
+        if snapshot.focusedPaneID != focusedPaneID {
+            focusedPaneID = snapshot.focusedPaneID
             reconcilePresentationActivity()
             didChange()
         }
@@ -1066,7 +1192,7 @@ final class HerdrScreenModel {
         attempt.activationDeadline = nil
         if wanted {
             awaitActivation(of: attempt, request: attempt.visibilityRequests)
-            attempt.ask(.show(geometry, request: attempt.visibilityRequests))
+            attempt.ask(.show(geometry, request: attempt.visibilityRequests, zoom: paneToZoomOnShow))
         } else {
             attempt.ask(.hide)
         }
@@ -1159,6 +1285,14 @@ final class HerdrScreenModel {
             createRendererIfPossible(paneID)
         case .layout(let layout):
             self.layout = layout
+            if let tab = layout.tab, !tab.zoomed {
+                let drawn = layout.panes.compactMap { pane in pane.hasTextArea ? pane.innerRect.map { (pane.paneID, $0) } : nil }
+                tabMap = HerdrTabMap(
+                    bootID: layout.bootID,
+                    tabID: tab.tabID,
+                    rects: Dictionary(drawn) { first, _ in first }
+                )
+            }
             let shown = Set(layout.panes.lazy.filter(\.hasTextArea).map(\.paneID))
             terminals = terminals.filter { shown.contains($0.key) }
             presentationFailures = presentationFailures.filter { shown.contains($0.key) }
@@ -1199,12 +1333,9 @@ final class HerdrScreenModel {
 
     private func displayMetrics(for paneID: String) -> GhosttySurfaceDisplayMetrics? {
         guard let measurement,
-              let pane = layout?.panes.first(where: { $0.paneID == paneID })
+              let area = layout?.panes.first(where: { $0.paneID == paneID })?.innerRect
         else { return nil }
-        return measurement.displayMetrics(
-            columns: UInt32(pane.innerRect.width),
-            rows: UInt32(pane.innerRect.height)
-        )
+        return measurement.displayMetrics(columns: UInt32(area.width), rows: UInt32(area.height))
     }
 
     private func retryFailedPanes() {
@@ -1387,8 +1518,10 @@ final class HerdrScreenModel {
     )
 
     nonisolated static let paneFocusMethod = "pane.focus"
+    nonisolated static let paneZoomMethod = "pane.zoom"
     private static let inputFailureLabel = "input"
     private static let focusFailureLabel = "select pane"
+    private static let zoomFailureLabel = "zoom pane"
 
     private static let rendererFailureMessage = "Terminal renderer is unavailable. Reconnect to try again."
     private static let configurationFailureMessage =
@@ -1526,9 +1659,10 @@ extension HerdrBridgeError {
 }
 
 extension HerdrPaneLayout.Pane {
-    /// A pane with no text area has no terminal.
+    /// A pane with no text area, or one the frame doesn't draw, has no terminal.
     var hasTextArea: Bool {
-        innerRect.width > 0 && innerRect.height > 0
+        guard let innerRect else { return false }
+        return innerRect.width > 0 && innerRect.height > 0
     }
 }
 

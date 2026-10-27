@@ -223,6 +223,8 @@ actor HerdrConnection {
         /// A show sent with `sendShow`: its answer goes to `answered`, after the same rollback as a
         /// failed `show`.
         case show(position: UInt64, answered: @Sendable (Result<UInt64, Error>) -> Void)
+        /// A command sent with `sendCommandIfIdle`: its reply's JSON goes to `answered`.
+        case command(answered: @Sendable (Result<Data, Error>) -> Void)
     }
 
     private var pending: [String: Pending] = [:]
@@ -694,6 +696,41 @@ actor HerdrConnection {
         return try await reply(to: id, method: method, holdsLane: true, timeout: timing.command, sending: [message])
     }
 
+    /// Sends a command only if it can go at once: the session is shown and no command is in flight.
+    /// Returns whether it went, once it is queued behind everything sent before it; `answered` gets its
+    /// reply as `command` returns it, or its failure within `timeout` (Herdr's command timeout unless
+    /// given). Herdr refuses a command while another is in flight or while the session is hidden
+    /// (`endpoint_requests.rs`), so one that would have to wait isn't sent.
+    func sendCommandIfIdle(
+        _ method: String,
+        params: some Encodable & Sendable,
+        timeout: Duration? = nil,
+        answered: @escaping @Sendable (Result<Data, Error>) -> Void
+    ) -> Bool {
+        guard !ended, isActive, !laneBusy, negotiated.methods.contains(method), let bootID else { return false }
+        let id = makeID("c")
+        guard let message = try? HerdrClientMessage.endpointRequest(bootID: bootID, id: id, method: method, params: params)
+        else { return false }
+        laneBusy = true
+        register(id, waiter: .command(answered: answered), holdsLane: true, timeout: timeout ?? timing.command,
+                 method: method, sending: [message])
+        return true
+    }
+
+    /// `sendCommandIfIdle`, waiting for the reply: nil when the command didn't go.
+    func commandIfIdle(
+        _ method: String,
+        params: some Encodable & Sendable,
+        timeout: Duration? = nil
+    ) async -> Result<Data, Error>? {
+        await withCheckedContinuation { continuation in
+            let sent = sendCommandIfIdle(method, params: params, timeout: timeout) {
+                continuation.resume(returning: $0)
+            }
+            if !sent { continuation.resume(returning: nil) }
+        }
+    }
+
     private func reply(
         to id: String,
         method: String,
@@ -740,6 +777,8 @@ actor HerdrConnection {
             }
             if case .failure = floor, position == visibilityRequests { rollBackShow() }
             answered(floor)
+        case .command(let answered)?:
+            answered(result)
         case nil:
             break
         }
