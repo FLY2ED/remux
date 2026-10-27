@@ -177,6 +177,26 @@ struct TerminalPreviewCandidate: Equatable, Sendable {
     }
 }
 
+/// A web link the terminal printed, which opens in the system browser rather
+/// than in a preview. Loopback URLs stay previews: only the server reaches them.
+enum TerminalExternalLink {
+    static func url(selection: String, explicitTarget: String? = nil) -> URL? {
+        let value = (explicitTarget ?? selection).trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !value.contains("\0"),
+              !value.contains("\n"),
+              !value.contains("\r"),
+              let url = URL(string: value),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host?.isEmpty == false,
+              TerminalPreviewCandidate(selection: value) == nil
+        else { return nil }
+        return url
+    }
+}
+
 struct TerminalPreviewSelectionContext: Equatable {
     private var automaticVisibleText: String?
     private var automaticExplicitTarget: String?
@@ -195,13 +215,20 @@ struct TerminalPreviewSelectionContext: Equatable {
     }
 
     func candidate(for selection: String) -> TerminalPreviewCandidate? {
-        let matchesAutomaticSelection = automaticVisibleText == selection
-        let explicitTarget = matchesAutomaticSelection
-            ? automaticExplicitTarget
-            : nil
-        return TerminalPreviewCandidate(
+        TerminalPreviewCandidate(
             selection: selection,
-            explicitTarget: explicitTarget
+            explicitTarget: explicitTarget(for: selection)
         )
+    }
+
+    func externalLink(for selection: String) -> URL? {
+        TerminalExternalLink.url(
+            selection: selection,
+            explicitTarget: explicitTarget(for: selection)
+        )
+    }
+
+    private func explicitTarget(for selection: String) -> String? {
+        automaticVisibleText == selection ? automaticExplicitTarget : nil
     }
 }

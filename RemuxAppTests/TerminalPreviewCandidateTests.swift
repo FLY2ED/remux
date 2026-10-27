@@ -172,4 +172,48 @@ final class TerminalPreviewCandidateTests: XCTestCase {
         context.selectionDidChange()
         XCTAssertNil(context.candidate(for: "report"))
     }
+
+    func testOpensNonLoopbackWebLinksExternally() {
+        for value in [
+            "https://github.com/h3nock/remux/pull/131",
+            "http://example.com/docs?page=2#setup",
+            "  HTTPS://Example.com/path  \n",
+        ] {
+            XCTAssertNotNil(TerminalExternalLink.url(selection: value), value)
+        }
+    }
+
+    func testKeepsLoopbackAndNonWebTargetsOutOfExternalLinks() {
+        for value in [
+            "http://localhost:3000",
+            "http://127.0.0.1:8000/docs",
+            "localhost:3000",
+            "/srv/app/readme.md",
+            "file:///srv/app/readme.md",
+            "mailto:someone@example.com",
+            "ftp://example.com/file",
+            "https://",
+            "https://example.com/a\nb",
+        ] {
+            XCTAssertNil(TerminalExternalLink.url(selection: value), value)
+        }
+    }
+
+    func testExternalLinkUsesExplicitTargetOnlyForUntouchedAutomaticSelection() {
+        var context = TerminalPreviewSelectionContext()
+        context.setAutomaticSelection(
+            visibleText: "the PR",
+            explicitTarget: "https://github.com/h3nock/remux/pull/1"
+        )
+
+        XCTAssertEqual(
+            context.externalLink(for: "the PR")?.absoluteString,
+            "https://github.com/h3nock/remux/pull/1"
+        )
+        XCTAssertNil(context.candidate(for: "the PR"))
+        XCTAssertNil(context.externalLink(for: "the PR edited"))
+
+        context.selectionDidChange()
+        XCTAssertNil(context.externalLink(for: "the PR"))
+    }
 }

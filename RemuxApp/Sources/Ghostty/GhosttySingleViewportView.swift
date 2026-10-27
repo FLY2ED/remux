@@ -928,6 +928,20 @@ private final class GhosttyCompositeViewportContainerView: UIView,
                 else { return }
                 self.onPreviewSelection?(surface.id, candidate)
             })
+        } else if previewSelectionContext.externalLink(for: selectedText) != nil {
+            actions.append(UIAction(
+                title: "Open Link",
+                image: UIImage(systemName: "safari")
+            ) { [weak self] _ in
+                guard let self,
+                      let (_, control) = self.exactLocalSelectionSurface(),
+                      let selectedText = control.readSelection(),
+                      let url = self.previewSelectionContext.externalLink(
+                          for: selectedText
+                      )
+                else { return }
+                UIApplication.shared.open(url)
+            })
         }
         actions.append(
             UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in
