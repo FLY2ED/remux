@@ -633,6 +633,61 @@ final class HerdrLiveConnectionTests: XCTestCase {
         XCTAssertEqual(copied, url)
     }
 
+    /// A long-press on a plain-text link the pane wraps finds only a row's part of it in the pane's own
+    /// terminal, on either row; Herdr finds the rest, the selection grows over both rows, and its copy is
+    /// the link on one line.
+    @MainActor
+    func testAWrappedPlainLinkSelectsAndCopiesWholeOnHerdr093() async throws {
+        try await checkWrappedPlainLinkSelectsWhole(version: "0.9.3")
+    }
+
+    @MainActor
+    func testAWrappedPlainLinkSelectsAndCopiesWholeOnHerdr095() async throws {
+        try await checkWrappedPlainLinkSelectsWhole(version: "0.9.5")
+    }
+
+    /// Scrolled wholly off screen and back, a selection is still there, drawn at its line, and copies it.
+    @MainActor
+    func testASelectionScrolledOffScreenStaysOnHerdr093() async throws {
+        try await checkASelectionScrolledOffScreenStays(version: "0.9.3")
+    }
+
+    @MainActor
+    func testASelectionScrolledOffScreenStaysOnHerdr095() async throws {
+        try await checkASelectionScrolledOffScreenStays(version: "0.9.5")
+    }
+
+    /// How long a long-press's selection takes to grow over a wrapped link: from the pane's terminal's cut
+    /// match to the grown selection, `pane.link.resolve`'s round trip through Remux's connection over SSH
+    /// to the fixture included.
+    @MainActor
+    func testWrappedLinkGrowthTime() async throws {
+        let session = try await openShownSession(version: "0.9.5", through: { $0 })
+        let pane = try selectionPane(of: session)
+        let url = "https://example.com/\(UUID().uuidString.prefix(8).lowercased())/" + String(repeating: "p", count: Int(pane.area.width))
+        XCTAssertEqual(session.model.sendText("clear; printf '%s\\n' \(url)\r"), .accepted)
+        let row = try await waitForWrappedRows(of: url, in: session, pane: pane)
+        let press = cellPoint(row: row, column: 2, in: session)
+        let adapter = session.model.terminalScreenAdapter
+
+        var samples: [Duration] = []
+        for _ in 0..<30 {
+            _ = pane.surface.clearSelection()
+            XCTAssertEqual(longPress(pane, at: press), .link)
+            let started = ContinuousClock.now
+            let grew = await adapter.completeLinkSelection(in: pane.id, at: press, selected: .link)
+            samples.append(ContinuousClock.now - started)
+            XCTAssertTrue(grew)
+        }
+        samples.sort()
+        let summary = "a wrapped link's selection grows over \(samples.count) long-presses in: "
+            + "median \(samples[samples.count / 2]), p95 \(samples[samples.count * 95 / 100]), max \(samples.last!)"
+        print(summary)
+        let attachment = XCTAttachment(string: summary)
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     /// How long a copy waits for Herdr: `pane.selection.read`'s round trip through Remux's connection,
     /// over SSH to the fixture.
     @MainActor
@@ -738,6 +793,92 @@ final class HerdrLiveConnectionTests: XCTestCase {
             ((line - 7)...line).map { "history line \($0)" }.joined(separator: "\n"),
             "Herdr \(version)"
         )
+    }
+
+    @MainActor
+    private func checkWrappedPlainLinkSelectsWhole(version: String) async throws {
+        let session = try await openShownSession(version: version, through: { $0 })
+        let pane = try selectionPane(of: session)
+        let width = Int(pane.area.width)
+        let token = UUID().uuidString.prefix(8).lowercased()
+        let url = "https://example.com/\(token)/" + String(repeating: "p", count: width)
+        XCTAssertEqual(session.model.sendText("clear; printf '%s\\n' \(url)\r"), .accepted)
+        let row = try await waitForWrappedRows(of: url, in: session, pane: pane)
+        let adapter = session.model.terminalScreenAdapter
+
+        for pressed in [row, row + 1] {
+            let press = cellPoint(row: pressed, column: 2, in: session)
+            let selected = try XCTUnwrap(longPress(pane, at: press), "row \(pressed)")
+            XCTAssertNotEqual(
+                pane.surface.controlSurface.readSelection(),
+                String(url.prefix(width)) + "\n" + String(url.dropFirst(width)),
+                "the pane's own terminal found the whole link"
+            )
+            let grew = await adapter.completeLinkSelection(in: pane.id, at: press, selected: selected)
+            XCTAssertTrue(grew, "Herdr \(version), row \(pressed)")
+            XCTAssertEqual(
+                pane.surface.controlSurface.readSelection(),
+                String(url.prefix(width)) + "\n" + String(url.dropFirst(width)),
+                "the selection didn't grow over both rows"
+            )
+            let copied = await adapter.selectedText(in: pane.id)
+            XCTAssertEqual(copied, url, "Herdr \(version), row \(pressed)")
+        }
+    }
+
+    @MainActor
+    private func checkASelectionScrolledOffScreenStays(version: String) async throws {
+        let session = try await openShownSession(version: version, through: { $0 })
+        let pane = try selectionPane(of: session)
+        XCTAssertEqual(session.model.sendText("clear; seq -f 'history line %g' 1 300\r"), .accepted)
+        let rows = try await waitForRows(in: session, pane: pane, "the history wasn't printed") {
+            $0.contains("history line 300")
+        }
+        try await waitUntil("Herdr's history didn't reach the pane", timeout: .seconds(15)) {
+            pane.surface.scrollRoute == .remoteHistory && pane.surface.scrollState.maxRow >= 200
+                && pane.surface.scrollState.offset == pane.surface.scrollState.maxRow
+        }
+        let line = rows[1]
+        XCTAssertTrue(isActive(pane.surface.selectWord(at: cellPoint(row: 1, column: 0, in: session))))
+        XCTAssertTrue(isActive(pane.surface.setSelectionEndpoint(
+            GHOSTTY_TERMINAL_SURFACE_SELECTION_ENDPOINT_END,
+            at: cellPoint(row: 1, column: line.count - 1, in: session)
+        )))
+        let selection = pane.surface.historySelection
+
+        // Each step scrolls three lines, which takes the second row below the last.
+        let steps = Int(pane.area.height) / 3 + 1
+        try scroll(session, pane: pane.id, steps: steps)
+        try await waitUntil("Herdr didn't scroll the history", timeout: .seconds(15)) {
+            pane.surface.scrollState.maxRow - pane.surface.scrollState.offset == UInt64(3 * steps)
+        }
+        XCTAssertEqual(pane.surface.selectionSnapshot(), .snapshot(.offScreen), "Herdr \(version)")
+        XCTAssertEqual(pane.surface.historySelection, selection)
+
+        try scroll(session, pane: pane.id, steps: -steps)
+        try await waitUntil("Herdr didn't scroll back to the bottom", timeout: .seconds(15)) {
+            pane.surface.scrollState.offset == pane.surface.scrollState.maxRow
+        }
+        guard case .snapshot(let back) = pane.surface.selectionSnapshot(), let start = back.start, let end = back.end else {
+            return XCTFail("the selection wasn't drawn back")
+        }
+        XCTAssertEqual(pane.surface.controlSurface.viewportCell(of: start), GhosttyTerminalCell(row: 1, column: 0))
+        XCTAssertEqual(pane.surface.controlSurface.viewportCell(of: end)?.row, 1)
+        let copied = await session.model.terminalScreenAdapter.selectedText(in: pane.id)
+        XCTAssertEqual(copied, line, "Herdr \(version)")
+    }
+
+    /// What the screen does on a long-press: selects the link there, else the word.
+    @MainActor
+    private func longPress(_ pane: SelectionPane, at point: CGPoint) -> GhosttyLongPressSelection? {
+        switch pane.surface.selectLink(at: point) {
+        case .match(_, let explicitTarget):
+            return explicitTarget == nil ? .link : .explicitLink
+        case .noMatch:
+            return isActive(pane.surface.selectWord(at: point)) ? .word : nil
+        case .unavailable:
+            return nil
+        }
     }
 
     private struct SelectionPane {

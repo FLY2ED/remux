@@ -56,6 +56,13 @@ struct GhosttyHistorySelection: Equatable {
         start <= end ? (start, end) : (end, start)
     }
 
+    /// Whether it starts at a row's first column or ends at its last in a viewport `columns` wide: where a
+    /// line the server wraps goes on from the row before or into the next.
+    func reachesRowEdge(columns: UInt16) -> Bool {
+        let (first, last) = ordered
+        return first.column == 0 || last.column >= columns - 1
+    }
+
     /// Where the endpoints show in a viewport of `rows` × `columns` whose top row is history row `top`:
     /// an endpoint on screen at its cell; one above at the viewport's first cell and one below at its
     /// last, so the highlight covers the selection's part on screen. Nil when none of it is on screen.
@@ -103,8 +110,8 @@ final class GhosttyManagedSurface {
     private(set) var scrollRoute: GhosttySurfaceScrollRoute
     private var remoteScroll: (state: GhosttySurfaceScrollState, route: GhosttySurfaceScrollRoute)?
     /// The selection of a pane whose server keeps its history. Its terminal holds only the rows on
-    /// screen, repainted in place as the server's viewport moves, so the selection is kept in history rows
-    /// here and its highlight moved with the viewport.
+    /// screen, repainted in place as the server's viewport moves, so the selection lives here in history
+    /// rows, and the terminal's selection draws the part of it on screen.
     private(set) var historySelection: GhosttyHistorySelection?
     var onScrollStateChange: (() -> Void)?
     var onLocalSelectionGeometryChange: (() -> Void)?
@@ -231,7 +238,7 @@ final class GhosttyManagedSurface {
     /// goes replace the local terminal's, which only shows what the server painted.
     func setRemoteScroll(_ state: GhosttySurfaceScrollState, route: GhosttySurfaceScrollRoute) {
         remoteScroll = (state, route)
-        moveHistorySelection()
+        drawHistorySelection()
         refreshInteractionState()
     }
 
@@ -260,13 +267,35 @@ final class GhosttyManagedSurface {
         return shown(outcome)
     }
 
+    /// Selects cells given in history rows, for a pane whose server keeps its history.
+    func select(_ selection: GhosttyHistorySelection) -> GhosttyLocalSelectionOutcome {
+        guard remoteScroll != nil else { return .unavailable }
+        historySelection = selection
+        drawHistorySelection()
+        return selectionSnapshot()
+    }
+
     func clearSelection() -> GhosttyLocalSelectionOutcome {
         historySelection = nil
         return controlSurface.clearSelection()
     }
 
+    /// Ends the selection for something other than the screen's own gestures, as input to the pane; the
+    /// screen then lets its handles go.
+    func endSelection() {
+        guard historySelection != nil || Self.isActive(controlSurface.selectionSnapshot()) else { return }
+        _ = clearSelection()
+        onLocalSelectionGeometryChange?()
+    }
+
     func selectionSnapshot() -> GhosttyLocalSelectionOutcome {
         shown(controlSurface.selectionSnapshot())
+    }
+
+    /// The history cell at `point` in the pane, for a pane whose server keeps its history.
+    func historyCell(at point: CGPoint) -> GhosttyTerminalCell? {
+        guard let remoteScroll, let cell = controlSurface.viewportCell(at: point) else { return nil }
+        return GhosttyTerminalCell(row: remoteScroll.state.offset + cell.row, column: cell.column)
     }
 
     /// Records where a selection change left the selection in history rows, for a pane whose server keeps
@@ -300,20 +329,36 @@ final class GhosttyManagedSurface {
         }
     }
 
-    /// The server moved its viewport: the highlight follows the selection's history rows, and a selection
-    /// no longer on screen ends, since the terminal can't hold it.
-    private func moveHistorySelection() {
+    /// Draws the part of the selection on screen with the terminal's selection, as the server's viewport
+    /// moves. With none of it on screen the terminal has no selection, and the selection waits here until
+    /// it comes back.
+    private func drawHistorySelection() {
         guard let selection = historySelection, let remoteScroll else { return }
         let size = controlSurface.viewportSize
         guard let shown = selection.shown(top: remoteScroll.state.offset, rows: size.rows, columns: size.columns) else {
-            historySelection = nil
             _ = controlSurface.clearSelection()
             return
         }
+        guard Self.isActive(controlSurface.selectionSnapshot())
+            || startTerminalSelection(from: shown.start.cell, to: shown.end.cell)
+        else { return }
         _ = controlSurface.setSelectionEndpoint(GHOSTTY_TERMINAL_SURFACE_SELECTION_ENDPOINT_START, toViewportCell: shown.start.cell)
-        let outcome = controlSurface.setSelectionEndpoint(GHOSTTY_TERMINAL_SURFACE_SELECTION_ENDPOINT_END, toViewportCell: shown.end.cell)
-        if case .snapshot(let snapshot) = outcome, snapshot.isActive { return }
-        historySelection = nil
+        _ = controlSurface.setSelectionEndpoint(GHOSTTY_TERMINAL_SURFACE_SELECTION_ENDPOINT_END, toViewportCell: shown.end.cell)
+    }
+
+    /// The terminal starts a selection only as the word at a cell with text, so a selection coming back on
+    /// screen starts at the first cell of its part on screen that has text, and its endpoints then move to
+    /// that part's ends. A part with no text has nothing to start from and isn't drawn.
+    private func startTerminalSelection(from start: GhosttyTerminalCell, to end: GhosttyTerminalCell) -> Bool {
+        let columns = controlSurface.viewportSize.columns
+        var cell = min(start, end)
+        while cell <= max(start, end) {
+            if Self.isActive(controlSurface.selectWord(atViewportCell: cell)) { return true }
+            cell = cell.column + 1 < columns
+                ? GhosttyTerminalCell(row: cell.row, column: cell.column + 1)
+                : GhosttyTerminalCell(row: cell.row + 1, column: 0)
+        }
+        return false
     }
 
     private func shown(_ outcome: GhosttyLocalSelectionOutcome) -> GhosttyLocalSelectionOutcome {
@@ -322,17 +367,18 @@ final class GhosttyManagedSurface {
     }
 
     /// The selection as the screen shows it: for a pane whose server keeps its history, an endpoint off
-    /// screen has no handle.
+    /// screen has no handle, and a selection with no part drawn is still there.
     private func shown(_ snapshot: GhosttyLocalSelectionSnapshot) -> GhosttyLocalSelectionSnapshot {
-        guard let remoteScroll else { return snapshot }
-        guard snapshot.isActive else {
-            historySelection = nil
-            return snapshot
-        }
+        guard let remoteScroll, let selection = historySelection else { return snapshot }
         let size = controlSurface.viewportSize
-        guard let shown = historySelection?.shown(top: remoteScroll.state.offset, rows: size.rows, columns: size.columns)
-        else { return snapshot }
+        guard snapshot.isActive,
+              let shown = selection.shown(top: remoteScroll.state.offset, rows: size.rows, columns: size.columns)
+        else { return .offScreen }
         return snapshot.showing(start: shown.start.isOnScreen, end: shown.end.isOnScreen)
+    }
+
+    private static func isActive(_ outcome: GhosttyLocalSelectionOutcome) -> Bool {
+        if case .snapshot(let snapshot) = outcome { snapshot.isActive } else { false }
     }
 
     @discardableResult

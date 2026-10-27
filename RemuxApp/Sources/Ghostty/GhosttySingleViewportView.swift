@@ -2,6 +2,15 @@ import GhosttyKit
 import SwiftUI
 import UIKit
 
+/// What a pane's selection takes from the backend that keeps the pane's history, beyond what the pane's
+/// terminal holds.
+struct GhosttyTerminalSelectionSource {
+    /// The text a pane's selection copies.
+    let readText: (UUID) async -> String?
+    /// Grows what a long-press selected to the whole link there; true once it has.
+    let completeLink: (UUID, CGPoint, GhosttyLongPressSelection) async -> Bool
+}
+
 /// Hosts every visible pane in the active tmux window at its authoritative
 /// grid rectangle using one shared, unscaled cell metric.
 struct GhosttyCompositeViewportView: View {
@@ -18,8 +27,7 @@ struct GhosttyCompositeViewportView: View {
     let submitMouseButton: ((UUID, GhosttySurfaceMouseButtonEvent) -> GhosttyMouseInputSubmissionOutcome)?
     let submitMousePosition: ((UUID, CGPoint, GhosttySurfaceKeyEvent.Mods) -> GhosttyMouseInputSubmissionOutcome)?
     let submitMouseScroll: ((UUID, GhosttySurfaceMouseScrollEvent) -> GhosttyMouseInputSubmissionOutcome)?
-    /// The text a pane's selection copies.
-    let readSelectedText: ((UUID) async -> String?)?
+    let selectionSource: GhosttyTerminalSelectionSource?
 
     var body: some View {
         GhosttyCompositeViewportRepresentable(
@@ -36,7 +44,7 @@ struct GhosttyCompositeViewportView: View {
             submitMouseButton: submitMouseButton,
             submitMousePosition: submitMousePosition,
             submitMouseScroll: submitMouseScroll,
-            readSelectedText: readSelectedText
+            selectionSource: selectionSource
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -56,8 +64,7 @@ private struct GhosttyCompositeViewportRepresentable: UIViewRepresentable {
     let submitMouseButton: ((UUID, GhosttySurfaceMouseButtonEvent) -> GhosttyMouseInputSubmissionOutcome)?
     let submitMousePosition: ((UUID, CGPoint, GhosttySurfaceKeyEvent.Mods) -> GhosttyMouseInputSubmissionOutcome)?
     let submitMouseScroll: ((UUID, GhosttySurfaceMouseScrollEvent) -> GhosttyMouseInputSubmissionOutcome)?
-    /// The text a pane's selection copies.
-    let readSelectedText: ((UUID) async -> String?)?
+    let selectionSource: GhosttyTerminalSelectionSource?
 
     func makeUIView(context: Context) -> GhosttyCompositeViewportContainerView {
         let view = GhosttyCompositeViewportContainerView()
@@ -88,7 +95,7 @@ private struct GhosttyCompositeViewportRepresentable: UIViewRepresentable {
             submitMouseButton: submitMouseButton,
             submitMousePosition: submitMousePosition,
             submitMouseScroll: submitMouseScroll,
-            readSelectedText: readSelectedText
+            selectionSource: selectionSource
         )
     }
 
@@ -120,7 +127,7 @@ private final class GhosttyCompositeViewportContainerView: UIView,
     private var submitMouseButton: ((UUID, GhosttySurfaceMouseButtonEvent) -> GhosttyMouseInputSubmissionOutcome)?
     private var submitMousePosition: ((UUID, CGPoint, GhosttySurfaceKeyEvent.Mods) -> GhosttyMouseInputSubmissionOutcome)?
     private var submitMouseScroll: ((UUID, GhosttySurfaceMouseScrollEvent) -> GhosttyMouseInputSubmissionOutcome)?
-    private var readSelectedText: ((UUID) async -> String?)?
+    private var selectionSource: GhosttyTerminalSelectionSource?
 
     private var activePanAxis: GhosttySurfacePanGesture.Axis?
     private var didNavigateForActivePan = false
@@ -237,7 +244,7 @@ private final class GhosttyCompositeViewportContainerView: UIView,
         submitMouseButton: ((UUID, GhosttySurfaceMouseButtonEvent) -> GhosttyMouseInputSubmissionOutcome)?,
         submitMousePosition: ((UUID, CGPoint, GhosttySurfaceKeyEvent.Mods) -> GhosttyMouseInputSubmissionOutcome)?,
         submitMouseScroll: ((UUID, GhosttySurfaceMouseScrollEvent) -> GhosttyMouseInputSubmissionOutcome)?,
-        readSelectedText: ((UUID) async -> String?)?
+        selectionSource: GhosttyTerminalSelectionSource?
     ) {
         let topologyChanged = self.projection != projection
         self.projection = projection
@@ -252,7 +259,7 @@ private final class GhosttyCompositeViewportContainerView: UIView,
         self.submitMouseButton = submitMouseButton
         self.submitMousePosition = submitMousePosition
         self.submitMouseScroll = submitMouseScroll
-        self.readSelectedText = readSelectedText
+        self.selectionSource = selectionSource
 
         if topologyChanged {
             setNeedsDisplay()
@@ -298,7 +305,7 @@ private final class GhosttyCompositeViewportContainerView: UIView,
         submitMouseButton = nil
         submitMousePosition = nil
         submitMouseScroll = nil
-        readSelectedText = nil
+        selectionSource = nil
         trackpadDriver = nil
     }
 
@@ -560,12 +567,31 @@ private final class GhosttyCompositeViewportContainerView: UIView,
                 explicitTarget: explicitTarget
             )
             applySelectionOutcome(.snapshot(snapshot), presentMenu: true)
+            completeLink(on: surface, at: point, selected: explicitTarget == nil ? .link : .explicitLink)
         case .noMatch:
             longPressOriginalPoint = nil
             previewSelectionContext.selectionDidChange()
             applySelectionOutcome(surface.selectWord(at: point), presentMenu: true)
+            completeLink(on: surface, at: point, selected: .word)
         case .unavailable:
             reconcileLocalSelectionAfterLongPress()
+        }
+    }
+
+    /// The backend may know more of a link than the pane's terminal shows. Once it has grown the
+    /// selection, the handles and the menu move to its new ends.
+    private func completeLink(
+        on surface: GhosttyManagedSurface,
+        at point: CGPoint,
+        selected: GhosttyLongPressSelection
+    ) {
+        guard selectionSnapshot.isActive, let source = selectionSource else { return }
+        Task { @MainActor [weak self] in
+            guard await source.completeLink(surface.id, point, selected),
+                  let self, self.exactLocalSelectionSurface()?.0 === surface
+            else { return }
+            self.applySelectionOutcome(surface.selectionSnapshot(), presentMenu: false)
+            self.selectionEditMenuInteraction.updateVisibleMenuPosition(animated: true)
         }
     }
 
@@ -941,12 +967,12 @@ private final class GhosttyCompositeViewportContainerView: UIView,
         actions.append(
             UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in
                 guard let (surface, _) = self?.exactLocalSelectionSurface(),
-                      let readSelectedText = self?.readSelectedText
+                      let source = self?.selectionSource
                 else { return }
                 // The backend reads the text where it keeps the pane's history, which can take a reply
                 // from its server.
                 Task { @MainActor in
-                    guard let text = await readSelectedText(surface.id), !text.isEmpty else { return }
+                    guard let text = await source.readText(surface.id), !text.isEmpty else { return }
                     UIPasteboard.general.string = text
                 }
             }

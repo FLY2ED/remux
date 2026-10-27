@@ -1775,9 +1775,10 @@ final class RemuxAppUITests: XCTestCase {
         captureLiveHerdrStep("6-scrolled", in: configuration)
     }
 
-    /// Copy on a Herdr pane is Herdr's text of the selection: a link the pane wraps onto two rows pastes as
-    /// the whole link on one line, and a word pastes as itself. A selection made over the history moves
-    /// with its line when a swipe scrolls Herdr's history.
+    /// Copy on a Herdr pane is Herdr's text of the selection: an OSC 8 link the pane wraps onto two rows
+    /// pastes as the whole link on one line, as does a plain-text one once Herdr has found the rest of it,
+    /// and a word pastes as itself. A selection made over the history moves with its line when a swipe
+    /// scrolls Herdr's history.
     func testLiveHerdrSelectionCopyWhenConfigured() throws {
         let configuration = try launchLiveHerdrApp()
         openFirstSavedSession()
@@ -1800,6 +1801,22 @@ final class RemuxAppUITests: XCTestCase {
         linkCopy.tap()
         XCTAssertEqual(pasteIntoEmptyComposer(), url, "A link the pane wraps should copy whole, on one line.")
         captureLiveHerdrStep("c2-link-pasted", in: configuration)
+        clearAndCloseComposer()
+
+        let plainURL = "https://example.org/\(token)/" + String(repeating: "q", count: 60)
+        UIPasteboard.general.string = "REMUX_HERDR_PLAIN_LINK_COPY_SENTINEL"
+        sendTerminalCommand("clear; printf '%s\\n' \(plainURL)")
+        hideKeyboardIfPresent()
+        guard waitForStableLiveTerminalScreenshot(attachmentName: "herdr-plain-link-ready") != nil else { return }
+        topRows.press(forDuration: 0.70)
+        let plainCopy = waitForCopyMenuItem(timeout: 5)
+        captureLiveHerdrStep("c2b-plain-link-grown", in: configuration)
+        plainCopy.tap()
+        XCTAssertEqual(
+            pasteIntoEmptyComposer(),
+            plainURL,
+            "A plain-text link the pane wraps should grow to the whole link and copy on one line."
+        )
         clearAndCloseComposer()
 
         let word = "herdrword-\(token)"

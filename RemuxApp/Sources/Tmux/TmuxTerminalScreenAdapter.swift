@@ -672,6 +672,15 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         managedSurface(for: surfaceID)?.controlSurface.readSelection()
     }
 
+    /// A tmux pane's terminal knows where its lines wrap, so its link match is already whole.
+    func completeLinkSelection(
+        in surfaceID: UUID,
+        at point: CGPoint,
+        selected: GhosttyLongPressSelection
+    ) async -> Bool {
+        false
+    }
+
     // MARK: tmux topology actions
 
     func reclaimActiveTmuxViewport() {

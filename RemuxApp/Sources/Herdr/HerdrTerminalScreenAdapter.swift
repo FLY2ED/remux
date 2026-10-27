@@ -261,7 +261,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     var holdsTmuxPrefixKey: Bool { false }
 
     func sendInputToFocusedSurface(_ text: String) -> FocusedTerminalInputSubmissionResult {
-        typed(model?.sendText(text) ?? .transportUnavailable)
+        model?.sendText(text) ?? .transportUnavailable
     }
 
     func sendPasteToFocusedSurface(_ text: String) -> FocusedTerminalInputSubmissionResult {
@@ -292,19 +292,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func sendKeyEventToFocusedSurface(_ event: GhosttySurfaceKeyEvent) -> FocusedTerminalInputSubmissionResult {
-        let result = model?.sendKey(event) ?? .transportUnavailable
-        return event.action == .release ? result : typed(result)
-    }
-
-    /// Typing ends the focused pane's selection, as Ghostty ends a tmux pane's (`selection-clear-on-typing`)
-    /// and Herdr's client its own on a key. A Herdr pane's input goes to Herdr, not through its terminal,
-    /// so the terminal doesn't end it itself.
-    private func typed(_ result: FocusedTerminalInputSubmissionResult) -> FocusedTerminalInputSubmissionResult {
-        if result == .accepted, let id = presentedSurfaceID, let surface = managedSurface(for: id) {
-            _ = surface.clearSelection()
-            surface.notifyLocalSelectionGeometryChanged()
-        }
-        return result
+        model?.sendKey(event) ?? .transportUnavailable
     }
 
     private func isFocusedPane(_ surfaceID: UUID) -> Bool {
@@ -348,6 +336,28 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
               let selection = managedSurface(for: surfaceID)?.historySelection
         else { return nil }
         return await model.readSelection(selection, inPane: paneID)
+    }
+
+    /// Herdr's frames don't say where lines wrap, so the pane's terminal cuts a link the pane wraps at the
+    /// row's edge. A link or word reaching a row's edge may be part of one, and Herdr finds the whole link,
+    /// as its client asks it for a plain-text link's cells; an OSC 8 link, or one inside a row, is whole.
+    func completeLinkSelection(
+        in surfaceID: UUID,
+        at point: CGPoint,
+        selected: GhosttyLongPressSelection
+    ) async -> Bool {
+        guard selected != .explicitLink, let model, let paneID = paneID(for: surfaceID),
+              let surface = managedSurface(for: surfaceID),
+              let selection = surface.historySelection,
+              selection.reachesRowEdge(columns: surface.controlSurface.viewportSize.columns),
+              let pressed = surface.historyCell(at: point)
+        else { return false }
+        guard let link = await model.resolveLink(at: pressed, inPane: paneID), link != selection,
+              // A selection changed meanwhile is the user's.
+              surface.historySelection == selection,
+              case .snapshot(let snapshot) = surface.select(link)
+        else { return false }
+        return snapshot.isActive
     }
 
     // MARK: Topology actions

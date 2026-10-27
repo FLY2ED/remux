@@ -47,3 +47,74 @@ struct HerdrSelectionRead: Encodable, Sendable {
         case anchor, cursor
     }
 }
+
+/// `pane.link.resolve`: the cells of the plain-text link at a cell of a pane's viewport, which Herdr finds
+/// across the pane's wrapped rows, as regions of rows of the viewport. As Herdr's client asks it, the
+/// request names the content revision and viewport of the frame on screen, and Herdr refuses it once its
+/// pane shows something else.
+struct HerdrLinkResolve: Encodable, Sendable {
+    let paneID: String
+    let viewportRow: UInt16
+    let col: UInt16
+    let contentRevision: UInt64
+    let offsetFromBottom: UInt64?
+    private let content: HerdrPaneContent
+
+    /// Asks about `cell`, a history cell of the pane whose terminal shows `content`; nil when the cell
+    /// isn't on its viewport, or the content is one Herdr was still changing (an odd revision), which
+    /// Herdr's client doesn't ask about either.
+    init?(paneID: String, cell: GhosttyTerminalCell, content: HerdrPaneContent) {
+        guard content.revision.isMultiple(of: 2), cell.row >= content.top,
+              cell.row - content.top < UInt64(content.rows), cell.column < content.columns
+        else { return nil }
+        self.paneID = paneID
+        viewportRow = UInt16(cell.row - content.top)
+        col = cell.column
+        contentRevision = content.revision
+        offsetFromBottom = content.offsetFromBottom
+        self.content = content
+    }
+
+    /// The link from the reply `{"id", "result": {"type": "pane_link_resolved", "regions"}}`, in history
+    /// rows; nil when Herdr found none. Regions are taken as Herdr's client takes them: inside the
+    /// viewport and covering the cell asked about.
+    func link(fromReply reply: Data) throws -> GhosttyHistorySelection? {
+        struct Reply: Decodable {
+            struct Result: Decodable {
+                let regions: [Region]
+            }
+
+            let result: Result
+        }
+        struct Region: Decodable {
+            let row: UInt16
+            let startCol: UInt16
+            let endCol: UInt16
+
+            private enum CodingKeys: String, CodingKey {
+                case row
+                case startCol = "start_col"
+                case endCol = "end_col"
+            }
+        }
+        let regions = try JSONDecoder().decode(Reply.self, from: reply).result.regions
+        guard regions.count <= Int(content.rows),
+              regions.allSatisfy({ $0.row < content.rows && $0.startCol <= $0.endCol && $0.endCol < content.columns }),
+              regions.contains(where: { $0.row == viewportRow && ($0.startCol...$0.endCol).contains(col) }),
+              let first = regions.min(by: { ($0.row, $0.startCol) < ($1.row, $1.startCol) }),
+              let last = regions.max(by: { ($0.row, $0.endCol) < ($1.row, $1.endCol) })
+        else { return nil }
+        return GhosttyHistorySelection(
+            start: GhosttyTerminalCell(row: content.top + UInt64(first.row), column: first.startCol),
+            end: GhosttyTerminalCell(row: content.top + UInt64(last.row), column: last.endCol)
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case paneID = "pane_id"
+        case viewportRow = "viewport_row"
+        case col
+        case contentRevision = "content_revision"
+        case offsetFromBottom = "offset_from_bottom"
+    }
+}

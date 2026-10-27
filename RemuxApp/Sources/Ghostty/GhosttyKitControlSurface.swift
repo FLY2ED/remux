@@ -179,6 +179,8 @@ struct GhosttyLocalSelectionSnapshot: Equatable {
         cValue: ghostty_terminal_surface_selection_snapshot_s(),
         scaleFactor: 1
     )
+    /// A selection the screen shows no part of, as one scrolled off screen.
+    static let offScreen = GhosttyLocalSelectionSnapshot(start: nil, end: nil, isActive: true)
 
     /// Each endpoint's cell, nil while it isn't on screen.
     let start: CGRect?
@@ -460,21 +462,38 @@ final class GhosttyKitControlSurface {
         _ endpoint: ghostty_terminal_surface_selection_endpoint_e,
         toViewportCell cell: GhosttyTerminalCell
     ) -> GhosttyLocalSelectionOutcome {
-        guard let size = cellSize else { return .unavailable }
-        return setSelectionEndpoint(endpoint, at: CGPoint(
-            x: (CGFloat(cell.column) + 0.5) * size.width,
-            y: (CGFloat(cell.row) + 0.5) * size.height
-        ))
+        guard let point = point(ofViewportCell: cell) else { return .unavailable }
+        return setSelectionEndpoint(endpoint, at: point)
     }
 
-    /// The viewport cell at `frame`, the geometry a selection snapshot gives an endpoint. The surface has
-    /// no padding, so its cells start at its origin.
+    /// Selects the word at a cell of the viewport.
+    func selectWord(atViewportCell cell: GhosttyTerminalCell) -> GhosttyLocalSelectionOutcome {
+        guard let point = point(ofViewportCell: cell) else { return .unavailable }
+        return selectWord(at: point)
+    }
+
+    /// The viewport cell at `frame`, the geometry a selection snapshot gives an endpoint.
     func viewportCell(of frame: CGRect) -> GhosttyTerminalCell? {
         guard let size = cellSize else { return nil }
-        let column = ((frame.minX + size.width / 2) / size.width).rounded(.down)
-        let row = ((frame.minY + size.height / 2) / size.height).rounded(.down)
+        return viewportCell(at: CGPoint(x: frame.minX + size.width / 2, y: frame.minY + size.height / 2))
+    }
+
+    /// The viewport cell at `point`. The surface has no padding, so its cells start at its origin.
+    func viewportCell(at point: CGPoint) -> GhosttyTerminalCell? {
+        guard let size = cellSize else { return nil }
+        let column = (point.x / size.width).rounded(.down)
+        let row = (point.y / size.height).rounded(.down)
         guard column >= 0, row >= 0, column <= CGFloat(UInt16.max) else { return nil }
         return GhosttyTerminalCell(row: UInt64(row), column: UInt16(column))
+    }
+
+    /// The middle of a cell of the viewport.
+    private func point(ofViewportCell cell: GhosttyTerminalCell) -> CGPoint? {
+        guard let size = cellSize else { return nil }
+        return CGPoint(
+            x: (CGFloat(cell.column) + 0.5) * size.width,
+            y: (CGFloat(cell.row) + 0.5) * size.height
+        )
     }
 
     /// The viewport's rows and columns.

@@ -145,6 +145,24 @@ protocol GhosttyTerminalInputModeling: ObservableObject {
     /// The text the pane's selection copies, from wherever the backend keeps the pane's history; nil
     /// when there is none to copy.
     func selectedText(in surfaceID: UUID) async -> String?
+
+    /// Grows what a long-press at `point` selected to the whole link there, when the backend knows more
+    /// of the link than the pane's terminal shows; true once it has.
+    func completeLinkSelection(
+        in surfaceID: UUID,
+        at point: CGPoint,
+        selected: GhosttyLongPressSelection
+    ) async -> Bool
+}
+
+/// What a long-press selected from a pane's terminal.
+enum GhosttyLongPressSelection: Equatable, Sendable {
+    /// An OSC 8 link, whose id marks every cell of it, so the terminal has all of it.
+    case explicitLink
+    /// Text the terminal's link patterns matched.
+    case link
+    /// The word at the press, where no link matched.
+    case word
 }
 
 @MainActor
