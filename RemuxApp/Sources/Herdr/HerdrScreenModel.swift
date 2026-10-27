@@ -248,7 +248,8 @@ final class HerdrScreenModel {
     private var snapshot: HerdrSnapshot?
     /// The frame on screen: the connection and snapshot revision it was drawn against, and its panes.
     private var presentedFrame: (connection: UInt64, bootID: String, projectionRevision: UInt64, paneIDs: Set<String>)?
-    private var agents = HerdrAgentPresentation()
+    /// The session's agents as this phone shows them.
+    let agents = HerdrAgentPresentation()
     /// A pane to go to once the session is shown, and the server boot its id belongs to.
     private var pendingReveal: (paneID: String, bootID: String?)?
     /// The pane keys go to and the screen highlights: the newest snapshot's focused pane, as in
@@ -1364,7 +1365,7 @@ final class HerdrScreenModel {
         self.snapshot = snapshot
         ownedZoom.reconcile(with: snapshot)
         zoomTabMovedTo(attempt)
-        agents.project(snapshot, completions: completions)
+        if agents.project(snapshot, completions: completions) { didChange() }
         acknowledgeShownAgents()
         if snapshot.focusedPaneID != focusedPaneID {
             focusedPaneID = snapshot.focusedPaneID
@@ -1407,7 +1408,7 @@ final class HerdrScreenModel {
               frame.connection == attempt.feed?.connection, let snapshot,
               frame.bootID == snapshot.bootID, frame.projectionRevision == snapshot.revision
         else { return }
-        agents.acknowledge(panes: frame.paneIDs)
+        if agents.acknowledge(panes: frame.paneIDs) { didChange() }
     }
 
     /// A reconnect reads as one until the new connection is ready.

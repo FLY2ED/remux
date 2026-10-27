@@ -194,16 +194,19 @@ enum HerdrServerScript {
         terminalTitleStripped: String? = nil,
         agent: String? = nil,
         displayAgent: String? = nil,
+        workspace: String = "w1",
         tab: String = "t1",
         status: HerdrAgentStatus = .working,
-        stateChange: UInt64 = 1
+        stateChange: UInt64 = 1,
+        stateLabels: [(state: String, word: String)] = []
     ) -> String {
-        """
-        {"pane_id":"\(paneID)","workspace_id":"w1","tab_id":"\(tab)","name":\(json(name)),
+        let labels = stateLabels.map { "[\(json($0.state)),\(json($0.word))]" }.joined(separator: ",")
+        return """
+        {"pane_id":"\(paneID)","workspace_id":"\(workspace)","tab_id":"\(tab)","name":\(json(name)),
          "display_agent":\(json(displayAgent)),"agent":\(json(agent)),"title":\(json(title)),
          "terminal_title":null,"terminal_title_stripped":\(json(terminalTitleStripped)),
          "agent_status":"\(status.rawValue)","state_change_seq":\(stateChange),
-         "state_labels":[],"tokens":[],"focused":false}
+         "state_labels":[\(labels)],"tokens":[],"focused":false}
         """
     }
 

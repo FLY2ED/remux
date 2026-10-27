@@ -1680,13 +1680,25 @@ final class RemuxRootModel: ObservableObject {
     /// goes to a notification's pane on its machine. The banner goes either way.
     func openHerdrNotification(_ banner: HerdrNotificationPolicy.Banner) {
         herdrNotifications.dismiss(banner.id)
-        let workspaceID = banner.origin.workspaceID
+        openHerdrSession(banner.origin.workspaceID, atPane: banner.notification.paneID, bootID: banner.origin.bootID)
+    }
+
+    /// Shows an open Herdr session, at `paneID` when given: the session goes there once it is on screen,
+    /// if the pane is still there on the server boot `bootID` names.
+    func openHerdrSession(_ workspaceID: SavedWorkspace.ID, atPane paneID: String?, bootID: String?) {
         guard let session = RemuxActiveSessionCollection.session(workspaceID, in: activeSessions) else { return }
-        if let paneID = banner.notification.paneID,
-           case .herdr(let model)? = terminalRuntimes[TerminalRuntimeAttemptKey(session: session)] {
-            model.reveal(paneID: paneID, bootID: banner.origin.bootID)
+        if let paneID, case .herdr(let model)? = terminalRuntimes[TerminalRuntimeAttemptKey(session: session)] {
+            model.reveal(paneID: paneID, bootID: bootID)
         }
         showActiveSession(workspaceID)
+    }
+
+    /// An open Herdr session's agents.
+    func herdrAgents(of workspaceID: SavedWorkspace.ID) -> HerdrAgentPresentation? {
+        guard let session = RemuxActiveSessionCollection.session(workspaceID, in: activeSessions),
+              case .herdr(let model)? = terminalRuntimes[TerminalRuntimeAttemptKey(session: session)]
+        else { return nil }
+        return model.agents
     }
 
     private func herdrNotificationState(of workspaceID: SavedWorkspace.ID) -> HerdrNotificationSessionState? {

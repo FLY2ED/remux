@@ -152,6 +152,7 @@ struct GhosttyWindowSelectionSheet: View {
                             totalCount: window.totalCount,
                             paneCount: window.paneCount,
                             isSelected: window.isSelected,
+                            agentStatus: window.agentStatus,
                             previewState: window.focusedPreviewPaneID
                                 .flatMap { session.imagesByPaneID[$0] },
                             chromeStyle: chromeStyle,
@@ -482,6 +483,7 @@ private struct GhosttyWindowSelectionTile: View {
     let totalCount: Int
     let paneCount: Int
     let isSelected: Bool
+    let agentStatus: TerminalAgentStatus?
     let previewState: GhosttyPanePreviewSession.PreviewState?
     let chromeStyle: GhosttyTerminalChromeStyle
     let layout: PanePreviewLayout.Metrics
@@ -536,6 +538,12 @@ private struct GhosttyWindowSelectionTile: View {
 
     private var metadata: some View {
         HStack(spacing: 4) {
+            if let agentStatus {
+                TerminalAgentDot(status: agentStatus)
+                    // The label sits on a dark plate in either appearance.
+                    .environment(\.colorScheme, .dark)
+            }
+
             Text(displayName.isEmpty ? "\(topLevelNoun.singular) \(displayIndex)" : displayName)
                 .fontWeight(.semibold)
 
@@ -553,10 +561,11 @@ private struct GhosttyWindowSelectionTile: View {
         let paneText = "\(paneCount) \(paneCount == 1 ? "pane" : "panes")"
         let positional = "\(topLevelNoun.singular) \(displayIndex) of \(totalCount)"
         let named = displayName.isEmpty ? positional : "\(positional), \(displayName)"
+        let agent = agentStatus.map { ", agent \($0.word)" } ?? ""
         if isSelected {
-            return "\(named), \(paneText), active"
+            return "\(named), \(paneText)\(agent), active"
         }
-        return "\(named), \(paneText)"
+        return "\(named), \(paneText)\(agent)"
     }
 }
 
@@ -728,6 +737,10 @@ private struct GhosttyPaneTopologyDiagram: View {
                 .foregroundStyle(TerminalSelectionSheetPalette.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
+
+            if let agent = pane.agent {
+                TerminalAgentStateLine(state: agent)
+            }
         }
         .multilineTextAlignment(.center)
         .frame(width: max(0, size.width - 16))
@@ -745,7 +758,9 @@ private struct GhosttyPaneTopologyDiagram: View {
     private func accessibilityLabel(
         for pane: GhosttyPaneSelectionSheetRenderProjection.Pane
     ) -> String {
-        "\(directoryName(pane)), \(commandName(for: pane))"
+        let label = "\(directoryName(pane)), \(commandName(for: pane))"
+        guard let agent = pane.agent else { return label }
+        return "\(label), \(agent.word)"
     }
 }
 

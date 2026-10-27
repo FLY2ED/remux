@@ -1,25 +1,54 @@
 import Foundation
+import Observation
 
-/// Each agent's status as this phone shows it, by Herdr's client's rules (`endpoint_agent_state.rs`).
+/// A Herdr session's agents as this phone shows them: the one owner of their state, which views read
+/// directly.
 ///
-/// Herdr's `done` only says no client in front has looked at the pane, so each client decides for
-/// itself: an agent that is idle after finishing work reads as done until its pane is on this phone's
-/// screen. Work counts as finished when Herdr recorded a completion at the agent's current state change,
-/// or, for a snapshot sent without that record, when this phone saw the agent working. Completions from
-/// before the phone first heard from a server boot count as seen.
-struct HerdrAgentPresentation {
-    private var bootID: String?
-    /// The newest state change of each agent that was on screen.
-    private var acknowledged: [String: UInt64] = [:]
-    /// The state change at which each agent finished work it hasn't started again since.
-    private var completed: [String: UInt64] = [:]
-    private var working: Set<String> = []
-    private var agents: [HerdrSnapshot.Agent] = []
+/// Each agent's status follows Herdr's client's rules (`endpoint_agent_state.rs`). Herdr's `done` only
+/// says no client in front has looked at the pane, so each client decides for itself: an agent that is
+/// idle after finishing work reads as done until its pane is on this phone's screen. Work counts as
+/// finished when Herdr recorded a completion at the agent's current state change, or, for a snapshot sent
+/// without that record, when this phone saw the agent working. Completions from before the phone first
+/// heard from a server boot count as seen.
+///
+/// The agents are in the snapshot's order, which is Herdr's agent list's by default
+/// (`agent_panel_sort = "spaces"`). A tab or the session shows its most urgent agent, as Herdr's client
+/// rolls tabs up from the statuses it shows (`project_aggregate_status`). Views are told only when what
+/// they show changes.
+@Observable
+final class HerdrAgentPresentation {
+    /// One agent as the sheets show it.
+    struct Agent: Identifiable, Equatable, Sendable {
+        let paneID: String
+        let workspaceID: String
+        let tabID: String
+        /// As Herdr's agent list names it (`client/shell/agent_sidebar.rs` `agent_row`).
+        let name: String
+        /// Its workspace, then its tab when the workspace has more than one or the tab has a label of its
+        /// own, as Herdr's agent list places it.
+        let place: String
+        let state: TerminalAgentState
 
+        var id: String { paneID }
+    }
+
+    /// The server boot the agents' pane ids belong to.
+    private(set) var bootID: String?
+    private(set) var agents: [Agent] = []
     /// Each agent pane's status, from the newest snapshot.
     private(set) var statuses: [String: HerdrAgentStatus] = [:]
 
-    mutating func project(_ snapshot: HerdrSnapshot, completions: [String: UInt64]?) {
+    /// The newest state change of each agent that was on screen.
+    @ObservationIgnored private var acknowledged: [String: UInt64] = [:]
+    /// The state change at which each agent finished work it hasn't started again since.
+    @ObservationIgnored private var completed: [String: UInt64] = [:]
+    @ObservationIgnored private var working: Set<String> = []
+    /// The snapshot's agents, each with its name and place.
+    @ObservationIgnored private var reported: [(agent: HerdrSnapshot.Agent, name: String, place: String)] = []
+
+    /// Returns whether what the phone shows of the agents changed.
+    @discardableResult
+    func project(_ snapshot: HerdrSnapshot, completions: [String: UInt64]?) -> Bool {
         if bootID != snapshot.bootID {
             bootID = snapshot.bootID
             acknowledged = Dictionary(snapshot.agents.map { ($0.paneID, $0.stateChangeSeq) }) { $1 }
@@ -48,27 +77,65 @@ struct HerdrAgentPresentation {
                 completed[paneID] = nil
             }
         }
-        agents = snapshot.agents
-        updateStatuses()
+        reported = snapshot.agents.map { agent in
+            let workspace = snapshot.workspaces.first { $0.workspaceID == agent.workspaceID }
+            let tabs = snapshot.tabs.filter { $0.workspaceID == agent.workspaceID }
+            let tab = tabs.first { $0.tabID == agent.tabID }.flatMap { tabs.count > 1 || $0.customLabel ? $0 : nil }
+            return (
+                agent,
+                agent.displayAgent ?? agent.name ?? agent.agent ?? agent.title ?? "agent",
+                [workspace?.label, tab?.label].compactMap { $0 }.joined(separator: " › ")
+            )
+        }
+        return update()
     }
 
-    /// The panes on this phone's screen: their agents' current states count as seen. Returns whether a
-    /// status changed.
+    /// The panes on this phone's screen: their agents' current states count as seen. Returns whether what
+    /// the phone shows of the agents changed.
     @discardableResult
-    mutating func acknowledge(panes paneIDs: Set<String>) -> Bool {
-        var changed = false
-        for agent in agents where paneIDs.contains(agent.paneID) {
+    func acknowledge(panes paneIDs: Set<String>) -> Bool {
+        var seen = false
+        for (agent, _, _) in reported where paneIDs.contains(agent.paneID) {
             if acknowledged[agent.paneID, default: 0] < agent.stateChangeSeq {
                 acknowledged[agent.paneID] = agent.stateChangeSeq
-                changed = true
+                seen = true
             }
         }
-        if changed { updateStatuses() }
-        return changed
+        return seen && update()
     }
 
-    private mutating func updateStatuses() {
-        statuses = Dictionary(agents.map { ($0.paneID, status(of: $0)) }) { $1 }
+    func state(ofPane paneID: String) -> TerminalAgentState? {
+        agents.first { $0.paneID == paneID }?.state
+    }
+
+    /// The tab's most urgent agent, if it has any.
+    func status(ofTab tabID: String) -> TerminalAgentStatus? {
+        agents.lazy.filter { $0.tabID == tabID }.map(\.state.status).max()
+    }
+
+    /// The session's most urgent agent, if it has any.
+    var status: TerminalAgentStatus? {
+        agents.lazy.map(\.state.status).max()
+    }
+
+    /// Only a change is set, so views reading the agents are told only then.
+    private func update() -> Bool {
+        let nextStatuses = Dictionary(reported.map { ($0.agent.paneID, status(of: $0.agent)) }) { $1 }
+        let nextAgents = reported.map { agent, name, place in
+            let status = nextStatuses[agent.paneID] ?? agent.agentStatus
+            return Agent(
+                paneID: agent.paneID,
+                workspaceID: agent.workspaceID,
+                tabID: agent.tabID,
+                name: name,
+                place: place,
+                state: TerminalAgentState(status.terminalStatus, word: agent.label(for: status))
+            )
+        }
+        guard nextAgents != agents || nextStatuses != statuses else { return false }
+        statuses = nextStatuses
+        agents = nextAgents
+        return true
     }
 
     private func status(of agent: HerdrSnapshot.Agent) -> HerdrAgentStatus {
@@ -80,6 +147,18 @@ struct HerdrAgentPresentation {
             return .done
         case let status:
             return status
+        }
+    }
+}
+
+extension HerdrAgentStatus {
+    var terminalStatus: TerminalAgentStatus {
+        switch self {
+        case .unknown: .unknown
+        case .idle: .idle
+        case .working: .working
+        case .done: .done
+        case .blocked: .blocked
         }
     }
 }

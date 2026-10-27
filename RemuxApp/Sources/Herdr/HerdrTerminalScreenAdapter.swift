@@ -89,13 +89,14 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
     }
 
     private var topologySnapshot: GhosttyRuntimeSurfaceTopologySnapshot {
-        guard let layout = model?.layout else { return .empty }
+        guard let model, let layout = model.layout else { return .empty }
         let id = topLevelID(for: layout)
         let tab = GhosttyTopLevelSurface(
             id: id,
             name: layout.tab?.label ?? "",
             leafIDs: listedPanes.map { surfaceID(forPane: $0.paneID) },
-            focusedLeafID: focusedPaneID.map { surfaceID(forPane: $0) }
+            focusedLeafID: focusedPaneID.map { surfaceID(forPane: $0) },
+            agentStatus: layout.tab.flatMap { model.agents.status(ofTab: $0.tabID) }
         )
         return GhosttyRuntimeSurfaceTopologySnapshot(topLevels: [tab], selectedTopLevelID: id)
     }
@@ -134,7 +135,8 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
                 visibleFrame: drawn,
                 isFocused: pane.paneID == focusedPaneID,
                 currentCommand: pane.name,
-                currentPath: pane.path
+                currentPath: pane.path,
+                agent: model.agents.state(ofPane: pane.paneID)
             )
         }
         return GhosttyTerminalViewportPresentationProjection(
