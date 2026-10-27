@@ -339,7 +339,7 @@ final class HerdrScreenModelTests: XCTestCase {
 
         let adapter = harness.model.terminalScreenAdapter
         let projection = adapter.terminalScreenPresentationProjection
-        XCTAssertEqual(adapter.windowSelectionSheetRenderProjection().windows.map(\.displayName), ["build"])
+        XCTAssertEqual(adapter.windowSelectionSheetRenderProjection(group: nil).windows.map(\.displayName), ["build"])
         XCTAssertEqual(projection.viewport.windowGrid, GhosttyTerminalGridSize(columns: 17, rows: 2))
         XCTAssertEqual(projection.viewport.panes.map(\.normalFrame), [
             GhosttyTerminalGridRect(x: 0, y: 0, columns: 8, rows: 2),
@@ -2350,7 +2350,7 @@ final class HerdrScreenModelTests: XCTestCase {
         let session = try await shownTab(harness, zoomingOnShow: true, secondTab: Self.secondTab)
         var index = session.next
 
-        harness.model.reveal(paneID: "w1:p3", bootID: "boot")
+        harness.model.reveal(.pane("w1:p3"), bootID: "boot")
         let first = try await harness.writes(session.bridge, from: index, count: 1)
         guard case .paneZoom(let unzoom, "w1:p1", "off") = first[0] else {
             return XCTFail("the zoom on the tab left wasn't undone first: \(first)")
@@ -2384,7 +2384,7 @@ final class HerdrScreenModelTests: XCTestCase {
         try await harness.waitUntil("the session didn't connect") { harness.model.stateTraceLabel == "hidden" }
 
         var index = await bridge.writtenCount
-        harness.model.reveal(paneID: "w1:p3", bootID: "boot")
+        harness.model.reveal(.pane("w1:p3"), bootID: "boot")
         harness.model.setSelected(true)
         let show = try await harness.nextSurfaceSet(bridge, from: &index)
         let next = index
@@ -2411,7 +2411,7 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertTrue(harness.model.focusPane("w1:p2"))
         let busy = try await nextWrite(session.bridge, from: &index, paneFocus)
 
-        harness.model.reveal(paneID: "w1:p3", bootID: "boot")
+        harness.model.reveal(.pane("w1:p3"), bootID: "boot")
         try await Task.sleep(for: .milliseconds(150))
         let waiting = await session.bridge.writtenCount
         XCTAssertEqual(waiting, index, "something went while the command was in flight")
@@ -3355,7 +3355,7 @@ final class HerdrScreenModelTests: XCTestCase {
         let harness = await makeHarness()
         let bridge = try await revealableSession(harness)
 
-        harness.model.reveal(paneID: "w1:p3", bootID: "boot")
+        harness.model.reveal(.pane("w1:p3"), bootID: "boot")
         try await Task.sleep(for: .milliseconds(100))
         let whileHidden = await bridge.writtenCount
         harness.model.setSelected(true)
@@ -3375,13 +3375,13 @@ final class HerdrScreenModelTests: XCTestCase {
         let harness = await makeHarness()
         let bridge = try await revealableSession(harness)
 
-        harness.model.reveal(paneID: "w1:p3", bootID: "old-boot")
+        harness.model.reveal(.pane("w1:p3"), bootID: "old-boot")
         harness.model.setSelected(true)
         var index = 0
         let show = try await harness.nextSurfaceSet(bridge, from: &index)
         await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
-        harness.model.reveal(paneID: "w1:gone", bootID: "boot")
-        harness.model.reveal(paneID: "w1:p3", bootID: "boot")
+        harness.model.reveal(.pane("w1:gone"), bootID: "boot")
+        harness.model.reveal(.pane("w1:p3"), bootID: "boot")
         let focus = try await nextWrite(bridge, from: &index, paneFocus)
         XCTAssertEqual(focus.paneID, "w1:p3")
         await bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
@@ -3396,7 +3396,7 @@ final class HerdrScreenModelTests: XCTestCase {
     /// doesn't go there on a later show.
     func testARevealIsForgottenWhenTheSessionIsLeftFirst() async throws {
         let harness = await makeHarness()
-        harness.model.reveal(paneID: "w1:p3", bootID: "boot")
+        harness.model.reveal(.pane("w1:p3"), bootID: "boot")
         harness.model.setSelected(true)
         harness.model.setSelected(false)
         let bridge = try await revealableSession(harness)
@@ -3425,5 +3425,253 @@ final class HerdrScreenModelTests: XCTestCase {
         harness.setScreenSize()
         try await harness.waitUntil("the session didn't connect") { harness.model.stateTraceLabel == "hidden" }
         return bridge
+    }
+}
+
+// MARK: - Tabs and workspaces
+
+extension HerdrScreenModelTests {
+    /// A tab tile goes to its tab with `tab.focus`, as Herdr's client goes to a tab it shows, the same way
+    /// as a move to a pane: Remux's zoom comes off the tab left first, and once Herdr has answered and the
+    /// tab is on screen the setting zooms it.
+    func testATabTileMovesWithTabFocusAndTakesRemuxsZoomWithIt() async throws {
+        let harness = await makeHarness(settings: Self.zooming)
+        let session = try await shownWorkspaces(harness, zoomingOnShow: true)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let tile = try XCTUnwrap(
+            adapter.windowSelectionSheetRenderProjection(group: nil).windows.first { $0.displayName == "t2" }
+        )
+
+        XCTAssertEqual(adapter.focusTopLevel(tile.id), .queued)
+        let unzoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        XCTAssertEqual([unzoom.paneID, unzoom.mode], ["w1:p1", "off"])
+        await session.bridge.serve(HerdrServerScript.zoomReply(id: unzoom.id, changed: true, zoomed: false, panes: Self.places(2)))
+        let focus = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(focus.method, "tab.focus")
+        XCTAssertEqual(focus.params, ["tab_id": "t2"])
+        await session.bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
+        await session.bridge.serve(Self.twoWorkspaces(revision: 4, focusedTab: "t2", focusedPane: "w1:p3"))
+        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        XCTAssertEqual([zoom.paneID, zoom.mode], ["w1:p3", "on"])
+    }
+
+    /// A workspace goes with `workspace.focus`, as Herdr's client switches workspaces, to the tab this
+    /// phone has there, and that tab gets the setting's zoom once it is on screen.
+    func testAWorkspaceMovesWithWorkspaceFocusAndZoomsTheTabItShows() async throws {
+        let harness = await makeHarness(settings: Self.zooming)
+        let session = try await shownWorkspaces(harness, zoomingOnShow: true)
+        var index = session.next
+
+        XCTAssertTrue(harness.model.focusWorkspace("w2"))
+        let unzoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        XCTAssertEqual([unzoom.paneID, unzoom.mode], ["w1:p1", "off"])
+        await session.bridge.serve(HerdrServerScript.zoomReply(id: unzoom.id, changed: true, zoomed: false, panes: Self.places(2)))
+        let focus = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(focus.method, "workspace.focus")
+        XCTAssertEqual(focus.params, ["workspace_id": "w2"])
+        await session.bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
+        await session.bridge.serve(Self.twoWorkspaces(revision: 4, focusedTab: "t4", focusedPane: "w2:p6"))
+        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        XCTAssertEqual([zoom.paneID, zoom.mode], ["w2:p6", "on"])
+    }
+
+    /// As in Herdr's client, a workspace picked while the session is still being shown goes once the show
+    /// completes, and any other move or command asked meanwhile is refused.
+    func testAWorkspacePickedDuringAShowGoesOnceTheShowCompletes() async throws {
+        let harness = await makeHarness()
+        let bridge = try await hiddenWorkspaces(harness)
+        harness.model.setSelected(true)
+        var index = 0
+        let show = try await harness.nextSurfaceSet(bridge, from: &index)
+
+        XCTAssertTrue(harness.model.focusWorkspace("w2"))
+        XCTAssertFalse(harness.model.focusTab("t2"))
+        XCTAssertFalse(harness.model.focusPane("w1:p2"))
+        XCTAssertFalse(harness.model.create(.tab(workspaceID: "w1")))
+        try await Task.sleep(for: .milliseconds(150))
+        let duringShow = await bridge.writtenCount
+        for write in try await harness.writes(bridge, from: index, count: duringShow - index) {
+            XCTAssertNil(command(write), "a command went during the show: \(write)")
+        }
+
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        await bridge.serve(try harness.shownSurface(projection: 1, revision: 1, lines: ["one two"], panes: Self.twoPanes))
+        let focus = try await expectWrite(harness, bridge, from: &index, "the workspace didn't go after the show", command)
+        XCTAssertEqual(focus.method, "workspace.focus")
+        XCTAssertEqual(focus.params, ["workspace_id": "w2"])
+    }
+
+    /// A workspace picked during a show the session then left belongs to that show, as Herdr's client
+    /// drops navigation left from an abandoned one: the next show doesn't go there.
+    func testAWorkspacePickedDuringAShowIsDroppedWhenTheSessionLeaves() async throws {
+        let harness = await makeHarness()
+        let bridge = try await hiddenWorkspaces(harness)
+        harness.model.setSelected(true)
+        var index = 0
+        _ = try await harness.nextSurfaceSet(bridge, from: &index)
+        XCTAssertTrue(harness.model.focusWorkspace("w2"))
+        harness.model.setSelected(false)
+        _ = try await harness.nextSurfaceSet(bridge, from: &index)
+
+        harness.model.setSelected(true)
+        let show = try await harness.nextSurfaceSet(bridge, from: &index)
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        await bridge.serve(try harness.shownSurface(projection: 1, revision: 1, lines: ["one two"], panes: Self.twoPanes))
+        try await harness.waitUntil("the session wasn't shown again") { harness.model.stateTraceLabel == "shown" }
+        try await Task.sleep(for: .milliseconds(150))
+        let written = await bridge.writtenCount
+        for write in try await harness.writes(bridge, from: index, count: written - index) {
+            XCTAssertNil(command(write), "the dropped workspace went: \(write)")
+        }
+    }
+
+    /// A workspace picked in the Sessions sheet for a hidden session goes right behind its show, as Herdr's
+    /// client opens a machine at a workspace.
+    func testARevealedWorkspaceGoesRightAfterTheShow() async throws {
+        let harness = await makeHarness()
+        let bridge = try await hiddenWorkspaces(harness)
+
+        harness.model.reveal(.workspace("w2"), bootID: "boot")
+        harness.model.setSelected(true)
+        var index = 0
+        _ = try await harness.nextSurfaceSet(bridge, from: &index)
+        let focus = try await nextWrite(bridge, from: &index, command)
+        XCTAssertEqual(focus.method, "workspace.focus")
+        XCTAssertEqual(focus.params, ["workspace_id": "w2"])
+    }
+
+    /// New Tab goes in the workspace the Tabs sheet shows and New Workspace starts from it, each with the
+    /// command Herdr's client sends, focused. The tab on screen changes, so Remux's zoom comes off it first.
+    func testNewTabAndNewWorkspaceGoInTheWorkspaceTheSheetShows() async throws {
+        let harness = await makeHarness(settings: Self.zooming)
+        let session = try await shownWorkspaces(harness, zoomingOnShow: true)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let grouping = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).grouping)
+        let beta = try XCTUnwrap(grouping.groups.first { $0.name == "beta" }).id
+
+        XCTAssertEqual(adapter.createTopLevel(inGroup: beta), .queued)
+        let unzoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        XCTAssertEqual([unzoom.paneID, unzoom.mode], ["w1:p1", "off"])
+        await session.bridge.serve(HerdrServerScript.zoomReply(id: unzoom.id, changed: true, zoomed: false, panes: Self.places(2)))
+        let tab = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(tab.method, "tab.create")
+        XCTAssertEqual(tab.params, ["workspace_id": "w2", "focus": "true"])
+        await session.bridge.serve(HerdrConnectionTests.reply(id: tab.id, json: #"{"type":"tab_created"}"#))
+
+        XCTAssertEqual(adapter.createTopLevelGroup(from: nil), .queued)
+        let workspace = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(workspace.method, "workspace.create")
+        XCTAssertEqual(workspace.params, ["source_workspace_id": "w1", "focus": "true"])
+    }
+
+    /// The Tabs sheet lists the tabs of the workspace on screen, and the workspaces, the one on screen
+    /// first. A workspace picked there lists its own tabs, none selected, with no preview but the tab on
+    /// screen's, and the sheet keeps the height of the largest workspace.
+    func testTheTabsSheetListsAWorkspacesTabsAndOffersTheOthers() async throws {
+        let harness = await makeHarness()
+        let session = try await shownWorkspaces(harness, zoomingOnShow: false)
+        let adapter = harness.model.terminalScreenAdapter
+
+        XCTAssertEqual(adapter.terminalInteractionProjection.windowCount, 2)
+        XCTAssertEqual(adapter.terminalInteractionProjection.selectedWindowIndex, 0)
+        let onScreen = adapter.windowSelectionSheetRenderProjection(group: nil)
+        XCTAssertEqual(onScreen.windows.map(\.displayName), ["t1", "t2"])
+        XCTAssertEqual(onScreen.windows.map(\.isSelected), [true, false])
+        XCTAssertEqual(onScreen.windows.map(\.paneCount), [2, 2])
+        let grouping = try XCTUnwrap(onScreen.grouping)
+        XCTAssertEqual(grouping.noun, .workspace)
+        XCTAssertEqual(grouping.groups.map(\.name), ["alpha", "beta"])
+        XCTAssertEqual(grouping.shownGroupID, grouping.groups[0].id)
+        XCTAssertEqual(grouping.largestWindowCount, 2)
+
+        let other = adapter.windowSelectionSheetRenderProjection(group: grouping.groups[1].id)
+        XCTAssertEqual(other.windows.map(\.displayName), ["t3", "t4"])
+        XCTAssertEqual(other.windows.map(\.isSelected), [false, false])
+        XCTAssertEqual(other.windows.map(\.paneCount), [1, 2])
+        XCTAssertEqual(other.grouping?.shownGroupID, grouping.groups[1].id)
+        XCTAssertEqual(other.previewLeafIDs, onScreen.previewLeafIDs)
+
+        var index = session.next
+        XCTAssertTrue(harness.model.focusWorkspace("w2"))
+        let focus = try await nextWrite(session.bridge, from: &index, command)
+        await session.bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
+        await session.bridge.serve(Self.twoWorkspaces(revision: 3, focusedTab: "t4", focusedPane: "w2:p6"))
+        try await harness.waitUntil("the workspace the session went to didn't come first") {
+            adapter.windowSelectionSheetRenderProjection(group: nil).grouping?.groups.map(\.name) == ["beta", "alpha"]
+        }
+    }
+
+    /// A swipe goes to the next tab of the workspace on screen, by the same move as a tile.
+    func testASwipeGoesToTheNextTabOfTheWorkspace() async throws {
+        let harness = await makeHarness()
+        let session = try await shownWorkspaces(harness, zoomingOnShow: false)
+        var index = session.next
+
+        XCTAssertEqual(harness.model.terminalScreenAdapter.focusAdjacentTopLevel(.next), .queued)
+        let focus = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(focus.method, "tab.focus")
+        XCTAssertEqual(focus.params, ["tab_id": "t2"])
+    }
+
+    /// Workspace `w1` "alpha" has tab `t1` (`w1:p1`, `w1:p2`) and `t2` (`w1:p3`, `w1:p4`); workspace `w2`
+    /// "beta" has tab `t3` (`w2:p5`) and `t4` (`w2:p6`, `w2:p7`), where this phone has `t4`.
+    private static func twoWorkspaces(
+        revision: UInt64,
+        focusedTab: String = "t1",
+        focusedPane: String = "w1:p1",
+        zoomedTabs: Set<String> = []
+    ) -> [UInt8] {
+        HerdrServerScript.snapshot(
+            revision: revision,
+            workspaces: [
+                .init(id: "w1", label: "alpha", tabs: [("t1", ["w1:p1", "w1:p2"]), ("t2", ["w1:p3", "w1:p4"])]),
+                .init(id: "w2", label: "beta", tabs: [("t3", ["w2:p5"]), ("t4", ["w2:p6", "w2:p7"])], activeTab: "t4"),
+            ],
+            focusedTab: focusedTab,
+            focusedPane: focusedPane,
+            zoomedTabs: zoomedTabs
+        )
+    }
+
+    /// The two workspaces, connected and hidden.
+    private func hiddenWorkspaces(_ harness: HerdrModelHarness) async throws -> FakeBridgeTransport {
+        let bridge = try await harness.bridge()
+        await bridge.serve(try HerdrServerScript.welcome() + Self.twoWorkspaces(revision: 1))
+        harness.setScreenSize()
+        try await harness.waitUntil("the session didn't connect") { harness.model.stateTraceLabel == "hidden" }
+        return bridge
+    }
+
+    /// The two workspaces shown on tab `t1`, which, with `zoomingOnShow`, Herdr zooms behind the show.
+    /// Returns the bridge and the index of the first write after the show's.
+    private func shownWorkspaces(
+        _ harness: HerdrModelHarness,
+        zoomingOnShow: Bool
+    ) async throws -> (bridge: FakeBridgeTransport, next: Int) {
+        let bridge = try await hiddenWorkspaces(harness)
+        harness.model.setSelected(true)
+        var index = 0
+        let show = try await harness.nextSurfaceSet(bridge, from: &index)
+        index += 1
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        if zoomingOnShow {
+            let zoom = try await nextWrite(bridge, from: &index, paneZoom)
+            await bridge.serve(Self.twoWorkspaces(revision: 2, zoomedTabs: ["t1"]))
+            await bridge.serve(try harness.shownSurface(projection: 2, revision: 1, lines: ["one"], panes: [Self.zoomedPane]))
+            await bridge.serve(HerdrServerScript.zoomReply(id: zoom.id, changed: true, zoomed: true, panes: Self.places(2)))
+        } else {
+            await bridge.serve(try harness.shownSurface(projection: 1, revision: 1, lines: ["one two"], panes: Self.twoPanes))
+        }
+        try await harness.waitUntil("the session wasn't shown") {
+            harness.model.stateTraceLabel == "shown" && harness.model.layout != nil
+        }
+        if zoomingOnShow { try await waitForMap(harness) }
+        return (bridge, index)
+    }
+
+    private func command(_ write: ClientWrite) -> (id: String, method: String, params: [String: String])? {
+        if case .command(let id, let method, let params) = write { (id, method, params) } else { nil }
     }
 }

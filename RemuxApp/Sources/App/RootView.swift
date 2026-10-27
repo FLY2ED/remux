@@ -214,7 +214,10 @@ private struct RemuxWorkspaceShell: View {
                     }
                 },
                 onRefresh: model.refreshSessions,
-                discoveries: model.sessionDiscoveries
+                discoveries: model.sessionDiscoveries,
+                herdrPlaces: model.herdrPlaces(of:),
+                onSelectHerdrWorkspace: model.openHerdrWorkspace(_:bootID:in:),
+                onCreateHerdrWorkspace: model.createHerdrWorkspace(in:)
             )
             .remuxSheetPresentationBackground()
             .ghosttyTerminalChromePresentation(
@@ -1500,6 +1503,7 @@ private struct ServerDetailView: View {
                         AvailableServerSessionRow(session: session)
                     }
                     .buttonStyle(.plain)
+                    .disabled(session.unavailableReason != nil)
                     .accessibilityIdentifier("library.server.available.session")
                 }
 
@@ -1654,9 +1658,11 @@ private struct AvailableServerSessionRow: View {
         session.id.locator.name
     }
 
-    /// The logo tells tmux from Herdr; a Herdr session can be listed while stopped.
+    /// The logo tells tmux from Herdr; a Herdr session can be listed while stopped, or unavailable with
+    /// Herdr's reason.
     private var detail: String {
-        session.isRunning ? "On the server" : "Stopped"
+        if let reason = session.unavailableReason { return "Unavailable: \(reason)" }
+        return session.isRunning ? "On the server" : "Stopped"
     }
 
     var body: some View {
@@ -1671,21 +1677,24 @@ private struct AvailableServerSessionRow: View {
                 Text(detail)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
 
             Spacer(minLength: 8)
 
-            Image(systemName: "chevron.right")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.tertiary)
+            if session.unavailableReason == nil {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
         }
         .padding(.vertical, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(sessionName), \(session.id.locator.backend.displayName), \(detail)")
-        .accessibilityHint("Add this session to Remux")
-        .accessibilityAddTraits(.isButton)
+        .accessibilityHint(session.unavailableReason == nil ? "Add this session to Remux" : "")
+        .accessibilityAddTraits(session.unavailableReason == nil ? .isButton : [])
     }
 }
 
@@ -1705,6 +1714,7 @@ private struct ServerAvailableSessionsView: View {
                         AvailableServerSessionRow(session: session)
                     }
                     .buttonStyle(.plain)
+                    .disabled(session.unavailableReason != nil)
                     .accessibilityIdentifier("library.server.available.result")
                 }
 

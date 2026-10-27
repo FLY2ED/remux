@@ -771,10 +771,14 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         )
     }
 
-    func createTopLevel() -> GhosttyTerminalActionOutcome {
+    func createTopLevel(inGroup group: UUID?) -> GhosttyTerminalActionOutcome {
         guard let controller else { return .missingTarget(.host) }
         controller.requestNewWindow()
         return .queued
+    }
+
+    func createTopLevelGroup(from group: UUID?) -> GhosttyTerminalActionOutcome {
+        .missingTarget(.host)
     }
 
     func splitFocusedPane(
@@ -1042,7 +1046,7 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
 
     var topLevelNoun: GhosttyTopLevelNoun { .window }
 
-    func windowSelectionSheetRenderProjection() -> GhosttyWindowSelectionSheetRenderProjection {
+    func windowSelectionSheetRenderProjection(group: UUID?) -> GhosttyWindowSelectionSheetRenderProjection {
         let projection = GhosttyTerminalPresentationProjector.windowSelectionSheetRenderProjection(
             snapshot: topologySnapshot
         )

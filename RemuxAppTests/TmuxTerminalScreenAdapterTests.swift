@@ -412,7 +412,7 @@ final class TmuxTerminalScreenAdapterTests: XCTestCase {
         )
 
         let windowID = try XCTUnwrap(
-            adapter.windowSelectionSheetRenderProjection().selectedWindowID
+            adapter.windowSelectionSheetRenderProjection(group: nil).selectedWindowID
         )
         let panePicker = adapter.paneSelectionSheetRenderProjection(topLevelID: windowID)
         XCTAssertTrue(panePicker.isServerZoomed)
@@ -451,7 +451,7 @@ final class TmuxTerminalScreenAdapterTests: XCTestCase {
         )
         session.handleTopology(twoWindows)
 
-        let first = adapter.windowSelectionSheetRenderProjection()
+        let first = adapter.windowSelectionSheetRenderProjection(group: nil)
         XCTAssertEqual(
             first.windows.count, 2,
             "the first emitted topology must project immediately, not lag one update behind"
@@ -476,7 +476,7 @@ final class TmuxTerminalScreenAdapterTests: XCTestCase {
         )
         session.handleTopology(oneWindow)
 
-        let second = adapter.windowSelectionSheetRenderProjection()
+        let second = adapter.windowSelectionSheetRenderProjection(group: nil)
         XCTAssertEqual(
             second.windows.count, 1,
             "removing a non-current window must drop its tile on the same topology update"
@@ -504,7 +504,7 @@ final class TmuxTerminalScreenAdapterTests: XCTestCase {
             activeWindowID: 1
         )
         session.handleTopology(initial)
-        let before = adapter.windowSelectionSheetRenderProjection()
+        let before = adapter.windowSelectionSheetRenderProjection(group: nil)
         let beforeWindowID = try XCTUnwrap(before.windows.first?.id)
         let beforePaneID = try XCTUnwrap(before.windows.first?.focusedPreviewPaneID)
 
@@ -515,7 +515,7 @@ final class TmuxTerminalScreenAdapterTests: XCTestCase {
             activeWindowID: 1
         )
         session.handleTopology(renamed)
-        let after = adapter.windowSelectionSheetRenderProjection()
+        let after = adapter.windowSelectionSheetRenderProjection(group: nil)
 
         XCTAssertEqual(after.windows.first?.displayName, "déploy-漢字")
         XCTAssertEqual(after.windows.first?.id, beforeWindowID)

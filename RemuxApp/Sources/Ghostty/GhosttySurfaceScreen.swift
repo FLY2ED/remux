@@ -72,6 +72,9 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
     @State private var terminalInputController = GhosttyTerminalInputController()
     @State private var keyboardResponderHandoff = GhosttyKeyboardResponderHandoff()
     @State private var selectionSheet: GhosttySurfaceSelectionSheet?
+    /// The group whose windows the window sheet lists, when the backend groups them; nil is the group on
+    /// screen.
+    @State private var shownWindowGroupID: UUID?
     @State private var bottomChromeReservation = GhosttyBottomChromeReservation()
     @State private var softwareKeyboardOverlapHeight: CGFloat = 0
     @State private var lastSoftwareKeyboardOverlapHeight: CGFloat = 0
@@ -518,9 +521,18 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
                 let navigationBarHeight = TerminalSelectionSheetLayout.nativeNavigationBarHeight(
                     width: screenProxy.size.width
                 )
+                let windowProjection: GhosttyWindowSelectionSheetRenderProjection? = if case .windows = sheet {
+                    model.windowSelectionSheetRenderProjection(group: shownWindowGroupID)
+                } else {
+                    nil
+                }
+                let headerHeight = windowProjection?.grouping == nil
+                    ? TerminalSelectionSheetLayout.contextHeight
+                    : TerminalSelectionSheetLayout.groupPickerHeight
                 let maximumContentHeight = TerminalSelectionSheetLayout.maximumContentHeight(
                     availableHeight: screenProxy.size.height,
-                    navigationBarHeight: navigationBarHeight
+                    navigationBarHeight: navigationBarHeight,
+                    headerHeight: headerHeight
                 )
                 let paneTopologySize = PaneTopologyLayout.size(
                     availableWidth: TerminalSelectionSheetLayout.contentWidth(
@@ -530,12 +542,14 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
                 )
                 let contentHeight = selectionSheetContentHeight(
                     for: sheet,
+                    windowProjection: windowProjection,
                     windowLayout: windowLayout,
                     paneTopologySize: paneTopologySize,
                     maximumContentHeight: maximumContentHeight
                 )
                 selectionSheetContent(
                     sheet,
+                    windowProjection: windowProjection,
                     windowLayout: windowLayout,
                     paneTopologySize: paneTopologySize,
                     contentHeight: contentHeight
@@ -543,7 +557,8 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
                     .presentationDetents(
                         [.height(TerminalSelectionSheetLayout.sheetHeight(
                             contentHeight: contentHeight,
-                            navigationBarHeight: navigationBarHeight
+                            navigationBarHeight: navigationBarHeight,
+                            headerHeight: headerHeight
                         ))]
                     )
                     .presentationContentInteraction(.scrolls)
@@ -1438,6 +1453,7 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
             leafIDs: projection.previewLeafIDs,
             layout: layout
         )
+        shownWindowGroupID = nil
         applySelectionSheetPresentation(.windows(session))
         session.startRefreshing()
     }
@@ -1607,7 +1623,7 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
 
         attachmentPreviewRequest = nil
         attachmentNotice = nil
-        let selectedWindowName = model.windowSelectionSheetRenderProjection()
+        let selectedWindowName = model.windowSelectionSheetRenderProjection(group: nil)
             .windows.first(where: \.isSelected)?.displayName
         composer.submit(
             to: GhosttyComposerSubmissionDestination(
@@ -2046,7 +2062,14 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
         )
         let effect = model.createTopLevelInteractionEffect()
         performTopologyActionInteraction(effect) {
-            model.createTopLevel()
+            model.createTopLevel(inGroup: shownWindowGroupID)
+        }
+    }
+
+    private func createTopLevelGroupFromSelectionSheet() {
+        let effect = model.createTopLevelInteractionEffect()
+        performTopologyActionInteraction(effect) {
+            model.createTopLevelGroup(from: shownWindowGroupID)
         }
     }
 
@@ -2120,8 +2143,11 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
         _ = model.setFocusedPaneZoomed(zoomed)
     }
 
+    /// A sheet listing one group's windows is as tall as the largest group needs, so it keeps its height
+    /// as the group changes.
     private func selectionSheetContentHeight(
         for sheet: GhosttySurfaceSelectionSheet,
+        windowProjection: GhosttyWindowSelectionSheetRenderProjection?,
         windowLayout: PanePreviewLayout.Metrics,
         paneTopologySize: CGSize,
         maximumContentHeight: CGFloat
@@ -2129,7 +2155,7 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
         switch sheet {
         case .windows:
             return PanePreviewLayout.gridIdealHeight(
-                itemCount: model.windowSelectionSheetRenderProjection().windows.count,
+                itemCount: windowProjection.map { $0.grouping?.largestWindowCount ?? $0.windows.count } ?? 0,
                 metrics: windowLayout,
                 maximumContentHeight: maximumContentHeight
             )
@@ -2141,24 +2167,29 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
     @ViewBuilder
     private func selectionSheetContent(
         _ sheet: GhosttySurfaceSelectionSheet,
+        windowProjection: GhosttyWindowSelectionSheetRenderProjection?,
         windowLayout: PanePreviewLayout.Metrics,
         paneTopologySize: CGSize,
         contentHeight: CGFloat
     ) -> some View {
         switch sheet {
         case .windows(let session):
-            GhosttyWindowSelectionSheet(
-                session: session,
-                projection: model.windowSelectionSheetRenderProjection(),
-                topLevelNoun: model.topLevelNoun,
-                sessionName: presentation.sessionName,
-                layout: windowLayout,
-                contentHeight: contentHeight,
-                commandFailureMessage: selectionSheetCommandFailureMessage,
-                onCreateWindow: createTopLevelFromSelectionSheet,
-                onSelect: selectTopLevelFromSelectionSheet,
-                onRemoveWindow: closeTopLevelFromSelectionSheet
-            )
+            if let windowProjection {
+                GhosttyWindowSelectionSheet(
+                    session: session,
+                    projection: windowProjection,
+                    topLevelNoun: model.topLevelNoun,
+                    sessionName: presentation.sessionName,
+                    layout: windowLayout,
+                    contentHeight: contentHeight,
+                    commandFailureMessage: selectionSheetCommandFailureMessage,
+                    onCreateWindow: createTopLevelFromSelectionSheet,
+                    onSelect: selectTopLevelFromSelectionSheet,
+                    onRemoveWindow: closeTopLevelFromSelectionSheet,
+                    onShowGroup: { shownWindowGroupID = $0 },
+                    onCreateGroup: createTopLevelGroupFromSelectionSheet
+                )
+            }
 
         case .panes(let topLevelID):
             GhosttyPaneSelectionSheet(

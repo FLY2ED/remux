@@ -1681,19 +1681,46 @@ final class RemuxRootModel: ObservableObject {
     func openHerdrNotification(_ banner: HerdrNotificationPolicy.Banner) {
         herdrNotifications.dismiss(banner.id)
         let workspaceID = banner.origin.workspaceID
-        guard let session = RemuxActiveSessionCollection.session(workspaceID, in: activeSessions) else { return }
-        if let paneID = banner.notification.paneID,
-           case .herdr(let model)? = terminalRuntimes[TerminalRuntimeAttemptKey(session: session)] {
-            model.reveal(paneID: paneID, bootID: banner.origin.bootID)
+        guard RemuxActiveSessionCollection.containsWorkspace(workspaceID, in: activeSessions) else { return }
+        if let paneID = banner.notification.paneID {
+            herdrModel(of: workspaceID)?.reveal(.pane(paneID), bootID: banner.origin.bootID)
         }
         showActiveSession(workspaceID)
     }
 
-    private func herdrNotificationState(of workspaceID: SavedWorkspace.ID) -> HerdrNotificationSessionState? {
+    /// The workspaces and tabs of an open Herdr session, for the Sessions sheet.
+    func herdrPlaces(of workspaceID: SavedWorkspace.ID) -> HerdrSessionPlaces? {
+        herdrModel(of: workspaceID)?.places
+    }
+
+    /// A Herdr workspace picked in the Sessions sheet. In the session on screen it is a move there; another
+    /// session is shown with the workspace as its show's move, as Herdr's client opens a machine at a
+    /// workspace. `bootID` is the server boot the sheet listed it from.
+    func openHerdrWorkspace(_ herdrWorkspaceID: String, bootID: String, in workspaceID: SavedWorkspace.ID) {
+        guard let model = herdrModel(of: workspaceID) else { return }
+        if state == .terminal(workspaceID) {
+            _ = model.focusWorkspace(herdrWorkspaceID)
+        } else {
+            model.reveal(.workspace(herdrWorkspaceID), bootID: bootID)
+            showActiveSession(workspaceID)
+        }
+    }
+
+    /// New Workspace in the Sessions sheet, beside the session's workspace on screen.
+    func createHerdrWorkspace(in workspaceID: SavedWorkspace.ID) {
+        guard let model = herdrModel(of: workspaceID) else { return }
+        _ = model.create(.workspace(source: model.places.outline?.focusedWorkspaceID))
+    }
+
+    private func herdrModel(of workspaceID: SavedWorkspace.ID) -> HerdrScreenModel? {
         guard let session = RemuxActiveSessionCollection.session(workspaceID, in: activeSessions),
               case .herdr(let model)? = terminalRuntimes[TerminalRuntimeAttemptKey(session: session)]
         else { return nil }
-        return model.notificationState
+        return model
+    }
+
+    private func herdrNotificationState(of workspaceID: SavedWorkspace.ID) -> HerdrNotificationSessionState? {
+        herdrModel(of: workspaceID)?.notificationState
     }
 
     /// Only the session's current model speaks for it; a replaced one's late events are dropped.

@@ -43,6 +43,23 @@ final class SessionSwitcherProjectionTests: XCTestCase {
         XCTAssertEqual(projection.availableSessions.map(\.isRunning), [false, true, true, true])
     }
 
+    /// A Herdr session Herdr can't reach is listed with its reason, so the sheet shows it unavailable.
+    func testAnUnreachableHerdrSessionIsListedWithItsReason() {
+        let server = makeServer(name: "Mini")
+        let projection = SessionSwitcherProjection(
+            snapshot: snapshot(servers: [server], workspaces: []),
+            activeSessions: [],
+            discoveries: [
+                server.id: loadedDiscovery([], herdr: [
+                    DiscoveredSession(name: "locked", isRunning: false, unavailableReason: "Permission denied"),
+                    DiscoveredSession(name: "open", isRunning: true),
+                ]),
+            ],
+            selectedSessionID: nil
+        )
+        XCTAssertEqual(projection.availableSessions.map(\.unavailableReason), ["Permission denied", nil])
+    }
+
     /// The switcher names a server only when none of its sessions could be listed. A missing Herdr, even
     /// where a Herdr session is saved, leaves the server's tmux sessions listed.
     func testOnlyAServerNoneOfWhoseSessionsCouldBeListedIsUnchecked() {

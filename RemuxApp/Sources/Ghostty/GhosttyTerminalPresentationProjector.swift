@@ -565,9 +565,27 @@ struct GhosttyWindowSelectionSheetRenderProjection: Equatable, Sendable {
         let focusedPreviewPaneID: UUID?
     }
 
+    /// The groups a backend keeps its top-levels in, as Herdr's workspaces hold its tabs.
+    struct Grouping: Equatable, Sendable {
+        struct Group: Identifiable, Equatable, Sendable {
+            let id: UUID
+            let name: String
+        }
+
+        let noun: GhosttyTopLevelNoun
+        /// The most recent first.
+        let groups: [Group]
+        /// The group whose windows the sheet lists.
+        let shownGroupID: UUID
+        /// The most windows a group has, so the sheet keeps one height whichever group it shows.
+        let largestWindowCount: Int
+    }
+
     let windows: [Window]
     let selectedWindowID: UUID?
     let previewLeafIDs: [UUID]
+    /// Nil for a backend without groups.
+    var grouping: Grouping? = nil
 }
 
 struct GhosttyPaneSelectionSheetRenderProjection: Equatable, Sendable {

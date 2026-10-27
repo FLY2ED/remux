@@ -1775,6 +1775,128 @@ final class RemuxAppUITests: XCTestCase {
         captureLiveHerdrStep("6-scrolled", in: configuration)
     }
 
+    /// Tabs and workspaces of a live Herdr session whose workspace `remux` has a three-pane tab and a tab
+    /// `build`, beside workspaces `api` (a two-pane tab `server` and a tab `tests`), `web`, `notes` and
+    /// `infra`, with a session `locked` Herdr can't reach. The Tabs sheet lists the tabs of the workspace
+    /// on screen, and offers the three most recent workspaces as capsules and the rest behind More; picking
+    /// one only changes the tiles, a tile goes there, and the capsules follow recency. The Sessions sheet
+    /// lists the workspaces under the session with New Workspace, and lists `locked` as unavailable.
+    func testLiveHerdrTabsAndWorkspacesWhenConfigured() throws {
+        let configuration = try launchLiveHerdrApp()
+        let tabs = app.buttons.matching(identifier: "terminal.windows").firstMatch
+        let panes = app.buttons.matching(identifier: "terminal.panes").firstMatch
+        let tabsSheet = elementWithIdentifier("terminal.windows.sheet")
+        func capsule(_ index: Int) -> XCUIElement { app.buttons["terminal.windows.group.\(index)"] }
+        let more = elementWithIdentifier("terminal.windows.group.more")
+        func tile(_ index: Int) -> XCUIElement { app.buttons["terminal.window.tile.\(index)"] }
+
+        openFirstSavedSession()
+        waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 2", timeout: 10))
+
+        tabs.tap()
+        XCTAssertTrue(tabsSheet.waitForExistence(timeout: 5))
+        XCTAssertEqual(capsule(1).label, "Workspace remux")
+        XCTAssertTrue(capsule(1).isSelected)
+        XCTAssertEqual([capsule(2).label, capsule(3).label], ["Workspace api", "Workspace web"])
+        XCTAssertTrue(tile(2).exists && !tile(3).exists, "The sheet should list remux's two tabs.")
+        captureLiveHerdrStep("w1-tabs-sheet", in: configuration)
+
+        capsule(2).tap()
+        XCTAssertTrue(waitForLabel(of: tile(1), "Tab 1 of 2, server, 2 panes", timeout: 5), "Picking api didn't list its tabs.")
+        XCTAssertTrue(tabsSheet.exists, "Picking a workspace closed the sheet.")
+        captureLiveHerdrStep("w2-other-workspace", in: configuration)
+
+        more.tap()
+        let infra = app.buttons["infra"]
+        XCTAssertTrue(infra.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["notes"].exists)
+        XCTAssertTrue(app.buttons["New Workspace"].exists)
+        captureLiveHerdrStep("w3-more-menu", in: configuration)
+        infra.tap()
+        XCTAssertTrue(waitForLabel(of: more, "Workspace infra, more workspaces", timeout: 5))
+        XCTAssertTrue(tile(1).exists && !tile(2).exists, "The sheet should list infra's one tab.")
+        captureLiveHerdrStep("w3b-more-picked", in: configuration)
+
+        capsule(2).tap()
+        XCTAssertTrue(waitForLabel(of: tile(1), "Tab 1 of 2, server, 2 panes", timeout: 5))
+        tile(1).tap()
+        XCTAssertTrue(tabsSheet.waitForNonExistence(timeout: 5), "The tile didn't close the sheet.")
+        XCTAssertTrue(waitForLabel(of: panes, "Panes, 2 panes", timeout: 10), "The tile didn't go to api's server tab.")
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 2", timeout: 10))
+        captureLiveHerdrStep("w4-moved-to-api", in: configuration)
+
+        // The setting zooms the two-pane tab reached, as a show does.
+        let zoom = openHerdrPanesZoomSwitch(paneCount: 2)
+        XCTAssertTrue(waitForValue("1", of: zoom, timeout: 8), "The tab reached wasn't zoomed.")
+        app.buttons["terminal.panes.close"].tap()
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+
+        tabs.tap()
+        XCTAssertTrue(tabsSheet.waitForExistence(timeout: 5))
+        XCTAssertEqual([capsule(1).label, capsule(2).label], ["Workspace api", "Workspace remux"])
+        captureLiveHerdrStep("w5-recency", in: configuration)
+        app.buttons["terminal.windows.close"].tap()
+        XCTAssertTrue(tabsSheet.waitForNonExistence(timeout: 5))
+
+        let sessionsSheet = app.otherElements["terminal.sessions.sheet"]
+        openSessionSwitcherFromTerminal()
+        XCTAssertTrue(sessionsSheet.waitForExistence(timeout: 5))
+        let workspaceRows = app.descendants(matching: .any).matching(identifier: "terminal.sessions.herdr-workspace")
+        XCTAssertTrue(workspaceRows.firstMatch.waitForExistence(timeout: 5), "The session on screen didn't list its workspaces.")
+        XCTAssertEqual(workspaceRows.count, 5)
+        let current = workspaceRows.matching(NSPredicate(format: "label == %@", "Workspace api, 2 tabs, current workspace"))
+        XCTAssertEqual(current.count, 1)
+        captureLiveHerdrStep("w6-sessions-sheet", in: configuration)
+        let sessionList = app.descendants(matching: .any)["terminal.sessions.list"]
+        let newWorkspace = elementWithIdentifier("terminal.sessions.herdr-workspace.new")
+        for _ in 0..<4 where !newWorkspace.exists || !newWorkspace.isHittable {
+            sessionList.swipeUp()
+        }
+        XCTAssertTrue(newWorkspace.isHittable, "The session on screen didn't offer New Workspace.")
+        captureLiveHerdrStep("w6b-sessions-sheet-scrolled", in: configuration)
+
+        workspaceRows.matching(NSPredicate(format: "label BEGINSWITH %@", "Workspace web,")).firstMatch.tap()
+        XCTAssertTrue(sessionsSheet.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 1", timeout: 10))
+        XCTAssertTrue(waitForLabel(of: panes, "Panes, 1 pane", timeout: 10), "The workspace row didn't go to web.")
+        captureLiveHerdrStep("w7-moved-to-web", in: configuration)
+
+        // Herdr lists a session it can't reach as unavailable, and it isn't offered.
+        openSessionSwitcherFromTerminal()
+        XCTAssertTrue(sessionsSheet.waitForExistence(timeout: 5))
+        let locked = app.descendants(matching: .any)
+            .matching(identifier: "terminal.sessions.available-session")
+            .matching(NSPredicate(format: "label BEGINSWITH %@", "locked, Herdr, Unavailable"))
+            .firstMatch
+        for _ in 0..<6 where !locked.exists || !locked.isHittable {
+            sessionList.swipeUp()
+        }
+        XCTAssertTrue(locked.waitForExistence(timeout: 20), "The session Herdr can't reach wasn't listed as unavailable.")
+        XCTAssertFalse(locked.isEnabled, "The unavailable session was offered.")
+        sessionList.swipeUp()
+        captureLiveHerdrStep("w8-unavailable-session", in: configuration)
+        for _ in 0..<6 where !newWorkspace.exists || !newWorkspace.isHittable {
+            sessionList.swipeDown()
+        }
+        XCTAssertTrue(newWorkspace.isHittable)
+        newWorkspace.tap()
+        XCTAssertTrue(sessionsSheet.waitForNonExistence(timeout: 5))
+        tabs.tap()
+        XCTAssertTrue(tabsSheet.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitForLabel(of: more, "More workspaces", timeout: 5))
+        XCTAssertFalse(["Workspace remux", "Workspace api", "Workspace web", "Workspace notes", "Workspace infra"]
+            .contains(capsule(1).label), "New Workspace didn't go to the new workspace: \(capsule(1).label)")
+        captureLiveHerdrStep("w9-new-workspace", in: configuration)
+
+        app.buttons["terminal.window.new"].tap()
+        XCTAssertTrue(tabsSheet.waitForNonExistence(timeout: 5), "New Tab didn't close the sheet.")
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 2 of 2", timeout: 10), "New Tab didn't go to the new tab.")
+        sendTerminalCommand("echo REMUX_NEW_TAB_TYPED")
+        XCTAssertEqual(app.state, .runningForeground)
+        captureLiveHerdrStep("w10-new-tab", in: configuration)
+    }
+
     /// Opens Panes over a Herdr session whose tab has `paneCount` panes, checks that the pane picker maps
     /// every one, also while the tab is zoomed, and returns its Zoom switch.
     private func openHerdrPanesZoomSwitch(paneCount: Int) -> XCUIElement {

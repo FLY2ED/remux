@@ -39,12 +39,21 @@ struct GhosttyWindowSelectionSheet: View {
     let onCreateWindow: (() -> Void)?
     let onSelect: (UUID) -> Void
     let onRemoveWindow: (UUID) -> Void
+    /// Picking a group changes only which windows the sheet lists.
+    let onShowGroup: (UUID) -> Void
+    let onCreateGroup: () -> Void
 
     var body: some View {
         NavigationStack {
-            TerminalSelectionSheetContent(
-                context: "\(sessionName) · \(projection.windows.count) \((projection.windows.count == 1 ? topLevelNoun.singular : topLevelNoun.plural).lowercased())"
-            ) {
+            TerminalSelectionSheetContent {
+                if let grouping = projection.grouping {
+                    GhosttyWindowGroupPicker(grouping: grouping, onShow: onShowGroup, onCreate: onCreateGroup)
+                } else {
+                    TerminalSelectionSheetContextLabel(
+                        text: "\(sessionName) · \(projection.windows.count) \((projection.windows.count == 1 ? topLevelNoun.singular : topLevelNoun.plural).lowercased())"
+                    )
+                }
+            } content: {
                 ScrollView(showsIndicators: false) {
                     windowGrid(
                         windows: projection.windows,
@@ -382,6 +391,101 @@ struct GhosttyPaneSelectionSheet: View {
             return "This is the only pane in the \(noun), so removing it can close the \(noun) too."
         }
         return "This will close the pane."
+    }
+}
+
+/// A backend's groups of windows, as Herdr's workspaces: the three most recent as capsules, and the rest
+/// and a new group behind More, which shows the group it lists when that one is picked. The order follows
+/// the backend's recency, so it holds as groups are added.
+private struct GhosttyWindowGroupPicker: View {
+    private static let capsuleCount = 3
+
+    let grouping: GhosttyWindowSelectionSheetRenderProjection.Grouping
+    let onShow: (UUID) -> Void
+    let onCreate: () -> Void
+
+    var body: some View {
+        let capsules = Array(grouping.groups.prefix(Self.capsuleCount))
+        let rest = Array(grouping.groups.dropFirst(Self.capsuleCount))
+        let shownInMore = rest.first { $0.id == grouping.shownGroupID }
+
+        HStack(spacing: 8) {
+            ForEach(Array(capsules.enumerated()), id: \.element.id) { index, group in
+                let isShown = group.id == grouping.shownGroupID
+                Button {
+                    Haptic.selection()
+                    onShow(group.id)
+                } label: {
+                    GhosttyWindowGroupCapsule(title: group.name, isShown: isShown)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(grouping.noun.singular) \(group.name)")
+                .accessibilityAddTraits(isShown ? [.isSelected, .isButton] : .isButton)
+                .accessibilityIdentifier("terminal.windows.group.\(index + 1)")
+            }
+
+            Menu {
+                Picker(
+                    grouping.noun.plural,
+                    selection: Binding(get: { grouping.shownGroupID }, set: { onShow($0) })
+                ) {
+                    ForEach(rest) { group in
+                        Text(group.name).tag(group.id)
+                    }
+                }
+                .pickerStyle(.inline)
+
+                Button {
+                    onCreate()
+                } label: {
+                    Label("New \(grouping.noun.singular)", systemImage: "plus")
+                }
+                .accessibilityIdentifier("terminal.windows.group.new")
+            } label: {
+                GhosttyWindowGroupCapsule(
+                    title: shownInMore?.name ?? "More",
+                    isShown: shownInMore != nil,
+                    showsMenuIndicator: true
+                )
+            }
+            .accessibilityLabel(
+                shownInMore.map { "\(grouping.noun.singular) \($0.name), more \(grouping.noun.plural.lowercased())" }
+                    ?? "More \(grouping.noun.plural.lowercased())"
+            )
+            .accessibilityIdentifier("terminal.windows.group.more")
+
+            Spacer(minLength: 0)
+        }
+        .frame(height: TerminalSelectionSheetLayout.groupPickerHeight)
+    }
+}
+
+private struct GhosttyWindowGroupCapsule: View {
+    let title: String
+    let isShown: Bool
+    var showsMenuIndicator = false
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Text(title)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            if showsMenuIndicator {
+                Image(systemName: "chevron.down")
+                    .font(.caption.weight(.bold))
+                    .accessibilityHidden(true)
+            }
+        }
+        .font(.subheadline.weight(.semibold))
+        .foregroundStyle(isShown ? Color(uiColor: .systemBackground) : TerminalSelectionSheetPalette.primary)
+        .padding(.horizontal, 14)
+        .frame(height: TerminalSelectionSheetLayout.groupPickerHeight)
+        .background(
+            isShown ? TerminalSelectionSheetPalette.primary : TerminalSelectionSheetPalette.controlFill,
+            in: Capsule()
+        )
+        .contentShape(Capsule())
     }
 }
 

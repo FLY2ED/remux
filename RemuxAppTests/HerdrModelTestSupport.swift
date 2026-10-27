@@ -120,6 +120,62 @@ enum HerdrServerScript {
         return control(HerdrControlKind.snapshot, json)
     }
 
+    /// A workspace of a scripted session: its tabs in order, each with its panes, and the tab this phone
+    /// has there, the first unless given.
+    struct Workspace {
+        let id: String
+        var label: String
+        let tabs: [(id: String, panes: [String])]
+        var activeTab: String?
+    }
+
+    /// A snapshot of `workspaces` in order, with this phone at `focusedTab` and `focusedPane`; each tab is
+    /// named after its id, and zoomed when in `zoomedTabs`.
+    static func snapshot(
+        revision: UInt64,
+        boot: String = "boot",
+        workspaces: [Workspace],
+        focusedTab: String,
+        focusedPane: String?,
+        zoomedTabs: Set<String> = []
+    ) -> [UInt8] {
+        let focusedWorkspace = workspaces.first { $0.tabs.contains { $0.id == focusedTab } }?.id
+        let workspaceEntries = workspaces.enumerated().map { index, workspace in
+            let active = workspace.id == focusedWorkspace ? focusedTab : workspace.activeTab ?? workspace.tabs[0].id
+            return """
+            {"workspace_id":"\(workspace.id)","active_tab_id":"\(active)","number":\(index + 1),
+             "label":"\(workspace.label)","custom_label":true,"focused":\(workspace.id == focusedWorkspace),
+             "agent_status":"idle"}
+            """
+        }
+        let tabEntries = workspaces.flatMap { workspace in
+            workspace.tabs.enumerated().map { index, tab in
+                """
+                {"tab_id":"\(tab.id)","workspace_id":"\(workspace.id)","number":\(index + 1),"label":"\(tab.id)",
+                 "custom_label":true,"zoomed":\(zoomedTabs.contains(tab.id)),"focused":\(tab.id == focusedTab),
+                 "agent_status":"idle"}
+                """
+            }
+        }
+        let paneEntries = workspaces.flatMap { workspace in
+            workspace.tabs.flatMap { tab in
+                tab.panes.map { pane in
+                    """
+                    {"pane_id":"\(pane)","workspace_id":"\(workspace.id)","tab_id":"\(tab.id)","label":null,
+                     "cwd":null,"foreground_cwd":null,"focused":\(pane == focusedPane),"right_click_passthrough":false}
+                    """
+                }
+            }
+        }
+        let json = """
+        {"boot_id":"\(boot)","revision":\(revision),"focused_workspace_id":\(json(focusedWorkspace)),
+         "focused_tab_id":"\(focusedTab)","focused_pane_id":\(json(focusedPane)),
+         "workspaces":[\(workspaceEntries.joined(separator: ","))],"tabs":[\(tabEntries.joined(separator: ","))],
+         "panes":[\(paneEntries.joined(separator: ","))],"agents":[]}
+        """
+        return control(HerdrControlKind.snapshot, json)
+    }
+
     /// `endpoint.agent-completions.v1`, as Herdr sends it before the snapshot of the same revision.
     static func agentCompletions(revision: UInt64, boot: String = "boot", _ completions: [String: UInt64]) -> [UInt8] {
         let entries = completions.sorted { $0.key < $1.key }.map { #""\#($0.key)":\#($0.value)"# }
@@ -350,6 +406,8 @@ enum ClientWrite: Equatable {
     case paneFocus(id: String, paneID: String)
     /// A `pane.zoom`, with its mode: "on" or "off".
     case paneZoom(id: String, paneID: String, mode: String)
+    /// Any other command, with its parameters as text.
+    case command(id: String, method: String, params: [String: String])
     case ping(data: String)
     case other(tag: UInt32, kind: String)
 
@@ -394,7 +452,17 @@ enum ClientWrite: Equatable {
                 return .paneZoom(id: request.id, paneID: paneID, mode: try XCTUnwrap(params["mode"]))
             }
             guard request.method == HerdrConnection.surfaceSetMethod else {
-                return .other(tag: tag, kind: request.method)
+                _ = try reader.string()
+                let json = try XCTUnwrap(
+                    JSONSerialization.jsonObject(with: Data(try reader.string().utf8)) as? [String: Any]
+                )
+                let params = (json["params"] as? [String: Any] ?? [:]).mapValues { value in
+                    if let flag = value as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID() {
+                        return flag.boolValue ? "true" : "false"
+                    }
+                    return "\(value)"
+                }
+                return .command(id: request.id, method: request.method, params: params)
             }
             return .surfaceSet(id: request.id, active: try XCTUnwrap(request.params?["active"]))
         case 17:

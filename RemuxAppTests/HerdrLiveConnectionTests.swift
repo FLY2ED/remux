@@ -242,6 +242,106 @@ final class HerdrLiveConnectionTests: XCTestCase {
         throw HerdrLiveError(description: "Herdr reported the tab zoomed \(String(describing: last)), not \(zoomed)")
     }
 
+    // MARK: - Tabs and workspaces
+
+    /// New Tab and New Workspace make what Herdr's own client makes and go there, and a tab tile and a
+    /// workspace take the session back, as the frame Herdr then sends shows.
+    @MainActor
+    func testTabsAndWorkspacesAreMadeAndReachedOnHerdr093() async throws {
+        try await checkTabsAndWorkspaces(version: "0.9.3")
+    }
+
+    @MainActor
+    func testTabsAndWorkspacesAreMadeAndReachedOnHerdr095() async throws {
+        try await checkTabsAndWorkspaces(version: "0.9.5")
+    }
+
+    @MainActor
+    private func checkTabsAndWorkspaces(version: String) async throws {
+        let session = try await openShownSession(version: version, through: { $0 })
+        let model = session.model
+        let adapter = model.terminalScreenAdapter
+        let first = try XCTUnwrap(model.places.outline?.workspaces.first)
+        let firstTab = try XCTUnwrap(first.tabs.first).id
+        func onScreen() -> String? { model.layout?.tab?.tabID }
+
+        XCTAssertEqual(adapter.createTopLevel(inGroup: nil), .queued)
+        try await waitUntil("New Tab didn't make a tab", timeout: .seconds(15)) {
+            model.places.outline?.workspace(first.id)?.tabs.count == 2
+        }
+        try await waitUntil("New Tab didn't go to its tab", timeout: .seconds(15)) {
+            onScreen() != firstTab && model.stateTraceLabel == "shown"
+        }
+        XCTAssertEqual(adapter.terminalInteractionProjection.windowCount, 2)
+        XCTAssertEqual(adapter.terminalInteractionProjection.selectedWindowIndex, 1)
+
+        let tile = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).windows.first)
+        XCTAssertEqual(adapter.focusTopLevel(tile.id), .queued)
+        try await waitUntil("the tile didn't go to its tab", timeout: .seconds(15)) { onScreen() == firstTab }
+
+        XCTAssertEqual(adapter.createTopLevelGroup(from: nil), .queued)
+        try await waitUntil("New Workspace didn't make a workspace", timeout: .seconds(15)) {
+            model.places.outline?.workspaces.count == 2
+        }
+        try await waitUntil("New Workspace didn't go to its workspace", timeout: .seconds(15)) {
+            guard let tab = onScreen() else { return false }
+            return model.places.outline?.workspace(containingTab: tab)?.id != first.id
+        }
+        let grouping = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).grouping)
+        XCTAssertEqual(grouping.groups.last?.name, first.label, "the workspace left isn't the most recent")
+
+        XCTAssertTrue(model.focusWorkspace(first.id))
+        try await waitUntil("the workspace didn't go back to the tab this phone had there", timeout: .seconds(15)) {
+            onScreen() == firstTab
+        }
+    }
+
+    /// With "Zoom multipane windows" on, a move to another tab or workspace takes Remux's zoom along: the
+    /// two-pane tab left is unzoomed, and going back zooms it again, as Herdr itself reports.
+    @MainActor
+    func testRemuxsZoomFollowsTabAndWorkspaceMovesOnHerdr093() async throws {
+        try await checkZoomFollowsMoves(version: "0.9.3")
+    }
+
+    @MainActor
+    func testRemuxsZoomFollowsTabAndWorkspaceMovesOnHerdr095() async throws {
+        try await checkZoomFollowsMoves(version: "0.9.5")
+    }
+
+    @MainActor
+    private func checkZoomFollowsMoves(version: String) async throws {
+        let session = try await openShownSession(version: version, settings: Self.zooming, through: { $0 })
+        let model = session.model
+        let adapter = model.terminalScreenAdapter
+        let panes = try await split(session)
+        session.model.setSelected(false)
+        session.model.setSelected(true)
+        try await zoomState(session, pane: panes.focused, is: true)
+        try await waitUntil("the session wasn't shown again", timeout: .seconds(10)) { model.isInputAvailable }
+        let first = try XCTUnwrap(model.places.outline?.workspaces.first)
+        let firstTab = try XCTUnwrap(first.tabs.first).id
+        func onScreen() -> String? { model.layout?.tab?.tabID }
+
+        XCTAssertEqual(adapter.createTopLevel(inGroup: nil), .queued)
+        try await zoomState(session, pane: panes.focused, is: false)
+        try await waitUntil("New Tab didn't go to its tab", timeout: .seconds(15)) {
+            onScreen() != firstTab && model.stateTraceLabel == "shown"
+        }
+        let tile = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).windows.first)
+        XCTAssertEqual(adapter.focusTopLevel(tile.id), .queued)
+        try await zoomState(session, pane: panes.focused, is: true)
+
+        try await waitUntil("the tab wasn't on screen again", timeout: .seconds(15)) { onScreen() == firstTab }
+        XCTAssertEqual(adapter.createTopLevelGroup(from: nil), .queued)
+        try await zoomState(session, pane: panes.focused, is: false)
+        try await waitUntil("New Workspace didn't go to its workspace", timeout: .seconds(15)) {
+            guard let tab = onScreen() else { return false }
+            return model.places.outline?.workspace(containingTab: tab)?.id != first.id
+        }
+        XCTAssertTrue(model.focusWorkspace(first.id))
+        try await zoomState(session, pane: panes.focused, is: true)
+    }
+
     // MARK: - Health
 
     /// Herdr's health rule against a real server, with short limits: a quiet connection is pinged after

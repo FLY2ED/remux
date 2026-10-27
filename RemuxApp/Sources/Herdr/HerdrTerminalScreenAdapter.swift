@@ -4,13 +4,15 @@ import GhosttyKit
 
 extension GhosttyTopLevelNoun {
     static let tab = GhosttyTopLevelNoun(singular: "Tab", plural: "Tabs")
+    static let workspace = GhosttyTopLevelNoun(singular: "Workspace", plural: "Workspaces")
 }
 
 /// Presents a `HerdrScreenModel`'s tab through the `GhosttyTerminalScreenModeling` boundary so
-/// `GhosttySurfaceScreen` renders it: one top-level for the tab, one leaf for each pane with a text
-/// area, laid out on the tab's cell grid, and while the tab is zoomed a leaf for each of its panes. The
-/// model owns all state; this maps it to the screen's projections and stable ids, and passes typing,
-/// pane focus and zoom to it. Other topology actions aren't offered.
+/// `GhosttySurfaceScreen` renders it: a top-level for each tab of the workspace on screen, with one leaf
+/// for each pane of the tab on screen that has a text area, laid out on the tab's cell grid, and while
+/// the tab is zoomed a leaf for each of its panes. The Tabs sheet offers the other workspaces as groups.
+/// The model owns all state; this maps it to the screen's projections and stable ids, and passes typing,
+/// moves, zoom and New Tab and New Workspace to it. Other topology actions aren't offered.
 @MainActor
 final class HerdrTerminalScreenAdapter: ObservableObject {
     private weak var model: HerdrScreenModel?
@@ -23,6 +25,9 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
     private var paneSurfaceIDs: [String: UUID] = [:]
     private var paneIDsBySurfaceID: [UUID: String] = [:]
     private var tabSurfaceIDs: [String: UUID] = [:]
+    private var tabIDsBySurfaceID: [UUID: String] = [:]
+    private var workspaceGroupIDs: [String: UUID] = [:]
+    private var workspaceIDsByGroupID: [UUID: String] = [:]
 
     func attach(to model: HerdrScreenModel) {
         self.model = model
@@ -37,6 +42,9 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
         paneSurfaceIDs.removeAll()
         paneIDsBySurfaceID.removeAll()
         tabSurfaceIDs.removeAll()
+        tabIDsBySurfaceID.removeAll()
+        workspaceGroupIDs.removeAll()
+        workspaceIDsByGroupID.removeAll()
         objectWillChange.send()
     }
 
@@ -51,10 +59,22 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
     }
 
     private func topLevelID(for layout: HerdrPaneLayout) -> UUID {
-        let tabID = layout.tab?.tabID ?? ""
+        topLevelID(forTab: layout.tab?.tabID ?? "")
+    }
+
+    private func topLevelID(forTab tabID: String) -> UUID {
         if let id = tabSurfaceIDs[tabID] { return id }
         let id = UUID()
         tabSurfaceIDs[tabID] = id
+        tabIDsBySurfaceID[id] = tabID
+        return id
+    }
+
+    private func groupID(forWorkspace workspaceID: String) -> UUID {
+        if let id = workspaceGroupIDs[workspaceID] { return id }
+        let id = UUID()
+        workspaceGroupIDs[workspaceID] = id
+        workspaceIDsByGroupID[id] = workspaceID
         return id
     }
 
@@ -88,16 +108,39 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
         return surfaceID(forPane: paneID)
     }
 
+    /// The tab the frame on screen draws, and the other tabs of its workspace from the newest snapshot,
+    /// in Herdr's order.
     private var topologySnapshot: GhosttyRuntimeSurfaceTopologySnapshot {
         guard let layout = model?.layout else { return .empty }
         let id = topLevelID(for: layout)
-        let tab = GhosttyTopLevelSurface(
+        let shown = GhosttyTopLevelSurface(
             id: id,
             name: layout.tab?.label ?? "",
             leafIDs: listedPanes.map { surfaceID(forPane: $0.paneID) },
             focusedLeafID: focusedPaneID.map { surfaceID(forPane: $0) }
         )
-        return GhosttyRuntimeSurfaceTopologySnapshot(topLevels: [tab], selectedTopLevelID: id)
+        guard let workspace = workspaceOnScreen else {
+            return GhosttyRuntimeSurfaceTopologySnapshot(topLevels: [shown], selectedTopLevelID: id)
+        }
+        let tabs = workspace.tabs.map { $0.id == layout.tab?.tabID ? shown : topLevel(for: $0) }
+        return GhosttyRuntimeSurfaceTopologySnapshot(topLevels: tabs, selectedTopLevelID: id)
+    }
+
+    /// The workspace of the tab the frame on screen draws.
+    private var workspaceOnScreen: HerdrSessionOutline.Workspace? {
+        guard let layout = model?.layout, let tabID = layout.tab?.tabID, let outline = model?.places.outline,
+              outline.bootID == layout.bootID
+        else { return nil }
+        return outline.workspace(containingTab: tabID)
+    }
+
+    /// A tab that isn't on screen: its panes are the snapshot's, and none has a surface.
+    private func topLevel(for tab: HerdrSessionOutline.Tab) -> GhosttyTopLevelSurface {
+        GhosttyTopLevelSurface(
+            id: topLevelID(forTab: tab.id),
+            name: tab.label,
+            leafIDs: tab.paneIDs.map(surfaceID(forPane:))
+        )
     }
 
     private var viewportProjection: GhosttyTerminalViewportPresentationProjection {
@@ -144,7 +187,7 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
             paneLines: layout.borders.map { Self.paneLine($0, colors: model.terminalColors) },
             focusedSurfaceID: presentedSurfaceID,
             isServerZoomed: zoomed,
-            windowCount: 1
+            windowCount: workspaceOnScreen?.tabs.count ?? 1
         )
     }
 
@@ -350,17 +393,39 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func focusTopLevel(_ id: UUID) -> GhosttyTerminalActionOutcome {
-        .missingTarget(.topLevel(id))
+        guard let tabID = tabIDsBySurfaceID[id], model?.focusTab(tabID) == true else {
+            return .missingTarget(.topLevel(id))
+        }
+        return .queued
     }
 
     func focusAdjacentTopLevel(
         _ direction: GhosttyRuntimeSelectionDirection
     ) -> GhosttyTerminalActionOutcome {
-        .missingTarget(.adjacentTopLevel)
+        let topology = topologySnapshot
+        guard let index = topology.selectedTopLevelIndex else { return .missingTarget(.adjacentTopLevel) }
+        let target = direction.advancedIndex(from: index, count: topology.topLevels.count)
+        guard target != index else { return .missingTarget(.adjacentTopLevel) }
+        return focusTopLevel(topology.topLevels[target].id)
     }
 
-    func createTopLevel() -> GhosttyTerminalActionOutcome {
-        .missingTarget(.host)
+    /// New Tab goes in the workspace the Tabs sheet shows.
+    func createTopLevel(inGroup group: UUID?) -> GhosttyTerminalActionOutcome {
+        guard let workspaceID = workspaceID(shownFor: group),
+              model?.create(.tab(workspaceID: workspaceID)) == true
+        else { return .missingTarget(.host) }
+        return .queued
+    }
+
+    /// New Workspace starts from the workspace the Tabs sheet shows, as Herdr's client starts one from the
+    /// workspace it has picked.
+    func createTopLevelGroup(from group: UUID?) -> GhosttyTerminalActionOutcome {
+        model?.create(.workspace(source: workspaceID(shownFor: group))) == true ? .queued : .missingTarget(.host)
+    }
+
+    /// The workspace `group` names, or without one the workspace on screen.
+    private func workspaceID(shownFor group: UUID?) -> String? {
+        group.flatMap { workspaceIDsByGroupID[$0] } ?? workspaceOnScreen?.id
     }
 
     func splitFocusedPane(_ direction: ghostty_action_split_direction_e) -> GhosttyTerminalActionOutcome {
@@ -384,7 +449,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func createTopLevelInteractionEffect() -> GhosttyTopologyActionInteractionEffect {
-        .none
+        GhosttyTerminalPresentationProjector.createTopLevelInteractionEffect()
     }
 
     func splitFocusedPaneInteractionEffect() -> GhosttyTopologyActionInteractionEffect {
@@ -459,14 +524,40 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         )
     }
 
-    func windowSelectionSheetRenderProjection() -> GhosttyWindowSelectionSheetRenderProjection {
-        let projection = GhosttyTerminalPresentationProjector.windowSelectionSheetRenderProjection(
-            snapshot: topologySnapshot
-        )
+    /// The tabs of the workspace `group` names, or of the workspace on screen, with the workspaces most
+    /// recent first. Only the tab on screen has a preview: the frame Remux already has.
+    func windowSelectionSheetRenderProjection(group: UUID?) -> GhosttyWindowSelectionSheetRenderProjection {
+        let topology = topologySnapshot
+        let onScreen = GhosttyTerminalPresentationProjector.windowSelectionSheetRenderProjection(snapshot: topology)
+        let previewLeafIDs = capturablePreviewLeafIDs(onScreen.previewLeafIDs)
+        guard let outline = model?.places.outline, let workspaceOnScreen else {
+            return GhosttyWindowSelectionSheetRenderProjection(
+                windows: onScreen.windows,
+                selectedWindowID: onScreen.selectedWindowID,
+                previewLeafIDs: previewLeafIDs
+            )
+        }
+        let shown = group.flatMap { workspaceIDsByGroupID[$0] }.flatMap { outline.workspace($0) } ?? workspaceOnScreen
+        let windows = shown.id == workspaceOnScreen.id
+            ? onScreen.windows
+            : GhosttyTerminalPresentationProjector.windowSelectionSheetRenderProjection(
+                snapshot: GhosttyRuntimeSurfaceTopologySnapshot(
+                    topLevels: shown.tabs.map(topLevel(for:)),
+                    selectedTopLevelID: nil
+                )
+            ).windows
         return GhosttyWindowSelectionSheetRenderProjection(
-            windows: projection.windows,
-            selectedWindowID: projection.selectedWindowID,
-            previewLeafIDs: capturablePreviewLeafIDs(projection.previewLeafIDs)
+            windows: windows,
+            selectedWindowID: onScreen.selectedWindowID,
+            previewLeafIDs: previewLeafIDs,
+            grouping: GhosttyWindowSelectionSheetRenderProjection.Grouping(
+                noun: .workspace,
+                groups: outline.workspacesByRecency.map {
+                    .init(id: groupID(forWorkspace: $0.id), name: $0.label)
+                },
+                shownGroupID: groupID(forWorkspace: shown.id),
+                largestWindowCount: outline.workspaces.map(\.tabs.count).max() ?? 0
+            )
         )
     }
 
