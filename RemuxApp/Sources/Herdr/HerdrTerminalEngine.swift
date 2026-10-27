@@ -44,6 +44,40 @@ struct HerdrPaneScroll: Equatable, Sendable {
     let alternateScreenActive: Bool
 }
 
+extension HerdrPaneScroll {
+    init(of pane: HerdrSurfacePane) {
+        self.init(
+            linesFromBottom: pane.scroll?.offsetFromBottom ?? 0,
+            maxLinesFromBottom: pane.scroll?.maxOffsetFromBottom ?? 0,
+            rows: pane.scroll?.viewportRows ?? UInt64(pane.innerRect.height),
+            mouseReporting: pane.mouseReporting,
+            alternateScreenActive: pane.alternateScreenActive
+        )
+    }
+}
+
+/// What a pane's terminal shows of Herdr's pane, which a request about the terminal's cells names, as
+/// Herdr's client names the frame it shows.
+struct HerdrPaneContent: Equatable, Sendable {
+    /// Herdr's revision of the pane's content; odd while Herdr is changing it.
+    let revision: UInt64
+    /// As Herdr sent it: nil for a pane it gave no scroll metrics.
+    let offsetFromBottom: UInt64?
+    /// The history row at the viewport's top.
+    let top: UInt64
+    /// The text area's size.
+    let columns: UInt16
+    let rows: UInt16
+
+    init(of pane: HerdrSurfacePane) {
+        revision = pane.contentRevision
+        offsetFromBottom = pane.scroll?.offsetFromBottom
+        top = HerdrPaneScroll(of: pane).scrollState.offset
+        columns = pane.innerRect.width
+        rows = pane.innerRect.height
+    }
+}
+
 /// What the engine tells its main-actor owner, in order.
 enum HerdrEngineUpdate: Sendable {
     /// A new terminal for a pane, already painted; the owner creates its renderer with a
@@ -231,6 +265,8 @@ actor HerdrTerminalEngine {
         let terminal: HerdrRetainedTerminal
         /// What the terminal shows: the last paint Ghostty accepted.
         var painted: HerdrPanePainter.Painted
+        /// Herdr's pane as of that paint.
+        var content: HerdrPaneContent
         /// The images the terminal holds and shows, as of that paint.
         var images: HerdrPaneImages
         var renderer: HerdrRendererSurface?
@@ -401,6 +437,11 @@ actor HerdrTerminalEngine {
         paintPresented()
     }
 
+    /// What `paneID`'s terminal shows of Herdr's pane; nil while it has no terminal.
+    func content(ofPane paneID: String) -> HerdrPaneContent? {
+        panes[paneID]?.content
+    }
+
     /// A new cell size, from the screen's font or scale: the terminals keep their grids.
     func setCellSize(widthPx: UInt32, heightPx: UInt32) {
         guard state != .stopped, widthPx > 0, heightPx > 0,
@@ -459,6 +500,7 @@ actor HerdrTerminalEngine {
         for pane in surface.panes {
             paint(
                 HerdrPanePainter.Painted(frame: surface.frame, area: pane.innerRect, cursor: cursor),
+                content: HerdrPaneContent(of: pane),
                 images: HerdrPaneImages.Scene(surface.graphics, pane: pane),
                 paneID: pane.paneID
             )
@@ -484,7 +526,12 @@ actor HerdrTerminalEngine {
         publishScroll(of: surface)
     }
 
-    private func paint(_ next: HerdrPanePainter.Painted, images scene: HerdrPaneImages.Scene, paneID: String) {
+    private func paint(
+        _ next: HerdrPanePainter.Painted,
+        content: HerdrPaneContent,
+        images scene: HerdrPaneImages.Scene,
+        paneID: String
+    ) {
         let area = next.area
         guard area.width > 0, area.height > 0 else {
             // A pane with no text area has no terminal; it gets a new one when it has room again.
@@ -494,7 +541,7 @@ actor HerdrTerminalEngine {
         }
         guard !failedPaneIDs.contains(paneID) else { return }
         guard var pane = panes[paneID] else {
-            createPane(paneID: paneID, painted: next, images: scene)
+            createPane(paneID: paneID, painted: next, content: content, images: scene)
             return
         }
         let result: ghostty_terminal_producer_result_e
@@ -503,6 +550,7 @@ actor HerdrTerminalEngine {
                 + pane.images.update(to: scene, from: images)
             guard !bytes.isEmpty else {
                 pane.painted = next
+                pane.content = content
                 panes[paneID] = pane
                 return
             }
@@ -522,11 +570,17 @@ actor HerdrTerminalEngine {
             return
         }
         pane.painted = next
+        pane.content = content
         wake(&pane, paneID: paneID)
         panes[paneID] = pane
     }
 
-    private func createPane(paneID: String, painted: HerdrPanePainter.Painted, images scene: HerdrPaneImages.Scene) {
+    private func createPane(
+        paneID: String,
+        painted: HerdrPanePainter.Painted,
+        content: HerdrPaneContent,
+        images scene: HerdrPaneImages.Scene
+    ) {
         let producer: any HerdrPaneProducing
         let terminal: HerdrRetainedTerminal
         do {
@@ -549,7 +603,7 @@ actor HerdrTerminalEngine {
             fail(paneID: paneID)
             return
         }
-        panes[paneID] = Pane(producer: producer, terminal: terminal, painted: painted, images: paneImages)
+        panes[paneID] = Pane(producer: producer, terminal: terminal, painted: painted, content: content, images: paneImages)
         continuation.yield(.paneTerminal(paneID: paneID, terminal: terminal))
     }
 
@@ -585,13 +639,7 @@ actor HerdrTerminalEngine {
     private func publishScroll(of surface: HerdrPaneSurfaceFrame) {
         var next: [String: HerdrPaneScroll] = [:]
         for pane in surface.panes {
-            next[pane.paneID] = HerdrPaneScroll(
-                linesFromBottom: pane.scroll?.offsetFromBottom ?? 0,
-                maxLinesFromBottom: pane.scroll?.maxOffsetFromBottom ?? 0,
-                rows: pane.scroll?.viewportRows ?? UInt64(pane.innerRect.height),
-                mouseReporting: pane.mouseReporting,
-                alternateScreenActive: pane.alternateScreenActive
-            )
+            next[pane.paneID] = HerdrPaneScroll(of: pane)
         }
         guard next != paneScrolls else { return }
         paneScrolls = next

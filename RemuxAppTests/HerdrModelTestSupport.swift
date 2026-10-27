@@ -73,6 +73,8 @@ enum HerdrServerScript {
         var scroll: (fromBottom: UInt64, max: UInt64, rows: UInt64)?
         var mouseReporting = false
         var alternateScreen = false
+        /// Even, as Herdr's is between changes.
+        var contentRevision: UInt64 = 2
         /// The pane with Herdr's borders around its text area, when it has any.
         var rect: (x: UInt16, y: UInt16, width: UInt16, height: UInt16)?
     }
@@ -228,7 +230,7 @@ enum HerdrServerScript {
         frame(lines, foreground: foreground, to: &writer)
         writer.array(panes) { writer, pane in
             writer.string(pane.id)
-            writer.u64(1)
+            writer.u64(pane.contentRevision)
             let textArea = (x: pane.x, y: pane.y, width: pane.width, height: pane.height)
             for rect in [pane.rect ?? textArea, textArea] {
                 writer.u16(rect.x)
