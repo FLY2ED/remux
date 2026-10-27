@@ -44,6 +44,21 @@ final class PaneTopologyLayoutTests: XCTestCase {
         XCTAssertEqual(frames[3].maxY, frames[4].minY, accuracy: 0.001)
     }
 
+    /// Herdr's layout gives pane places that touch, with no separator between them, as its `pane.zoom`
+    /// answer does; they split as a tmux layout's do.
+    func testPanesWhosePlacesTouchSplitAsSeparatedOnesDo() throws {
+        let panes: [PaneTopologyLayout.Pane] = [
+            .init(id: UUID(), frame: .init(x: 0, y: 0, columns: 40, rows: 24)),
+            .init(id: UUID(), frame: .init(x: 40, y: 0, columns: 40, rows: 12)),
+            .init(id: UUID(), frame: .init(x: 40, y: 12, columns: 40, rows: 12)),
+        ]
+        let metrics = try XCTUnwrap(PaneTopologyLayout.frames(panes: panes, size: CGSize(width: 300, height: 200)))
+
+        XCTAssertEqual(metrics.frame(for: panes[0].id), CGRect(x: 0, y: 0, width: 100, height: 200))
+        XCTAssertEqual(metrics.frame(for: panes[1].id), CGRect(x: 100, y: 0, width: 200, height: 100))
+        XCTAssertEqual(metrics.frame(for: panes[2].id), CGRect(x: 100, y: 100, width: 200, height: 100))
+    }
+
     private func fivePaneTopology() -> [PaneTopologyLayout.Pane] {
         [
             .init(id: UUID(), frame: .init(x: 0, y: 0, columns: 39, rows: 59)),

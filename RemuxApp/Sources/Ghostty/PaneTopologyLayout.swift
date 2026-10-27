@@ -148,7 +148,8 @@ enum PaneTopologyLayout {
                 let secondStart = second.map {
                     axis == .horizontal ? $0.frame.x : $0.frame.y
                 }.min() ?? 0
-                if firstEnd < UInt64(secondStart) {
+                // Groups may touch: tmux keeps a separator between panes, Herdr's layout may not.
+                if firstEnd <= UInt64(secondStart) {
                     return (first, second)
                 }
             }
