@@ -66,13 +66,21 @@ final class HerdrScreenModel {
         case appActive(Bool)
         /// `delivered`, when given, learns whether Herdr has the input.
         case input(paneID: String, events: [HerdrInputEvent], delivered: CheckedContinuation<Bool, Never>?)
-        /// A `pane.focus` that must reach Herdr after the operations asked before it.
+        /// Remux's move to a pane (`move(to:)`), after the operations asked before it.
         case focusPane(String)
 
         /// Tells whoever waits on the operation that it won't be carried out.
         func abandon() {
             if case .input(_, _, let delivered?) = self { delivered.resume(returning: false) }
         }
+    }
+
+    /// A move Remux makes to another tab: the tab, and the pane its `pane.focus` goes to there.
+    private struct TabMove {
+        let tab: HerdrTabKey
+        let paneID: String
+        /// Whether Herdr has answered that focus.
+        var focused = false
     }
 
     /// One connection to the server, from opening its bridge to its end. A reconnect replaces it, and
@@ -107,6 +115,8 @@ final class HerdrScreenModel {
         /// sent, so the last pane tapped ends up focused.
         var focusInFlight = false
         var waitingFocus: String?
+        /// The move to another tab in progress, whose tab the setting zooms once it is on screen.
+        var tabMove: TabMove?
         private var operations: [Operation] = []
         private var operationWaiter: CheckedContinuation<Void, Never>?
         private var operationsFinished = false
@@ -335,18 +345,21 @@ final class HerdrScreenModel {
     func reveal(paneID: String, bootID: String?) {
         guard !stopped else { return }
         pendingReveal = (paneID, bootID)
-        sendPendingReveal()
+        guard let attempt, isCurrent(attempt), attempt.connection != nil, attempt.requestedShown,
+              let paneID = takePendingReveal()
+        else { return }
+        attempt.ask(.focusPane(paneID))
     }
 
-    private func sendPendingReveal() {
-        guard let reveal = pendingReveal, let attempt, isCurrent(attempt), attempt.connection != nil,
-              attempt.requestedShown, let snapshot
-        else { return }
+    /// The pane asked for, once a snapshot is in, if it is still there on the server boot its id came
+    /// from.
+    private func takePendingReveal() -> String? {
+        guard let reveal = pendingReveal, let snapshot else { return nil }
         pendingReveal = nil
         guard reveal.bootID.map({ $0 == snapshot.bootID }) ?? true,
               snapshot.panes.contains(where: { $0.paneID == reveal.paneID })
-        else { return }
-        attempt.ask(.focusPane(reveal.paneID))
+        else { return nil }
+        return reveal.paneID
     }
 
     /// The background hides the session; the app's other phases leave it on screen.
@@ -663,17 +676,43 @@ final class HerdrScreenModel {
         }
     }
 
-    /// Asks Herdr to focus the pane, as Herdr's client does on a click; keys follow the snapshot that
-    /// reports the new focus. Returns false when the session can't take input.
+    /// Remux's own move to a pane, the one way a tap on a pane, a notification's pane or a list of the
+    /// session's places takes the session there, after the operations asked before it. Keys follow the
+    /// snapshot that reports the new focus. Returns false when the session can't take input.
     func focusPane(_ paneID: String) -> Bool {
-        guard let attempt, isCurrent(attempt), let connection = attempt.connection,
-              attempt.isActivated
-        else { return false }
-        focus(paneID, attempt: attempt, connection: connection)
+        guard let attempt, isCurrent(attempt), attempt.connection != nil, attempt.isActivated else { return false }
+        attempt.ask(.focusPane(paneID))
         return true
     }
 
+    /// Within the tab on screen a move is a `pane.focus`, as Herdr's client sends on a click. Into
+    /// another tab the tab on screen changes, so Remux's zoom follows the screen as it does when the
+    /// session leaves and comes back: Remux's zoom comes off the tab left first, while that tab is still
+    /// on screen, since an unzoom focuses its target; `pane.focus` then takes this client to the pane's
+    /// tab; and once Herdr has answered it and the tab is on screen, the setting zooms that tab as a show
+    /// does. A tab another client moves the session to stays as it is: unzooming a tab off screen would
+    /// focus it and take the session back.
+    private func move(to paneID: String, attempt: Attempt, connection: HerdrConnection) async {
+        if let tab = otherTab(ofPane: paneID) {
+            await undoZoomOnScreen(on: connection)
+            // The session left the screen meanwhile; its next show zooms the tab it shows.
+            guard attempt.requestedShown else { return }
+            attempt.tabMove = TabMove(tab: tab, paneID: paneID)
+        }
+        focus(paneID, attempt: attempt, connection: connection)
+    }
+
+    /// The tab `paneID` is in, when it isn't the tab on screen.
+    private func otherTab(ofPane paneID: String) -> HerdrTabKey? {
+        guard let snapshot, let tabID = snapshot.panes.first(where: { $0.paneID == paneID })?.tabID,
+              tabID != snapshot.focusedTabID
+        else { return nil }
+        return HerdrTabKey(bootID: snapshot.bootID, tabID: tabID)
+    }
+
     private func focus(_ paneID: String, attempt: Attempt, connection: HerdrConnection) {
+        // A focus asked for before Herdr has answered a move's replaces the move.
+        if let move = attempt.tabMove, move.paneID != paneID, !move.focused { attempt.tabMove = nil }
         if attempt.focusInFlight {
             attempt.waitingFocus = paneID
         } else if paneID != focusedPaneID {
@@ -690,11 +729,11 @@ final class HerdrScreenModel {
             } catch {
                 failure = error
             }
-            self?.focusAnswered(attempt: attempt, connection: connection, failure: failure)
+            self?.focusAnswered(paneID, attempt: attempt, connection: connection, failure: failure)
         }
     }
 
-    private func focusAnswered(attempt: Attempt, connection: HerdrConnection, failure: Error?) {
+    private func focusAnswered(_ paneID: String, attempt: Attempt, connection: HerdrConnection, failure: Error?) {
         attempt.focusInFlight = false
         guard isCurrent(attempt) else { return }
         if let failure {
@@ -702,9 +741,33 @@ final class HerdrScreenModel {
         } else {
             notices.succeeded(Self.paneFocusMethod, bootID: layout?.bootID)
         }
+        if attempt.tabMove?.paneID == paneID {
+            if failure == nil { attempt.tabMove?.focused = true } else { attempt.tabMove = nil }
+        }
         if let next = attempt.waitingFocus {
             attempt.waitingFocus = nil
             requestFocus(next, attempt: attempt, connection: connection)
+        }
+        zoomTabMovedTo(attempt)
+    }
+
+    /// The tab a move took the session to gets the setting's zoom once Herdr has answered the move's
+    /// focus and the snapshot has the tab on screen, as a show zooms the tab it shows.
+    private func zoomTabMovedTo(_ attempt: Attempt) {
+        guard let move = attempt.tabMove, move.focused, let snapshot, snapshot.bootID == move.tab.bootID,
+              snapshot.focusedTabID == move.tab.tabID, let connection = attempt.connection
+        else { return }
+        attempt.tabMove = nil
+        guard let paneID = paneToZoomOnShow else { return }
+        Task { [weak self] in
+            _ = await connection.sendCommandWhileShown(
+                Self.paneZoomMethod,
+                params: Self.zoomParams(paneID, zoomed: true)
+            ) { [weak self] reply in
+                Task { @MainActor [weak self] in
+                    self?.zoomAnswered(reply.map(\.json), bootID: move.tab.bootID, reportingFailure: false)
+                }
+            }
         }
     }
 
@@ -837,6 +900,21 @@ final class HerdrScreenModel {
     /// the tab on screen.
     private var paneToUnzoom: String? {
         snapshot.flatMap(ownedZoom.paneToUnzoom(in:))
+    }
+
+    /// Remux's zoom comes off the tab on screen as the session leaves it, first, while Herdr still takes
+    /// commands from this client. It goes only if no command is in flight: one that waited for the lane
+    /// would hold the leave back, so the zoom then stays, as when the app can't clean up at all.
+    private func undoZoomOnScreen(on connection: HerdrConnection) async {
+        guard let paneID = paneToUnzoom, let bootID = snapshot?.bootID else { return }
+        _ = await connection.sendCommandIfIdle(
+            Self.paneZoomMethod,
+            params: Self.zoomParams(paneID, zoomed: false)
+        ) { [weak self] reply in
+            Task { @MainActor [weak self] in
+                self?.zoomAnswered(reply.map(\.json), bootID: bootID, reportingFailure: false)
+            }
+        }
     }
 
     /// Herdr's answer records or forgets the zoom Remux made, and gives the tab's map; an answer that
@@ -1085,19 +1163,7 @@ final class HerdrScreenModel {
             // The session is off screen and takes no input either way. Frames from here on show what
             // leaving does, so the engine holds them before anything goes out.
             await feed.endActivation()
-            // The zoom Remux made comes off first, while Herdr still takes commands from this client. It
-            // goes only if no command is in flight: one that waited for the lane would hold the hide back,
-            // so the zoom then stays, as when the app can't clean up at all.
-            if let paneID = paneToUnzoom, let bootID = snapshot?.bootID {
-                _ = await connection.sendCommandIfIdle(
-                    Self.paneZoomMethod,
-                    params: Self.zoomParams(paneID, zoomed: false)
-                ) { [weak self] reply in
-                    Task { @MainActor [weak self] in
-                        self?.zoomAnswered(reply.map(\.json), bootID: bootID, reportingFailure: false)
-                    }
-                }
-            }
+            await undoZoomOnScreen(on: connection)
             // A hide Herdr doesn't confirm leaves only its stale foreground on the server.
             await connection.sendHide()
         case .resize(let geometry):
@@ -1128,7 +1194,7 @@ final class HerdrScreenModel {
             // it. Later operations don't wait for the answer.
             Task { delivered.resume(returning: await connection.confirmAlive()) }
         case .focusPane(let paneID):
-            focus(paneID, attempt: attempt, connection: connection)
+            await move(to: paneID, attempt: attempt, connection: connection)
         }
     }
 
@@ -1218,6 +1284,7 @@ final class HerdrScreenModel {
         }
         self.snapshot = snapshot
         ownedZoom.reconcile(with: snapshot)
+        zoomTabMovedTo(attempt)
         agents.project(snapshot, completions: completions)
         acknowledgeShownAgents()
         if snapshot.focusedPaneID != focusedPaneID {
@@ -1385,9 +1452,13 @@ final class HerdrScreenModel {
         attempt.activationDeadline = nil
         if wanted {
             awaitActivation(of: attempt, request: attempt.visibilityRequests)
-            attempt.ask(.show(geometry, request: attempt.visibilityRequests, zoom: paneToZoomOnShow))
-            sendPendingReveal()
+            // A move to another tab right behind the show takes the setting's zoom to the tab it reaches.
+            let reveal = takePendingReveal()
+            let zoom = reveal.flatMap(otherTab(ofPane:)) == nil ? paneToZoomOnShow : nil
+            attempt.ask(.show(geometry, request: attempt.visibilityRequests, zoom: zoom))
+            if let reveal { attempt.ask(.focusPane(reveal)) }
         } else {
+            attempt.tabMove = nil
             attempt.ask(.hide)
         }
         // Input is offered only once a show completes, and closes as soon as a hide is asked.

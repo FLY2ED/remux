@@ -85,8 +85,8 @@ enum HerdrServerScript {
     /// `panes` and `agents` are the snapshot's JSON entries, made with `snapshotPane` and
     /// `snapshotAgent`.
     /// The focused tab is labelled `tabLabel` and is `zoomed` or not; `otherTabs` are further tabs of
-    /// workspace `w1`, by id, each named after its id and unzoomed. Workspace `w1` is listed when it has a
-    /// label.
+    /// workspace `w1`, by id, each named after its id, and zoomed when in `zoomedOtherTabs`. Workspace `w1`
+    /// is listed when it has a label.
     static func snapshot(
         revision: UInt64,
         boot: String = "boot",
@@ -95,6 +95,7 @@ enum HerdrServerScript {
         zoomed: Bool = false,
         focusedTab: String = "t1",
         otherTabs: [String] = [],
+        zoomedOtherTabs: [String] = [],
         focusedPane: String? = "w1:p1",
         panes: [String] = [],
         agents: [String] = []
@@ -102,7 +103,7 @@ enum HerdrServerScript {
         let tabs = ([(focusedTab, tabLabel, true)] + otherTabs.map { ($0, $0, false) }).enumerated().map { index, tab in
             """
             {"tab_id":"\(tab.0)","workspace_id":"w1","number":\(index + 1),"label":"\(tab.1)","custom_label":true,
-             "zoomed":\(tab.2 && zoomed),"focused":\(tab.2),"agent_status":"idle"}
+             "zoomed":\(tab.2 ? zoomed : zoomedOtherTabs.contains(tab.0)),"focused":\(tab.2),"agent_status":"idle"}
             """
         }
         let workspaces = workspaceLabel.map { label in
@@ -311,6 +312,7 @@ enum HerdrServerScript {
         id: String,
         changed: Bool,
         zoomed: Bool,
+        tab: String = "t1",
         panes: [(id: String, x: UInt16, y: UInt16, width: UInt16, height: UInt16)]
     ) -> [UInt8] {
         let focused = panes.first?.id ?? ""
@@ -321,7 +323,7 @@ enum HerdrServerScript {
         let reason = changed ? "" : ",\"reason\":\"\(zoomed ? "already_zoomed" : "already_unzoomed")\""
         let zoom = "{\"changed\":\(changed),\"zoom_changed\":\(changed),\"focus_changed\":false\(reason),"
             + "\"pane_id\":\"\(focused)\",\"focused_pane_id\":\"\(focused)\",\"zoomed\":\(zoomed),"
-            + "\"layout\":{\"workspace_id\":\"w1\",\"tab_id\":\"t1\",\"zoomed\":\(zoomed),"
+            + "\"layout\":{\"workspace_id\":\"w1\",\"tab_id\":\"\(tab)\",\"zoomed\":\(zoomed),"
             + "\"area\":{\"x\":0,\"y\":0,\"width\":80,\"height\":24},\"focused_pane_id\":\"\(focused)\","
             + "\"panes\":[\(rects.joined(separator: ","))],\"splits\":[]}}"
         return HerdrConnectionTests.reply(id: id, json: "{\"type\":\"pane_zoom\",\"zoom\":\(zoom)}")

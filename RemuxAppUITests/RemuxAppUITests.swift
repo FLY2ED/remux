@@ -34,7 +34,8 @@ final class RemuxAppUITests: XCTestCase {
         let expectedHostKey: String
         /// Where each step's screenshot is written as well, when set.
         var captureDirectory: String?
-        /// The panes of the session's tab, when the pane picker should be checked for a tile each.
+        /// The panes of the session's tab, as the server counts them: the session test needs more than one,
+        /// and checks that the pane picker shows a tile for each.
         var paneCount: Int?
         /// Where the notification test asks the harness for each change on the server, by writing
         /// `<step>.request`; that test is skipped without it.
@@ -1680,9 +1681,11 @@ final class RemuxAppUITests: XCTestCase {
     /// A Herdr session opened from the library on a live server. On a phone the multi-pane tab opens zoomed
     /// on its focused pane, and Panes lists all of its panes; turned off there, the tab's panes are on
     /// screen, with the keyboard opening and closing over them, and the tab stays unzoomed over Home and
-    /// back. Skipped without REMUX_LIVE_HERDR_UI_CONFIG.
+    /// back. Skipped without REMUX_LIVE_HERDR_UI_CONFIG; its `paneCount` must give the tab's panes.
     func testLiveHerdrSessionWhenConfigured() throws {
         let configuration = try launchLiveHerdrApp()
+        let paneCount = try XCTUnwrap(configuration.paneCount, "The live Herdr configuration should give paneCount.")
+        guard paneCount > 1 else { return XCTFail("The session's tab needs more than one pane to open zoomed.") }
 
         openFirstSavedSession()
         waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
@@ -1691,7 +1694,6 @@ final class RemuxAppUITests: XCTestCase {
 
         // Zoomed on open, as "Zoom multipane windows" is on by default on a phone, with every pane in the
         // pane picker; turned off from Panes, the tab's panes are on screen for the rest of the test.
-        let paneCount = configuration.paneCount ?? 3
         let zoom = openHerdrPanesZoomSwitch(paneCount: paneCount)
         XCTAssertEqual(zoom.value as? String, "1", "The multi-pane tab should open zoomed.")
         captureLiveHerdrStep("1a-panes-zoomed", in: configuration)
