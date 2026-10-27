@@ -122,6 +122,7 @@ private struct RemuxWorkspaceShell: View {
             HerdrNotificationBannerWindow(
                 center: model.herdrNotifications,
                 shownWorkspaceID: selectedTerminalID,
+                holdsUnsavedInput: model.connectionSetup != nil,
                 onOpen: openHerdrNotification
             )
         }
@@ -498,13 +499,10 @@ private struct RemuxWorkspaceShell: View {
         }
     }
 
-    /// The banner's window has closed whatever was presented; the sheets this shell keeps state for
-    /// follow, and a setup left open goes, as its Cancel would.
+    /// The banner's window has closed whatever was presented; the sheet this shell keeps state for
+    /// follows. A server or session form being filled in never gets here: its typing is kept.
     private func openHerdrNotification(_ banner: HerdrNotificationPolicy.Banner) {
         isSessionSwitcherPresented = false
-        if model.connectionSetup != nil {
-            model.cancelSetup()
-        }
         model.openHerdrNotification(banner)
     }
 

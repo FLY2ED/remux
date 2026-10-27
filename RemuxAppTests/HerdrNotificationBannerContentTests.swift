@@ -62,6 +62,10 @@ final class HerdrNotificationBannerContentTests: XCTestCase {
             "gpu-box · agents · train › main"
         )
         XCTAssertEqual(
+            content(try banner(.finished, "claude finished", place: HerdrNotificationPlace(workspace: "remux", tab: "2")), shown: true).place,
+            "remux › 2"
+        )
+        XCTAssertEqual(
             content(try banner(.finished, "claude finished", place: HerdrNotificationPlace(workspace: "web")), shown: true).place,
             "web"
         )
@@ -77,8 +81,8 @@ final class HerdrNotificationBannerContentTests: XCTestCase {
         XCTAssertEqual(content(try banner(.custom, "build", body: "all green"), shown: false).place, "gpu-box · all green")
     }
 
-    /// The names come from the snapshot: the workspace's label, and the tab's when it has one of its own,
-    /// since Herdr names an unnamed tab after its number.
+    /// The names come from the snapshot, as Herdr gives them: the workspace's label and the tab's, which for
+    /// a tab without a label of its own is its number.
     func testThePlaceIsNamedFromTheSnapshot() throws {
         let json = """
         {"boot_id":"b","revision":1,"focused_workspace_id":"w1","focused_tab_id":"w1:t1","focused_pane_id":null,
@@ -103,6 +107,10 @@ final class HerdrNotificationBannerContentTests: XCTestCase {
         )
         XCTAssertEqual(
             HerdrNotificationPlace(try notification(tab: "w1:t1", workspace: nil), in: snapshot),
+            HerdrNotificationPlace(workspace: "web", tab: "1")
+        )
+        XCTAssertEqual(
+            HerdrNotificationPlace(try notification(tab: nil, workspace: "w1"), in: snapshot),
             HerdrNotificationPlace(workspace: "web")
         )
         XCTAssertEqual(HerdrNotificationPlace(try notification(tab: "w1:t2", workspace: "w1"), in: nil), HerdrNotificationPlace())

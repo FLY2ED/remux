@@ -12,8 +12,8 @@ struct HerdrNotificationSessionState: Equatable {
     var agentStatuses: [String: HerdrAgentStatus]
 }
 
-/// The workspace and tab a notification is about, by name, from the session's snapshot when it arrived.
-/// A tab Herdr names after its number counts as unnamed.
+/// The workspace and tab a notification is about, by the names Herdr gives them in the session's snapshot
+/// when it arrived; a tab without a label of its own is named after its number, as Herdr names it.
 struct HerdrNotificationPlace: Equatable, Sendable {
     var workspace: String?
     var tab: String?
@@ -27,7 +27,7 @@ struct HerdrNotificationPlace: Equatable, Sendable {
         let tab = snapshot?.tabs.first { $0.tabID == notification.tabID }
         let workspaceID = notification.workspaceID ?? tab?.workspaceID
         self.workspace = snapshot?.workspaces.first { $0.workspaceID == workspaceID }.map(\.label)
-        self.tab = tab.flatMap { $0.customLabel ? $0.label : nil }
+        self.tab = tab?.label
     }
 }
 

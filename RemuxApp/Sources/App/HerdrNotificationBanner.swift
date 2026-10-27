@@ -178,10 +178,12 @@ struct HerdrNotificationBannerLayer: View {
 
 /// Puts Herdr's notification banner above everything in the app's window, sheets included, as iOS puts
 /// its own: in a window of its own over the app's window, taking touches only on the banner. A tap closes
-/// whatever is presented over the app, then opens the banner.
+/// whatever is presented over the app, then opens the banner, unless a form the user is typing into is
+/// open: the typing is kept, and the tap only puts the banner away.
 struct HerdrNotificationBannerWindow: UIViewRepresentable {
     let center: HerdrNotificationCenter
     let shownWorkspaceID: SavedWorkspace.ID?
+    let holdsUnsavedInput: Bool
     let onOpen: (HerdrNotificationPolicy.Banner) -> Void
 
     func makeUIView(context: Context) -> HerdrNotificationBannerAnchor {
@@ -189,7 +191,12 @@ struct HerdrNotificationBannerWindow: UIViewRepresentable {
     }
 
     func updateUIView(_ anchor: HerdrNotificationBannerAnchor, context: Context) {
-        anchor.show(center: center, shownWorkspaceID: shownWorkspaceID, onOpen: onOpen)
+        anchor.show(
+            center: center,
+            shownWorkspaceID: shownWorkspaceID,
+            holdsUnsavedInput: holdsUnsavedInput,
+            onOpen: onOpen
+        )
     }
 
     static func dismantleUIView(_ anchor: HerdrNotificationBannerAnchor, coordinator: ()) {
@@ -203,6 +210,7 @@ final class HerdrNotificationBannerAnchor: UIView {
     private struct Content {
         let center: HerdrNotificationCenter
         let shownWorkspaceID: SavedWorkspace.ID?
+        let holdsUnsavedInput: Bool
         let onOpen: (HerdrNotificationPolicy.Banner) -> Void
     }
 
@@ -236,9 +244,15 @@ final class HerdrNotificationBannerAnchor: UIView {
     func show(
         center: HerdrNotificationCenter,
         shownWorkspaceID: SavedWorkspace.ID?,
+        holdsUnsavedInput: Bool,
         onOpen: @escaping (HerdrNotificationPolicy.Banner) -> Void
     ) {
-        content = Content(center: center, shownWorkspaceID: shownWorkspaceID, onOpen: onOpen)
+        content = Content(
+            center: center,
+            shownWorkspaceID: shownWorkspaceID,
+            holdsUnsavedInput: holdsUnsavedInput,
+            onOpen: onOpen
+        )
         render()
     }
 
@@ -283,10 +297,11 @@ final class HerdrNotificationBannerAnchor: UIView {
     }
 
     /// The banner goes at once; a sheet or alert over the app closes before the pane opens, so it is
-    /// what the user lands on.
+    /// what the user lands on. A form with the user's typing stays, and nothing else happens.
     private func open(_ banner: HerdrNotificationPolicy.Banner) {
         guard let content else { return }
         content.center.dismiss(banner.id)
+        guard !content.holdsUnsavedInput else { return }
         guard let root = window?.rootViewController, root.presentedViewController != nil else {
             content.onOpen(banner)
             return

@@ -1731,8 +1731,9 @@ final class RemuxAppUITests: XCTestCase {
     /// open Sessions sheet; tapping it closes the sheet and takes the phone to that tab. An agent finishing
     /// while Home is on screen shows a banner naming the server and session over Home; tapping it opens
     /// the session at that agent's pane. A banner above the Panes sheet closes it too, and both sheets open
-    /// again afterwards. A bell rings the session on screen. The harness makes each change on the server
-    /// when the test asks: `attention`, `finished`, `attention-again`, `bell`.
+    /// again afterwards. A bell rings the session on screen. A banner over a server form being filled in
+    /// only goes away when tapped, keeping the typing. The harness makes each change on the server when the
+    /// test asks: `attention`, `finished`, `attention-again`, `bell`, `attention-form`.
     func testLiveHerdrNotificationsWhenConfigured() throws {
         let configuration = try launchLiveHerdrApp(requiringSteps: true)
         let banner = app.descendants(matching: .any)["herdr.notification.banner"].firstMatch
@@ -1764,7 +1765,7 @@ final class RemuxAppUITests: XCTestCase {
         openHomeFromTerminal()
         try requestLiveHerdrStep("finished", in: configuration)
         XCTAssertTrue(banner.waitForExistence(timeout: 20), "No banner over Home for the agent that finished.")
-        XCTAssertEqual(banner.label, "claude done, Herdr live · remux-ui · remux")
+        XCTAssertEqual(banner.label, "claude done, Herdr live · remux-ui · remux › 1")
         captureLiveHerdrStep("n4-banner-over-home", in: configuration)
         banner.tap()
         waitForLiveTerminalReady(timeout: 30, expectedHostKey: configuration.expectedHostKey)
@@ -1787,6 +1788,26 @@ final class RemuxAppUITests: XCTestCase {
         try requestLiveHerdrStep("bell", in: configuration)
         _ = XCTWaiter.wait(for: [XCTestExpectation(description: "the bell arrives")], timeout: 3)
         captureLiveHerdrStep("n6-bell", in: configuration)
+
+        openHomeFromTerminal()
+        let addServer = app.buttons["library.add-server"]
+        XCTAssertTrue(addServer.waitForExistence(timeout: 5))
+        addServer.tap()
+        let serverName = app.textFields["connection.name"]
+        XCTAssertTrue(serverName.waitForExistence(timeout: 5))
+        serverName.tap()
+        serverName.typeText("Draft server")
+        try requestLiveHerdrStep("attention-form", in: configuration)
+        XCTAssertTrue(banner.waitForExistence(timeout: 20), "No banner over the server form.")
+        XCTAssertEqual(banner.label, "claude waiting, Herdr live · remux-ui · remux › build")
+        captureLiveHerdrStep("n7-banner-over-server-form", in: configuration)
+        banner.tap()
+        XCTAssertTrue(banner.waitForNonExistence(timeout: 5), "The tap didn't put the banner away.")
+        XCTAssertTrue(serverName.exists, "The tap closed the server form.")
+        XCTAssertEqual(serverName.value as? String, "Draft server", "The typing in the server form was lost.")
+        captureLiveHerdrStep("n8-form-kept", in: configuration)
+        app.buttons["connection.cancel"].tap()
+        XCTAssertTrue(serverName.waitForNonExistence(timeout: 5))
     }
 
     private func waitForLabel(of element: XCUIElement, _ label: String, timeout: TimeInterval) -> Bool {
