@@ -307,8 +307,9 @@ actor HerdrTerminalEngine {
         /// Where Herdr's answer to its newest step that took the session to its place fell among the
         /// snapshots.
         var answer: (sentAfter: UInt64, answeredAfter: UInt64)?
-        /// Herdr's state went elsewhere after its commands, as another client took the session somewhere:
-        /// it sends nothing more, and ends as Herdr shows the session. Once set it stays.
+        /// Herdr's state went elsewhere after its commands, as another client took the session somewhere,
+        /// or its target is gone: it sends nothing more, and ends as Herdr shows the session. Once set it
+        /// stays.
         var overtaken = false
         /// The snapshots since it began, while in progress.
         var snapshots: [HerdrSnapshot] = []
@@ -325,14 +326,16 @@ actor HerdrTerminalEngine {
         }
 
         /// Whether `snapshot`, the newest, shows Herdr's state gone elsewhere since the request's commands:
-        /// away from the pane a show keeps, or, once Herdr has answered the step that took it there, away
-        /// from its target, after that answer, after a snapshot since it went out showed the target, or with
-        /// the target gone since it went out.
+        /// away from the pane a show keeps; with its target gone, whether or not its steps went out, since
+        /// every target is a pane or tab a snapshot has shown and one that is gone doesn't come back; or,
+        /// once Herdr has answered the step that took it there, away from its target, after that answer or
+        /// after a snapshot since it went out showed the target.
         func isOvertaken(by snapshot: HerdrSnapshot) -> Bool {
             if let kept, snapshot.focusedPaneID != kept { return true }
-            guard let answer, let target, !target.isShown(in: snapshot) else { return false }
+            guard let target, !target.isShown(in: snapshot) else { return false }
+            if target.isGone(in: snapshot) { return true }
+            guard let answer else { return false }
             return snapshot.revision > answer.answeredAfter
-                || (snapshot.revision > answer.sentAfter && target.isGone(in: snapshot))
                 || snapshots.contains { $0.revision > answer.sentAfter && target.isShown(in: $0) }
         }
 
@@ -627,6 +630,9 @@ actor HerdrTerminalEngine {
     private func begin(_ id: UInt64, kind: HerdrViewKind, showing: Bool, until due: ContinuousClock.Instant) {
         startDeadline(for: id, until: due)
         continuation.yield(.started(request: id, kind: kind, showing: showing, connection: connection))
+        // The pane may be gone already from the snapshot the request starts on, newer than the one it was
+        // asked from.
+        checkOvertaken()
         dispatch()
     }
 

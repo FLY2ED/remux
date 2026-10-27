@@ -79,13 +79,18 @@ enum HerdrServerScript {
         var rect: (x: UInt16, y: UInt16, width: UInt16, height: UInt16)?
     }
 
+    /// The scripted session's panes by tab: `t1` holds `w1:p1` and `w1:p2`, `t2` holds `w1:p3` and
+    /// `w1:p4`, and `t3` holds `w1:p5`.
+    static let sessionPanes: [String: [String]] = ["t1": ["w1:p1", "w1:p2"], "t2": ["w1:p3", "w1:p4"], "t3": ["w1:p5"]]
+
     /// A recorded v0.9.3 welcome.
     static func welcome() throws -> [UInt8] {
         HerdrWire.frame(try HerdrConnectionTests.frames(HerdrConnectionTests.recording("herdr-01-handshake-all-caps-A"))[0])
     }
 
     /// `panes` and `agents` are the snapshot's JSON entries, made with `snapshotPane` and
-    /// `snapshotAgent`.
+    /// `snapshotAgent`. Without `panes` it lists the panes of its tabs in the scripted session
+    /// (`sessionPanes`), as Herdr lists every pane, but those `closed` names.
     /// The focused tab is labelled `tabLabel` and is `zoomed` or not; `otherTabs` are further tabs of
     /// workspace `w1`, by id, each named after its id, and zoomed when in `zoomedOtherTabs`. Workspace `w1`
     /// is listed when it has a label.
@@ -99,9 +104,13 @@ enum HerdrServerScript {
         otherTabs: [String] = [],
         zoomedOtherTabs: [String] = [],
         focusedPane: String? = "w1:p1",
-        panes: [String] = [],
+        panes: [String]? = nil,
+        closed: Set<String> = [],
         agents: [String] = []
     ) -> [UInt8] {
+        let panes = panes ?? ([focusedTab] + otherTabs).flatMap { tab in
+            (sessionPanes[tab] ?? []).filter { !closed.contains($0) }.map { snapshotPane($0, tab: tab) }
+        }
         let tabs = ([(focusedTab, tabLabel, true)] + otherTabs.map { ($0, $0, false) }).enumerated().map { index, tab in
             """
             {"tab_id":"\(tab.0)","workspace_id":"w1","number":\(index + 1),"label":"\(tab.1)","custom_label":true,

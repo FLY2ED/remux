@@ -476,6 +476,68 @@ final class HerdrTerminalEngineTests: XCTestCase {
         }
     }
 
+    /// A move waiting behind a command whose pane another client closes before it can go sends nothing,
+    /// not even Remux's zoom off the tab on screen, and ends as Herdr shows the session.
+    func testAMoveWaitingBehindACommandWhosePaneClosesSendsNothing() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shownZoomed(feed, updates, outbox)
+        let answers = Answers()
+
+        await feed.command("worktree.list", params: [String: String](), answered: answers.record)
+        let move = try await start(feed, updates, Self.move("R", fromAnotherTab: true, zoom: Self.zooming), within: .seconds(2))
+        await feed.receive(try Self.places(revision: 3, zoomed: ["t1"], closed: ["R"]))
+        await feed.receive(.surface(try Self.surface(
+            projection: 3,
+            revision: 2,
+            lines: ["one ", "two "],
+            panes: [Self.pane("P", x: 0, width: 4, height: 2, focused: true)]
+        )))
+        try await answer(feed, outbox)
+        _ = try await answers.next().get()
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "worktree.list"], "the move to a closed pane sent its steps")
+        while true {
+            switch try await updates.next() {
+            case .activated(move, _):
+                return await engine.stop()
+            case .timedOut:
+                return XCTFail("the move waited out its time for a pane that is gone, after \(try outbox.commands())")
+            default:
+                continue
+            }
+        }
+    }
+
+    /// A move to a pane already gone from the snapshot it starts on, as another client closed it after the
+    /// screen last showed it, sends nothing and ends as Herdr shows the session.
+    func testAMoveToAPaneClosedBeforeItStartsSendsNothing() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shownZoomed(feed, updates, outbox)
+
+        await feed.receive(try Self.places(revision: 3, zoomed: ["t1"], closed: ["R"]))
+        await feed.receive(.surface(try Self.surface(
+            projection: 3,
+            revision: 2,
+            lines: ["one ", "two "],
+            panes: [Self.pane("P", x: 0, width: 4, height: 2, focused: true)]
+        )))
+        let move = try await start(feed, updates, Self.move("R", fromAnotherTab: true, zoom: Self.zooming), within: .seconds(2))
+        while true {
+            switch try await updates.next() {
+            case .activated(move, _):
+                XCTAssertEqual(try outbox.commands(), ["zoom P on"], "the move to a closed pane sent its steps")
+                return await engine.stop()
+            case .timedOut:
+                return XCTFail("the move waited out its time for a pane that is gone, after \(try outbox.commands())")
+            default:
+                continue
+            }
+        }
+    }
+
     /// Leaving takes Remux's zoom off only the tab Herdr shows: an unzoom focuses its target, so one of a
     /// tab another client has since left would take the session back there. A zoom answered after another
     /// client took the session to the other tab stays.
@@ -1755,14 +1817,18 @@ final class HerdrTerminalEngineTests: XCTestCase {
     }
 
     /// A snapshot at `focusedPane`, on its tab, of tab `t1` with panes P and Q and tab `t2` with R and S;
-    /// `zoomed` names the zoomed tabs, and a tab `gone` names isn't listed, nor are its panes.
+    /// `zoomed` names the zoomed tabs, a tab `gone` names isn't listed, nor are its panes, and a pane
+    /// `closed` names isn't listed.
     static func places(
         revision: UInt64,
         focusedPane: String = "P",
         zoomed: Set<String> = [],
-        gone: Set<String> = []
+        gone: Set<String> = [],
+        closed: Set<String> = []
     ) throws -> HerdrSnapshot {
-        let tabs = [(id: "t1", panes: ["P", "Q"]), (id: "t2", panes: ["R", "S"])].filter { !gone.contains($0.id) }
+        let tabs = [(id: "t1", panes: ["P", "Q"]), (id: "t2", panes: ["R", "S"])]
+            .filter { !gone.contains($0.id) }
+            .map { (id: $0.id, panes: $0.panes.filter { !closed.contains($0) }) }
         let focusedTab = try XCTUnwrap(tabs.first { $0.panes.contains(focusedPane) }).id
         let tabEntries = tabs.enumerated().map { index, tab in
             """

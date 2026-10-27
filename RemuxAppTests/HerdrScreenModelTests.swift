@@ -4259,7 +4259,7 @@ final class HerdrScreenModelTests: XCTestCase {
             panes: [.init(id: "w1:p3", x: 0, width: 5, height: 1, focused: true)]
         )
         await session.bridge.serve(
-            HerdrServerScript.snapshot(revision: 4, focusedTab: "t2", focusedPane: "w1:p3", agents: [
+            HerdrServerScript.snapshot(revision: 4, focusedTab: "t2", focusedPane: "w1:p3", closed: ["w1:p4"], agents: [
                 HerdrServerScript.snapshotAgent("w1:p2", status: .idle, stateChange: 4),
             ])
                 + otherTab
