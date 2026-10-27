@@ -1655,8 +1655,10 @@ final class RemuxAppUITests: XCTestCase {
         app.buttons["terminal.sessions.close"].tap()
     }
 
-    /// A Herdr session opened from the library on a live server: the tab's panes on screen, the keyboard
-    /// opening and closing over them, and Home and back. Skipped without REMUX_LIVE_HERDR_UI_CONFIG.
+    /// A Herdr session opened from the library on a live server. On a phone the multi-pane tab opens zoomed
+    /// on its focused pane, and Panes lists all of its panes; turned off there, the tab's panes are on
+    /// screen, with the keyboard opening and closing over them, and the tab stays unzoomed over Home and
+    /// back. Skipped without REMUX_LIVE_HERDR_UI_CONFIG.
     func testLiveHerdrSessionWhenConfigured() throws {
         guard let path = ProcessInfo.processInfo.environment["REMUX_LIVE_HERDR_UI_CONFIG"], !path.isEmpty else {
             throw XCTSkip("Set REMUX_LIVE_HERDR_UI_CONFIG to run the live Herdr UI test.")
@@ -1684,6 +1686,20 @@ final class RemuxAppUITests: XCTestCase {
         waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
         assertLiveTerminalScreenshotContainsRenderedContent()
         captureLiveHerdrStep("1-session", in: configuration)
+
+        // Zoomed on open, as "Zoom multipane windows" is on by default on a phone; turned off from Panes,
+        // the tab's panes are on screen for the rest of the test.
+        let zoom = openHerdrPanesZoomSwitch()
+        XCTAssertEqual(zoom.value as? String, "1", "The multi-pane tab should open zoomed.")
+        captureLiveHerdrStep("1a-panes-zoomed", in: configuration)
+        zoom.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
+        XCTAssertTrue(
+            waitForValue("0", of: zoom, timeout: 8),
+            "Zoom should turn off from Panes."
+        )
+        app.buttons["terminal.panes.close"].tap()
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        captureLiveHerdrStep("1c-panes-unzoomed", in: configuration)
 
         // A long-press selects the word under the finger and offers Copy, as on a tmux pane.
         let terminal = app.otherElements["terminal.screen"].firstMatch
@@ -1733,6 +1749,11 @@ final class RemuxAppUITests: XCTestCase {
         assertLiveTerminalScreenshotContainsRenderedContent()
         captureLiveHerdrStep("5-back", in: configuration)
 
+        // The tab the user unzoomed isn't zoomed again on the way back.
+        XCTAssertEqual(openHerdrPanesZoomSwitch().value as? String, "0", "The tab should stay unzoomed.")
+        app.buttons["terminal.panes.close"].tap()
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+
         // A swipe down over the first pane scrolls its history back on Herdr. The harness reads
         // Herdr's scroll position after the test, so the swipe's steps get time to go out first.
         let firstPane = app.otherElements["terminal.screen"].firstMatch
@@ -1741,6 +1762,32 @@ final class RemuxAppUITests: XCTestCase {
         _ = XCTWaiter.wait(for: [XCTestExpectation(description: "the swipe's wheel steps go out")], timeout: 2)
         XCTAssertEqual(app.state, .runningForeground)
         captureLiveHerdrStep("6-scrolled", in: configuration)
+    }
+
+    /// Opens Panes over a Herdr session whose tab has three panes, and returns its Zoom switch.
+    private func openHerdrPanesZoomSwitch() -> XCUIElement {
+        let panes = app.buttons["terminal.panes"]
+        XCTAssertTrue(panes.waitForExistence(timeout: 10))
+        panes.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["terminal.panes.sheet"].waitForExistence(timeout: 8))
+        let tiles = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "terminal.pane.tile."))
+        XCTAssertTrue(
+            tiles.element(boundBy: 2).waitForExistence(timeout: 8),
+            "Panes should list every pane of the tab, also while it is zoomed."
+        )
+        XCTAssertEqual(tiles.count, 3)
+        let zoom = app.switches["terminal.pane.zoom"]
+        XCTAssertTrue(zoom.waitForExistence(timeout: 8))
+        return zoom
+    }
+
+    private func waitForValue(_ value: String, of element: XCUIElement, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if element.value as? String == value { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        return false
     }
 
     private func captureLiveHerdrStep(_ name: String, in configuration: LiveHerdrConfiguration) {
