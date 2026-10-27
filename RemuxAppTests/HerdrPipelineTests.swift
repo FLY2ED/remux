@@ -43,13 +43,14 @@ final class HerdrPipelineTests: XCTestCase {
     func testASessionShownAfterConnectingHiddenIsPaintedAsHerdrSentIt() async throws {
         let recording = "herdr-08-connect-inactive-A"
         let frames = try HerdrConnectionTests.frames(HerdrConnectionTests.recording(recording))
+        let last = try Self.herdrsLastFrame(recording)
+        let screen = try HerdrModelHarness.screenSize(columns: last.frame.width, rows: last.frame.height)
         let harness = await makeHarness()
         let bridge = try await harness.bridge()
         // Up to the snapshot and the server's state for this client; the recorded show reply answers
         // another client's request id, so the model's own is answered instead.
         await bridge.serve(frames[0...4].flatMap(HerdrWire.frame))
-        let last = try Self.herdrsLastFrame(recording)
-        try harness.setScreenSize(columns: last.frame.width, rows: last.frame.height)
+        harness.setScreenSize(screen)
         harness.model.setSelected(true)
 
         var index = 0
@@ -68,11 +69,12 @@ final class HerdrPipelineTests: XCTestCase {
     func testAHideDuringAShowWinsAndHiddenSurfacesStillDecode() async throws {
         let recording = "herdr-04-patch-and-delta-A"
         let frames = try HerdrConnectionTests.frames(HerdrConnectionTests.recording(recording))
+        let last = try Self.herdrsLastFrame(recording)
+        let screen = try HerdrModelHarness.screenSize(columns: last.frame.width, rows: last.frame.height)
         let harness = await makeHarness()
         let bridge = try await harness.bridge()
         await bridge.serve(frames[0...3].flatMap(HerdrWire.frame))
-        let last = try Self.herdrsLastFrame(recording)
-        try harness.setScreenSize(columns: last.frame.width, rows: last.frame.height)
+        harness.setScreenSize(screen)
         harness.model.setSelected(true)
 
         var index = 0

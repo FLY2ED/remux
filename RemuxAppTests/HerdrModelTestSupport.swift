@@ -620,13 +620,18 @@ final class HerdrModelHarness {
         return await bridges.opened[index]
     }
 
-    func setScreenSize() {
-        model.terminalScreenAdapter.prepareInitialViewport(size: CGSize(width: 390, height: 844), scale: 3)
+    func setScreenSize(_ size: CGSize = CGSize(width: 390, height: 844)) {
+        model.terminalScreenAdapter.prepareInitialViewport(size: size, scale: 3)
     }
 
-    /// A screen of `columns` x `rows` cells, as a recording made at that size needs: Herdr draws at the
-    /// size the show asks for, and only such a frame completes the show.
-    func setScreenSize(columns: UInt16, rows: UInt16) throws {
+    private static var screenSizes: [[UInt16]: CGSize] = [:]
+
+    /// The screen that gives `columns` x `rows` cells, as a recording made at that size needs: Herdr draws
+    /// at the size the show asks for, and only such a frame completes the show. Measured once per size, and
+    /// by a test before its model opens a bridge: the search holds the main actor, and on a slow machine
+    /// long enough to pass the model's hello deadline, after which the model opens another bridge.
+    static func screenSize(columns: UInt16, rows: UInt16) throws -> CGSize {
+        if let size = screenSizes[[columns, rows]] { return size }
         let runtime = try GhosttyKitRuntime(terminalSettings: .default)
         let lengths = stride(from: CGFloat(40), through: 4000, by: 1)
         let width = try lengths.first {
@@ -639,7 +644,8 @@ final class HerdrModelHarness {
             width: try XCTUnwrap(width, "no screen width gives \(columns) columns"),
             height: try XCTUnwrap(height, "no screen height gives \(rows) rows")
         )
-        model.terminalScreenAdapter.prepareInitialViewport(size: size, scale: 3)
+        screenSizes[[columns, rows]] = size
+        return size
     }
 
     /// A frame of `lines` at the size a show asks for, padded with blanks: Herdr answers a show with a
