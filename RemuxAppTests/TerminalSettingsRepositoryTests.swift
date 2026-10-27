@@ -49,7 +49,9 @@ final class TerminalSettingsRepositoryTests: XCTestCase {
                 first: .pageDown,
                 second: .control,
                 third: .pageDown
-            )
+            ),
+            vibratesForBellsAndAgents: false,
+            vibratesForKeysAndButtons: true
         )
 
         try await repository.saveSettings(saved)

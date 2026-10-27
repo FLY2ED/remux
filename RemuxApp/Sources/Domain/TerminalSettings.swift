@@ -269,18 +269,28 @@ struct TerminalSettings: Equatable, Codable, Sendable {
     /// toolbar. The first key owns the long-press shortcut-palette gesture.
     var toolbarKeys: TerminalToolbarKeys
 
+    /// Vibrate when a program rings the bell, or an agent needs the user or finishes.
+    var vibratesForBellsAndAgents: Bool
+
+    /// Vibrate when the user presses toolbar keys and Remux's buttons.
+    var vibratesForKeysAndButtons: Bool
+
     init(
         fontSize: Float32?,
         theme: TerminalTheme,
         allowInsecureRSAHostKeys: Bool = false,
         zoomMultipaneWindowsByDefault: Bool = false,
-        toolbarKeys: TerminalToolbarKeys = .default
+        toolbarKeys: TerminalToolbarKeys = .default,
+        vibratesForBellsAndAgents: Bool = true,
+        vibratesForKeysAndButtons: Bool = true
     ) {
         self.fontSize = Self.normalizedFontSize(fontSize)
         self.theme = theme
         self.allowInsecureRSAHostKeys = allowInsecureRSAHostKeys
         self.zoomMultipaneWindowsByDefault = zoomMultipaneWindowsByDefault
         self.toolbarKeys = toolbarKeys
+        self.vibratesForBellsAndAgents = vibratesForBellsAndAgents
+        self.vibratesForKeysAndButtons = vibratesForKeysAndButtons
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -289,6 +299,8 @@ struct TerminalSettings: Equatable, Codable, Sendable {
         case allowInsecureRSAHostKeys
         case zoomMultipaneWindowsByDefault
         case toolbarKeys
+        case vibratesForBellsAndAgents
+        case vibratesForKeysAndButtons
     }
 
     // Custom decoding keeps older persisted settings (written before these keys
@@ -306,7 +318,15 @@ struct TerminalSettings: Equatable, Codable, Sendable {
             toolbarKeys: try container.decodeIfPresent(
                 TerminalToolbarKeys.self,
                 forKey: .toolbarKeys
-            ) ?? .default
+            ) ?? .default,
+            vibratesForBellsAndAgents: try container.decodeIfPresent(
+                Bool.self,
+                forKey: .vibratesForBellsAndAgents
+            ) ?? true,
+            vibratesForKeysAndButtons: try container.decodeIfPresent(
+                Bool.self,
+                forKey: .vibratesForKeysAndButtons
+            ) ?? true
         )
     }
 
