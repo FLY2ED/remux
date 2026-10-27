@@ -398,6 +398,42 @@ final class HerdrScreenModelTests: XCTestCase {
         ])
     }
 
+    /// With Herdr's borders and gaps off, panes touch, and the pane picker's map still has a tile for
+    /// each.
+    func testThePanePickerMapsTouchingPanes() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge()
+        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        await bridge.serve(HerdrServerScript.surface(
+            projection: 1,
+            revision: 1,
+            lines: ["leftright", "left down"],
+            panes: [
+                .init(id: "w1:p1", x: 0, width: 4, height: 2, focused: true),
+                .init(id: "w1:p2", x: 4, width: 5, height: 1),
+                .init(id: "w1:p3", x: 4, y: 1, width: 5, height: 1),
+            ]
+        ))
+        harness.setScreenSize()
+        let adapter = harness.model.terminalScreenAdapter
+        try await harness.waitUntil("the panes weren't laid out") {
+            adapter.terminalScreenPresentationProjection.viewport.panes.count == 3
+        }
+
+        let tab = try XCTUnwrap(adapter.selectedPaneSheetPresentationProjection()).topLevelID
+        let picker = adapter.paneSelectionSheetRenderProjection(topLevelID: tab)
+        let map = try XCTUnwrap(PaneTopologyLayout.frames(
+            panes: try picker.panes.map { PaneTopologyLayout.Pane(id: $0.id, frame: try XCTUnwrap($0.frame)) },
+            size: CGSize(width: 300, height: 200)
+        ))
+        XCTAssertEqual(picker.panes.map { map.frame(for: $0.id) }, [
+            CGRect(x: 0, y: 0, width: 100, height: 200),
+            CGRect(x: 100, y: 0, width: 200, height: 100),
+            CGRect(x: 100, y: 100, width: 200, height: 100),
+        ])
+        XCTAssertEqual(adapter.terminalScreenPresentationProjection.viewport.paneLines, [])
+    }
+
     /// The pane sheet shows, as for a tmux pane, the folder of the pane's foreground program, and names
     /// each pane as Herdr's pane navigator does within a tab: its manual label or agent's name, else
     /// its title, else its agent's kind, else "terminal", numbered by its place among the tab's panes

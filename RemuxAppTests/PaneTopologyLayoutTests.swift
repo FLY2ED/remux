@@ -44,6 +44,33 @@ final class PaneTopologyLayoutTests: XCTestCase {
         XCTAssertEqual(frames[3].maxY, frames[4].minY, accuracy: 0.001)
     }
 
+    /// Herdr with its borders and gaps off lays panes out with no cell between them; the map still cuts
+    /// between them and gives every pane a tile, as for panes a border apart.
+    func testTouchingPanesGetATileEach() throws {
+        let left = UUID()
+        let topRight = UUID()
+        let bottomRight = UUID()
+        let panes: [PaneTopologyLayout.Pane] = [
+            .init(id: left, frame: .init(x: 0, y: 0, columns: 27, rows: 40)),
+            .init(id: topRight, frame: .init(x: 27, y: 0, columns: 26, rows: 20)),
+            .init(id: bottomRight, frame: .init(x: 27, y: 20, columns: 26, rows: 20)),
+        ]
+        let frames = try XCTUnwrap(PaneTopologyLayout.frames(panes: panes, size: CGSize(width: 300, height: 200)))
+
+        XCTAssertEqual(frames.frame(for: left), CGRect(x: 0, y: 0, width: 100, height: 200))
+        XCTAssertEqual(frames.frame(for: topRight), CGRect(x: 100, y: 0, width: 200, height: 100))
+        XCTAssertEqual(frames.frame(for: bottomRight), CGRect(x: 100, y: 100, width: 200, height: 100))
+    }
+
+    /// Panes that overlap along an axis can't be cut there.
+    func testOverlappingPanesAreNotCut() {
+        let panes: [PaneTopologyLayout.Pane] = [
+            .init(id: UUID(), frame: .init(x: 0, y: 0, columns: 28, rows: 40)),
+            .init(id: UUID(), frame: .init(x: 27, y: 0, columns: 26, rows: 40)),
+        ]
+        XCTAssertNil(PaneTopologyLayout.frames(panes: panes, size: CGSize(width: 300, height: 200)))
+    }
+
     private func fivePaneTopology() -> [PaneTopologyLayout.Pane] {
         [
             .init(id: UUID(), frame: .init(x: 0, y: 0, columns: 39, rows: 59)),
