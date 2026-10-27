@@ -689,10 +689,8 @@ final class HerdrScreenModel {
         let sent = await connection.sendCommandWhileShown(
             Self.paneZoomMethod,
             params: Self.zoomParams(paneID, zoomed: true)
-        ) { [weak self] answer, snapshotRevision in
-            let tab = (try? HerdrPaneZoomResult(reply: answer.get())).map {
-                (tabID: $0.layout.tabID, zoomed: $0.zoomed, snapshotRevision: snapshotRevision)
-            }
+        ) { [weak self] answer in
+            let tab = (try? HerdrPaneZoomResult(reply: answer.get())).map { (tabID: $0.layout.tabID, zoomed: $0.zoomed) }
             Task { await feed.settleZoom(request: request, tab: tab) }
             Task { @MainActor [weak self] in self?.zoomAnswered(answer, bootID: bootID, reportingFailure: false) }
         }
@@ -970,7 +968,7 @@ final class HerdrScreenModel {
                 _ = await connection.sendCommandIfIdle(
                     Self.paneZoomMethod,
                     params: Self.zoomParams(paneID, zoomed: false)
-                ) { [weak self] answer, _ in
+                ) { [weak self] answer in
                     Task { @MainActor [weak self] in
                         self?.zoomAnswered(answer, bootID: bootID, reportingFailure: false)
                     }

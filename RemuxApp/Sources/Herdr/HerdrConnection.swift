@@ -227,14 +227,12 @@ actor HerdrConnection {
         /// A show sent with `sendShow`: its answer goes to `answered`, after the same rollback as a
         /// failed `show`.
         case show(position: UInt64, answered: @Sendable (Result<UInt64, Error>) -> Void)
-        /// A command sent without a caller awaiting it: its reply's JSON goes to `answered`, with the
-        /// revision of the newest snapshot read before the reply.
+        /// A command sent without a caller awaiting it: its reply's JSON goes to `answered`.
         case command(answered: CommandAnswered)
     }
 
-    /// Gets a command's reply, or its failure, and the revision of the newest snapshot Herdr had sent
-    /// before it. Herdr builds every snapshot after that one once the command was carried out.
-    typealias CommandAnswered = @Sendable (Result<Data, Error>, _ snapshotRevision: UInt64) -> Void
+    /// Gets a command's reply, or its failure.
+    typealias CommandAnswered = @Sendable (Result<Data, Error>) -> Void
 
     /// Waiting for the lane: a caller, or a command for a show (`sendCommandWhileShown`).
     private enum LaneWaiter {
@@ -254,8 +252,6 @@ actor HerdrConnection {
     private var laneBusy = false
     private var nextTicket: UInt64 = 0
     private var laneWaiters: [(ticket: UInt64, waiter: LaneWaiter)] = []
-    /// The newest snapshot's revision on this connection.
-    private var snapshotRevision: UInt64 = 0
     private var healthTask: Task<Void, Never>?
 
     // MARK: - Opening
@@ -449,7 +445,6 @@ actor HerdrConnection {
             switch try HerdrEndpointControl.parse(kind: kind, data: data) {
             case .snapshot(let snapshot):
                 bootID = snapshot.bootID
-                snapshotRevision = snapshot.revision
                 await onEvent(.snapshot(snapshot))
             case .surfaceReuse(let reuse):
                 await onEvent(.surface(try decoder.decode(.reuse(reuse))))
@@ -749,7 +744,7 @@ actor HerdrConnection {
         timeout: Duration? = nil
     ) async -> Result<Data, Error>? {
         await withCheckedContinuation { continuation in
-            let sent = sendCommandIfIdle(method, params: params, timeout: timeout) { result, _ in
+            let sent = sendCommandIfIdle(method, params: params, timeout: timeout) { result in
                 continuation.resume(returning: result)
             }
             if !sent { continuation.resume(returning: nil) }
@@ -844,7 +839,7 @@ actor HerdrConnection {
             if case .failure = floor, position == visibilityRequests { rollBackShow() }
             answered(floor)
         case .command(let answered)?:
-            answered(result, snapshotRevision)
+            answered(result)
         case nil:
             break
         }
@@ -929,11 +924,11 @@ actor HerdrConnection {
                 return
             case .command(let command):
                 guard !ended, isActive, command.show == visibilityRequests else {
-                    command.answered(.failure(HerdrCommandError.notSent), snapshotRevision)
+                    command.answered(.failure(HerdrCommandError.notSent))
                     continue
                 }
                 if send(command.method, params: command.params, timeout: nil, answered: command.answered) { return }
-                command.answered(.failure(HerdrCommandError.notSent), snapshotRevision)
+                command.answered(.failure(HerdrCommandError.notSent))
             }
         }
         laneBusy = false
@@ -1092,7 +1087,7 @@ actor HerdrConnection {
             case .caller(let continuation):
                 continuation.resume(throwing: HerdrCommandError.connectionEnded)
             case .command(let command):
-                command.answered(.failure(HerdrCommandError.connectionEnded), snapshotRevision)
+                command.answered(.failure(HerdrCommandError.connectionEnded))
             }
         }
     }
