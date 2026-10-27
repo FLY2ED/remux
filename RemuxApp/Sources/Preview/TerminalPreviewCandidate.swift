@@ -168,6 +168,8 @@ struct TerminalPreviewCandidate: Equatable, Sendable {
         if host.hasPrefix("["), host.hasSuffix("]") {
             host = String(host.dropFirst().dropLast())
         }
+        // A fully qualified "localhost." names the same loopback host.
+        if host.hasSuffix(".") { host.removeLast() }
         if host == "localhost" || host == "::1" { return host }
         if host == "0.0.0.0" { return "127.0.0.1" }
         if host.hasPrefix("127."), host.split(separator: ".").count == 4 {

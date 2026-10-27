@@ -38,6 +38,7 @@ final class TerminalPreviewCandidateTests: XCTestCase {
             ("https://localhost:8443/", "localhost", 8443, "https", "/"),
             ("http://0.0.0.0:5173/", "127.0.0.1", 5173, "http", "/"),
             ("http://[::1]:9000", "::1", 9000, "http", ""),
+            ("http://localhost.:3000/", "localhost", 3000, "http", "/"),
             ("localhost:3000", "localhost", 3000, "http", ""),
             ("127.0.0.1:8000/health", "127.0.0.1", 8000, "http", "/health"),
         ]
@@ -187,6 +188,7 @@ final class TerminalPreviewCandidateTests: XCTestCase {
         for value in [
             "http://localhost:3000",
             "http://127.0.0.1:8000/docs",
+            "http://localhost.:3000",
             "localhost:3000",
             "/srv/app/readme.md",
             "file:///srv/app/readme.md",
