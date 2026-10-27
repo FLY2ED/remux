@@ -445,9 +445,8 @@ actor HerdrTerminalEngine {
     /// one to the same server boot undoes it all the same.
     private var ownedZoom = HerdrOwnedZoom()
     /// The newest answered step whose effect Herdr's snapshots don't show yet. Herdr can answer before it
-    /// sends the snapshot showing the answer, so the next step and the finale wait for that snapshot: each
-    /// goes from where the step before it took the session, and Remux's zoom comes off only the tab Herdr
-    /// shows.
+    /// sends the snapshot showing the answer, so the next step waits for that snapshot, going from where the
+    /// step before it took the session, and a leave unzooms nothing meanwhile.
     private var unsettled: StepEffect?
     private var layout: HerdrPaneLayout?
     private var paneScrolls: [String: HerdrPaneScroll] = [:]
@@ -515,10 +514,9 @@ actor HerdrTerminalEngine {
         outbox = nil
         surfaceSets.removeAll()
         unsettled = nil
-        let (inFlight, waiting, finale) = lane.takeAll()
+        let (inFlight, waiting) = lane.takeAll()
         if case .command(let command)? = inFlight?.item { fail(command, .connectionEnded) }
         waiting.forEach { fail($0, .connectionEnded) }
-        if case .close(let done)? = finale { done() }
     }
 
     // MARK: - Showing
@@ -544,10 +542,8 @@ actor HerdrTerminalEngine {
         let snapshot = presentation.snapshot
         switch view {
         case .hidden:
-            hide(within: deadline)
+            hide(outbox: outbox, snapshot: snapshot)
         case .shown(let geometry, let pane, let policy):
-            // A hide whose finale hasn't gone is taken back.
-            if case .hide? = lane.finale { lane.finale = nil }
             let id = nextRequest()
             let kept = pane == nil ? snapshot?.focusedPaneID : nil
             var steps: [HerdrCommandLane.Step] = []
@@ -641,22 +637,44 @@ actor HerdrTerminalEngine {
         return steps
     }
 
-    /// Hides the session: the request in progress ends, its steps not yet sent don't go, and the commands
-    /// waiting fail, since Herdr refuses commands from a hidden session. Frames are held and input stops from
-    /// here on. The hide goes as the finale, once the command in flight is answered and a snapshot shows
-    /// where the last step took the session; a snapshot that never comes holds it for `deadline` at most.
-    private func hide(within deadline: Duration) {
+    /// Hides the session at once: the request in progress ends, its steps not yet sent don't go, and the
+    /// commands waiting fail, since Herdr refuses commands from a hidden session. Remux's zoom comes off first
+    /// if it can go now, while Herdr still takes commands from this client; otherwise it stays, so the leave
+    /// never waits. Focus goes before the hide, while still active: deactivation keeps the stored focus, so
+    /// without it the next show's focus would be ignored.
+    private func hide(outbox: any HerdrOutbound, snapshot: HerdrSnapshot?) {
+        if let snapshot { unzoomIfIdle(in: snapshot, closed: nil) }
         lane.dropSteps()
         lane.takeWaiting().forEach { fail($0, .notSent) }
         let id = nextRequest()
         request = ViewRequest(
             id: id, kind: .hide, show: nil, columns: 1, rows: 1, destination: nil, kept: nil, zooms: false
         )
-        lane.finale = .hide(request: id)
-        outbox?.setSurfaceActive(false)
-        startDeadline(for: id, within: deadline)
+        cancelDeadline()
+        // A hide Herdr doesn't confirm leaves only its stale foreground on the server.
+        if let message = surfaceSet(active: false, show: nil, in: snapshot) {
+            outbox.send([.focus(false), message])
+        }
+        outbox.setSurfaceActive(false)
         continuation.yield(.started(request: id, kind: .hide, showing: false, connection: connection))
-        dispatch()
+    }
+
+    /// Remux's zoom off the tab on screen as the session leaves, if it can go now: nothing is in flight, the
+    /// newest snapshot shows where the last step took the session, and it has the tab Remux zoomed on
+    /// screen, since an unzoom focuses its target. Otherwise the zoom stays. `closed` once Herdr has
+    /// answered it. Returns whether it went.
+    @discardableResult
+    private func unzoomIfIdle(in snapshot: HerdrSnapshot, closed: (@Sendable () -> Void)?) -> Bool {
+        guard lane.isIdle, unsettled == nil, methods.contains(HerdrScreenModel.paneZoomMethod),
+              let pane = ownedZoom.paneToUnzoom(in: snapshot)
+        else { return false }
+        let unzoom = HerdrCommandLane.Command(
+            method: HerdrScreenModel.paneZoomMethod,
+            params: HerdrScreenModel.zoomParams(pane, zoomed: false),
+            purpose: .unzoom(pane: pane, closed: closed)
+        )
+        send(.command(unzoom), params: unzoom.params, in: snapshot)
+        return true
     }
 
     /// Whether `pane` is on another tab than the one `snapshot` shows.
@@ -742,32 +760,22 @@ actor HerdrTerminalEngine {
         dispatch()
     }
 
-    /// The connection closes: the request in progress ends, as for a hide, and the finale takes Remux's zoom
-    /// off the tab on screen before the close; `done` once Herdr has answered it, or once nothing needs
-    /// undoing.
+    /// Remux's zoom off the tab on screen before the connection closes, if it can go now, as for a hide, so
+    /// the close isn't held back; `done` once Herdr has answered it, or at once.
     fileprivate func unzoomBeforeClosing(done: @escaping @Sendable () -> Void, connection: UInt64) {
-        guard state == .running, connection == self.connection, outbox != nil, presentation.snapshot != nil
+        guard state == .running, connection == self.connection, outbox != nil,
+              request.map({ $0.kind != .hide }) == true, let snapshot = presentation.snapshot,
+              unzoomIfIdle(in: snapshot, closed: done)
         else { return done() }
-        lane.dropSteps()
-        lane.takeWaiting().forEach { fail($0, .notSent) }
-        lane.finale = .close(done: done)
-        dispatch()
     }
 
     /// The one place a command is let go: whenever the lane is free, its next item goes, in the lane's
     /// order, if it may go now against Herdr's newest snapshot. This runs in the same turn as the start,
     /// answer, timeout or snapshot that made it due, so nothing changes between the check and the send. A
-    /// step and the finale go from where the step before took the session, so they wait for the snapshot
-    /// showing that.
+    /// step goes from where the step before it took the session, so it waits for the snapshot showing that.
     private func dispatch() {
         guard state == .running, lane.isIdle, outbox != nil, let snapshot = presentation.snapshot else { return }
-        lane: while true {
-            guard let item = lane.next else {
-                guard let finale = lane.finale, unsettled == nil else { break }
-                lane.finale = nil
-                if leave(finale, in: snapshot) { return }
-                continue
-            }
+        lane: while let item = lane.next {
             let params: any Encodable & Sendable
             switch item {
             case .step(let id, let step):
@@ -796,43 +804,6 @@ actor HerdrTerminalEngine {
             return
         }
         completeIfReady()
-    }
-
-    /// The finale: Remux's zoom comes off the tab on screen, if Remux made it, while Herdr still takes
-    /// commands from this client; then focus goes, while still active, since deactivation keeps the stored
-    /// focus and the next show's focus would otherwise be ignored, and the hide; or the close follows the
-    /// unzoom's answer. After the hide went, nothing more goes. Returns whether the unzoom went, which then
-    /// holds the lane.
-    private func leave(_ finale: HerdrCommandLane.Finale, in snapshot: HerdrSnapshot) -> Bool {
-        let hidden = request.map { $0.kind == .hide && $0.completed } ?? true
-        var unzoomed = false
-        if !hidden, methods.contains(HerdrScreenModel.paneZoomMethod), let pane = ownedZoom.paneToUnzoom(in: snapshot) {
-            var closed: (@Sendable () -> Void)?
-            if case .close(let done) = finale { closed = done }
-            let unzoom = HerdrCommandLane.Command(
-                method: HerdrScreenModel.paneZoomMethod,
-                params: HerdrScreenModel.zoomParams(pane, zoomed: false),
-                purpose: .unzoom(pane: pane, closed: closed)
-            )
-            send(.command(unzoom), params: unzoom.params, in: snapshot)
-            unzoomed = true
-        }
-        switch finale {
-        case .hide(let id):
-            sendHide(id, in: snapshot)
-        case .close(let done):
-            if !unzoomed { done() }
-        }
-        return unzoomed
-    }
-
-    private func sendHide(_ id: UInt64, in snapshot: HerdrSnapshot) {
-        guard request?.id == id, let outbox else { return }
-        request?.completed = true
-        // A hide Herdr doesn't confirm leaves only its stale foreground on the server.
-        if let message = surfaceSet(active: false, show: nil, in: snapshot) {
-            outbox.send([.focus(false), message])
-        }
     }
 
     /// What a step sends against Herdr's newest snapshot, or nil when it doesn't go. The leave unzooms the
@@ -1074,18 +1045,10 @@ actor HerdrTerminalEngine {
         deadline = nil
     }
 
-    /// The deadline passed: it fires only for the current request, still in progress. A hide's ends the
-    /// wait for the lane: the hide goes, without Remux's unzoom if a command is still in flight, so Herdr
-    /// doesn't keep a client that left as its foreground.
+    /// The deadline passed: it fires only for the current request, still in progress.
     private func expire(request id: UInt64, connection: UInt64) {
-        guard state == .running, connection == self.connection, let request, request.id == id else { return }
-        if request.kind == .hide {
-            unsettled = nil
-            guard !lane.isIdle, case .hide? = lane.finale, let snapshot = presentation.snapshot else { return dispatch() }
-            lane.finale = nil
-            return sendHide(id, in: snapshot)
-        }
-        guard request.inProgress else { return }
+        guard state == .running, connection == self.connection, request?.id == id, request?.inProgress == true
+        else { return }
         continuation.yield(.timedOut(request: id, connection: connection))
     }
 

@@ -352,10 +352,10 @@ final class HerdrLiveConnectionTests: XCTestCase {
 
     // MARK: - Composer
 
-    /// Remux's composer sends a message to a Herdr pane as one paste, then Enter in a read of its own at
-    /// least the composer's pause later, so a program sees the paste settle before Enter. The program
-    /// asks for bracketed paste, as agents' prompts do; the message starts with a slash, which opens a
-    /// command menu in some agents.
+    /// Remux's composer sends a message to a Herdr pane as one paste, then Enter at least the composer's
+    /// pause after Herdr has the paste, and the program reads Enter on its own after the whole paste. The
+    /// program asks for bracketed paste, as agents' prompts do; the message starts with a slash, which
+    /// opens a command menu in some agents.
     @MainActor
     func testAComposedMessageArrivesAsAPasteThenEnterAfterThePauseOnHerdr093() async throws {
         try await checkComposedMessage(version: "0.9.3", message: Self.composedMessage)
@@ -367,7 +367,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
     }
 
     /// Over a slow uplink a long paste is still arriving well after the phone wrote it. The pause before
-    /// Enter runs once Herdr has the paste, so Enter still comes on its own, the pause after the paste.
+    /// Enter runs once Herdr has the whole paste, so Enter still comes on its own, after the paste.
     @MainActor
     func testAComposedMessageKeepsItsPauseOverASlowUplink() async throws {
         // The program's log of a longer message is more than a command's output may be.
@@ -392,6 +392,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
         let composer = GhosttyComposerModel()
         composer.draft = message
         let surfaceID = try XCTUnwrap(adapter.terminalInteractionProjection.selectedActiveLeafID)
+        let times = ComposerTimes()
         // As the screen sends a composed message.
         composer.submit(to: GhosttyComposerSubmissionDestination(
             workspaceID: session.model.target.workspace.id,
@@ -399,8 +400,13 @@ final class HerdrLiveConnectionTests: XCTestCase {
             destinationLabel: nil,
             makeAttachmentTransferService: { FailingComposerAttachmentTransferService() },
             prepareTerminalInput: {},
-            sendPaste: { await adapter.sendPasteAwaitingCommandCompletion($0, to: surfaceID) },
+            sendPaste: {
+                let delivered = await adapter.sendPasteAwaitingCommandCompletion($0, to: surfaceID)
+                times.pasteDelivered = .now
+                return delivered
+            },
             sendEnter: {
+                times.enterSent = .now
                 let enter = GhosttySurfaceKeyEvent(action: .press, keyCode: .enter)
                 guard await adapter.sendKeyEventAwaitingCommandCompletion(enter, to: surfaceID) else { return false }
                 _ = adapter.sendKeyEvent(GhosttySurfaceKeyEvent(action: .release, keyCode: .enter), to: surfaceID)
@@ -417,8 +423,10 @@ final class HerdrLiveConnectionTests: XCTestCase {
         guard let enter = reads.last, enter.bytes == [0x0d], reads.count >= 2 else {
             return XCTFail("Enter came in the paste's read on Herdr \(version): \(reads.map(\.bytes.count))")
         }
-        let gap = enter.milliseconds - reads[reads.count - 2].milliseconds
-        XCTAssertGreaterThanOrEqual(gap, 150, "Enter came \(gap) ms after the paste on Herdr \(version)")
+        // The pause runs from Herdr's answer that it has the paste; Herdr can still be writing the paste to
+        // the program then, so the gap the program sees isn't Remux's to keep.
+        let pause = try XCTUnwrap(times.enterSent) - (try XCTUnwrap(times.pasteDelivered))
+        XCTAssertGreaterThanOrEqual(pause, .milliseconds(150), "Enter went \(pause) after Herdr had the paste on Herdr \(version)")
     }
 
     // MARK: - Pane borders
@@ -1127,17 +1135,6 @@ final class HerdrLiveConnectionTests: XCTestCase {
         }
         window.isHidden = false
         try await waitUntil("the session didn't take input", timeout: .seconds(20)) { model.isInputAvailable }
-        // The composer sends only to a pane whose renderer has shown its first frame, which on a cold
-        // simulator can come well after the session takes input.
-        let presentations = { model.layout?.panes.filter(\.hasTextArea).map { model.presentation(ofPane: $0.paneID) } ?? [] }
-        do {
-            try await waitUntil("", timeout: .seconds(20)) {
-                let shown = presentations()
-                return !shown.isEmpty && shown.allSatisfy { $0 == .ready }
-            }
-        } catch {
-            throw HerdrLiveError(description: "the panes didn't draw: \(presentations())")
-        }
         return ShownSession(fixture: fixture, model: model)
     }
 
@@ -1411,6 +1408,13 @@ actor HerdrLivePingCounter: HerdrBridgeTransport {
 }
 
 /// Records a live connection's events for the test to wait on.
+/// When the composer's paste was delivered and its Enter sent, as the test's own closures see them.
+@MainActor
+private final class ComposerTimes {
+    var pasteDelivered: ContinuousClock.Instant?
+    var enterSent: ContinuousClock.Instant?
+}
+
 actor HerdrLiveEventLog {
     private var snapshots: [HerdrSnapshot] = []
     private(set) var surfaceCount = 0

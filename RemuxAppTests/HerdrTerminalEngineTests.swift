@@ -514,9 +514,9 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
-    /// A hide is the last thing in the lane: it waits for the command in flight, then Remux's zoom comes off
-    /// the tab on screen, and focus and the hide follow. Input stops at once.
-    func testAHideWaitsForTheCommandInFlightThenTakesRemuxsZoomOff() async throws {
+    /// A hide with a command in flight goes at once and leaves Remux's zoom: an unzoom would have to wait
+    /// for the lane, and the leave doesn't wait. Nothing follows the command's answer.
+    func testAHideWithACommandInFlightGoesAtOnceAndLeavesTheZoom() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
         let (feed, outbox) = await connect(engine)
@@ -527,40 +527,37 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let before = try outbox.writes().count
         _ = try await start(feed, updates, .hidden)
         XCTAssertFalse(outbox.isSurfaceActive)
-        let early = Array(try outbox.writes().dropFirst(before))
-        XCTAssertEqual(early, [], "the hide went ahead of the command in flight")
-
+        let leave = Array(try outbox.writes().dropFirst(before))
+        XCTAssertEqual(leave.count, 2, "\(leave)")
+        guard leave.first == .focus(false), case .surfaceSet(_, false)? = leave.last else {
+            return XCTFail("the hide didn't go at once: \(leave)")
+        }
         try await answer(feed, outbox)
         _ = try await answers.next().get()
+        XCTAssertEqual(try outbox.writes().count, before + 2, "something went after the hide")
+        await engine.stop()
+    }
+
+    /// A hide on an idle lane, with Herdr's snapshot showing the tab Remux zoomed, takes the zoom off first,
+    /// then focus and the hide go at once.
+    func testAHideOnAnIdleLaneTakesRemuxsZoomOffFirst() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shownZoomed(feed, updates, outbox)
+
+        let before = try outbox.writes().count
+        _ = try await start(feed, updates, .hidden)
         let leave = Array(try outbox.writes().dropFirst(before))
         XCTAssertEqual(leave.count, 3, "\(leave)")
         guard case .paneZoom(_, "P", "off")? = leave.first, leave.dropFirst().first == .focus(false),
               case .surfaceSet(_, false)? = leave.last
-        else { return XCTFail("the hide didn't follow Remux's zoom off: \(leave)") }
+        else { return XCTFail("the hide didn't take Remux's zoom off first: \(leave)") }
         await engine.stop()
     }
 
-    /// A show asked while the hide still waits for the lane takes it back: the hide never goes.
-    func testAShowTakesBackAHideThatHasntGone() async throws {
-        let engine = makeEngine()
-        let updates = UpdateLog(engine)
-        let (feed, outbox) = await connect(engine)
-        try await shown(feed, updates, outbox, panes: Self.atP)
-        let answers = Answers()
-
-        await feed.command("worktree.list", params: [String: String](), answered: answers.record)
-        _ = try await start(feed, updates, .hidden)
-        _ = try await start(feed, updates, Self.show())
-        try await answer(feed, outbox)
-        _ = try await answers.next().get()
-        XCTAssertEqual(try outbox.surfaceSets().map(\.active), [true, true], "the hide went")
-        XCTAssertTrue(outbox.isSurfaceActive)
-        await engine.stop()
-    }
-
-    /// A close waits for the command in flight, as a hide does, then takes Remux's zoom off the tab on
-    /// screen and closes once Herdr has answered it.
-    func testACloseWaitsForTheCommandInFlightThenTakesRemuxsZoomOff() async throws {
+    /// A close with a command in flight goes at once and leaves Remux's zoom, as a hide does.
+    func testACloseWithACommandInFlightGoesAtOnceAndLeavesTheZoom() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
         let (feed, outbox) = await connect(engine)
@@ -570,9 +567,23 @@ final class HerdrTerminalEngineTests: XCTestCase {
 
         await feed.command("worktree.list", params: [String: String](), answered: answers.record)
         await feed.unzoomBeforeClosing(done: closed.close)
-        XCTAssertFalse(closed.isClosed, "closed before the command in flight was answered")
+        XCTAssertTrue(closed.isClosed, "the close waited for the command in flight")
         try await answer(feed, outbox)
         _ = try await answers.next().get()
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "worktree.list"], "an unzoom went after the close")
+        await engine.stop()
+    }
+
+    /// A close on an idle lane, with Herdr's snapshot showing the tab Remux zoomed, takes the zoom off first
+    /// and closes once Herdr has answered it.
+    func testACloseOnAnIdleLaneTakesRemuxsZoomOffFirst() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shownZoomed(feed, updates, outbox)
+        let closed = Closed()
+
+        await feed.unzoomBeforeClosing(done: closed.close)
         XCTAssertEqual(try outbox.commands().last, "zoom P off")
         XCTAssertFalse(closed.isClosed, "closed before Herdr answered the unzoom")
         try await answerZoom(feed, outbox, zoomed: false)
@@ -580,31 +591,20 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
-    /// A close ends the move in progress: the steps not yet sent don't go, the commands waiting fail, and
-    /// Remux's zoom comes off only once a snapshot shows where the move's answered zoom took the session,
-    /// which is the tab Remux then unzooms.
-    func testACloseAfterAMovesZoomWaitsForItsSnapshot() async throws {
+    /// A close before the snapshot showing a move's answered zoom goes at once and leaves that zoom: which
+    /// tab is on screen isn't known yet, and an unzoom of another tab would take the session there.
+    func testACloseBeforeTheSnapshotShowingAMovesZoomLeavesIt() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
         let (feed, outbox) = await connect(engine)
         try await shown(feed, updates, outbox, panes: Self.atP)
-        let answers = Answers()
         let closed = Closed()
 
         _ = try await start(feed, updates, Self.move("R", fromAnotherTab: true, zoom: Self.zooming))
-        await feed.command("worktree.list", params: [String: String](), answered: answers.record)
         try await answerZoom(feed, outbox, zoomed: true, tab: "t2", panes: ["R", "S"])
         await feed.unzoomBeforeClosing(done: closed.close)
-        guard try outbox.commands() == ["zoom R on"] else {
-            return XCTFail("the close's unzoom went before Herdr showed the zoom: \(try outbox.commands())")
-        }
-        let dropped = try await answers.next()
-        XCTAssertEqual(dropped.failure, .notSent)
-
-        await feed.receive(try Self.places(revision: 2, focusedPane: "R", zoomed: ["t2"]))
-        XCTAssertEqual(try outbox.commands(), ["zoom R on", "zoom R off"])
-        try await answerZoom(feed, outbox, zoomed: false, tab: "t2", panes: ["R", "S"])
-        XCTAssertTrue(closed.isClosed)
+        XCTAssertTrue(closed.isClosed, "the close waited for the snapshot")
+        XCTAssertEqual(try outbox.commands(), ["zoom R on"], "the close's unzoom went before Herdr showed the zoom")
         await engine.stop()
     }
 

@@ -100,7 +100,7 @@ final class HerdrScreenModel {
     ///
     /// Its task opens the connection, then carries out the operations one at a time, in the order they
     /// were asked for. Herdr takes the newest of a show and a hide, so that order is the session's
-    /// state. No operation waits for Herdr's answer, so a hide is asked while a show is unanswered.
+    /// state. No operation waits for Herdr's answer, so a hide goes out while a show is unanswered.
     @MainActor
     private final class Attempt {
         let id: UInt64
@@ -617,7 +617,20 @@ final class HerdrScreenModel {
     }
 
     private var inputTarget: (attempt: Attempt, paneID: String)? {
-        guard let attempt = shownAttempt, let paneID = focusedPaneID else { return nil }
+        focusedPaneID.flatMap(inputTarget(forPane:))
+    }
+
+    /// Where input for `paneID` goes, the one rule for every input: the session is shown with no show in
+    /// progress, and Herdr takes input for the pane, as it does for the panes of the tab a client views
+    /// (`server/headless/client_views.rs` `shell_client_views_pane`), whatever Remux has drawn of them:
+    /// only the focused pane while that tab is zoomed, and any pane of it otherwise.
+    private func inputTarget(forPane paneID: String) -> (attempt: Attempt, paneID: String)? {
+        guard let attempt = shownAttempt, let snapshot else { return nil }
+        let tab = snapshot.tabs.first { $0.tabID == snapshot.focusedTabID }
+        guard paneID == snapshot.focusedPaneID
+            || (tab?.zoomed == false
+                && snapshot.panes.contains { $0.paneID == paneID && $0.tabID == snapshot.focusedTabID })
+        else { return nil }
         return (attempt, paneID)
     }
 
@@ -685,11 +698,11 @@ final class HerdrScreenModel {
 
     private func sendAwaitingDelivery(_ events: [HerdrInputEvent], toPane paneID: String) async -> Bool {
         // Herdr drops pane input while a popup is open over the tab, and still answers the ping.
-        guard let attempt = shownAttempt, presentation(ofPane: paneID) == .ready, layout?.hasPopup == false,
+        guard let target = inputTarget(forPane: paneID), layout?.hasPopup == false,
               (try? HerdrConnection.checkLimits(events)) != nil
         else { return false }
         return await withCheckedContinuation { delivered in
-            ask(input: events, toPane: paneID, on: attempt, delivered: delivered)
+            ask(input: events, toPane: target.paneID, on: target.attempt, delivered: delivered)
         }
     }
 
@@ -1404,9 +1417,8 @@ final class HerdrScreenModel {
     }
 
     /// Shows the session while the root wants it on screen and hides it otherwise. Herdr takes the
-    /// newest of a show and a hide, so each change is asked at once, even while the last is unanswered:
-    /// a show goes out at once, and a hide once the command in flight is answered, after Remux's zoom
-    /// comes off. A pane asked for goes right after the show, as part of it.
+    /// newest of a show and a hide, so each change is sent at once, even while the last is unanswered.
+    /// A pane asked for goes right after the show, as part of it.
     private func reconcileVisibility() {
         guard let attempt, isCurrent(attempt), attempt.isOpen, attempt.hasSnapshot, let geometry
         else { return }
