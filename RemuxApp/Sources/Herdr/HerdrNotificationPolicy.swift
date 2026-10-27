@@ -40,6 +40,9 @@ struct HerdrNotificationPlace: Equatable, Sendable {
 /// state it reports and its tab isn't on screen; otherwise it is dropped. Herdr's client checks only when
 /// a notification falls due, so one that waited could show for a tab already on screen. A newer
 /// notification for a pane replaces that pane's earlier one wherever it is.
+///
+/// A notification that comes with a bell keeps that pairing until its banner shows, whatever rings
+/// after: the bell's vibration stood for both.
 struct HerdrNotificationPolicy {
     /// Where a notification came from, as the banner names it and its tap needs it.
     struct Origin: Equatable, Sendable {
@@ -57,12 +60,14 @@ struct HerdrNotificationPolicy {
         let notification: HerdrSemanticNotification
         /// When the notification came, which can be well before the banner shows.
         let arrived: ContinuousClock.Instant
+        /// A bell rang with the notification (`HapticRules.cameTogether`).
+        var cameWithBell = false
 
         /// The vibration the banner plays when it shows: only an agent that needs the user or finished.
         var alert: HapticAlert? {
             switch notification.kind {
-            case .needsAttention: .agentNeedsYou(arrived: arrived)
-            case .finished: .agentFinished(arrived: arrived)
+            case .needsAttention: .agentNeedsYou(cameWithBell: cameWithBell)
+            case .finished: .agentFinished(cameWithBell: cameWithBell)
             case .updateInstalled, .custom: nil
             }
         }
@@ -93,7 +98,7 @@ struct HerdrNotificationPolicy {
     }
 
     private struct Pending {
-        let banner: Banner
+        var banner: Banner
         var due: ContinuousClock.Instant
         let expires: ContinuousClock.Instant
     }
@@ -102,6 +107,7 @@ struct HerdrNotificationPolicy {
     private var queued: [Banner] = []
     private(set) var visible: (banner: Banner, until: ContinuousClock.Instant)?
     private var nextID: UInt64 = 0
+    private var lastBell: ContinuousClock.Instant?
 
     /// When something is next due: a waiting notification, or the end of the one on screen.
     var nextDeadline: ContinuousClock.Instant? {
@@ -128,11 +134,26 @@ struct HerdrNotificationPolicy {
         }
         nextID += 1
         pending.append(Pending(
-            banner: Banner(id: nextID, origin: origin, notification: notification, arrived: now),
+            banner: Banner(
+                id: nextID,
+                origin: origin,
+                notification: notification,
+                arrived: now,
+                cameWithBell: lastBell.map { HapticRules.cameTogether($0, now) } ?? false
+            ),
             due: now + delay,
             expires: now + Self.completionEvidenceGrace
         ))
         advance(to: now, sessions: sessions)
+    }
+
+    /// A program rang the bell: each notification that came with it is paired with it. An agent's
+    /// notification is still waiting out its delay then, so only those are looked at.
+    mutating func ringBell(at now: ContinuousClock.Instant) {
+        lastBell = now
+        for index in pending.indices where HapticRules.cameTogether(now, pending[index].banner.arrived) {
+            pending[index].banner.cameWithBell = true
+        }
     }
 
     /// Ends the banner on screen when its time is up, and shows or drops each notification that is due.
@@ -263,6 +284,7 @@ final class HerdrNotificationCenter: ObservableObject {
 
     /// A program in the session on screen rang the bell.
     func ringBell() {
+        policy.ringBell(at: .now)
         vibrate(.bell)
     }
 

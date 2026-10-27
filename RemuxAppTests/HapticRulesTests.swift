@@ -21,8 +21,8 @@ final class HapticRulesTests: XCTestCase {
 
     func testEachAlertPlaysItsVibration() {
         XCTAssertEqual(feedback(.bell, at: 0), .warning)
-        XCTAssertEqual(feedback(.agentNeedsYou(arrived: at(0.5)), at: 1.5), .warning)
-        XCTAssertEqual(feedback(.agentFinished(arrived: at(2)), at: 3), .success)
+        XCTAssertEqual(feedback(.agentNeedsYou(cameWithBell: false), at: 1.5), .warning)
+        XCTAssertEqual(feedback(.agentFinished(cameWithBell: false), at: 3), .success)
     }
 
     func testABurstOfBellsVibratesAtMostOnceATenthOfASecond() {
@@ -33,23 +33,27 @@ final class HapticRulesTests: XCTestCase {
     /// Banners and bells share the spacing: an agent's banner right after a bell, or a bell right after
     /// a banner, adds nothing.
     func testBannersAndBellsShareTheSpacing() {
-        XCTAssertEqual(feedback(.agentNeedsYou(arrived: at(0)), at: 1), .warning)
+        XCTAssertEqual(feedback(.agentNeedsYou(cameWithBell: false), at: 1), .warning)
         XCTAssertNil(feedback(.bell, at: 1.05))
-        XCTAssertNil(feedback(.agentFinished(arrived: at(0.5)), at: 1.08))
+        XCTAssertNil(feedback(.agentFinished(cameWithBell: false), at: 1.08))
         XCTAssertEqual(feedback(.bell, at: 1.1), .warning)
     }
 
-    /// A bell that came with an agent's notification already vibrated, so the banner that shows a second
-    /// later doesn't, whichever came first; a bell well apart from the notification doesn't count.
-    func testABellWithAnAgentsNotificationVibratesOnce() {
-        XCTAssertEqual(feedback(.bell, at: 0.05), .warning)
-        XCTAssertNil(feedback(.agentNeedsYou(arrived: at(0)), at: 1))
+    /// A bell and an agent's notification come together within a tenth of a second, in either order.
+    func testABellAndANotificationComeTogetherWithinATenthOfASecond() {
+        XCTAssertTrue(HapticRules.cameTogether(at(1), at(1)))
+        XCTAssertTrue(HapticRules.cameTogether(at(1), at(1.09)))
+        XCTAssertTrue(HapticRules.cameTogether(at(1.09), at(1)))
+        XCTAssertFalse(HapticRules.cameTogether(at(1), at(1.1)))
+        XCTAssertFalse(HapticRules.cameTogether(at(1.1), at(1)))
+    }
 
-        XCTAssertEqual(feedback(.bell, at: 2), .warning)
-        XCTAssertNil(feedback(.agentFinished(arrived: at(2.06)), at: 3.06))
-
-        XCTAssertEqual(feedback(.bell, at: 4), .warning)
-        XCTAssertEqual(feedback(.agentNeedsYou(arrived: at(4.5)), at: 5.5), .warning)
+    /// The bell that came with an agent's notification already vibrated, so its banner doesn't.
+    func testABannerWhoseNotificationCameWithABellDoesNotVibrate() {
+        XCTAssertEqual(feedback(.bell, at: 0), .warning)
+        XCTAssertNil(feedback(.agentNeedsYou(cameWithBell: true), at: 1))
+        XCTAssertNil(feedback(.agentFinished(cameWithBell: true), at: 2))
+        XCTAssertEqual(feedback(.agentNeedsYou(cameWithBell: false), at: 3), .warning)
     }
 
     func testBothSwitchesAreOnByDefault() {
@@ -63,8 +67,8 @@ final class HapticRulesTests: XCTestCase {
         rules.follow(settings)
 
         XCTAssertNil(feedback(.bell, at: 0))
-        XCTAssertNil(feedback(.agentNeedsYou(arrived: at(1)), at: 2))
-        XCTAssertNil(feedback(.agentFinished(arrived: at(3)), at: 4))
+        XCTAssertNil(feedback(.agentNeedsYou(cameWithBell: false), at: 2))
+        XCTAssertNil(feedback(.agentFinished(cameWithBell: false), at: 4))
         XCTAssertFalse(rules.allows(.bellsAndAgents))
         XCTAssertTrue(rules.allows(.keysAndButtons))
 

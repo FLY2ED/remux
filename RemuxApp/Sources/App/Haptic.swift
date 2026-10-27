@@ -13,20 +13,19 @@ enum HapticCategory: Hashable, Sendable {
 enum HapticAlert: Equatable, Sendable {
     /// A program in the session on screen rang the bell.
     case bell
-    /// An agent's banner appeared; `arrived` is when its notification came, which can be well before.
-    case agentNeedsYou(arrived: ContinuousClock.Instant)
-    case agentFinished(arrived: ContinuousClock.Instant)
+    /// An agent's banner appeared; `cameWithBell` when a bell rang with its notification.
+    case agentNeedsYou(cameWithBell: Bool)
+    case agentFinished(cameWithBell: Bool)
 }
 
 /// Which vibrations play. Each belongs to a category the user can turn off, and alerts are spaced so a
-/// burst of bells vibrates once, and so does a bell with an agent's notification that came with it, even
-/// though its banner appears later.
+/// burst of bells vibrates once. A bell and an agent's notification that come together vibrate once: the
+/// bell at once, and the banner, which appears later, not at all.
 struct HapticRules: Sendable {
     static let alertSpacing: Duration = .milliseconds(100)
 
     private(set) var allowed: Set<HapticCategory>
     private var lastAlert: ContinuousClock.Instant?
-    private var lastBell: ContinuousClock.Instant?
 
     init(_ settings: TerminalSettings = .default) {
         allowed = Self.allowed(by: settings)
@@ -40,6 +39,12 @@ struct HapticRules: Sendable {
         allowed.contains(category)
     }
 
+    /// Whether a bell and an agent's notification came together, in either order.
+    static func cameTogether(_ bell: ContinuousClock.Instant, _ notification: ContinuousClock.Instant) -> Bool {
+        let gap = bell < notification ? notification - bell : bell - notification
+        return gap < alertSpacing
+    }
+
     /// The vibration `alert` plays at `now`, if any: a warning for a bell or an agent that needs the
     /// user, and success for an agent that finished.
     mutating func feedback(
@@ -50,24 +55,17 @@ struct HapticRules: Sendable {
         let feedback: UINotificationFeedbackGenerator.FeedbackType
         switch alert {
         case .bell:
-            lastBell = now
             feedback = .warning
-        case .agentNeedsYou(let arrived):
-            guard !Self.isNear(arrived, lastBell) else { return nil }
+        case .agentNeedsYou(let cameWithBell):
+            guard !cameWithBell else { return nil }
             feedback = .warning
-        case .agentFinished(let arrived):
-            guard !Self.isNear(arrived, lastBell) else { return nil }
+        case .agentFinished(let cameWithBell):
+            guard !cameWithBell else { return nil }
             feedback = .success
         }
         if let lastAlert, now - lastAlert < Self.alertSpacing { return nil }
         lastAlert = now
         return feedback
-    }
-
-    private static func isNear(_ instant: ContinuousClock.Instant, _ other: ContinuousClock.Instant?) -> Bool {
-        guard let other else { return false }
-        let gap = instant < other ? other - instant : instant - other
-        return gap < alertSpacing
     }
 
     private static func allowed(by settings: TerminalSettings) -> Set<HapticCategory> {

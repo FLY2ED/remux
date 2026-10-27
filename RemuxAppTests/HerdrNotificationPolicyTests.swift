@@ -265,6 +265,30 @@ final class HerdrNotificationPolicyTests: XCTestCase {
         XCTAssertEqual(shown, "still waiting")
         XCTAssertEqual(policy.visible?.until, at(13))
     }
+
+    // MARK: - Bells
+
+    /// A notification is paired with a bell that rang up to a tenth of a second before or after it came,
+    /// and stays paired whatever rings later; one apart from any bell isn't.
+    func testANotificationThatCameWithABellStaysPairedWithIt() throws {
+        sessions[agents] = session(["p2": .blocked, "p3": .blocked, "p4": .done])
+        policy.ringBell(at: at(0))
+        try receive(.needsAttention, "after a bell", pane: "p2", tab: "t2", at: 0.05)
+        try receive(.needsAttention, "apart", pane: "p3", tab: "t2", at: 0.5)
+        try receive(.finished, "before a bell", pane: "p4", tab: "t2", at: 0.7)
+        policy.ringBell(at: at(0.75))
+        policy.ringBell(at: at(0.95))
+
+        var shownBanners: [(String, Bool)] = []
+        for seconds in [1.05, 1.5, 1.7] {
+            advance(to: seconds)
+            let banner = try XCTUnwrap(policy.visible?.banner)
+            shownBanners.append((banner.notification.title, banner.cameWithBell))
+            policy.dismiss(banner.id, at: at(seconds)) { self.sessions[$0] }
+        }
+        XCTAssertEqual(shownBanners.map { $0.0 }, ["after a bell", "apart", "before a bell"])
+        XCTAssertEqual(shownBanners.map { $0.1 }, [true, false, true])
+    }
 }
 
 /// A banner vibrates when it shows, by its kind, including one whose turn comes after waiting; nothing
@@ -325,15 +349,12 @@ final class HerdrNotificationCenterTests: XCTestCase {
 
         let attention = try await harness.waitForBanner()
         XCTAssertEqual(attention.notification.kind, .needsAttention)
-        XCTAssertEqual(harness.vibrations, [.agentNeedsYou(arrived: attention.arrived)])
+        XCTAssertEqual(harness.vibrations, [.agentNeedsYou(cameWithBell: false)])
 
         harness.center.dismiss(attention.id)
         let finished = try XCTUnwrap(harness.center.banner)
         XCTAssertEqual(finished.notification.kind, .finished)
-        XCTAssertEqual(harness.vibrations, [
-            .agentNeedsYou(arrived: attention.arrived),
-            .agentFinished(arrived: finished.arrived),
-        ])
+        XCTAssertEqual(harness.vibrations, [.agentNeedsYou(cameWithBell: false), .agentFinished(cameWithBell: false)])
     }
 
     /// Nothing vibrates for the tab on screen, for an agent that moved on before its turn, or for a

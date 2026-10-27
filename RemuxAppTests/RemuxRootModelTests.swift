@@ -4935,29 +4935,25 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertNil(harness.model.herdrNotifications.banner)
     }
 
-    /// A bell in the Herdr session on screen vibrates at once; an agent's banner from the session behind
-    /// Home vibrates when it shows.
-    func testAHerdrBellAndAnAgentsBannerVibrate() async throws {
+    /// A bell in the Herdr session on screen vibrates at once. It came with an agent's notification for
+    /// another tab, so that banner shows a second later paired with the bell.
+    func testAHerdrBellVibratesAndPairsWithTheAgentNotificationThatCameWithIt() async throws {
         let (harness, _, bridge) = try await connectedHerdrSession(agentStatus: .blocked)
         let recorder = VibrationRecorder()
         harness.model.herdrNotifications.vibrate = { recorder.alerts.append($0) }
 
-        await bridge.serve(HerdrServerScript.bell())
-        let rang = await waitUntil(timeout: 3) { recorder.alerts == [.bell] }
-        XCTAssertTrue(rang, "the bell didn't vibrate: \(recorder.alerts)")
-
-        await harness.model.showLibrary()
-        await bridge.serve(HerdrServerScript.notification(
+        await bridge.serve(HerdrServerScript.bell() + HerdrServerScript.notification(
             .needsAttention,
             title: "claude needs attention",
             workspace: "w1",
             tab: "t2",
             pane: "w1:p3"
         ))
+        let rang = await waitUntil(timeout: 3) { recorder.alerts == [.bell] }
+        XCTAssertTrue(rang, "the bell didn't vibrate: \(recorder.alerts)")
         let shown = await waitUntil(timeout: 3) { harness.model.herdrNotifications.banner != nil }
         XCTAssertTrue(shown, "no banner")
-        let banner = try XCTUnwrap(harness.model.herdrNotifications.banner)
-        XCTAssertEqual(recorder.alerts, [.bell, .agentNeedsYou(arrived: banner.arrived)])
+        XCTAssertEqual(recorder.alerts, [.bell, .agentNeedsYou(cameWithBell: true)])
     }
 
     /// The Haptics switches apply as loaded at launch and as soon as they change.
