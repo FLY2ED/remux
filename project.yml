@@ -110,6 +110,7 @@ schemes:
       targets:
         Remux: all
         RemuxTests: [test]
+        RemuxUITests: [test]
     test:
       targets:
         - RemuxTests
