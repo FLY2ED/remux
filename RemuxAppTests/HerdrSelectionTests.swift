@@ -57,6 +57,15 @@ final class HerdrSelectionTests: XCTestCase {
         )
     }
 
+    /// A selection may go on in another row when it starts at a row's first column or ends at its last;
+    /// a surface without columns, as a failed one reports, has no edge.
+    func testASelectionReachesARowEdgeAtItsFirstOrLastColumn() {
+        XCTAssertTrue(GhosttyHistorySelection(start: cell(40, 0), end: cell(40, 4)).reachesRowEdge(columns: 10))
+        XCTAssertTrue(GhosttyHistorySelection(start: cell(40, 9), end: cell(40, 3)).reachesRowEdge(columns: 10))
+        XCTAssertFalse(GhosttyHistorySelection(start: cell(40, 2), end: cell(41, 8)).reachesRowEdge(columns: 10))
+        XCTAssertFalse(GhosttyHistorySelection(start: cell(40, 2), end: cell(40, 8)).reachesRowEdge(columns: 0))
+    }
+
     /// Herdr's client sends a selection in reading order, rows from the top of the history.
     func testTheReadSendsTheSelectionInReadingOrder() throws {
         let read = HerdrSelectionRead(
