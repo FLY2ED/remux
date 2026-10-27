@@ -1901,10 +1901,10 @@ final class RemuxAppUITests: XCTestCase {
         func agentRow(_ label: String) -> XCUIElement {
             agentRows.matching(NSPredicate(format: "label == %@", label)).firstMatch
         }
-        func waitForAgentRows(_ labels: Set<String>) -> Bool {
+        func waitForAgentRows(_ labels: [String]) -> Bool {
             let deadline = Date().addingTimeInterval(10)
             while Date() < deadline {
-                if Set(agentRows.allElementsBoundByIndex.map { $0.label }) == labels { return true }
+                if agentRows.allElementsBoundByIndex.map({ $0.label }).sorted() == labels.sorted() { return true }
                 RunLoop.current.run(until: Date().addingTimeInterval(0.2))
             }
             return false
