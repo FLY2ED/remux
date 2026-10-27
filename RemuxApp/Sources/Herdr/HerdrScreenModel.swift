@@ -957,6 +957,9 @@ final class HerdrScreenModel {
             }
             if let zoom { await sendZoom(zoom, behindShow: request, on: connection, feed: feed) }
         case .hide:
+            // The session is off screen and takes no input either way. Frames from here on show what
+            // leaving does, so the engine holds them before anything goes out.
+            await feed.endActivation()
             // The zoom Remux made comes off first, while Herdr still takes commands from this client. It
             // goes only if no command is in flight: one that waited for the lane would hold the hide back,
             // so the zoom then stays, as when the app can't clean up at all.
@@ -970,9 +973,7 @@ final class HerdrScreenModel {
                     }
                 }
             }
-            // The session is off screen and takes no input either way; a hide Herdr doesn't confirm
-            // leaves only its stale foreground on the server.
-            await feed.endActivation()
+            // A hide Herdr doesn't confirm leaves only its stale foreground on the server.
             await connection.sendHide()
         case .resize(let geometry):
             await feed.resizeActivation(columns: geometry.cols, rows: geometry.rows)
