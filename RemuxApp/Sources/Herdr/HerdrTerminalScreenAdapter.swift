@@ -276,19 +276,23 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         .surfaceRejected
     }
 
+    /// The screen moves the pointer only where a scroll gesture over the pane is.
     func sendMousePosition(
         to surfaceID: UUID,
         _ position: CGPoint,
         mods: GhosttySurfaceKeyEvent.Mods
     ) -> GhosttyMouseInputSubmissionOutcome {
-        .surfaceRejected
+        guard let model, let paneID = paneID(for: surfaceID) else { return .missingTarget(surfaceID) }
+        model.setScrollPointer(position, inPane: paneID)
+        return .sent
     }
 
     func sendMouseScroll(
         to surfaceID: UUID,
         _ event: GhosttySurfaceMouseScrollEvent
     ) -> GhosttyMouseInputSubmissionOutcome {
-        .surfaceRejected
+        guard let model, let paneID = paneID(for: surfaceID) else { return .missingTarget(surfaceID) }
+        return model.scroll(event, inPane: paneID) ? .sent : .surfaceRejected
     }
 
     // MARK: Topology actions

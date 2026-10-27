@@ -118,6 +118,8 @@ enum GhosttySurfaceScrollRoute: Equatable {
     case viewport
     case altScreenCursor
     case mouseReport
+    /// The server scrolls the pane's history, as Herdr's does; the local terminal has none.
+    case remoteHistory
 
     init(cValue: ghostty_terminal_surface_scroll_route_e) {
         switch cValue {
