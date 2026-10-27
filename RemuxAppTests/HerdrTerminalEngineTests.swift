@@ -73,6 +73,102 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    // MARK: - Showing
+
+    /// As in Herdr's client, a show completes on a frame painted after it began, at or after the
+    /// projection revision Herdr acknowledged, and at the size asked for. The frame from before it, one
+    /// below the floor and one at another size don't complete it; the next at the floor and size does,
+    /// though none of its cells changed.
+    func testAShowCompletesOnAFrameAfterItAtTheAcknowledgedRevisionAndSize() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection()
+        let panes = [Self.pane("P", x: 0, width: 4, height: 2)]
+        await feed.receive(try Self.snapshot(revision: 1))
+        await feed.receive(.surface(try Self.surface(revision: 1, lines: ["one ", "two "], panes: panes)))
+        _ = try await updates.nextLayout()
+        _ = try await updates.nextPaneScroll()
+
+        await feed.beginActivation(request: 1, columns: 4, rows: 2)
+        await feed.acknowledgeActivation(request: 1, floor: 2)
+        await feed.receive(.surface(try Self.surface(revision: 2, lines: ["one ", "two "], panes: panes)))
+        await feed.receive(try Self.snapshot(revision: 2))
+        await feed.receive(.surface(try Self.surface(projection: 2, revision: 3, lines: ["one  ", "two  "], panes: panes)))
+        await feed.receive(.surface(try Self.surface(projection: 2, revision: 4, lines: ["one ", "two "], panes: panes)))
+
+        guard case .layout(let wider) = try await updates.next(),
+              case .layout(let shown) = try await updates.next(),
+              case .activated(let request, let connection) = try await updates.next()
+        else { return XCTFail("the show completed before its frame") }
+        XCTAssertEqual(wider.columns, 5)
+        XCTAssertEqual(shown.columns, 4)
+        XCTAssertEqual(request, 1)
+        XCTAssertEqual(connection, feed.connection)
+        await engine.stop()
+    }
+
+    /// A frame can arrive before Herdr's answer to the show; the answer then completes it. A resize while
+    /// the show is in progress needs a frame at the new size, as Herdr's client drops its evidence.
+    func testAFrameBeforeTheAnswerCountsAndAResizeNeedsAFrameAtTheNewSize() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection()
+        let panes = [Self.pane("P", x: 0, width: 4, height: 2)]
+        await feed.receive(try Self.snapshot(revision: 1))
+
+        await feed.beginActivation(request: 1, columns: 4, rows: 2)
+        await feed.receive(.surface(try Self.surface(revision: 1, lines: ["one ", "two "], panes: panes)))
+        _ = try await updates.nextLayout()
+        _ = try await updates.nextPaneScroll()
+        await feed.acknowledgeActivation(request: 1, floor: 1)
+        guard case .activated(1, _) = try await updates.next() else {
+            return XCTFail("the answer didn't complete the show its frame came before")
+        }
+
+        await feed.beginActivation(request: 2, columns: 4, rows: 2)
+        await feed.receive(.surface(try Self.surface(revision: 2, lines: ["one ", "two "], panes: panes)))
+        await feed.resizeActivation(columns: 5, rows: 2)
+        await feed.acknowledgeActivation(request: 2, floor: 1)
+        await feed.receive(.surface(try Self.surface(revision: 3, lines: ["one  ", "two  "], panes: panes)))
+        guard case .layout(let resized) = try await updates.next(),
+              case .activated(2, _) = try await updates.next()
+        else { return XCTFail("a frame from before the resize completed the show") }
+        XCTAssertEqual(resized.columns, 5)
+        await engine.stop()
+    }
+
+    /// As in Herdr's client, the frame completing a show is drawn against the newest snapshot: a snapshot
+    /// that arrives after the painted frame, before Herdr's answer, waits for its own frame.
+    func testAShowWaitsForTheFrameOfASnapshotNewerThanThePaintedOne() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection()
+        await feed.receive(try Self.snapshot(revision: 1))
+
+        await feed.beginActivation(request: 1, columns: 4, rows: 2)
+        await feed.receive(.surface(try Self.surface(
+            revision: 1,
+            lines: ["one ", "two "],
+            panes: [Self.pane("P", x: 0, width: 4, height: 2)]
+        )))
+        _ = try await updates.nextLayout()
+        _ = try await updates.nextPaneScroll()
+        await feed.receive(try Self.snapshot(revision: 2))
+        await feed.acknowledgeActivation(request: 1, floor: 1)
+        await feed.receive(.surface(try Self.surface(
+            projection: 2,
+            revision: 2,
+            lines: ["one ", "two "],
+            panes: [Self.pane("P", x: 0, width: 4, height: 2, scroll: (fromBottom: 0, max: 5, rows: 2))]
+        )))
+
+        guard case .paneScroll(let scrolls) = try await updates.next(),
+              case .activated(1, _) = try await updates.next()
+        else { return XCTFail("the show completed on a frame its snapshot had replaced") }
+        XCTAssertEqual(scrolls["P"]?.maxLinesFromBottom, 5)
+        await engine.stop()
+    }
+
     /// A pane whose text area changes size is resized and repainted at once: none of its old text
     /// survives beside the new content.
     func testAResizedPaneIsRepaintedAtItsNewSize() async throws {
@@ -139,7 +235,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
                 switch update {
                 case .paneTerminal(let paneID, let terminal): terminals[paneID] = terminal
                 case .paneTerminalFailed, .rendererWakeFailed, .failed: XCTFail("\(fixture.name): \(update)")
-                case .layout, .paneScroll: break
+                case .layout, .paneScroll, .activated: break
                 }
             }
             for pane in surface.panes where pane.innerRect.width > 0 && pane.innerRect.height > 0 {

@@ -79,6 +79,9 @@ final class HerdrScreenModel {
         var hasSnapshot = false
         var requestedShown = false
         var visibilityRequests: UInt64 = 0
+        /// The newest show Herdr completed: its answer and a frame sent after it are in.
+        var activatedRequest: UInt64?
+        var activationDeadline: Task<Void, Never>?
         var ended = false
         /// Whether the focused pane asks for every key as an escape code.
         var reportsAllKeys = false
@@ -92,6 +95,12 @@ final class HerdrScreenModel {
 
         init(id: UInt64) {
             self.id = id
+        }
+
+        /// Shown, and the newest show completed. Until then the panes keep their last frame and take
+        /// no input, as Herdr's client freezes input while a show is in progress.
+        var isActivated: Bool {
+            requestedShown && activatedRequest == visibilityRequests
         }
 
         /// Queued while the connection opens, and carried out once it is open. Only the newest size
@@ -364,7 +373,8 @@ final class HerdrScreenModel {
         if stopped { return "released" }
         if failure != nil { return "ended" }
         guard let attempt, attempt.connection != nil else { return "connecting" }
-        return attempt.requestedShown ? "shown" : "hidden"
+        guard attempt.requestedShown else { return "hidden" }
+        return attempt.isActivated ? "shown" : "showing"
     }
 
     func paneSurface(_ paneID: String) -> HerdrPaneSurface? {
@@ -379,9 +389,9 @@ final class HerdrScreenModel {
 
     // MARK: - Input
 
-    /// Input goes out while the session is shown on an open connection and its focused pane shows a
-    /// frame: Herdr's client drops input before its first snapshot, and the server drops input on a
-    /// hidden surface.
+    /// Input goes out while the session is shown on an open connection, its show completed, and its
+    /// focused pane shows a frame: Herdr's client drops input before its first snapshot and while a show
+    /// is in progress, and the server drops input on a hidden surface.
     var isInputAvailable: Bool {
         inputTarget != nil
     }
@@ -394,7 +404,7 @@ final class HerdrScreenModel {
     }
 
     private var shownAttempt: Attempt? {
-        guard let attempt, isCurrent(attempt), !attempt.ended, attempt.connection != nil, attempt.requestedShown
+        guard let attempt, isCurrent(attempt), !attempt.ended, attempt.connection != nil, attempt.isActivated
         else { return nil }
         return attempt
     }
@@ -470,7 +480,7 @@ final class HerdrScreenModel {
     /// reports the new focus. Returns false when the session can't take input.
     func focusPane(_ paneID: String) -> Bool {
         guard let attempt, isCurrent(attempt), !attempt.ended, let connection = attempt.connection,
-              attempt.requestedShown
+              attempt.isActivated
         else { return false }
         if attempt.focusInFlight {
             attempt.waitingFocus = paneID
@@ -632,7 +642,7 @@ final class HerdrScreenModel {
                 operation.abandon()
                 break
             }
-            await perform(operation, on: connection, attemptID: attempt.id)
+            await perform(operation, on: connection, feed: feed, attemptID: attempt.id)
         }
     }
 
@@ -674,19 +684,31 @@ final class HerdrScreenModel {
     }
 
     /// Each operation returns once its messages are queued on the connection; Herdr's answer to a show
-    /// comes back separately.
-    private func perform(_ operation: Operation, on connection: HerdrConnection, attemptID: UInt64) async {
+    /// comes back separately, and the engine says when a frame completing it is painted.
+    private func perform(
+        _ operation: Operation,
+        on connection: HerdrConnection,
+        feed: HerdrEngineFeed,
+        attemptID: UInt64
+    ) async {
         switch operation {
         case .show(let geometry, let request):
+            await feed.beginActivation(request: request, columns: geometry.cols, rows: geometry.rows)
             await connection.sendShow(geometry) { [weak self] result in
-                guard case .failure(let error) = result else { return }
-                Task { @MainActor [weak self] in self?.showFailed(attemptID, request: request, error: error) }
+                switch result {
+                case .success(let floor):
+                    Task { await feed.acknowledgeActivation(request: request, floor: floor) }
+                case .failure(let error):
+                    Task { @MainActor [weak self] in self?.showFailed(attemptID, request: request, error: error) }
+                }
             }
         case .hide:
             // The session is off screen and takes no input either way; a hide Herdr doesn't confirm
             // leaves only its stale foreground on the server.
+            await feed.endActivation()
             await connection.sendHide()
         case .resize(let geometry):
+            await feed.resizeActivation(columns: geometry.cols, rows: geometry.rows)
             await connection.resize(geometry)
             await engine.setCellSize(widthPx: geometry.cellWidthPx, heightPx: geometry.cellHeightPx)
         case .theme(let updates):
@@ -818,6 +840,7 @@ final class HerdrScreenModel {
         attempt.ended = true
         attempt.finishOperations()
         attempt.task?.cancel()
+        attempt.activationDeadline?.cancel()
         if attempt === self.attempt { resumeSizeWaiter() }
         if let connection = attempt.connection {
             Task { await connection.close() }
@@ -836,9 +859,44 @@ final class HerdrScreenModel {
         guard wanted != attempt.requestedShown else { return }
         attempt.requestedShown = wanted
         attempt.visibilityRequests += 1
-        attempt.ask(wanted ? .show(geometry, request: attempt.visibilityRequests) : .hide)
-        // Input is offered only while the session is shown.
+        attempt.activationDeadline?.cancel()
+        attempt.activationDeadline = nil
+        if wanted {
+            awaitActivation(of: attempt, request: attempt.visibilityRequests)
+            attempt.ask(.show(geometry, request: attempt.visibilityRequests))
+        } else {
+            attempt.ask(.hide)
+        }
+        // Input is offered only once a show completes, and closes as soon as a hide is asked.
         didChange()
+    }
+
+    /// Herdr's answer and a frame sent after it must both be in within the show's time, as in Herdr's
+    /// client (`activation.rs`); a show that doesn't complete is rolled back like one Herdr refused.
+    private func awaitActivation(of attempt: Attempt, request: UInt64) {
+        let attemptID = attempt.id
+        attempt.activationDeadline = Task { [weak self, deadline = connectionTiming.activation] in
+            try? await Task.sleep(for: deadline)
+            guard !Task.isCancelled else { return }
+            self?.activationTimedOut(attemptID, request: request)
+        }
+    }
+
+    private func activated(_ request: UInt64, connection: UInt64) {
+        guard let attempt, isCurrent(attempt), !attempt.ended, attempt.feed?.connection == connection,
+              attempt.requestedShown, request == attempt.visibilityRequests
+        else { return }
+        attempt.activatedRequest = request
+        attempt.activationDeadline?.cancel()
+        attempt.activationDeadline = nil
+    }
+
+    private func activationTimedOut(_ attemptID: UInt64, request: UInt64) {
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt), !attempt.ended,
+              attempt.requestedShown, request == attempt.visibilityRequests, attempt.activatedRequest != request
+        else { return }
+        attempt.requestedShown = false
+        end(attempt, Self.activationTimeout)
     }
 
     /// Herdr's client rolls a failed show back and stays on what it showed before; a Remux session
@@ -927,6 +985,8 @@ final class HerdrScreenModel {
             if let attempt, attempt.feed?.connection == connection {
                 end(attempt, error.terminalDisconnectReason(on: target.server))
             }
+        case .activated(let request, let connection):
+            activated(request, connection: connection)
         }
         didChange()
     }
@@ -1111,6 +1171,11 @@ final class HerdrScreenModel {
     private static let paneFailure = TerminalDisconnectReason(
         kind: .runtime,
         message: "Terminal pane could not be painted. Reconnect to try again."
+    )
+
+    private static let activationTimeout = TerminalDisconnectReason(
+        kind: .transportIO,
+        message: "Herdr didn't show the session in time."
     )
 
     nonisolated static let paneFocusMethod = "pane.focus"

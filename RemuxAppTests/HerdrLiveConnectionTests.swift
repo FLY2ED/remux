@@ -102,6 +102,33 @@ final class HerdrLiveConnectionTests: XCTestCase {
         _ = try await live.log.snapshot(timeout: .seconds(15)) { $0.focusedPaneID == other }
     }
 
+    // MARK: - Showing
+
+    /// Hidden and shown again, the session takes no input until Herdr's show completes, then takes it
+    /// again: Herdr answers the show and sends a frame at the phone's size.
+    @MainActor
+    func testAShownAgainSessionTakesInputOnceTheShowCompletesOnHerdr093() async throws {
+        try await checkShownAgainSessionTakesInput(version: "0.9.3")
+    }
+
+    @MainActor
+    func testAShownAgainSessionTakesInputOnceTheShowCompletesOnHerdr095() async throws {
+        try await checkShownAgainSessionTakesInput(version: "0.9.5")
+    }
+
+    @MainActor
+    private func checkShownAgainSessionTakesInput(version: String) async throws {
+        let session = try await openShownSession(version: version, through: { $0 })
+        session.model.setSelected(false)
+        XCTAssertFalse(session.model.isInputAvailable)
+        session.model.setSelected(true)
+        XCTAssertFalse(session.model.isInputAvailable, "input was offered before Herdr completed the show")
+        try await waitUntil("the session shown again didn't take input", timeout: .seconds(10)) {
+            session.model.isInputAvailable
+        }
+        XCTAssertEqual(session.model.sendText("true\r"), .accepted)
+    }
+
     // MARK: - Health
 
     /// Herdr's health rule against a real server, with short limits: a quiet connection is pinged after

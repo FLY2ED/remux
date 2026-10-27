@@ -499,6 +499,21 @@ final class HerdrModelHarness {
         model.terminalScreenAdapter.prepareInitialViewport(size: CGSize(width: 390, height: 844), scale: 3)
     }
 
+    /// A frame of `lines` at the size a show asks for, padded with blanks: Herdr answers a show with a
+    /// frame at the client's size, and only such a frame completes the show.
+    func shownSurface(
+        projection: UInt64,
+        revision: UInt64,
+        lines: [String],
+        panes: [HerdrServerScript.Pane]
+    ) throws -> [UInt8] {
+        let viewport = try XCTUnwrap(model.measurement).controlViewport
+        let columns = Int(viewport.columns)
+        let padded = lines.map { $0.padding(toLength: columns, withPad: " ", startingAt: 0) }
+            + Array(repeating: String(repeating: " ", count: columns), count: max(Int(viewport.rows) - lines.count, 0))
+        return HerdrServerScript.surface(projection: projection, revision: revision, lines: padded, panes: panes)
+    }
+
     /// The bridge's writes from `index` on, decoded, once there are `count` of them.
     func writes(
         _ bridge: FakeBridgeTransport,
