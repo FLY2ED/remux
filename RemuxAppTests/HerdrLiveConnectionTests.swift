@@ -243,11 +243,17 @@ final class HerdrLiveConnectionTests: XCTestCase {
     }
 
     /// `pane_gaps = false`: neighbours share one line, Herdr's accent along the focused pane's side and
-    /// its grey along the other's (`line_touches_pane`).
+    /// its grey along the other's (`line_touches_pane`). The top line runs the window's width, under the
+    /// labels too.
     @MainActor
     func testNeighboursShareOneLineWithHerdrsGapsOff() async throws {
         let viewport = try await threePaneViewport(ui: ["pane_gaps = false"], settled: Self.hasOneSharedDivider)
         XCTAssertTrue(Self.hasOneSharedDivider(viewport))
+        let top = viewport.paneLines.filter { $0.orientation == .horizontal && $0.position == 0.5 }
+            .sorted { $0.start < $1.start }
+        XCTAssertEqual(top.first?.start, 0.5)
+        XCTAssertEqual(top.last?.end, CGFloat(viewport.windowGrid?.columns ?? 0) - 0.5)
+        XCTAssertTrue(zip(top, top.dropFirst()).allSatisfy { $0.end == $1.start }, "\(top)")
     }
 
     /// One line between the left pane and the two on the right, the window's height, in the accent
@@ -298,8 +304,8 @@ final class HerdrLiveConnectionTests: XCTestCase {
     }
 
     /// A tab split into a pane on the left and two on the right on a fresh server with the `ui` settings,
-    /// once `settled` holds for the screen's projection (or after 15 s). The pane picker's map has a
-    /// tile for each pane.
+    /// the left and the top right pane labelled, once `settled` holds for the screen's projection (or
+    /// after 15 s). The pane picker's map has a tile for each pane.
     @MainActor
     private func threePaneViewport(
         ui: [String],
@@ -320,6 +326,17 @@ final class HerdrLiveConnectionTests: XCTestCase {
             try await waitUntil("the split didn't arrive", timeout: .seconds(15)) {
                 adapter.terminalScreenPresentationProjection.viewport.panes.count == count + 1
             }
+        }
+        // Labels are written over the top borders of the left and the top right pane.
+        let topRight = try XCTUnwrap(model.layout?.panes.first { $0.paneID != first }?.paneID)
+        for (pane, label) in [(first, "editor"), (topRight, "notes")] {
+            let rename = try await session.fixture.herdr(["pane", "rename", pane, label], trace: trace)
+            XCTAssertEqual(rename.exitStatus, 0, String(decoding: rename.stderr, as: UTF8.self))
+        }
+        // The layout names its panes from the snapshot its frame was drawn against.
+        try await waitUntil("the labels didn't arrive", timeout: .seconds(15)) {
+            let names = model.layout?.panes.map(\.name) ?? []
+            return names.contains { $0.hasPrefix("editor") } && names.contains { $0.hasPrefix("notes") }
         }
         let deadline = ContinuousClock.now + .seconds(15)
         var viewport = adapter.terminalScreenPresentationProjection.viewport

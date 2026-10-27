@@ -98,6 +98,22 @@ final class HerdrBorderLineTests: XCTestCase {
         ])
     }
 
+    /// With `pane_gaps = false` a label can follow the T where a focused neighbour's accent line meets
+    /// the labelled pane's grey border. Herdr writes the label in its pane's colour, and the line under
+    /// it takes that colour too.
+    func testALineUnderALabelTakesTheLabelsColour() throws {
+        let surface = try Self.surface(
+            lines: ["┌──┬ ab ─┐", "│xx│xxxxx│", "└──┴─────┘"],
+            colors: ["AAAAGGGGGG", "A..A.....G", "AAAAGGGGGG"],
+            textAreas: [(1, 1, 2, 1), (4, 1, 5, 1)]
+        )
+
+        XCTAssertEqual(HerdrBorderLine.lines(in: surface).map(Self.describe), [
+            "h0 1-8 A", "h0 8-19 G", "h2 1-8 A", "h2 8-19 G",
+            "v0 1-5 A", "v3 1-5 A", "v9 1-5 G",
+        ])
+    }
+
     /// A program's own box-drawing in a pane's text area is the pane's content, and neither the blank
     /// gap Herdr leaves with its borders off nor the scrollbar's glyphs are lines.
     func testOnlyGlyphsOutsideTheTextAreasAreLines() throws {

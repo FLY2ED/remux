@@ -32,8 +32,8 @@ extension HerdrBorderLine {
     /// then each column's vertical ones.
     ///
     /// A pane's label is written over its top border, so a line also continues across cells that
-    /// aren't glyphs when the glyphs on both sides reach into them in one colour: the line runs on under
-    /// the label.
+    /// aren't glyphs when the glyphs on both sides reach into them: the line runs on under the label,
+    /// in the label's colour, which is its pane's border colour (`render_pane_border_titles`).
     static func lines(in surface: HerdrPaneSurfaceFrame) -> [HerdrBorderLine] {
         let frame = surface.frame
         let width = Int(frame.width)
@@ -42,7 +42,7 @@ extension HerdrBorderLine {
         func cell(_ x: Int, _ y: Int) -> Cell {
             guard !textAreas.contains(where: { $0.contains(x: x, y: y) }) else { return .text }
             let cell = frame.cells[y * width + x]
-            return Strokes(glyph: cell.symbol).map { .line($0, cell.fg) } ?? .other
+            return Strokes(glyph: cell.symbol).map { .line($0, cell.fg) } ?? .other(cell.fg)
         }
         var lines: [HerdrBorderLine] = []
         for y in 0..<height {
@@ -59,7 +59,7 @@ extension HerdrBorderLine {
         case text
         case line(Strokes, HerdrColor)
         /// Any other cell outside the text areas: a blank, a label's text, the scrollbar.
-        case other
+        case other(HerdrColor)
     }
 
     /// The sides of its cell a glyph's strokes reach from the cell's middle; a straight glyph reaches
@@ -99,8 +99,10 @@ extension HerdrBorderLine {
         to lines: inout [HerdrBorderLine],
         cell: (Int) -> Cell
     ) {
-        /// The run being built; `reachesOn` while its last glyph's stroke reaches its cell's far side.
+        /// The run being built; `reachesOn` while its last stroke reaches its cell's far side.
         var run: (start: UInt32, end: UInt32, color: HerdrColor, reachesOn: Bool)?
+        /// The first of the cells the run reaches into that aren't glyphs, such as a label's.
+        var writtenOver: Int?
         func finish() {
             if let current = run {
                 lines.append(HerdrBorderLine(
@@ -108,33 +110,44 @@ extension HerdrBorderLine {
                 ))
             }
             run = nil
+            writtenOver = nil
         }
-        for index in 0..<length {
-            let near: Bool
-            let far: Bool
-            let color: HerdrColor
-            switch cell(index) {
-            case .text:
-                finish()
-                continue
-            case .other:
-                if run?.reachesOn != true { finish() }
-                continue
-            case .line(let strokes, let lineColor):
-                (near, far) = axis == .horizontal ? (strokes.left, strokes.right) : (strokes.up, strokes.down)
-                color = lineColor
-            }
-            guard near || far else {
-                finish()
-                continue
-            }
-            let start = UInt32(index) * 2 + (near ? 0 : 1)
-            let end = UInt32(index) * 2 + (far ? 2 : 1)
+        /// A cell's stroke, in half cells: it continues the run when both reach their shared side in one
+        /// colour, else it starts a run.
+        func add(start: UInt32, end: UInt32, color: HerdrColor, near: Bool, far: Bool) {
             if let current = run, current.reachesOn, near, current.color == color {
                 run = (current.start, end, color, far)
             } else {
                 finish()
                 run = (start, end, color, far)
+            }
+        }
+        for index in 0..<length {
+            switch cell(index) {
+            case .text:
+                finish()
+            case .other:
+                if run?.reachesOn == true {
+                    writtenOver = writtenOver ?? index
+                } else {
+                    finish()
+                }
+            case .line(let strokes, let color):
+                let (near, far) = axis == .horizontal ? (strokes.left, strokes.right) : (strokes.up, strokes.down)
+                guard near || far else {
+                    finish()
+                    continue
+                }
+                if near, let first = writtenOver {
+                    for covered in first..<index {
+                        guard case .other(let coveredColor) = cell(covered) else { continue }
+                        let start = UInt32(covered) * 2
+                        add(start: start, end: start + 2, color: coveredColor, near: true, far: true)
+                    }
+                }
+                writtenOver = nil
+                let start = UInt32(index) * 2
+                add(start: start + (near ? 0 : 1), end: start + (far ? 2 : 1), color: color, near: near, far: far)
             }
         }
         finish()
