@@ -3463,7 +3463,8 @@ extension HerdrScreenModelTests {
         let session = try await shownWorkspaces(harness, zoomingOnShow: true)
         var index = session.next
 
-        XCTAssertTrue(harness.model.focusWorkspace("w2"))
+        XCTAssertFalse(harness.model.focusWorkspace("w2", bootID: "old-boot"), "a workspace of another boot went")
+        XCTAssertTrue(harness.model.focusWorkspace("w2", bootID: "boot"))
         let unzoom = try await nextWrite(session.bridge, from: &index, paneZoom)
         XCTAssertEqual([unzoom.paneID, unzoom.mode], ["w1:p1", "off"])
         await session.bridge.serve(HerdrServerScript.zoomReply(id: unzoom.id, changed: true, zoomed: false, panes: Self.places(2)))
@@ -3485,7 +3486,7 @@ extension HerdrScreenModelTests {
         var index = 0
         let show = try await harness.nextSurfaceSet(bridge, from: &index)
 
-        XCTAssertTrue(harness.model.focusWorkspace("w2"))
+        XCTAssertTrue(harness.model.focusWorkspace("w2", bootID: "boot"))
         XCTAssertFalse(harness.model.focusTab("t2"))
         XCTAssertFalse(harness.model.focusPane("w1:p2"))
         XCTAssertFalse(harness.model.create(.tab(workspaceID: "w1")))
@@ -3510,7 +3511,7 @@ extension HerdrScreenModelTests {
         harness.model.setSelected(true)
         var index = 0
         _ = try await harness.nextSurfaceSet(bridge, from: &index)
-        XCTAssertTrue(harness.model.focusWorkspace("w2"))
+        XCTAssertTrue(harness.model.focusWorkspace("w2", bootID: "boot"))
         harness.model.setSelected(false)
         _ = try await harness.nextSurfaceSet(bridge, from: &index)
 
@@ -3566,6 +3567,30 @@ extension HerdrScreenModelTests {
         XCTAssertEqual(workspace.params, ["source_workspace_id": "w1", "focus": "true"])
     }
 
+    /// A workspace the Tabs sheet showed that closes meanwhile gives way to the workspace on screen, for its
+    /// tiles and its New Tab alike.
+    func testTheSheetFallsBackToTheWorkspaceOnScreenWhenTheShownOneCloses() async throws {
+        let harness = await makeHarness()
+        let session = try await shownWorkspaces(harness, zoomingOnShow: false)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let grouping = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).grouping)
+        let beta = try XCTUnwrap(grouping.groups.first { $0.name == "beta" }).id
+
+        await session.bridge.serve(HerdrServerScript.snapshot(
+            revision: 2,
+            workspaces: [.init(id: "w1", label: "alpha", tabs: [("t1", ["w1:p1", "w1:p2"]), ("t2", ["w1:p3", "w1:p4"])])],
+            focusedTab: "t1",
+            focusedPane: "w1:p1"
+        ))
+        try await harness.waitUntil("beta didn't close") { harness.model.places.outline?.workspaces.count == 1 }
+        XCTAssertEqual(adapter.windowSelectionSheetRenderProjection(group: beta).windows.map(\.displayName), ["t1", "t2"])
+        XCTAssertEqual(adapter.createTopLevel(inGroup: beta), .queued)
+        let tab = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(tab.method, "tab.create")
+        XCTAssertEqual(tab.params, ["workspace_id": "w1", "focus": "true"])
+    }
+
     /// The Tabs sheet lists the tabs of the workspace on screen, and the workspaces, the one on screen
     /// first. A workspace picked there lists its own tabs, none selected, with no preview but the tab on
     /// screen's, and the sheet keeps the height of the largest workspace.
@@ -3594,7 +3619,7 @@ extension HerdrScreenModelTests {
         XCTAssertEqual(other.previewLeafIDs, onScreen.previewLeafIDs)
 
         var index = session.next
-        XCTAssertTrue(harness.model.focusWorkspace("w2"))
+        XCTAssertTrue(harness.model.focusWorkspace("w2", bootID: "boot"))
         let focus = try await nextWrite(session.bridge, from: &index, command)
         await session.bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
         await session.bridge.serve(Self.twoWorkspaces(revision: 3, focusedTab: "t4", focusedPane: "w2:p6"))

@@ -1699,7 +1699,7 @@ final class RemuxRootModel: ObservableObject {
     func openHerdrWorkspace(_ herdrWorkspaceID: String, bootID: String, in workspaceID: SavedWorkspace.ID) {
         guard let model = herdrModel(of: workspaceID) else { return }
         if state == .terminal(workspaceID) {
-            _ = model.focusWorkspace(herdrWorkspaceID)
+            _ = model.focusWorkspace(herdrWorkspaceID, bootID: bootID)
         } else {
             model.reveal(.workspace(herdrWorkspaceID), bootID: bootID)
             showActiveSession(workspaceID)

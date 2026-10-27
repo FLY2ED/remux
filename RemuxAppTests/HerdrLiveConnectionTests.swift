@@ -290,7 +290,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
         let grouping = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).grouping)
         XCTAssertEqual(grouping.groups.last?.name, first.label, "the workspace left isn't the most recent")
 
-        XCTAssertTrue(model.focusWorkspace(first.id))
+        XCTAssertTrue(model.focusWorkspace(first.id, bootID: try XCTUnwrap(model.places.outline).bootID))
         try await waitUntil("the workspace didn't go back to the tab this phone had there", timeout: .seconds(15)) {
             onScreen() == firstTab
         }
@@ -338,7 +338,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
             guard let tab = onScreen() else { return false }
             return model.places.outline?.workspace(containingTab: tab)?.id != first.id
         }
-        XCTAssertTrue(model.focusWorkspace(first.id))
+        XCTAssertTrue(model.focusWorkspace(first.id, bootID: try XCTUnwrap(model.places.outline).bootID))
         try await zoomState(session, pane: panes.focused, is: true)
     }
 

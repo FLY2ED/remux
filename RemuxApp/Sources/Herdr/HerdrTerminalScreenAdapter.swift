@@ -423,9 +423,14 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         model?.create(.workspace(source: workspaceID(shownFor: group))) == true ? .queued : .missingTarget(.host)
     }
 
-    /// The workspace `group` names, or without one the workspace on screen.
     private func workspaceID(shownFor group: UUID?) -> String? {
-        group.flatMap { workspaceIDsByGroupID[$0] } ?? workspaceOnScreen?.id
+        shownWorkspace(for: group)?.id
+    }
+
+    /// The workspace `group` names while it is still there, else the workspace on screen: the one the
+    /// Tabs sheet lists, and where its New Tab and New Workspace go.
+    private func shownWorkspace(for group: UUID?) -> HerdrSessionOutline.Workspace? {
+        group.flatMap { workspaceIDsByGroupID[$0] }.flatMap { model?.places.outline?.workspace($0) } ?? workspaceOnScreen
     }
 
     func splitFocusedPane(_ direction: ghostty_action_split_direction_e) -> GhosttyTerminalActionOutcome {
@@ -530,14 +535,13 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         let topology = topologySnapshot
         let onScreen = GhosttyTerminalPresentationProjector.windowSelectionSheetRenderProjection(snapshot: topology)
         let previewLeafIDs = capturablePreviewLeafIDs(onScreen.previewLeafIDs)
-        guard let outline = model?.places.outline, let workspaceOnScreen else {
+        guard let outline = model?.places.outline, let workspaceOnScreen, let shown = shownWorkspace(for: group) else {
             return GhosttyWindowSelectionSheetRenderProjection(
                 windows: onScreen.windows,
                 selectedWindowID: onScreen.selectedWindowID,
                 previewLeafIDs: previewLeafIDs
             )
         }
-        let shown = group.flatMap { workspaceIDsByGroupID[$0] }.flatMap { outline.workspace($0) } ?? workspaceOnScreen
         let windows = shown.id == workspaceOnScreen.id
             ? onScreen.windows
             : GhosttyTerminalPresentationProjector.windowSelectionSheetRenderProjection(

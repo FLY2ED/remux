@@ -696,9 +696,12 @@ final class HerdrScreenModel {
 
     /// A workspace's move, the same way as `focusPane`'s, by Herdr's client's rule for a workspace picked
     /// while the session is still being shown: it goes once the show completes, where any other move is
-    /// refused, and the session leaving the screen first drops it (`shell_runtime.rs`).
-    func focusWorkspace(_ workspaceID: String) -> Bool {
-        guard let attempt, isCurrent(attempt), attempt.connection != nil else { return false }
+    /// refused, and the session leaving the screen first drops it (`shell_runtime.rs`). It goes only on the
+    /// server boot the workspace id came from.
+    func focusWorkspace(_ workspaceID: String, bootID: String) -> Bool {
+        guard let attempt, isCurrent(attempt), attempt.connection != nil, snapshot?.bootID == bootID else {
+            return false
+        }
         if attempt.isActivated { return go(to: .workspace(workspaceID)) }
         guard attempt.requestedShown else { return false }
         attempt.waitingWorkspace = workspaceID
