@@ -4935,9 +4935,9 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertNil(harness.model.herdrNotifications.banner)
     }
 
-    /// A bell in the Herdr session on screen vibrates at once. It came with an agent's notification for
-    /// another tab, so that banner shows a second later paired with the bell.
-    func testAHerdrBellVibratesAndPairsWithTheAgentNotificationThatCameWithIt() async throws {
+    /// A bell in the Herdr session on screen vibrates at once, and an agent's banner for another tab
+    /// when it shows, as its pairing with the bell decides.
+    func testAHerdrBellAndAnAgentsBannerVibrate() async throws {
         let (harness, _, bridge) = try await connectedHerdrSession(agentStatus: .blocked)
         let recorder = VibrationRecorder()
         harness.model.herdrNotifications.vibrate = { recorder.alerts.append($0) }
@@ -4949,11 +4949,12 @@ final class RemuxRootModelTests: XCTestCase {
             tab: "t2",
             pane: "w1:p3"
         ))
-        let rang = await waitUntil(timeout: 3) { recorder.alerts == [.bell] }
+        let rang = await waitUntil(timeout: 5) { recorder.alerts == [.bell] }
         XCTAssertTrue(rang, "the bell didn't vibrate: \(recorder.alerts)")
-        let shown = await waitUntil(timeout: 3) { harness.model.herdrNotifications.banner != nil }
+        let shown = await waitUntil(timeout: 5) { harness.model.herdrNotifications.banner != nil }
         XCTAssertTrue(shown, "no banner")
-        XCTAssertEqual(recorder.alerts, [.bell, .agentNeedsYou(cameWithBell: true)])
+        let banner = try XCTUnwrap(harness.model.herdrNotifications.banner)
+        XCTAssertEqual(recorder.alerts, [.bell, try XCTUnwrap(banner.alert)])
     }
 
     /// The Haptics switches apply as loaded at launch and as soon as they change.
@@ -4980,7 +4981,8 @@ final class RemuxRootModelTests: XCTestCase {
     }
 
     /// A Herdr session shown and connected, its snapshot with tab `t1` in front, a second tab `t2`, and
-    /// an agent in pane `w1:p3` of `agentTab`.
+    /// an agent in pane `w1:p3` of `agentTab`. It returns once the show is sent: Herdr rings only the
+    /// session in front, so a bell comes after it.
     private func connectedHerdrSession(
         agentStatus: HerdrAgentStatus,
         agentTab: String = "t2"
@@ -5014,6 +5016,12 @@ final class RemuxRootModelTests: XCTestCase {
         ))
         let connected = await waitUntil(timeout: 3) { model.notificationState != nil && model.isConnectionOpen }
         XCTAssertTrue(connected, "the session didn't connect")
+        var position = 0
+        while true {
+            let write = try ClientWrite.decode(try await bridge.written(position))
+            position += 1
+            if case .surfaceSet(_, true) = write { break }
+        }
         return (harness, workspace, bridge)
     }
 

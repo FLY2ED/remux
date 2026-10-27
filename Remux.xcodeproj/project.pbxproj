@@ -88,7 +88,6 @@
 		3E192E1F4E9DEC7691077660 /* GhosttyTerminalDisconnectReasonClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6195E1BD742AC775F143F912 /* GhosttyTerminalDisconnectReasonClassifierTests.swift */; };
 		3F60EA4DB041B4296572C2AB /* RemuxPreparedTransportCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A245FF40A1998FA618E6370 /* RemuxPreparedTransportCacheTests.swift */; };
 		3F71D9F3D7782DCD769CF47E /* ApplicationStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE5B67646A0F14933B3FD8D8 /* ApplicationStorage.swift */; };
-		414CA9ECF5FC01A3131A65EC /* HerdrNotificationVibrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38D9455D245C3D2E54E7D656 /* HerdrNotificationVibrationTests.swift */; };
 		4168590B5BB4933AA075E636 /* RemuxPreparedTransportCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B3782AB19C138622144EE40 /* RemuxPreparedTransportCoordinatorTests.swift */; };
 		434C420D221F1CAF2A633602 /* DebugConnectionProfileSeederTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFD9AF0371D15A892B000530 /* DebugConnectionProfileSeederTests.swift */; };
 		44C12052281C243559EAFF20 /* TerminalRuntimeStatusPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1AAF15C6761B24466DD78D6 /* TerminalRuntimeStatusPresentationTests.swift */; };
@@ -225,6 +224,7 @@
 		AB2DBE12494A327FBC54FF9D /* GhosttyScrollDeltaBudgetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C09E9400D2638AE72F1CEBFB /* GhosttyScrollDeltaBudgetTests.swift */; };
 		ABFF88118BE80EBF9EFC7422 /* HerdrScreenModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7BA5C3FDAFAEB48FB30B6AA /* HerdrScreenModel.swift */; };
 		AC84CF9933D6859161CCB2A6 /* PaneTopologyLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F647060CF187F304EA04438 /* PaneTopologyLayoutTests.swift */; };
+		AD41F7CA1D46E48AC4C0D661 /* ManualClock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7ED99F26F506744B5B0E33ED /* ManualClock.swift */; };
 		AF023B663D5D8E38A9B1B816 /* GhosttyRepairPanelContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0A34726D374767B49CD98BA /* GhosttyRepairPanelContent.swift */; };
 		B056E6334A9EFBDB7FA305B3 /* TerminalPreviewCandidateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66FB23E143EA43A7AB28A323 /* TerminalPreviewCandidateTests.swift */; };
 		B141F33B4F5EB338B2F6A18E /* ServerDeletionConfirmationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1D4A5A563B25A2532C6E58A /* ServerDeletionConfirmationTests.swift */; };
@@ -437,7 +437,6 @@
 		375579FD92E3B9A605C7E9EC /* GhosttyTerminalRuntimeStateReporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttyTerminalRuntimeStateReporter.swift; sourceTree = "<group>"; };
 		38421A2585CF61B80FA0482B /* HerdrLiveConnectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HerdrLiveConnectionTests.swift; sourceTree = "<group>"; };
 		38CFF4B4833B4123ED4FB0A7 /* herdr-13-bell-clipboard-B.s2c.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = "herdr-13-bell-clipboard-B.s2c.bin"; sourceTree = "<group>"; };
-		38D9455D245C3D2E54E7D656 /* HerdrNotificationVibrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HerdrNotificationVibrationTests.swift; sourceTree = "<group>"; };
 		38F524A5D8DA7CA0D4C79771 /* herdr-01-handshake-all-caps-A.s2c.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = "herdr-01-handshake-all-caps-A.s2c.bin"; sourceTree = "<group>"; };
 		390AC3656C3FC87D81EE3150 /* herdr-11-health-A.c2s.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = "herdr-11-health-A.c2s.bin"; sourceTree = "<group>"; };
 		3946EC0FFAF1FDB73056471C /* SSHPublicKeyInstallSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHPublicKeyInstallSheet.swift; sourceTree = "<group>"; };
@@ -536,6 +535,7 @@
 		7C826602D9C963622FB26A40 /* TerminalThemePreviewRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalThemePreviewRenderer.swift; sourceTree = "<group>"; };
 		7CA0CB5980CAD8233A6D22B7 /* herdr-12-notification-B.c2s.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = "herdr-12-notification-B.c2s.bin"; sourceTree = "<group>"; };
 		7D2048A517191904B72E85A6 /* HerdrConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HerdrConnection.swift; sourceTree = "<group>"; };
+		7ED99F26F506744B5B0E33ED /* ManualClock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualClock.swift; sourceTree = "<group>"; };
 		7F2B5D499C55528C6EDC89FC /* HerdrInputTranslatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HerdrInputTranslatorTests.swift; sourceTree = "<group>"; };
 		810D178FA878A5BEA4265D7E /* RemuxSSHExecSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemuxSSHExecSession.swift; sourceTree = "<group>"; };
 		8151E185EE3CC5784181D01E /* GhosttyAttachmentTransfer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttyAttachmentTransfer.swift; sourceTree = "<group>"; };
@@ -823,7 +823,6 @@
 				791B1612B4B4B5078AC383CD /* HerdrNoticePolicyTests.swift */,
 				E5947CC3BB47DE791DF077C5 /* HerdrNotificationBannerContentTests.swift */,
 				C0607B88B4A762A560D7BBAF /* HerdrNotificationPolicyTests.swift */,
-				38D9455D245C3D2E54E7D656 /* HerdrNotificationVibrationTests.swift */,
 				4BFE1866A7DCEBF17D58BD6A /* HerdrPanePainterTests.swift */,
 				ACD5F886DEAFBF2C51B30B38 /* HerdrPipelineTests.swift */,
 				1934977E77DA77127F753C28 /* HerdrPresentationTests.swift */,
@@ -832,6 +831,7 @@
 				1A7B796DB1F72A4F6D1F1F88 /* HerdrSurfaceDecoderTests.swift */,
 				32493CBF3B59BA2B558D2CB7 /* HerdrTerminalEngineTests.swift */,
 				542D6FAA23D669DBE51E5E89 /* HerdrWireTests.swift */,
+				7ED99F26F506744B5B0E33ED /* ManualClock.swift */,
 				603A62637F1E7C43FD9A1370 /* PanePreviewLayoutTests.swift */,
 				6F647060CF187F304EA04438 /* PaneTopologyLayoutTests.swift */,
 				D79444A95DE472C78B11CB2E /* RemoteProgramCommandTests.swift */,
@@ -1635,7 +1635,6 @@
 				8C7188E826A84B1906558E9A /* HerdrNoticePolicyTests.swift in Sources */,
 				FEC8D0BBF87B5DC2AA6EDA21 /* HerdrNotificationBannerContentTests.swift in Sources */,
 				FB9C928EFF33DDF47039F8F2 /* HerdrNotificationPolicyTests.swift in Sources */,
-				414CA9ECF5FC01A3131A65EC /* HerdrNotificationVibrationTests.swift in Sources */,
 				7B1ED0A0B86AFFDA66CAB316 /* HerdrPanePainterTests.swift in Sources */,
 				E5C31E13A96BE9E1B4705FE2 /* HerdrPipelineTests.swift in Sources */,
 				294BBC43C8EACB5BB483AC84 /* HerdrPresentationTests.swift in Sources */,
@@ -1644,6 +1643,7 @@
 				9D4A57264269B97C768C6CA1 /* HerdrSurfaceDecoderTests.swift in Sources */,
 				1347B5293D02EE839BECE2F3 /* HerdrTerminalEngineTests.swift in Sources */,
 				CD77604DBA21CAE8BBD47848 /* HerdrWireTests.swift in Sources */,
+				AD41F7CA1D46E48AC4C0D661 /* ManualClock.swift in Sources */,
 				890ADA9AC6BC01F9D619CAD8 /* PanePreviewLayoutTests.swift in Sources */,
 				AC84CF9933D6859161CCB2A6 /* PaneTopologyLayoutTests.swift in Sources */,
 				284017BD9F93F14514F96C1B /* RemoteProgramCommandTests.swift in Sources */,

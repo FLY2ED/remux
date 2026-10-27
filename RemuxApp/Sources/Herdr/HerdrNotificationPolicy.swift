@@ -279,32 +279,44 @@ final class HerdrNotificationCenter: ObservableObject {
     /// Plays an alert's vibration, as the user's Haptics settings allow.
     var vibrate: @MainActor (HapticAlert) -> Void = { Haptic.alert($0) }
 
+    private let now: () -> ContinuousClock.Instant
+    private let sleep: (ContinuousClock.Instant) async throws -> Void
     private var policy = HerdrNotificationPolicy()
     private var timer: Task<Void, Never>?
 
+    /// `clock` times the notifications' delays, the banners' time on screen and a bell's pairing.
+    init<C: Clock>(clock: C = ContinuousClock()) where C.Instant == ContinuousClock.Instant {
+        now = { clock.now }
+        sleep = { try await clock.sleep(until: $0, tolerance: nil) }
+    }
+
+    deinit {
+        timer?.cancel()
+    }
+
     /// A program in the session on screen rang the bell.
     func ringBell() {
-        policy.ringBell(at: .now)
+        policy.ringBell(at: now())
         vibrate(.bell)
     }
 
     func receive(_ notification: HerdrSemanticNotification, from origin: HerdrNotificationPolicy.Origin) {
-        policy.receive(notification, from: origin, at: .now) { self.sessions($0) }
+        policy.receive(notification, from: origin, at: now()) { self.sessions($0) }
         update()
     }
 
     func dismiss(_ id: HerdrNotificationPolicy.Banner.ID) {
-        policy.dismiss(id, at: .now) { self.sessions($0) }
+        policy.dismiss(id, at: now()) { self.sessions($0) }
         update()
     }
 
     func retire(_ workspaceID: SavedWorkspace.ID) {
-        policy.retire(workspaceID, at: .now) { self.sessions($0) }
+        policy.retire(workspaceID, at: now()) { self.sessions($0) }
         update()
     }
 
     private func advance() {
-        policy.advance(to: .now) { self.sessions($0) }
+        policy.advance(to: now()) { self.sessions($0) }
         update()
     }
 
@@ -317,8 +329,9 @@ final class HerdrNotificationCenter: ObservableObject {
         timer?.cancel()
         timer = nil
         guard let due = policy.nextDeadline else { return }
+        let sleep = sleep
         timer = Task { [weak self] in
-            try? await Task.sleep(until: due, clock: .continuous)
+            try? await sleep(due)
             guard !Task.isCancelled else { return }
             self?.advance()
         }
