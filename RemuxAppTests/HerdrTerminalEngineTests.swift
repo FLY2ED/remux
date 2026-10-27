@@ -196,10 +196,10 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
-    /// A show carrying Remux's zoom completes once Herdr has answered the zoom, on a frame whose
-    /// snapshot shows the tab zoomed: Herdr's frame for the show from before the zoom isn't drawn, whether
-    /// the answer comes before the zoomed frame or after it. A zoom that didn't go holds nothing.
-    func testAShowCarryingAZoomCompletesOnAFrameShowingTheZoom() async throws {
+    /// A show carrying Remux's zoom completes once Herdr has answered the zoom, on a frame from after it:
+    /// Herdr's frame for the show from before the zoom isn't drawn, whether the answer comes before the
+    /// zoomed frame or after it. A zoom that didn't go or changed nothing holds nothing.
+    func testAShowCarryingAZoomCompletesOnAFrameFromAfterTheZoom() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
         let feed = await engine.beginConnection()
@@ -210,7 +210,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await feed.acknowledgeActivation(request: 1, floor: 1)
         await feed.receive(try Self.tabSnapshot(revision: 1, zoomed: false))
         await feed.receive(.surface(try Self.surface(revision: 1, lines: ["o t ", "w o "], panes: two)))
-        await feed.settleZoom(request: 1, tab: (tabID: "t1", zoomed: true))
+        await feed.settleZoom(request: 1, answer: Self.zoomAnswer(sentAfter: 0, answeredAfter: 1))
         await feed.receive(try Self.tabSnapshot(revision: 2, zoomed: true))
         await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["one ", "two "], panes: one)))
         guard case .paneTerminal("P", _) = try await updates.next(),
@@ -225,7 +225,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await feed.acknowledgeActivation(request: 2, floor: 3)
         await feed.receive(try Self.tabSnapshot(revision: 3, zoomed: true))
         await feed.receive(.surface(try Self.surface(projection: 3, revision: 3, lines: ["one ", "two "], panes: one)))
-        await feed.settleZoom(request: 2, tab: (tabID: "t1", zoomed: true))
+        await feed.settleZoom(request: 2, answer: Self.zoomAnswer(sentAfter: 2, answeredAfter: 3))
         guard case .activated(2, _) = try await updates.next() else {
             return XCTFail("an answer after the zoomed frame didn't complete the show")
         }
@@ -235,7 +235,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await feed.acknowledgeActivation(request: 3, floor: 4)
         await feed.receive(try Self.tabSnapshot(revision: 4, zoomed: true))
         await feed.receive(.surface(try Self.surface(projection: 4, revision: 4, lines: ["one ", "two "], panes: one)))
-        await feed.settleZoom(request: 3, tab: nil)
+        await feed.settleZoom(request: 3, answer: nil)
         guard case .activated(3, _) = try await updates.next() else {
             return XCTFail("a zoom that didn't go held the show")
         }
@@ -706,6 +706,11 @@ final class HerdrTerminalEngineTests: XCTestCase {
          "panes":[],"agents":[]}
         """
         return try JSONDecoder().decode(HerdrSnapshot.self, from: Data(json.utf8))
+    }
+
+    /// Herdr's answer zooming tab `t1`, sent and answered after the given snapshots.
+    static func zoomAnswer(sentAfter: UInt64, answeredAfter: UInt64) -> HerdrTerminalEngine.ZoomAnswer {
+        HerdrTerminalEngine.ZoomAnswer(tabID: "t1", zoomed: true, sentAfter: sentAfter, answeredAfter: answeredAfter)
     }
 
     static func cells(_ text: String) -> [HerdrCell] {

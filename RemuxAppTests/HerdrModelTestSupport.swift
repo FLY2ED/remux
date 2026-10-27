@@ -250,10 +250,11 @@ enum HerdrServerScript {
         return HerdrConnectionTests.reply(id: id, json: "{\"type\":\"pane_zoom\",\"zoom\":\(zoom)}")
     }
 
-    static func surfaceSetReply(id: String, active: Bool) -> [UInt8] {
+    /// Herdr's answer to a show or hide; a show's `projection` is the floor its frame must reach.
+    static func surfaceSetReply(id: String, active: Bool, projection: UInt64 = 1) -> [UInt8] {
         HerdrConnectionTests.reply(
             id: id,
-            json: #"{"type":"client_shell_surface_set","active":\#(active),"projection_revision":1}"#
+            json: #"{"type":"client_shell_surface_set","active":\#(active),"projection_revision":\#(projection)}"#
         )
     }
 }

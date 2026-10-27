@@ -136,6 +136,17 @@ enum HerdrInputError: Error, Equatable, LocalizedError {
     }
 }
 
+/// A command's reply, and where it fell among the session's snapshots. Herdr sends snapshots and replies
+/// in one ordered stream and applies a command before it replies, so a snapshot received before the
+/// command went out was built before it, and one received after the reply was built after it.
+struct HerdrCommandReply: Sendable {
+    let json: Data
+    /// The revision of the newest snapshot when the command went out.
+    let sentAfter: UInt64
+    /// The revision of the newest snapshot when the reply came.
+    let answeredAfter: UInt64
+}
+
 /// One endpoint connection to a Herdr server (generation 1).
 ///
 /// It sends Remux's hello and checks the welcome, then reads server messages in order and hands them to
@@ -227,12 +238,13 @@ actor HerdrConnection {
         /// A show sent with `sendShow`: its answer goes to `answered`, after the same rollback as a
         /// failed `show`.
         case show(position: UInt64, answered: @Sendable (Result<UInt64, Error>) -> Void)
-        /// A command sent without a caller awaiting it: its reply's JSON goes to `answered`.
-        case command(answered: CommandAnswered)
+        /// A command sent without a caller awaiting it, after the snapshot `sentAfter`: its reply goes
+        /// to `answered`.
+        case command(answered: CommandAnswered, sentAfter: UInt64)
     }
 
     /// Gets a command's reply, or its failure.
-    typealias CommandAnswered = @Sendable (Result<Data, Error>) -> Void
+    typealias CommandAnswered = @Sendable (Result<HerdrCommandReply, Error>) -> Void
 
     /// Waiting for the lane: a caller, or a command for a show (`sendCommandWhileShown`).
     private enum LaneWaiter {
@@ -252,6 +264,8 @@ actor HerdrConnection {
     private var laneBusy = false
     private var nextTicket: UInt64 = 0
     private var laneWaiters: [(ticket: UInt64, waiter: LaneWaiter)] = []
+    /// The newest snapshot's revision on this connection.
+    private var snapshotRevision: UInt64 = 0
     private var healthTask: Task<Void, Never>?
 
     // MARK: - Opening
@@ -445,6 +459,7 @@ actor HerdrConnection {
             switch try HerdrEndpointControl.parse(kind: kind, data: data) {
             case .snapshot(let snapshot):
                 bootID = snapshot.bootID
+                snapshotRevision = snapshot.revision
                 await onEvent(.snapshot(snapshot))
             case .surfaceReuse(let reuse):
                 await onEvent(.surface(try decoder.decode(.reuse(reuse))))
@@ -719,8 +734,8 @@ actor HerdrConnection {
 
     /// Sends a command only if it can go at once: the session is shown and no command is in flight.
     /// Returns whether it went, once it is queued behind everything sent before it; `answered` gets its
-    /// reply as `command` returns it, or its failure within `timeout` (Herdr's command timeout unless
-    /// given). Herdr refuses a command while another is in flight or while the session is hidden
+    /// reply, with the JSON `command` returns, or its failure within `timeout` (Herdr's command timeout
+    /// unless given). Herdr refuses a command while another is in flight or while the session is hidden
     /// (`endpoint_requests.rs`), so one that would have to wait isn't sent.
     func sendCommandIfIdle(
         _ method: String,
@@ -745,7 +760,7 @@ actor HerdrConnection {
     ) async -> Result<Data, Error>? {
         await withCheckedContinuation { continuation in
             let sent = sendCommandIfIdle(method, params: params, timeout: timeout) { result in
-                continuation.resume(returning: result)
+                continuation.resume(returning: result.map(\.json))
             }
             if !sent { continuation.resume(returning: nil) }
         }
@@ -787,8 +802,8 @@ actor HerdrConnection {
         let id = makeID("c")
         guard let message = try? HerdrClientMessage.endpointRequest(bootID: bootID, id: id, method: method, params: params)
         else { return false }
-        register(id, waiter: .command(answered: answered), holdsLane: true, timeout: timeout ?? timing.command,
-                 method: method, sending: [message])
+        register(id, waiter: .command(answered: answered, sentAfter: snapshotRevision), holdsLane: true,
+                 timeout: timeout ?? timing.command, method: method, sending: [message])
         return true
     }
 
@@ -838,8 +853,8 @@ actor HerdrConnection {
             }
             if case .failure = floor, position == visibilityRequests { rollBackShow() }
             answered(floor)
-        case .command(let answered)?:
-            answered(result)
+        case .command(let answered, let sentAfter)?:
+            answered(result.map { HerdrCommandReply(json: $0, sentAfter: sentAfter, answeredAfter: snapshotRevision) })
         case nil:
             break
         }

@@ -675,7 +675,7 @@ final class HerdrScreenModel {
     /// The zoom behind a show goes out after it, so Herdr takes it from a client on screen: at once, or,
     /// as after a quick return while the leave's unzoom is still unanswered, once the command in flight
     /// is answered, unless the session has left meanwhile. The show completes once Herdr has answered the
-    /// zoom, on a frame showing it or drawn after it; a zoom that doesn't go doesn't hold the show.
+    /// zoom, on a frame from after it; a zoom that doesn't go or changes nothing doesn't hold the show.
     private func sendZoom(
         _ paneID: String,
         behindShow request: UInt64,
@@ -683,18 +683,35 @@ final class HerdrScreenModel {
         feed: HerdrEngineFeed
     ) async {
         guard let bootID = snapshot?.bootID else {
-            await feed.settleZoom(request: request, tab: nil)
+            await feed.settleZoom(request: request, answer: nil)
             return
         }
         let sent = await connection.sendCommandWhileShown(
             Self.paneZoomMethod,
             params: Self.zoomParams(paneID, zoomed: true)
-        ) { [weak self] answer in
-            let tab = (try? HerdrPaneZoomResult(reply: answer.get())).map { (tabID: $0.layout.tabID, zoomed: $0.zoomed) }
-            Task { await feed.settleZoom(request: request, tab: tab) }
-            Task { @MainActor [weak self] in self?.zoomAnswered(answer, bootID: bootID, reportingFailure: false) }
+        ) { [weak self] reply in
+            Task { await feed.settleZoom(request: request, answer: Self.showZoomAnswer(reply)) }
+            Task { @MainActor [weak self] in
+                self?.zoomAnswered(reply.map(\.json), bootID: bootID, reportingFailure: false)
+            }
         }
-        if !sent { await feed.settleZoom(request: request, tab: nil) }
+        if !sent { await feed.settleZoom(request: request, answer: nil) }
+    }
+
+    /// What the show needs of Herdr's answer to its zoom: the tab, and where the zoom fell among the
+    /// snapshots; nil when the zoom failed or changed nothing, as on a tab zoomed already.
+    private nonisolated static func showZoomAnswer(
+        _ reply: Result<HerdrCommandReply, Error>
+    ) -> HerdrTerminalEngine.ZoomAnswer? {
+        guard let reply = try? reply.get(), let result = try? HerdrPaneZoomResult(reply: reply.json),
+              result.zoomChanged
+        else { return nil }
+        return HerdrTerminalEngine.ZoomAnswer(
+            tabID: result.layout.tabID,
+            zoomed: result.zoomed,
+            sentAfter: reply.sentAfter,
+            answeredAfter: reply.answeredAfter
+        )
     }
 
     /// The setting zooms the tab on screen as the session is shown: the focused pane, when the tab has
@@ -968,9 +985,9 @@ final class HerdrScreenModel {
                 _ = await connection.sendCommandIfIdle(
                     Self.paneZoomMethod,
                     params: Self.zoomParams(paneID, zoomed: false)
-                ) { [weak self] answer in
+                ) { [weak self] reply in
                     Task { @MainActor [weak self] in
-                        self?.zoomAnswered(answer, bootID: bootID, reportingFailure: false)
+                        self?.zoomAnswered(reply.map(\.json), bootID: bootID, reportingFailure: false)
                     }
                 }
             }

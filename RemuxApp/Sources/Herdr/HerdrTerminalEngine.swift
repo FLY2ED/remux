@@ -91,8 +91,8 @@ struct HerdrEngineFeed: Sendable {
         )
     }
 
-    func settleZoom(request: UInt64, tab: (tabID: String, zoomed: Bool)?) async {
-        await engine.settleZoom(request: request, tab: tab, connection: connection)
+    func settleZoom(request: UInt64, answer: HerdrTerminalEngine.ZoomAnswer?) async {
+        await engine.settleZoom(request: request, answer: answer, connection: connection)
     }
 
     func acknowledgeActivation(request: UInt64, floor: UInt64) async {
@@ -155,8 +155,7 @@ actor HerdrTerminalEngine {
         var floor: UInt64?
         /// The zoom the show carries.
         var zoom: ShowZoom
-        /// For a show carrying a zoom, each snapshot's revision and tabs' zoom, from the one current as
-        /// the show began.
+        /// For a show carrying a zoom, each snapshot's revision and tabs' zoom since the show began.
         var snapshots: [(revision: UInt64, zoomed: [String: Bool])] = []
         /// The newest frame since the activation began, or since the size last changed.
         var received: (projectionRevision: UInt64, columns: UInt16, rows: UInt16)?
@@ -170,33 +169,46 @@ actor HerdrTerminalEngine {
             ))
         }
 
-        /// Whether a frame drawn against `snapshot` can complete the show. Herdr can draw the show's frame
-        /// before it applies the zoom behind it, and answer the zoom before or after the zoomed frame, so
-        /// once it has answered, the show completes on a frame no older than the first snapshot since the
-        /// show began that shows the tab as the answer left it. Every snapshot from that one on came after
-        /// the zoom, also one where another client has since undone it, as a split ends a zoom; the show's
-        /// frame from before the zoom is older.
+        /// Whether a frame drawn against `snapshot` can complete the show. Herdr draws the show's frame
+        /// before it applies the zoom behind it, and answers the zoom before or after the snapshot showing
+        /// it, so the show completes on a frame no older than the first snapshot known to come after the
+        /// zoom: one received after the answer, or one received after the zoom went out that shows the tab
+        /// as the zoom changed it. Every later snapshot came after the zoom too, also one where another
+        /// client has since undone it, as a split ends a zoom.
         func admits(_ snapshot: HerdrSnapshot) -> Bool {
             switch zoom {
             case .none:
                 return true
             case .pending:
                 return false
-            case .answered(let tabID, let zoomed):
+            case .answered(let answer):
                 // A tab that is gone has nothing left to show.
-                guard let first = snapshots.first(where: { ($0.zoomed[tabID] ?? zoomed) == zoomed }) else {
-                    return false
+                let anchor = snapshots.first { recorded in
+                    let showsAnswer = (recorded.zoomed[answer.tabID] ?? answer.zoomed) == answer.zoomed
+                    return recorded.revision > answer.answeredAfter
+                        || (recorded.revision > answer.sentAfter && showsAnswer)
                 }
-                return snapshot.revision >= first.revision
+                guard let anchor else { return false }
+                return snapshot.revision >= anchor.revision
             }
         }
     }
 
-    /// The zoom sent behind a show: none, waiting for Herdr's answer, or the tab and its zoom after it.
+    /// The zoom sent behind a show: none, waiting for Herdr's answer, or answered.
     enum ShowZoom: Sendable {
         case none
         case pending
-        case answered(tabID: String, zoomed: Bool)
+        case answered(ZoomAnswer)
+    }
+
+    /// Herdr's answer to the zoom behind a show, for a zoom that changed the tab.
+    struct ZoomAnswer: Sendable {
+        let tabID: String
+        /// The tab's zoom after it.
+        let zoomed: Bool
+        /// The revisions of the newest snapshot when the zoom went out and when its answer came.
+        let sentAfter: UInt64
+        let answeredAfter: UInt64
     }
 
     /// Makes a pane's producer for a terminal of the given columns and rows.
@@ -280,7 +292,6 @@ actor HerdrTerminalEngine {
             rows: max(rows, 1),
             zoom: zoomed ? .pending : .none
         )
-        if let snapshot = presentation.snapshot { activation?.record(snapshot) }
         holdsFrames = zoomed
     }
 
@@ -291,15 +302,16 @@ actor HerdrTerminalEngine {
         completeActivationIfReady()
     }
 
-    /// Herdr's answer to the zoom behind the show: the tab and its zoom after it, or nil when the zoom
-    /// didn't go or failed, and the show then completes as one without a zoom.
+    /// Herdr's answer to the zoom behind the show, or nil when the zoom changed nothing, didn't go or
+    /// failed: the show then completes as one without a zoom. A zoom that changed nothing leaves the
+    /// show's frames showing the tab as it is, and Herdr has no reason to send a snapshot after it.
     fileprivate func settleZoom(
         request: UInt64,
-        tab: (tabID: String, zoomed: Bool)?,
+        answer: ZoomAnswer?,
         connection: UInt64
     ) {
         guard state == .running, connection == self.connection, activation?.request == request else { return }
-        activation?.zoom = tab.map { .answered(tabID: $0.tabID, zoomed: $0.zoomed) } ?? .none
+        activation?.zoom = answer.map(ShowZoom.answered) ?? .none
         completeActivationIfReady()
     }
 
