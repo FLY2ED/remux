@@ -1702,12 +1702,13 @@ final class RemuxRootModel: ObservableObject {
               let session = RemuxActiveSessionCollection.session(key.workspaceID, in: activeSessions)
         else { return }
         switch event {
-        case .received(let notification, let bootID):
+        case .received(let notification, let bootID, let place):
             herdrNotifications.receive(notification, from: HerdrNotificationPolicy.Origin(
                 workspaceID: key.workspaceID,
                 sessionName: session.target.workspace.sessionName,
                 serverName: session.target.server.displayName,
-                bootID: bootID
+                bootID: bootID,
+                place: place
             ))
         case .serverRestarted:
             herdrNotifications.retire(key.workspaceID)

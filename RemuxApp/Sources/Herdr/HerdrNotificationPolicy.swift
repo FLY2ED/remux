@@ -12,6 +12,25 @@ struct HerdrNotificationSessionState: Equatable {
     var agentStatuses: [String: HerdrAgentStatus]
 }
 
+/// The workspace and tab a notification is about, by name, from the session's snapshot when it arrived.
+/// A tab Herdr names after its number counts as unnamed.
+struct HerdrNotificationPlace: Equatable, Sendable {
+    var workspace: String?
+    var tab: String?
+
+    init(workspace: String? = nil, tab: String? = nil) {
+        self.workspace = workspace
+        self.tab = tab
+    }
+
+    init(_ notification: HerdrSemanticNotification, in snapshot: HerdrSnapshot?) {
+        let tab = snapshot?.tabs.first { $0.tabID == notification.tabID }
+        let workspaceID = notification.workspaceID ?? tab?.workspaceID
+        self.workspace = snapshot?.workspaces.first { $0.workspaceID == workspaceID }.map(\.label)
+        self.tab = tab.flatMap { $0.customLabel ? $0.label : nil }
+    }
+}
+
 /// Herdr's client's rules for its in-app notifications (`client/shell/notification_policy.rs`), across
 /// every open Herdr session as Herdr's client applies them across its machines.
 ///
@@ -27,6 +46,7 @@ struct HerdrNotificationPolicy {
         let serverName: String
         /// The server boot the session was on, whose pane ids the notification uses.
         let bootID: String?
+        let place: HerdrNotificationPlace
     }
 
     struct Banner: Identifiable, Equatable {

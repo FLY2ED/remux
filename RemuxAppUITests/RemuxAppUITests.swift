@@ -1726,39 +1726,63 @@ final class RemuxAppUITests: XCTestCase {
         captureLiveHerdrStep("6-scrolled", in: configuration)
     }
 
-    /// Herdr's notifications on a live server whose session has a three-pane tab and a second tab with
-    /// one agent pane. An agent waiting in the other tab shows a banner over the session, and tapping it
-    /// takes the phone to that tab. An agent finishing while Home is on screen shows a banner over Home,
-    /// and tapping it opens the session at that agent's pane. A bell rings the session on screen. The
-    /// harness makes each change on the server when the test asks: `attention`, `finished`, `bell`.
+    /// Herdr's notifications on a live server whose session has a three-pane tab (workspace `remux`) and a
+    /// second tab, `build`, with one agent pane. An agent waiting in the other tab shows a banner above the
+    /// open Sessions sheet; tapping it closes the sheet and takes the phone to that tab. An agent finishing
+    /// while Home is on screen shows a banner naming the server and session over Home; tapping it opens
+    /// the session at that agent's pane. A banner above the Panes sheet closes it too, and both sheets open
+    /// again afterwards. A bell rings the session on screen. The harness makes each change on the server
+    /// when the test asks: `attention`, `finished`, `attention-again`, `bell`.
     func testLiveHerdrNotificationsWhenConfigured() throws {
         let configuration = try launchLiveHerdrApp(requiringSteps: true)
         let banner = app.descendants(matching: .any)["herdr.notification.banner"].firstMatch
         let panes = app.buttons.matching(identifier: "terminal.panes").firstMatch
+        let sessionsSheet = app.otherElements["terminal.sessions.sheet"]
+        let panesSheet = elementWithIdentifier("terminal.panes.sheet")
 
         openFirstSavedSession()
         waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
         XCTAssertTrue(waitForLabel(of: panes, "Panes, 3 panes", timeout: 10))
         captureLiveHerdrStep("n1-session", in: configuration)
 
+        openSessionSwitcherFromTerminal()
+        XCTAssertTrue(sessionsSheet.waitForExistence(timeout: 5))
         try requestLiveHerdrStep("attention", in: configuration)
         XCTAssertTrue(banner.waitForExistence(timeout: 20), "No banner for the agent waiting in the other tab.")
-        XCTAssertTrue(banner.label.contains("claude needs attention"), banner.label)
-        captureLiveHerdrStep("n2-banner-over-session", in: configuration)
+        XCTAssertEqual(banner.label, "claude waiting, remux › build")
+        captureLiveHerdrStep("n2-banner-over-sessions-sheet", in: configuration)
         banner.tap()
+        XCTAssertTrue(sessionsSheet.waitForNonExistence(timeout: 5), "The tap didn't close the Sessions sheet.")
         XCTAssertTrue(waitForLabel(of: panes, "Panes, 1 pane", timeout: 10), "The tap didn't go to the other tab.")
         XCTAssertFalse(banner.exists)
         captureLiveHerdrStep("n3-tapped-other-tab", in: configuration)
+        openSessionSwitcherFromTerminal()
+        XCTAssertTrue(sessionsSheet.waitForExistence(timeout: 5), "The Sessions sheet didn't open again.")
+        app.buttons["terminal.sessions.close"].tap()
+        XCTAssertTrue(sessionsSheet.waitForNonExistence(timeout: 5))
 
         openHomeFromTerminal()
         try requestLiveHerdrStep("finished", in: configuration)
         XCTAssertTrue(banner.waitForExistence(timeout: 20), "No banner over Home for the agent that finished.")
-        XCTAssertTrue(banner.label.contains("claude finished"), banner.label)
+        XCTAssertEqual(banner.label, "claude done, Herdr live · remux-ui · remux")
         captureLiveHerdrStep("n4-banner-over-home", in: configuration)
         banner.tap()
         waitForLiveTerminalReady(timeout: 30, expectedHostKey: configuration.expectedHostKey)
         XCTAssertTrue(waitForLabel(of: panes, "Panes, 3 panes", timeout: 10), "The tap didn't open the agent's tab.")
         captureLiveHerdrStep("n5-tapped-from-home", in: configuration)
+
+        panes.tap()
+        XCTAssertTrue(panesSheet.waitForExistence(timeout: 5))
+        try requestLiveHerdrStep("attention-again", in: configuration)
+        XCTAssertTrue(banner.waitForExistence(timeout: 20), "No banner above the Panes sheet.")
+        captureLiveHerdrStep("n5b-banner-over-panes-sheet", in: configuration)
+        banner.tap()
+        XCTAssertTrue(panesSheet.waitForNonExistence(timeout: 5), "The tap didn't close the Panes sheet.")
+        XCTAssertTrue(waitForLabel(of: panes, "Panes, 1 pane", timeout: 10), "The tap didn't go to the other tab.")
+        panes.tap()
+        XCTAssertTrue(panesSheet.waitForExistence(timeout: 5), "The Panes sheet didn't open again.")
+        app.buttons["terminal.panes.close"].tap()
+        XCTAssertTrue(panesSheet.waitForNonExistence(timeout: 5))
 
         try requestLiveHerdrStep("bell", in: configuration)
         _ = XCTWaiter.wait(for: [XCTestExpectation(description: "the bell arrives")], timeout: 3)

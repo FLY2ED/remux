@@ -118,10 +118,11 @@ private struct RemuxWorkspaceShell: View {
             activeTerminalLayer
             routeLayer
         }
-        .overlay(alignment: .top) {
-            HerdrNotificationBannerLayer(
+        .background {
+            HerdrNotificationBannerWindow(
                 center: model.herdrNotifications,
-                onOpen: model.openHerdrNotification
+                shownWorkspaceID: selectedTerminalID,
+                onOpen: openHerdrNotification
             )
         }
         .preferredColorScheme(shownTerminalColorScheme)
@@ -495,6 +496,16 @@ private struct RemuxWorkspaceShell: View {
                 isSessionSwitcherPresented = false
             }
         }
+    }
+
+    /// The banner's window has closed whatever was presented; the sheets this shell keeps state for
+    /// follow, and a setup left open goes, as its Cancel would.
+    private func openHerdrNotification(_ banner: HerdrNotificationPolicy.Banner) {
+        isSessionSwitcherPresented = false
+        if model.connectionSetup != nil {
+            model.cancelSetup()
+        }
+        model.openHerdrNotification(banner)
     }
 
     private func cancelSessionSetupIfNeeded() {

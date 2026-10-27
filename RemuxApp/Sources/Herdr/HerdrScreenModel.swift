@@ -47,8 +47,9 @@ final class HerdrScreenModel {
 
     /// What the model tells its owner about the session's notifications.
     enum NotificationEvent: Equatable {
-        /// A Herdr notification, with the server boot whose pane ids it uses.
-        case received(HerdrSemanticNotification, bootID: String?)
+        /// A Herdr notification, with the server boot whose pane ids it uses and the names of the
+        /// place it is about.
+        case received(HerdrSemanticNotification, bootID: String?, place: HerdrNotificationPlace)
         /// The server restarted, so earlier notifications point at panes that are gone.
         case serverRestarted
     }
@@ -1039,7 +1040,12 @@ final class HerdrScreenModel {
     /// reaches the screen. The boot is known once this connection's first snapshot is in.
     private func notificationArrived(_ attemptID: UInt64, _ notification: HerdrSemanticNotification) {
         guard let attempt, attempt.id == attemptID, isCurrent(attempt) else { return }
-        onNotification(.received(notification, bootID: attempt.hasSnapshot ? snapshot?.bootID : nil))
+        let snapshot = attempt.hasSnapshot ? self.snapshot : nil
+        onNotification(.received(
+            notification,
+            bootID: snapshot?.bootID,
+            place: HerdrNotificationPlace(notification, in: snapshot)
+        ))
     }
 
     /// Herdr rings only the session in front, which the connection checks; a bell that comes after the

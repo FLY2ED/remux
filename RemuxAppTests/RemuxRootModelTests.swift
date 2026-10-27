@@ -4895,6 +4895,11 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertEqual(banner.notification.title, "claude needs attention")
         XCTAssertEqual(banner.origin.sessionName, "agents")
         XCTAssertEqual(banner.origin.serverName, "Build Host")
+        XCTAssertEqual(banner.origin.place, HerdrNotificationPlace(workspace: "remux", tab: "t2"))
+        XCTAssertEqual(
+            HerdrNotificationBannerContent(banner, fromShownSession: false).place,
+            "Build Host · agents · remux › t2"
+        )
 
         let beforeTap = await bridge.writtenCount
         harness.model.openHerdrNotification(banner)
@@ -4958,6 +4963,7 @@ final class RemuxRootModelTests: XCTestCase {
         let bridge = try await opener.bridge(0)
         await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(
             revision: 1,
+            workspaceLabel: "remux",
             otherTabs: ["t2"],
             panes: [HerdrServerScript.snapshotPane("w1:p1"), HerdrServerScript.snapshotPane("w1:p3", tab: agentTab)],
             agents: [HerdrServerScript.snapshotAgent("w1:p3", tab: agentTab, status: agentStatus, stateChange: 2)]

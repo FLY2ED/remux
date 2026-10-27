@@ -19,7 +19,8 @@ final class HerdrNotificationPolicyTests: XCTestCase {
             workspaceID: workspaceID,
             sessionName: workspaceID == agents ? "agents" : "other",
             serverName: "mini",
-            bootID: "boot"
+            bootID: "boot",
+            place: HerdrNotificationPlace(workspace: "web", tab: "review")
         )
     }
 

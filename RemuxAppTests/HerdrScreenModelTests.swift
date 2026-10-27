@@ -2067,19 +2067,22 @@ final class HerdrScreenModelTests: XCTestCase {
     )
 
     /// Herdr sends its notifications to every connection, so a session that isn't on screen hands them
-    /// on with the server boot their pane ids belong to; a reconnect to a restarted server says so.
+    /// on with the server boot their pane ids belong to and the names of their workspace and tab; a
+    /// reconnect to a restarted server says so.
     func testAHiddenSessionHandsOnItsNotificationsAndAServerRestart() async throws {
         let harness = await makeHarness()
         let bridge = try await connectedSession(harness, lines: ["one"])
+        await bridge.serve(HerdrServerScript.snapshot(revision: 2, workspaceLabel: "remux", otherTabs: ["t2"]))
 
         await bridge.serve(Self.notification)
         try await harness.waitUntil("the notification wasn't handed on") { !harness.stateLog.notifications.isEmpty }
-        guard case .received(let notification, let bootID)? = harness.stateLog.notifications.first else {
+        guard case .received(let notification, let bootID, let place)? = harness.stateLog.notifications.first else {
             return XCTFail("expected a notification, got \(harness.stateLog.notifications)")
         }
         XCTAssertEqual(notification.title, "claude needs attention")
         XCTAssertEqual(notification.paneID, "w1:p3")
         XCTAssertEqual(bootID, "boot")
+        XCTAssertEqual(place, HerdrNotificationPlace(workspace: "remux", tab: "t2"))
 
         XCTAssertTrue(harness.model.reconnect())
         let restarted = try await harness.bridge(1)

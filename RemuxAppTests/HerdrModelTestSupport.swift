@@ -81,10 +81,12 @@ enum HerdrServerScript {
 
     /// `panes` and `agents` are the snapshot's JSON entries, made with `snapshotPane` and
     /// `snapshotAgent`.
-    /// The focused tab is labelled `tabLabel`; `otherTabs` are further tabs of workspace `w1`, by id.
+    /// The focused tab is labelled `tabLabel`; `otherTabs` are further tabs of workspace `w1`, by id, each
+    /// named after its id. Workspace `w1` is listed when it has a label.
     static func snapshot(
         revision: UInt64,
         boot: String = "boot",
+        workspaceLabel: String? = nil,
         tabLabel: String = "main",
         focusedTab: String = "t1",
         otherTabs: [String] = [],
@@ -98,9 +100,15 @@ enum HerdrServerScript {
              "zoomed":false,"focused":\(tab.2),"agent_status":"idle"}
             """
         }
+        let workspaces = workspaceLabel.map { label in
+            """
+            {"workspace_id":"w1","active_tab_id":"\(focusedTab)","number":1,"label":"\(label)","custom_label":true,
+             "focused":true,"agent_status":"idle"}
+            """
+        }
         let json = """
         {"boot_id":"\(boot)","revision":\(revision),"focused_workspace_id":"w1","focused_tab_id":"\(focusedTab)",
-         "focused_pane_id":\(json(focusedPane)),"workspaces":[],"tabs":[\(tabs.joined(separator: ","))],
+         "focused_pane_id":\(json(focusedPane)),"workspaces":[\(workspaces ?? "")],"tabs":[\(tabs.joined(separator: ","))],
          "panes":[\(panes.joined(separator: ","))],"agents":[\(agents.joined(separator: ","))]}
         """
         return control(HerdrControlKind.snapshot, json)
