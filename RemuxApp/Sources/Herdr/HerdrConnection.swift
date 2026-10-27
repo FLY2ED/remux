@@ -90,6 +90,8 @@ enum HerdrCommandError: Error, Equatable, LocalizedError {
     case notAcknowledged
     case failed(code: String, message: String)
     case connectionEnded
+    /// The command waited for the lane, and the session left the screen first.
+    case notSent
 
     var errorDescription: String? {
         switch self {
@@ -105,6 +107,8 @@ enum HerdrCommandError: Error, Equatable, LocalizedError {
             return message
         case .connectionEnded:
             return "The connection to Herdr ended."
+        case .notSent:
+            return "The session left the screen before Herdr could take this."
         }
     }
 }
@@ -223,14 +227,35 @@ actor HerdrConnection {
         /// A show sent with `sendShow`: its answer goes to `answered`, after the same rollback as a
         /// failed `show`.
         case show(position: UInt64, answered: @Sendable (Result<UInt64, Error>) -> Void)
-        /// A command sent with `sendCommandIfIdle`: its reply's JSON goes to `answered`.
-        case command(answered: @Sendable (Result<Data, Error>) -> Void)
+        /// A command sent without a caller awaiting it: its reply's JSON goes to `answered`, with the
+        /// revision of the newest snapshot read before the reply.
+        case command(answered: CommandAnswered)
+    }
+
+    /// Gets a command's reply, or its failure, and the revision of the newest snapshot Herdr had sent
+    /// before it. Herdr builds every snapshot after that one once the command was carried out.
+    typealias CommandAnswered = @Sendable (Result<Data, Error>, _ snapshotRevision: UInt64) -> Void
+
+    /// Waiting for the lane: a caller, or a command for a show (`sendCommandWhileShown`).
+    private enum LaneWaiter {
+        case caller(CheckedContinuation<Void, Error>)
+        case command(QueuedCommand)
+    }
+
+    private struct QueuedCommand {
+        let method: String
+        let params: any Encodable & Sendable
+        /// The show it belongs to, as `visibilityRequests` counted it.
+        let show: UInt64
+        let answered: CommandAnswered
     }
 
     private var pending: [String: Pending] = [:]
     private var laneBusy = false
     private var nextTicket: UInt64 = 0
-    private var laneWaiters: [(ticket: UInt64, continuation: CheckedContinuation<Void, Error>)] = []
+    private var laneWaiters: [(ticket: UInt64, waiter: LaneWaiter)] = []
+    /// The newest snapshot's revision on this connection.
+    private var snapshotRevision: UInt64 = 0
     private var healthTask: Task<Void, Never>?
 
     // MARK: - Opening
@@ -424,6 +449,7 @@ actor HerdrConnection {
             switch try HerdrEndpointControl.parse(kind: kind, data: data) {
             case .snapshot(let snapshot):
                 bootID = snapshot.bootID
+                snapshotRevision = snapshot.revision
                 await onEvent(.snapshot(snapshot))
             case .surfaceReuse(let reuse):
                 await onEvent(.surface(try decoder.decode(.reuse(reuse))))
@@ -705,15 +731,14 @@ actor HerdrConnection {
         _ method: String,
         params: some Encodable & Sendable,
         timeout: Duration? = nil,
-        answered: @escaping @Sendable (Result<Data, Error>) -> Void
+        answered: @escaping CommandAnswered
     ) -> Bool {
-        guard !ended, isActive, !laneBusy, negotiated.methods.contains(method), let bootID else { return false }
-        let id = makeID("c")
-        guard let message = try? HerdrClientMessage.endpointRequest(bootID: bootID, id: id, method: method, params: params)
-        else { return false }
+        guard !ended, isActive, !laneBusy, negotiated.methods.contains(method) else { return false }
         laneBusy = true
-        register(id, waiter: .command(answered: answered), holdsLane: true, timeout: timeout ?? timing.command,
-                 method: method, sending: [message])
+        guard send(method, params: params, timeout: timeout, answered: answered) else {
+            releaseLane()
+            return false
+        }
         return true
     }
 
@@ -724,11 +749,52 @@ actor HerdrConnection {
         timeout: Duration? = nil
     ) async -> Result<Data, Error>? {
         await withCheckedContinuation { continuation in
-            let sent = sendCommandIfIdle(method, params: params, timeout: timeout) {
-                continuation.resume(returning: $0)
+            let sent = sendCommandIfIdle(method, params: params, timeout: timeout) { result, _ in
+                continuation.resume(returning: result)
             }
             if !sent { continuation.resume(returning: nil) }
         }
+    }
+
+    /// Sends a command for the show just sent: at once if no command is in flight, else once the lane
+    /// frees, and then only while that show is still the newest show or hide, since Herdr refuses commands
+    /// from a hidden session and a later show sends its own. Returns false, sending nothing, when the
+    /// session isn't shown or the server lacks the method; a command that waited and was dropped fails
+    /// with `notSent`.
+    func sendCommandWhileShown(
+        _ method: String,
+        params: some Encodable & Sendable,
+        answered: @escaping CommandAnswered
+    ) -> Bool {
+        guard !ended, isActive, negotiated.methods.contains(method) else { return false }
+        guard laneBusy else {
+            laneBusy = true
+            guard send(method, params: params, timeout: nil, answered: answered) else {
+                releaseLane()
+                return false
+            }
+            return true
+        }
+        nextTicket += 1
+        let command = QueuedCommand(method: method, params: params, show: visibilityRequests, answered: answered)
+        laneWaiters.append((nextTicket, .command(command)))
+        return true
+    }
+
+    /// Registers and queues a command that holds the lane; false when it can't be encoded.
+    private func send(
+        _ method: String,
+        params: any Encodable & Sendable,
+        timeout: Duration?,
+        answered: @escaping CommandAnswered
+    ) -> Bool {
+        guard let bootID else { return false }
+        let id = makeID("c")
+        guard let message = try? HerdrClientMessage.endpointRequest(bootID: bootID, id: id, method: method, params: params)
+        else { return false }
+        register(id, waiter: .command(answered: answered), holdsLane: true, timeout: timeout ?? timing.command,
+                 method: method, sending: [message])
+        return true
     }
 
     private func reply(
@@ -778,7 +844,7 @@ actor HerdrConnection {
             if case .failure = floor, position == visibilityRequests { rollBackShow() }
             answered(floor)
         case .command(let answered)?:
-            answered(result)
+            answered(result, snapshotRevision)
         case nil:
             break
         }
@@ -838,7 +904,7 @@ actor HerdrConnection {
         let ticket = nextTicket
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                laneWaiters.append((ticket, continuation))
+                laneWaiters.append((ticket, .caller(continuation)))
             }
         } onCancel: {
             Task { await self.leaveLine(ticket) }
@@ -846,17 +912,31 @@ actor HerdrConnection {
     }
 
     private func leaveLine(_ ticket: UInt64) {
-        guard let index = laneWaiters.firstIndex(where: { $0.ticket == ticket }) else { return }
-        laneWaiters.remove(at: index).continuation.resume(throwing: CancellationError())
+        guard let index = laneWaiters.firstIndex(where: { $0.ticket == ticket }),
+              case .caller(let continuation) = laneWaiters[index].waiter
+        else { return }
+        laneWaiters.remove(at: index)
+        continuation.resume(throwing: CancellationError())
     }
 
-    /// Passes the lane straight to the next waiter.
+    /// Passes the lane straight to the next waiter. A command for a show that is no longer the newest
+    /// isn't sent; the lane goes on to the one after it.
     private func releaseLane() {
-        if laneWaiters.isEmpty {
-            laneBusy = false
-        } else {
-            laneWaiters.removeFirst().continuation.resume()
+        while !laneWaiters.isEmpty {
+            switch laneWaiters.removeFirst().waiter {
+            case .caller(let continuation):
+                continuation.resume()
+                return
+            case .command(let command):
+                guard !ended, isActive, command.show == visibilityRequests else {
+                    command.answered(.failure(HerdrCommandError.notSent), snapshotRevision)
+                    continue
+                }
+                if send(command.method, params: command.params, timeout: nil, answered: command.answered) { return }
+                command.answered(.failure(HerdrCommandError.notSent), snapshotRevision)
+            }
         }
+        laneBusy = false
     }
 
     private func makeID(_ prefix: String) -> String {
@@ -1007,6 +1087,13 @@ actor HerdrConnection {
         let waiters = laneWaiters
         laneWaiters.removeAll()
         laneBusy = false
-        waiters.forEach { $0.continuation.resume(throwing: HerdrCommandError.connectionEnded) }
+        for (_, waiter) in waiters {
+            switch waiter {
+            case .caller(let continuation):
+                continuation.resume(throwing: HerdrCommandError.connectionEnded)
+            case .command(let command):
+                command.answered(.failure(HerdrCommandError.connectionEnded), snapshotRevision)
+            }
+        }
     }
 }

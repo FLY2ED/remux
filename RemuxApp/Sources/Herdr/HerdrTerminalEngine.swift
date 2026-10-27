@@ -91,7 +91,7 @@ struct HerdrEngineFeed: Sendable {
         )
     }
 
-    func settleZoom(request: UInt64, tab: (tabID: String, zoomed: Bool)?) async {
+    func settleZoom(request: UInt64, tab: (tabID: String, zoomed: Bool, snapshotRevision: UInt64)?) async {
         await engine.settleZoom(request: request, tab: tab, connection: connection)
     }
 
@@ -160,21 +160,24 @@ actor HerdrTerminalEngine {
     }
 
     /// A zoom sent behind a show. Herdr can draw the show's frame before it applies the zoom, and its
-    /// answer can come before or after the zoomed frame, so the show completes once Herdr has answered,
-    /// on a frame whose snapshot shows the tab as the answer left it.
+    /// answer can come before or after the zoomed frame. So once Herdr has answered, the show completes on
+    /// a frame whose snapshot shows the tab as the answer left it, or on one whose snapshot is newer than
+    /// the last before the answer: Herdr built it after the zoom, so it shows the tab as it is, also when
+    /// another client has changed it since, as a split ends a zoom.
     enum ShowZoom: Sendable {
         case none
         case pending
-        case answered(tabID: String, zoomed: Bool)
+        case answered(tabID: String, zoomed: Bool, snapshotRevision: UInt64)
 
-        func isShown(in snapshot: HerdrSnapshot) -> Bool {
+        func admits(_ snapshot: HerdrSnapshot) -> Bool {
             switch self {
             case .none:
                 true
             case .pending:
                 false
-            case .answered(let tabID, let zoomed):
-                snapshot.tabs.first { $0.tabID == tabID }.map { $0.zoomed == zoomed } ?? true
+            case .answered(let tabID, let zoomed, let snapshotRevision):
+                snapshot.revision > snapshotRevision
+                    || snapshot.tabs.first { $0.tabID == tabID }.map { $0.zoomed == zoomed } ?? true
             }
         }
     }
@@ -270,15 +273,18 @@ actor HerdrTerminalEngine {
         completeActivationIfReady()
     }
 
-    /// Herdr's answer to the zoom behind the show: the tab and its zoom after it, or nil when the zoom
-    /// didn't go or failed, and the show then completes as one without a zoom.
+    /// Herdr's answer to the zoom behind the show: the tab and its zoom after it, and the newest snapshot's
+    /// revision before the answer; or nil when the zoom didn't go or failed, and the show then completes
+    /// as one without a zoom.
     fileprivate func settleZoom(
         request: UInt64,
-        tab: (tabID: String, zoomed: Bool)?,
+        tab: (tabID: String, zoomed: Bool, snapshotRevision: UInt64)?,
         connection: UInt64
     ) {
         guard state == .running, connection == self.connection, activation?.request == request else { return }
-        activation?.zoom = tab.map { .answered(tabID: $0.tabID, zoomed: $0.zoomed) } ?? .none
+        activation?.zoom = tab.map {
+            .answered(tabID: $0.tabID, zoomed: $0.zoomed, snapshotRevision: $0.snapshotRevision)
+        } ?? .none
         completeActivationIfReady()
     }
 
@@ -307,7 +313,7 @@ actor HerdrTerminalEngine {
               surface.projectionRevision == received.projectionRevision,
               received.projectionRevision >= floor,
               received.columns == activation.columns, received.rows == activation.rows,
-              activation.zoom.isShown(in: snapshot)
+              activation.zoom.admits(snapshot)
         else { return }
         self.activation = nil
         if holdsFrames {

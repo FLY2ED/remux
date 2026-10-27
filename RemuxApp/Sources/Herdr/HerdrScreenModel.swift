@@ -672,9 +672,10 @@ final class HerdrScreenModel {
         return true
     }
 
-    /// The zoom behind a show goes out right after it, so Herdr takes it from a client on screen, and only
-    /// if no command is in flight, so it never holds the show back. The show completes once Herdr has
-    /// answered it, on a frame showing the zoom; one that didn't go doesn't hold the show.
+    /// The zoom behind a show goes out after it, so Herdr takes it from a client on screen: at once, or,
+    /// as after a quick return while the leave's unzoom is still unanswered, once the command in flight
+    /// is answered, unless the session has left meanwhile. The show completes once Herdr has answered the
+    /// zoom, on a frame showing it or drawn after it; a zoom that doesn't go doesn't hold the show.
     private func sendZoom(
         _ paneID: String,
         behindShow request: UInt64,
@@ -685,12 +686,14 @@ final class HerdrScreenModel {
             await feed.settleZoom(request: request, tab: nil)
             return
         }
-        let sent = await connection.sendCommandIfIdle(
+        let sent = await connection.sendCommandWhileShown(
             Self.paneZoomMethod,
             params: Self.zoomParams(paneID, zoomed: true)
-        ) { [weak self] answer in
-            let result = try? HerdrPaneZoomResult(reply: answer.get())
-            Task { await feed.settleZoom(request: request, tab: result.map { ($0.layout.tabID, $0.zoomed) }) }
+        ) { [weak self] answer, snapshotRevision in
+            let tab = (try? HerdrPaneZoomResult(reply: answer.get())).map {
+                (tabID: $0.layout.tabID, zoomed: $0.zoomed, snapshotRevision: snapshotRevision)
+            }
+            Task { await feed.settleZoom(request: request, tab: tab) }
             Task { @MainActor [weak self] in self?.zoomAnswered(answer, bootID: bootID, reportingFailure: false) }
         }
         if !sent { await feed.settleZoom(request: request, tab: nil) }
@@ -967,7 +970,7 @@ final class HerdrScreenModel {
                 _ = await connection.sendCommandIfIdle(
                     Self.paneZoomMethod,
                     params: Self.zoomParams(paneID, zoomed: false)
-                ) { [weak self] answer in
+                ) { [weak self] answer, _ in
                     Task { @MainActor [weak self] in
                         self?.zoomAnswered(answer, bootID: bootID, reportingFailure: false)
                     }

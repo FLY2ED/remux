@@ -210,7 +210,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await feed.acknowledgeActivation(request: 1, floor: 1)
         await feed.receive(try Self.tabSnapshot(revision: 1, zoomed: false))
         await feed.receive(.surface(try Self.surface(revision: 1, lines: ["o t ", "w o "], panes: two)))
-        await feed.settleZoom(request: 1, tab: (tabID: "t1", zoomed: true))
+        await feed.settleZoom(request: 1, tab: (tabID: "t1", zoomed: true, snapshotRevision: 1))
         await feed.receive(try Self.tabSnapshot(revision: 2, zoomed: true))
         await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["one ", "two "], panes: one)))
         guard case .paneTerminal("P", _) = try await updates.next(),
@@ -225,7 +225,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await feed.acknowledgeActivation(request: 2, floor: 3)
         await feed.receive(try Self.tabSnapshot(revision: 3, zoomed: true))
         await feed.receive(.surface(try Self.surface(projection: 3, revision: 3, lines: ["one ", "two "], panes: one)))
-        await feed.settleZoom(request: 2, tab: (tabID: "t1", zoomed: true))
+        await feed.settleZoom(request: 2, tab: (tabID: "t1", zoomed: true, snapshotRevision: 3))
         guard case .activated(2, _) = try await updates.next() else {
             return XCTFail("an answer after the zoomed frame didn't complete the show")
         }
