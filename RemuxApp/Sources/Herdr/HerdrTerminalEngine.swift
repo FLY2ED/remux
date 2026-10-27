@@ -63,10 +63,19 @@ enum HerdrEngineUpdate: Sendable {
     /// A surface Remux can't index came over `connection`. Nothing more of it is painted; the owner
     /// ends that connection.
     case failed(HerdrConnectionError, connection: UInt64)
-    /// The view request `request` on `connection` completed: a frame that arrived after it, at or after
-    /// the floor Herdr acknowledged, at the requested size and showing what its last command did, is
-    /// painted. Follows that frame's layout.
+    /// View request `request` became the engine's current one on `connection`, holding the frames until
+    /// it completes. `showing` when it carries a show still in progress, as a move that took one over does.
+    case started(request: UInt64, kind: HerdrViewKind, showing: Bool, connection: UInt64)
+    /// View request `request` is where it goes, or its focus failed and it stays where Herdr has it: the
+    /// owner sends its last step, the setting's zoom when it `zooms`, or ends it (`finish`). `snapshot` is
+    /// the newest Herdr sent.
+    case reached(request: UInt64, zooms: Bool, snapshot: HerdrSnapshot?, connection: UInt64)
+    /// View request `request` completed: a frame that arrived after it, at or after the floor Herdr
+    /// acknowledged, at the requested size, and showing what its last command did or what Herdr shows
+    /// since, is painted. Follows that frame's layout.
     case activated(request: UInt64, connection: UInt64)
+    /// View request `request` didn't complete within its time.
+    case timedOut(request: UInt64, connection: UInt64)
     /// The frame on screen now was drawn against snapshot `projectionRevision` and shows these panes,
     /// whose agents the user can see. Comes before that frame's layout.
     case presented(bootID: String, projectionRevision: UInt64, paneIDs: Set<String>, connection: UInt64)
@@ -87,29 +96,66 @@ struct HerdrEngineFeed: Sendable {
         await engine.receive(output, connection: connection)
     }
 
-    func beginActivation(request: UInt64, columns: UInt16, rows: UInt16) async {
-        await engine.beginActivation(request: request, columns: columns, rows: rows, connection: connection)
+    func start(_ view: HerdrView, within deadline: Duration) async -> HerdrViewStart? {
+        await engine.start(view, within: deadline, connection: connection)
     }
 
-    func retarget(request: UInt64, columns: UInt16, rows: UInt16) async {
-        await engine.retarget(request: request, columns: columns, rows: rows, connection: connection)
+    func acknowledge(show: UInt64, floor: UInt64) async {
+        await engine.acknowledge(show: show, floor: floor, connection: connection)
     }
 
-    func settle(request: UInt64, answer: HerdrTerminalEngine.CommandAnswer?) async {
-        await engine.settle(request: request, answer: answer, connection: connection)
+    func showFailed(_ show: UInt64) async -> Bool {
+        await engine.showFailed(show, connection: connection)
     }
 
-    func acknowledgeActivation(show: UInt64, floor: UInt64) async {
-        await engine.acknowledgeActivation(show: show, floor: floor, connection: connection)
+    func focused(request: UInt64, answer: HerdrTerminalEngine.CommandAnswer?) async -> Bool {
+        await engine.focused(request: request, answer: answer, connection: connection)
     }
 
-    func resizeActivation(columns: UInt16, rows: UInt16) async {
-        await engine.resizeActivation(columns: columns, rows: rows, connection: connection)
+    func awaitsLastStep(_ request: UInt64) async -> Bool {
+        await engine.awaitsLastStep(request, connection: connection)
     }
 
-    func endActivation() async {
-        await engine.endActivation(connection: connection)
+    func isSettled() async -> Bool {
+        await engine.isSettled(connection: connection)
     }
+
+    func finish(request: UInt64) async {
+        await engine.finish(request: request, with: .nothing, connection: connection)
+    }
+
+    func zoomed(request: UInt64, answer: HerdrTerminalEngine.CommandAnswer?) async {
+        await engine.finish(request: request, with: .zoom(answer), connection: connection)
+    }
+
+    func resize(columns: UInt16, rows: UInt16) async {
+        await engine.resize(columns: columns, rows: rows, connection: connection)
+    }
+}
+
+/// What Remux asks Herdr to show (`HerdrTerminalEngine.start`).
+enum HerdrView: Sendable {
+    /// The session on screen at `columns` x `rows`, taken to `pane` right after, when given.
+    case shown(columns: UInt16, rows: UInt16, pane: String?)
+    /// The session on screen taken to `pane`; `fromAnotherTab` when another tab was on screen as it was
+    /// asked for.
+    case moved(pane: String, fromAnotherTab: Bool, columns: UInt16, rows: UInt16)
+    case hidden
+}
+
+enum HerdrViewKind: Sendable {
+    case show
+    case move
+    case hide
+}
+
+/// A view request the engine started.
+struct HerdrViewStart: Sendable {
+    let request: UInt64
+    /// The pane it takes the session to, whose focus its owner sends; nil when there is none to send.
+    let pane: String?
+    /// The request leaves the tab Herdr shows now, whose zoom Remux undoes first.
+    let leavesTab: Bool
 }
 
 enum HerdrRendererRegistrationError: Error, Equatable {
@@ -157,69 +203,84 @@ actor HerdrTerminalEngine {
         let paneIDs: Set<String>
     }
 
-    /// A view request in progress, as Herdr's client tracks an activation (`activation/model.rs`): a
-    /// show, or a move that took over the one in progress or started on the frame on screen. Only frames
-    /// that arrive after it began count, so the last frame from before a hide never completes a show.
-    private struct Activation {
-        var request: UInt64
-        /// The show whose answer gives the floor; nil for a move on a session whose show completed, which
-        /// met its floor.
+    /// A view request, as Herdr's client tracks an activation (`activation/model.rs`): a show, a move or a
+    /// hide. The newest is current. A move takes over a show or move still in progress, keeping its show's
+    /// floor and frames, as Herdr's client retargets an activation; with none in progress it starts on the
+    /// frame on screen, which a move that changes nothing completes on. Only frames that arrive after a
+    /// show began count, so the last frame from before a hide never completes it.
+    private struct ViewRequest {
+        /// Its focus is out; it is answered and the snapshot isn't at the pane yet; it is where it goes and
+        /// waits for its owner's last step; or its last command is answered (nil: nothing to wait for).
+        enum Progress {
+            case going
+            case arriving(CommandAnswer)
+            case reached(CommandAnswer?)
+            case answered(CommandAnswer?)
+        }
+
+        let id: UInt64
+        let kind: HerdrViewKind
+        /// The show whose answer gives the floor; nil for a hide, and for a move on a session whose show
+        /// completed, which met its floor.
         let show: UInt64?
         var columns: UInt16
         var rows: UInt16
         /// The projection revision Herdr's acknowledgement returned, once it arrives.
         var floor: UInt64?
-        /// The request's last command: waiting for Herdr's answer until the screen settles it.
-        var awaited: Awaited = .pending
-        /// The snapshots since the request began, while it waits for its last command.
+        /// The pane it takes the session to; nil for a show that stays where Herdr has it, and a hide.
+        let pane: String?
+        /// Whether the setting zooms the tab it ends on, as it does when the session comes to a tab: on a
+        /// show, and on a move from another tab. A move carries on the zoom of the request it took over,
+        /// whose leave may already have undone Remux's zoom.
+        let zooms: Bool
+        var progress: Progress
+        /// The snapshots since it began, while in progress.
         var snapshots: [HerdrSnapshot] = []
-        /// The newest frame since the activation began, or since the size last changed.
+        /// The newest frame since it began, or since the size last changed.
         var received: (projectionRevision: UInt64, columns: UInt16, rows: UInt16)?
+        var completed = false
+
+        /// A show or move that hasn't completed: the frames are held for it.
+        var inProgress: Bool { kind != .hide && !completed }
 
         mutating func record(_ snapshot: HerdrSnapshot) {
-            if case .none = awaited { return }
-            guard snapshots.last.map({ $0.revision < snapshot.revision }) ?? true else { return }
+            guard inProgress, snapshots.last.map({ $0.revision < snapshot.revision }) ?? true else { return }
             snapshots.append(snapshot)
         }
 
-        /// Whether a frame drawn against `snapshot` can complete the request. As in Herdr's client, it
-        /// does once the command is answered and the snapshot shows what the command asked for, whether
-        /// that snapshot came before the answer or after it. Herdr answers through a separate thread, so
-        /// another client can change the place before the answer arrives: a snapshot from after the
-        /// command that showed it, or any from after the answer, then admits every later one, as a split
-        /// ends a zoom.
+        /// The first snapshot from after `answer`'s command took effect: one from after its answer, or one
+        /// from after it went out that showed what it asked for. Herdr answers through a separate thread, so
+        /// another client can change the place before the answer arrives.
+        func past(_ answer: CommandAnswer) -> HerdrSnapshot? {
+            snapshots.first { $0.revision > answer.answeredAfter || ($0.revision > answer.sentAfter && answer.reached($0)) }
+        }
+
+        /// Whether a frame drawn against `snapshot` completes the request. As in Herdr's client, it does once
+        /// the last command is answered and the snapshot shows what the command asked for, whether that
+        /// snapshot came before the answer or after it; or once Herdr's state is past the command, as when
+        /// another client's split ends a zoom.
         func admits(_ snapshot: HerdrSnapshot) -> Bool {
-            switch awaited {
-            case .none:
-                return true
-            case .pending:
-                return false
-            case .answered(let answer):
-                if answer.reached(snapshot) { return true }
-                let anchor = snapshots.first { recorded in
-                    recorded.revision > answer.answeredAfter
-                        || (recorded.revision > answer.sentAfter && answer.reached(recorded))
-                }
-                guard let anchor else { return false }
-                return snapshot.revision >= anchor.revision
-            }
+            guard case .answered(let answer) = progress else { return false }
+            guard let answer else { return true }
+            if answer.reached(snapshot) { return true }
+            return past(answer).map { snapshot.revision >= $0.revision } ?? false
         }
     }
 
-    /// The request's last command: none to wait for, waiting for Herdr's answer, or answered.
-    enum Awaited: Sendable {
-        case none
-        case pending
-        case answered(CommandAnswer)
-    }
-
-    /// Herdr's answer to the last command a view request waits for.
+    /// Herdr's answer to a view request's command.
     struct CommandAnswer: Sendable {
         /// The revisions of the newest snapshot when the command went out and when its answer came.
         let sentAfter: UInt64
         let answeredAfter: UInt64
         /// Whether a snapshot shows what the command asked for: the pane focused, the tab zoomed.
         let reached: @Sendable (HerdrSnapshot) -> Bool
+    }
+
+    /// A request's last step, as its owner took it after `reached`.
+    fileprivate enum LastStep {
+        case nothing
+        /// The setting's zoom, with Herdr's answer, nil when it failed or didn't go.
+        case zoom(CommandAnswer?)
     }
 
     /// Makes a pane's producer for a terminal of the given columns and rows.
@@ -250,13 +311,11 @@ actor HerdrTerminalEngine {
     private var bootID: String?
     private var paintedSurface: PaintedSurface?
     private var presentedFrame: PresentedFrame?
-    private var activation: Activation?
-    /// Frames are drawn as they come, except after a hide and during a view request. Frames Herdr sends
-    /// as a hide goes out show what leaving did, such as undoing the zoom, so the frame from before the
-    /// hide stays until the next show; and a show's frame from before its zoom would flash the unzoomed
-    /// tab, as a move's would flash the tab left and the tab reached unzoomed, so a request draws only the
-    /// frame that completes it.
-    private var holdsFrames = false
+    /// The newest view request on the connection: the one current request, which only `start` replaces.
+    private var request: ViewRequest?
+    private var requests: UInt64 = 0
+    /// The current request's time to complete.
+    private var deadline: Task<Void, Never>?
     private var layout: HerdrPaneLayout?
     private var paneScrolls: [String: HerdrPaneScroll] = [:]
     /// Herdr's border lines in the frame painted last. A patch never changes them, since
@@ -295,8 +354,8 @@ actor HerdrTerminalEngine {
         presentation = HerdrPresentation()
         paintedSurface = nil
         presentedFrame = nil
-        activation = nil
-        holdsFrames = false
+        request = nil
+        cancelDeadline()
         failedPaneIDs.removeAll()
         return feed
     }
@@ -307,104 +366,230 @@ actor HerdrTerminalEngine {
         guard state != .stopped, connection >= self.connection else { return }
         self.connection = connection
         state = .idle
+        cancelDeadline()
     }
 
     // MARK: - Showing
 
-    /// A show for `columns` x `rows` is about to go out as view request `request`. Herdr sends no frames
-    /// to a hidden session, so every frame from here on answers this show or a later request. Frames are
-    /// held until the request completes.
-    fileprivate func beginActivation(request: UInt64, columns: UInt16, rows: UInt16, connection: UInt64) {
-        guard state == .running, connection == self.connection else { return }
-        activation = Activation(request: request, show: request, columns: max(columns, 1), rows: max(rows, 1))
-        holdsFrames = true
+    /// Frames are drawn as they come, except while hidden and during a view request. Frames Herdr sends
+    /// as a hide goes out show what leaving did, such as undoing the zoom, so the frame from before the
+    /// hide stays until the next show; and a show's frame from before its zoom would flash the unzoomed
+    /// tab, as a move's would flash the tab left and the tab reached unzoomed, so a request draws only the
+    /// frame that completes it.
+    private var holdsFrames: Bool {
+        guard let request else { return false }
+        return request.kind == .hide || !request.completed
     }
 
-    /// A move is about to go out as view request `request`, for a screen of `columns` x `rows`. It takes
-    /// over the request in progress, keeping its show's floor and frames, as Herdr's client retargets an
-    /// activation; else it starts on the frame on screen, which a move that changes nothing completes on.
-    /// Frames are held until it completes, so neither the tab left nor the tab reached shows on the way.
-    fileprivate func retarget(request: UInt64, columns: UInt16, rows: UInt16, connection: UInt64) {
-        guard state == .running, connection == self.connection else { return }
-        if activation == nil {
-            let surface = presentation.presented?.surface
-            activation = Activation(
-                request: request,
-                show: nil,
+    /// Starts the view request for `view`: it becomes current in this turn, the frames are held for it
+    /// from here on, and it has `deadline` to complete. Herdr sends no frames to a hidden session, so every
+    /// frame after a show answers it or a later request. Returns nil for a move with nothing to do: to the
+    /// pane the request in progress already goes to or, with none, the pane Herdr has focused, asked from
+    /// that tab; or one asked before any show.
+    fileprivate func start(_ view: HerdrView, within deadline: Duration, connection: UInt64) -> HerdrViewStart? {
+        guard state == .running, connection == self.connection else { return nil }
+        let snapshot = presentation.snapshot
+        requests += 1
+        let id = requests
+        let next: ViewRequest
+        switch view {
+        case .hidden:
+            next = ViewRequest(id: id, kind: .hide, show: nil, columns: 1, rows: 1, pane: nil, zooms: false, progress: .answered(nil))
+        case .shown(let columns, let rows, let pane):
+            // A pane the session is on already needs no move.
+            let pane = pane == snapshot?.focusedPaneID ? nil : pane
+            next = ViewRequest(
+                id: id,
+                kind: .show,
+                show: id,
                 columns: max(columns, 1),
                 rows: max(rows, 1),
-                floor: 0,
-                received: surface.map { ($0.projectionRevision, $0.frame.width, $0.frame.height) }
+                pane: pane,
+                zooms: true,
+                progress: pane == nil ? .reached(nil) : .going
             )
-        } else {
-            activation?.request = request
-            activation?.awaited = .pending
-            activation?.snapshots.removeAll()
+        case .moved(let pane, let fromAnotherTab, let columns, let rows):
+            guard let current = request, current.kind != .hide else { return nil }
+            let taken = current.inProgress ? current : nil
+            // At the pane already, a move asked from another tab still goes, so the setting zooms the tab
+            // it reaches, as when another client took the session there first.
+            guard (taken?.pane ?? snapshot?.focusedPaneID) != pane || (taken == nil && fromAnotherTab) else {
+                return nil
+            }
+            next = ViewRequest(
+                id: id,
+                kind: .move,
+                show: taken?.show,
+                columns: max(columns, 1),
+                rows: max(rows, 1),
+                floor: taken == nil ? 0 : taken?.floor,
+                pane: pane,
+                zooms: taken?.zooms == true || fromAnotherTab || Self.leaves(to: pane, in: snapshot),
+                progress: .going,
+                received: taken == nil
+                    ? presentation.presented.map { ($0.surface.projectionRevision, $0.surface.frame.width, $0.surface.frame.height) }
+                    : taken?.received
+            )
         }
-        holdsFrames = true
+        request = next
+        if next.kind == .hide {
+            cancelDeadline()
+        } else {
+            startDeadline(for: id, within: deadline)
+        }
+        continuation.yield(.started(request: id, kind: next.kind, showing: next.show != nil, connection: connection))
+        if case .reached = next.progress {
+            continuation.yield(.reached(request: id, zooms: next.zooms, snapshot: snapshot, connection: connection))
+        }
+        return HerdrViewStart(
+            request: id,
+            pane: next.pane,
+            leavesTab: next.pane.map { Self.leaves(to: $0, in: snapshot) } ?? false
+        )
+    }
+
+    /// Whether `pane` is on another tab than the one `snapshot` shows.
+    private static func leaves(to pane: String, in snapshot: HerdrSnapshot?) -> Bool {
+        guard let snapshot, let tabID = snapshot.panes.first(where: { $0.paneID == pane })?.tabID else { return false }
+        return tabID != snapshot.focusedTabID
     }
 
     /// Herdr's answer to the show: its projection revision, which a frame completing it, or a move that
     /// took it over, must reach.
-    fileprivate func acknowledgeActivation(show: UInt64, floor: UInt64, connection: UInt64) {
-        guard state == .running, connection == self.connection, activation?.show == show else { return }
-        activation?.floor = floor
-        completeActivationIfReady()
+    fileprivate func acknowledge(show: UInt64, floor: UInt64, connection: UInt64) {
+        guard state == .running, connection == self.connection, request?.show == show, request?.inProgress == true
+        else { return }
+        request?.floor = floor
+        completeIfReady()
     }
 
-    /// Herdr's answer to the request's last command, or nil when there is none to wait for: a command
-    /// that failed or didn't go, or a show that sends none. It then completes on the frames it has. The
-    /// answer of a request a newer one took over changes nothing.
-    fileprivate func settle(
-        request: UInt64,
-        answer: CommandAnswer?,
-        connection: UInt64
-    ) {
-        guard state == .running, connection == self.connection, activation?.request == request else { return }
-        activation?.awaited = answer.map(Awaited.answered) ?? .none
-        completeActivationIfReady()
+    /// Whether Herdr's refusal of `show` concerns the current request: that show, or a move that took it
+    /// over.
+    fileprivate func showFailed(_ show: UInt64, connection: UInt64) -> Bool {
+        state == .running && connection == self.connection && request?.show == show
+    }
+
+    /// Herdr answered the focus of `id`, or it failed or didn't go (nil). Returns whether `id` is the
+    /// current request; the answer of any other changes nothing. One that failed leaves the session where
+    /// Herdr has it, which the request has then reached.
+    fileprivate func focused(request id: UInt64, answer: CommandAnswer?, connection: UInt64) -> Bool {
+        guard state == .running, connection == self.connection, var request, request.id == id, request.inProgress,
+              case .going = request.progress
+        else { return false }
+        if let answer {
+            request.progress = .arriving(answer)
+            self.request = request
+            arrive()
+        } else {
+            request.progress = .reached(nil)
+            self.request = request
+            continuation.yield(.reached(request: id, zooms: request.zooms, snapshot: presentation.snapshot, connection: connection))
+        }
+        return true
+    }
+
+    /// Once the focus is answered: the newest snapshot at the pane, by this request or any other way,
+    /// means the request is where it goes, and waits for its last step. A snapshot past the focus
+    /// elsewhere means another client has since taken the session there: the request ends as Herdr shows
+    /// it, with nothing more of its own to hide, and isn't zoomed.
+    private func arrive() {
+        guard var request, request.inProgress, case .arriving(let answer) = request.progress else { return }
+        if let snapshot = presentation.snapshot, answer.reached(snapshot) {
+            request.progress = .reached(answer)
+            self.request = request
+            continuation.yield(.reached(request: request.id, zooms: request.zooms, snapshot: snapshot, connection: connection))
+        } else if request.past(answer) != nil {
+            request.progress = .answered(answer)
+            self.request = request
+            completeIfReady()
+        }
+    }
+
+    /// Whether `id` is current and waits for its last step, which may go only then.
+    fileprivate func awaitsLastStep(_ id: UInt64, connection: UInt64) -> Bool {
+        guard state == .running, connection == self.connection, let request, request.id == id, request.inProgress,
+              case .reached = request.progress
+        else { return false }
+        return true
+    }
+
+    /// Whether no show or move is in progress, so a command for the tab on screen, which focuses its pane,
+    /// can go.
+    fileprivate func isSettled(connection: UInt64) -> Bool {
+        state == .running && connection == self.connection && request?.inProgress != true
+    }
+
+    /// The last step of `id`: none, so it completes on what Herdr answered to reach it; or the setting's
+    /// zoom, which it completes on, or on that when the zoom failed or didn't go.
+    fileprivate func finish(request id: UInt64, with step: LastStep, connection: UInt64) {
+        guard state == .running, connection == self.connection, var request, request.id == id, request.inProgress,
+              case .reached(let arrival) = request.progress
+        else { return }
+        switch step {
+        case .nothing:
+            request.progress = .answered(arrival)
+        case .zoom(let answer):
+            request.progress = .answered(answer ?? arrival)
+        }
+        self.request = request
+        completeIfReady()
     }
 
     /// The screen's size changed while a request is in progress: only a frame at the new size completes
     /// it, as Herdr's client drops its evidence on a resize.
-    fileprivate func resizeActivation(columns: UInt16, rows: UInt16, connection: UInt64) {
-        guard connection == self.connection, activation != nil else { return }
-        activation?.columns = max(columns, 1)
-        activation?.rows = max(rows, 1)
-        activation?.received = nil
-    }
-
-    /// The session is hidden: frames are held until the next show.
-    fileprivate func endActivation(connection: UInt64) {
-        guard connection == self.connection else { return }
-        activation = nil
-        holdsFrames = true
+    fileprivate func resize(columns: UInt16, rows: UInt16, connection: UInt64) {
+        guard connection == self.connection, request?.inProgress == true else { return }
+        request?.columns = max(columns, 1)
+        request?.rows = max(rows, 1)
+        request?.received = nil
     }
 
     /// Herdr's client checks the pair again at completion: a snapshot that arrived after the received
-    /// frame waits for its own frame. A held completing frame is drawn now, and frames are drawn as they
+    /// frame waits for its own frame. The held completing frame is drawn now, and frames are drawn as they
     /// come from then on.
-    private func completeActivationIfReady() {
-        guard let activation, let floor = activation.floor, let received = activation.received,
+    private func completeIfReady() {
+        guard let request, request.inProgress, let floor = request.floor, let received = request.received,
               let (snapshot, surface) = presentation.presented,
               surface.projectionRevision == received.projectionRevision,
               received.projectionRevision >= floor,
-              received.columns == activation.columns, received.rows == activation.rows,
-              activation.admits(snapshot)
+              received.columns == request.columns, received.rows == request.rows,
+              request.admits(snapshot)
         else { return }
-        self.activation = nil
-        if holdsFrames {
-            holdsFrames = false
-            draw(surface, snapshot: snapshot)
+        self.request?.completed = true
+        self.request?.snapshots.removeAll()
+        cancelDeadline()
+        draw(surface, snapshot: snapshot)
+        continuation.yield(.activated(request: request.id, connection: connection))
+    }
+
+    private func startDeadline(for id: UInt64, within duration: Duration) {
+        deadline?.cancel()
+        let connection = self.connection
+        deadline = Task { [weak self] in
+            try? await Task.sleep(for: duration)
+            guard !Task.isCancelled else { return }
+            await self?.expire(id, connection: connection)
         }
-        continuation.yield(.activated(request: activation.request, connection: connection))
+    }
+
+    private func cancelDeadline() {
+        deadline?.cancel()
+        deadline = nil
+    }
+
+    /// The deadline passed: it fires only for the current request, still in progress.
+    private func expire(_ id: UInt64, connection: UInt64) {
+        guard state == .running, connection == self.connection, request?.id == id, request?.inProgress == true
+        else { return }
+        continuation.yield(.timedOut(request: id, connection: connection))
     }
 
     fileprivate func receive(_ snapshot: HerdrSnapshot, connection: UInt64) {
         guard state == .running, connection == self.connection else { return }
         presentation.receive(snapshot)
-        activation?.record(snapshot)
+        request?.record(snapshot)
         bordersMayHaveChanged = true
+        arrive()
         paintPresented()
     }
 
@@ -456,6 +641,7 @@ actor HerdrTerminalEngine {
     func stop() {
         guard state != .stopped else { return }
         state = .stopped
+        cancelDeadline()
         panes.removeAll()
         failedPaneIDs.removeAll()
         continuation.finish()
@@ -468,9 +654,9 @@ actor HerdrTerminalEngine {
               PaintedSurface(of: surface) != paintedSurface
         else { return }
         if !holdsFrames { draw(surface, snapshot: snapshot) }
-        if activation != nil {
-            activation?.received = (surface.projectionRevision, surface.frame.width, surface.frame.height)
-            completeActivationIfReady()
+        if request?.inProgress == true {
+            request?.received = (surface.projectionRevision, surface.frame.width, surface.frame.height)
+            completeIfReady()
         }
     }
 

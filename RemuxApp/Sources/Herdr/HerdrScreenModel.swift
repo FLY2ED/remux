@@ -58,51 +58,25 @@ final class HerdrScreenModel {
 
     /// What the model asks of the connection and the engine, in the order it asks.
     private enum Operation: Sendable {
-        /// The show of view request `request`; a move with the same number right behind it takes the
-        /// session to the pane asked for with it.
-        case show(HerdrSurfaceGeometry, request: UInt64)
+        /// Shows the session, and takes it to `pane` right after, when given (`reconcileVisibility`).
+        case show(HerdrSurfaceGeometry, pane: String?)
         case hide
         case resize(HerdrSurfaceGeometry)
         case theme([HerdrHostThemeUpdate])
         case appActive(Bool)
         /// `delivered`, when given, learns whether Herdr has the input.
         case input(paneID: String, events: [HerdrInputEvent], delivered: CheckedContinuation<Bool, Never>?)
-        /// The steps that take view request `number` to its pane (`move(_:to:)`); they don't go once a
-        /// newer request replaced it.
-        case move(UInt64)
-        /// A `pane.zoom` of a pane's tab: the zoom button's, or the last step of the request it is
-        /// `completing`, which doesn't go once a newer request replaced it (`sendZoom`).
-        case zoom(String, zoomed: Bool, tab: HerdrTabKey, completing: Completion?)
+        /// Remux's move to a pane (`move(_:to:)`); `fromAnotherTab` when another tab was on screen as it
+        /// was asked for.
+        case move(String, fromAnotherTab: Bool)
+        /// A `pane.zoom` of a pane's tab: the zoom button's, or the last step of view request `completing`,
+        /// which goes only while that request waits for it (`sendZoom`).
+        case zoom(String, zoomed: Bool, tab: HerdrTabKey, completing: UInt64?)
 
         /// Tells whoever waits on the operation that it won't be carried out.
         func abandon() {
             if case .input(_, _, let delivered?) = self { delivered.resume(returning: false) }
         }
-    }
-
-    /// What Remux asks Herdr to show while the session is on screen: a show, which can take the session
-    /// to a pane right after it, or a move to a pane. Each is a view request with its own number. The
-    /// engine holds the frames until the newest completes, within one deadline, and a newer one replaces
-    /// it: the steps it hasn't taken don't go, and the answers to those it took change nothing.
-    private struct ViewRequest {
-        let number: UInt64
-        /// The show the session is on screen by; a move keeps it.
-        let show: UInt64
-        /// The pane the request takes the session to; nil for a show that stays where Herdr has it.
-        let paneID: String?
-        /// Whether the setting zooms the tab the request ends on, as it does when the session comes to
-        /// a tab: on a show, and on a move from another tab. A request carries on the zoom of the one in
-        /// progress it replaced, whose leave may already have undone Remux's zoom.
-        var zooms: Bool
-        /// Herdr's answer to its focus, while it waits for a snapshot at its pane.
-        var focused: HerdrTerminalEngine.CommandAnswer?
-    }
-
-    /// The request whose frames wait for a zoom, and the answer they fall back to when the zoom fails or
-    /// doesn't go.
-    private struct Completion: Sendable {
-        let request: UInt64
-        let fallback: HerdrTerminalEngine.CommandAnswer?
     }
 
     /// One connection to the server, from opening its bridge to its end. A reconnect replaces it, and
@@ -122,14 +96,16 @@ final class HerdrScreenModel {
         var isOpen = false
         /// Herdr's surface switch names the snapshot's boot, so nothing is shown before one arrives.
         var hasSnapshot = false
-        /// Numbers the view requests; the engine knows a request by its number.
-        var viewRequests: UInt64 = 0
-        /// The newest view request, while the session is to be shown.
-        var view: ViewRequest?
-        /// The newest request Herdr completed: its answers and a frame showing them are in.
+        /// Whether the model asked for the session shown.
+        var wantsShown = false
+        /// A show or hide was asked that the engine hasn't started yet: the screen reads nothing of the
+        /// request before it as the session's state.
+        var visibilityPending = false
+        /// The engine's current view request, as its `started` event said; only for what the screen
+        /// reads, since the engine alone decides what is current.
+        var request: (id: UInt64, kind: HerdrViewKind, showing: Bool)?
+        /// The newest request the engine completed.
         var activatedRequest: UInt64?
-        /// The newest request's time to complete.
-        var activationDeadline: Task<Void, Never>?
         /// How the attempt's bridge closes, set once it is given up; nil while it is under way.
         var closeCause: HerdrBridgeCloseCause?
         /// The give-up's close of the connection.
@@ -146,32 +122,26 @@ final class HerdrScreenModel {
 
         var ended: Bool { closeCause != nil }
 
-        var requestedShown: Bool { view != nil }
+        var requestedShown: Bool { wantsShown }
 
         /// The session reads as connected: the connection is open with its first snapshot and, while the
         /// session is shown, has completed a request, so the panes show its frames.
         var isReady: Bool {
-            isOpen && hasSnapshot && (view == nil || activatedRequest != nil)
+            isOpen && hasSnapshot && (!wantsShown || activatedRequest != nil)
         }
 
-        /// Ready and shown, with its show completed: the session takes input. A session shown again keeps
+        /// Ready and shown, with no show in progress: the session takes input. A session shown again keeps
         /// its last frame and reads as connected meanwhile, but takes no input, as Herdr's client freezes
-        /// input while a show is in progress. A move doesn't, as in Herdr's client, whose keys follow the
-        /// move's focus: here they go to the move's pane (`destinationPane`).
+        /// input while a show is in progress. A move doesn't freeze it, as in Herdr's client.
         var isActivated: Bool {
-            guard isReady, let view, let activatedRequest else { return false }
-            return activatedRequest >= view.show
+            guard isReady, wantsShown, !visibilityPending, let request, request.kind != .hide else { return false }
+            return !request.showing || activatedRequest == request.id
         }
 
         /// Activated with no request in progress: the frame on screen shows where the session is, so a
         /// command for the tab on screen can go.
         var isSettled: Bool {
-            isActivated && activatedRequest == view?.number
-        }
-
-        /// The request in progress, while its frames are held.
-        var pending: ViewRequest? {
-            view.flatMap { $0.number == activatedRequest ? nil : $0 }
+            isActivated && activatedRequest == request?.id
         }
 
         /// Returns once the attempt's task has returned and its give-up has closed its connection.
@@ -619,26 +589,18 @@ final class HerdrScreenModel {
 
     // MARK: - Input
 
-    /// Input goes out while the session is shown on an open connection, its show completed, and the pane
-    /// keys go to shows a frame: Herdr's client drops input before its first snapshot and while a show is
-    /// in progress, and the server drops input on a hidden surface.
+    /// Input goes out while the session is shown on an open connection with no show in progress, to the
+    /// newest snapshot's focused pane, as Herdr's client sends it (`shell/input.rs`): Herdr's client drops
+    /// input before its first snapshot and while a show is in progress, and the server drops input on a
+    /// hidden surface. What the screen draws doesn't matter to Herdr, which takes keys for the pane it has
+    /// focused.
     var isInputAvailable: Bool {
         inputTarget != nil
     }
 
     private var inputTarget: (attempt: Attempt, paneID: String)? {
-        guard let attempt = shownAttempt, let paneID = destinationPane(of: attempt),
-              presentation(ofPane: paneID) == .ready
-        else { return nil }
+        guard let attempt = shownAttempt, let paneID = focusedPaneID else { return nil }
         return (attempt, paneID)
-    }
-
-    /// The pane keys go to: the move in progress's pane, else the newest snapshot's focused pane. Keys
-    /// name their pane, and Herdr takes them for any pane on the tab on screen, so keys typed after a tap
-    /// reach the pane tapped before Herdr reports the focus. A pane on another tab has no frame on screen
-    /// until the move completes, and takes no keys until then.
-    private func destinationPane(of attempt: Attempt) -> String? {
-        attempt.pending?.paneID ?? focusedPaneID
     }
 
     private var shownAttempt: Attempt? {
@@ -723,32 +685,16 @@ final class HerdrScreenModel {
         return true
     }
 
-    /// Remux's move to `paneID`, a view request; the newest wins. Herdr's zoom is a flag on a tab, which
-    /// shows its focused pane, so a move within the tab on screen is a `pane.focus`, as Herdr's client
-    /// sends on a click. A move to another tab changes the tab: Remux's zoom comes off the tab left while
-    /// it is still on screen, since an unzoom focuses its target; `pane.focus` takes this client to the
-    /// pane's tab; and once Herdr has answered it and the snapshot is at the pane, by this move or any
-    /// other way, the setting zooms the tab as a show does. The engine holds the frames meanwhile, so only
-    /// the tab reached shows, as it ends up. A tab another client moves the session to stays as it is:
-    /// unzooming a tab off screen would focus it and take the session back.
+    /// Remux's move to `paneID`, a view request the engine starts when it goes (`.move`); the newest wins.
+    /// Herdr's zoom is a flag on a tab, which shows its focused pane, so a move within the tab on screen is
+    /// a `pane.focus`, as Herdr's client sends on a click. A move to another tab changes the tab: Remux's
+    /// zoom comes off the tab left while it is still on screen, since an unzoom focuses its target;
+    /// `pane.focus` takes this client to the pane's tab; and once Herdr has answered it and the snapshot is
+    /// at the pane, by this move or any other way, the setting zooms the tab as a show does. The engine
+    /// holds the frames meanwhile, so only the tab reached shows, as it ends up. A tab another client moves
+    /// the session to stays as it is: unzooming a tab off screen would focus it and take the session back.
     private func move(_ attempt: Attempt, to paneID: String) {
-        guard let view = attempt.view, paneID != destinationPane(of: attempt) else { return }
-        let number = nextViewRequest(attempt)
-        attempt.view = ViewRequest(
-            number: number,
-            show: view.show,
-            paneID: paneID,
-            zooms: attempt.pending?.zooms == true || tab(ofPane: paneID).map { $0 != onScreenTab } == true
-        )
-        awaitActivation(of: attempt, request: number)
-        attempt.ask(.move(number))
-        // Commands for the tab on screen wait for the move.
-        didChange()
-    }
-
-    private func nextViewRequest(_ attempt: Attempt) -> UInt64 {
-        attempt.viewRequests += 1
-        return attempt.viewRequests
+        attempt.ask(.move(paneID, fromAnotherTab: tab(ofPane: paneID).map { $0 != onScreenTab } == true))
     }
 
     /// The tab on screen, as the newest snapshot has it.
@@ -762,15 +708,37 @@ final class HerdrScreenModel {
         return HerdrTabKey(bootID: snapshot.bootID, tabID: tabID)
     }
 
-    /// Herdr answered the focus of view request `number`. One replaced meanwhile changes nothing. One
-    /// that failed ends where the session is, with the setting's zoom when the request zooms, since its
-    /// leave may have undone Remux's zoom there.
-    private func focusAnswered(
-        _ number: UInt64,
-        paneID: String,
-        attempt: Attempt,
-        reply: Result<HerdrCommandReply, Error>
-    ) {
+    /// The focus of view request `request`, which `go` sends once the engine has started the request.
+    /// The focus and zoom of a request it replaced, still waiting for the lane, don't go. Herdr's answer
+    /// goes to the engine, which alone knows whether the request is still current; only then does it
+    /// report the focus's outcome.
+    private func go(
+        to paneID: String,
+        request: UInt64,
+        leavingTab: Bool,
+        on connection: HerdrConnection,
+        feed: HerdrEngineFeed,
+        attempt: Attempt
+    ) async {
+        await connection.dropWaitingCommands(Self.paneFocusMethod)
+        await connection.dropWaitingCommands(Self.paneZoomMethod)
+        if leavingTab { await undoZoomOnScreen(on: connection) }
+        await connection.sendCommandWhileShown(Self.paneFocusMethod, params: ["pane_id": paneID]) {
+            [weak self] reply in
+            let answer = (try? reply.get()).map { reply in
+                HerdrTerminalEngine.CommandAnswer(sentAfter: reply.sentAfter, answeredAfter: reply.answeredAfter) {
+                    $0.focusedPaneID == paneID
+                }
+            }
+            Task { @MainActor [weak self] in
+                guard await feed.focused(request: request, answer: answer) else { return }
+                self?.focusAnswered(reply, attempt: attempt)
+            }
+        }
+    }
+
+    /// The current request's focus was answered.
+    private func focusAnswered(_ reply: Result<HerdrCommandReply, Error>, attempt: Attempt) {
         guard isCurrent(attempt) else { return }
         switch reply {
         case .success:
@@ -778,46 +746,19 @@ final class HerdrScreenModel {
         case .failure(let error):
             presentFailure(of: Self.paneFocusMethod, label: Self.focusFailureLabel, error)
         }
-        guard attempt.view?.number == number else { return }
-        guard let answer = try? reply.get() else { return finish(attempt, fallback: nil) }
-        attempt.view?.focused = HerdrTerminalEngine.CommandAnswer(
-            sentAfter: answer.sentAfter,
-            answeredAfter: answer.answeredAfter,
-            reached: { $0.focusedPaneID == paneID }
-        )
-        arrive(attempt)
     }
 
-    /// Once Herdr has answered the request's focus and the snapshot is at its pane, by this request or
-    /// any other way, the request ends with its last step (`finish`). A snapshot from after the answer at
-    /// another pane, where another client has since taken the session, ends it there as it is.
-    private func arrive(_ attempt: Attempt) {
-        guard let view = attempt.view, let focused = view.focused, let snapshot else { return }
-        if snapshot.focusedPaneID == view.paneID {
-            attempt.view?.focused = nil
-            finish(attempt, fallback: focused)
-        } else if snapshot.revision > focused.answeredAfter {
-            attempt.view?.focused = nil
-            settle(Completion(request: view.number, fallback: focused), attempt: attempt)
-        }
-    }
-
-    /// The request's last step: the setting's zoom of the tab on screen when the request zooms, which its
-    /// frames wait for; else they wait for what Herdr answered last, `fallback`.
-    private func finish(_ attempt: Attempt, fallback: HerdrTerminalEngine.CommandAnswer?) {
-        guard let view = attempt.view else { return }
-        let completion = Completion(request: view.number, fallback: fallback)
-        if view.zooms, let paneID = paneToZoomOnShow, let tab = onScreenTab {
-            attempt.ask(.zoom(paneID, zoomed: true, tab: tab, completing: completion))
+    /// The request is where it goes, or stays where Herdr has it: its last step is the setting's zoom of
+    /// the tab on screen when it zooms, which the engine lets go only while the request waits for it; else
+    /// it ends on what Herdr answered.
+    private func reached(_ request: UInt64, zooms: Bool, snapshot: HerdrSnapshot?, attempt: Attempt) {
+        if zooms, let snapshot = snapshot ?? self.snapshot, let paneID = paneToZoom(in: snapshot),
+           let tabID = snapshot.focusedTabID {
+            attempt.ask(.zoom(paneID, zoomed: true, tab: HerdrTabKey(bootID: snapshot.bootID, tabID: tabID), completing: request))
         } else {
-            settle(completion, attempt: attempt)
+            let feed = HerdrEngineFeed(engine: engine, connection: attempt.id)
+            Task { await feed.finish(request: request) }
         }
-    }
-
-    /// The request's frames wait for the answer it has, without another command.
-    private func settle(_ completion: Completion, attempt: Attempt) {
-        let feed = HerdrEngineFeed(engine: engine, connection: attempt.id)
-        Task { await feed.settle(request: completion.request, answer: completion.fallback) }
     }
 
     private func presentFailure(of method: String, label: String, _ failure: Error) {
@@ -865,16 +806,21 @@ final class HerdrScreenModel {
         )
         guard !gap.paneIDs.isEmpty, gap != askedTabMapGap else { return }
         askedTabMapGap = gap
+        let feed = HerdrEngineFeed(engine: engine, connection: attempt.id)
         Task { [weak self] in
-            let sent = await connection.sendCommandIfIdle(
-                Self.paneZoomMethod,
-                params: Self.zoomParams(paneID, zoomed: true)
-            ) { [weak self] reply in
-                Task { @MainActor [weak self] in
-                    self?.zoomAnswered(reply.map(\.json), bootID: gap.tab.bootID, reportingFailure: false)
+            // The zoom focuses its pane, so it doesn't go while a move is in progress.
+            var sent = false
+            if await feed.isSettled() {
+                sent = await connection.sendCommandIfIdle(
+                    Self.paneZoomMethod,
+                    params: Self.zoomParams(paneID, zoomed: true)
+                ) { [weak self] reply in
+                    Task { @MainActor [weak self] in
+                        self?.zoomAnswered(reply.map(\.json), bootID: gap.tab.bootID, reportingFailure: false)
+                    }
                 }
             }
-            // Held back by a command in flight, the gap is asked for at the next opening.
+            // Held back by a command or a move in flight, the gap is asked for at the next opening.
             if !sent, self?.askedTabMapGap == gap { self?.askedTabMapGap = nil }
         }
     }
@@ -884,12 +830,14 @@ final class HerdrScreenModel {
     /// screen: at once, or, as after a quick return while the leave's unzoom is still unanswered, once the
     /// command in flight is answered, unless the session has left or another client has taken it to
     /// another tab meanwhile. The request it is `completing` completes once Herdr has answered it, on a
-    /// frame showing the zoom; a zoom that fails or doesn't go leaves that to the fallback.
+    /// frame showing the zoom; a zoom that fails or doesn't go leaves that to the focus's answer. Herdr
+    /// applies a zoom whichever request asked, so its answer records Remux's zoom and the tab's map in any
+    /// case.
     private func sendZoom(
         _ paneID: String,
         zoomed: Bool,
         tab: HerdrTabKey,
-        completing: Completion?,
+        completing: UInt64?,
         on connection: HerdrConnection,
         feed: HerdrEngineFeed
     ) async {
@@ -900,8 +848,8 @@ final class HerdrScreenModel {
             onTab: tab.tabID
         ) { [weak self] reply in
             if let completing {
-                let answer = Self.zoomAnswer(reply, paneID: paneID) ?? completing.fallback
-                Task { await feed.settle(request: completing.request, answer: answer) }
+                let answer = Self.zoomAnswer(reply, paneID: paneID)
+                Task { await feed.zoomed(request: completing, answer: answer) }
             }
             Task { @MainActor [weak self] in
                 self?.zoomAnswered(reply.map(\.json), bootID: tab.bootID, reportingFailure: completing == nil)
@@ -930,12 +878,12 @@ final class HerdrScreenModel {
         )
     }
 
-    /// The setting zooms the tab on screen as the session is shown: the focused pane, when the tab has
-    /// more than one pane and the user hasn't unzoomed it. It is asked even when the tab is zoomed
+    /// The setting zooms the tab `snapshot` shows as the session comes to it: the focused pane, when the
+    /// tab has more than one pane and the user hasn't unzoomed it. It is asked even when the tab is zoomed
     /// already: Herdr's answer says whether Remux changed anything, and where the tab's panes sit for the
     /// pane sheet's map.
-    private var paneToZoomOnShow: String? {
-        guard currentTerminalSettings.zoomMultipaneWindowsByDefault, let snapshot,
+    private func paneToZoom(in snapshot: HerdrSnapshot) -> String? {
+        guard currentTerminalSettings.zoomMultipaneWindowsByDefault,
               let tabID = snapshot.focusedTabID, let paneID = snapshot.focusedPaneID,
               snapshot.panes.count(where: { $0.tabID == tabID }) > 1,
               !tabsUnzoomedByUser.contains(HerdrTabKey(bootID: snapshot.bootID, tabID: tabID))
@@ -1193,30 +1141,34 @@ final class HerdrScreenModel {
     ) async {
         let attemptID = attempt.id
         switch operation {
-        case .show(let geometry, let request):
-            await feed.beginActivation(request: request, columns: geometry.cols, rows: geometry.rows)
+        case .show(let geometry, let pane):
+            guard let started = await feed.start(
+                .shown(columns: geometry.cols, rows: geometry.rows, pane: pane),
+                within: connectionTiming.activation
+            ) else { return }
+            let show = started.request
             await connection.sendShow(geometry) { [weak self] result in
                 switch result {
                 case .success(let floor):
-                    Task { await feed.acknowledgeActivation(show: request, floor: floor) }
+                    Task { await feed.acknowledge(show: show, floor: floor) }
                 case .failure(let error):
-                    Task { @MainActor [weak self] in self?.showFailed(attemptID, show: request, error: error) }
+                    Task { @MainActor [weak self] in
+                        guard await feed.showFailed(show) else { return }
+                        self?.showFailed(attemptID, error: error)
+                    }
                 }
             }
-            // A show that stays where Herdr has the session ends here; one with a move behind it, or
-            // replaced meanwhile, leaves that to the move.
-            if let view = attempt.view, view.number == request, view.paneID == nil {
-                finish(attempt, fallback: nil)
+            if let pane = started.pane {
+                await go(to: pane, request: show, leavingTab: started.leavesTab, on: connection, feed: feed, attempt: attempt)
             }
         case .hide:
-            // The session is off screen and takes no input either way. Frames from here on show what
-            // leaving does, so the engine holds them before anything goes out.
-            await feed.endActivation()
+            // Frames from here on show what leaving does, so the engine holds them before anything goes out.
+            _ = await feed.start(.hidden, within: connectionTiming.activation)
             await undoZoomOnScreen(on: connection)
             // A hide Herdr doesn't confirm leaves only its stale foreground on the server.
             await connection.sendHide()
         case .resize(let geometry):
-            await feed.resizeActivation(columns: geometry.cols, rows: geometry.rows)
+            await feed.resize(columns: geometry.cols, rows: geometry.rows)
             await connection.resize(geometry)
             await engine.setCellSize(widthPx: geometry.cellWidthPx, heightPx: geometry.cellHeightPx)
         case .theme(let updates):
@@ -1242,27 +1194,20 @@ final class HerdrScreenModel {
             // Herdr acknowledges no input, but answers a ping only after reading everything sent before
             // it. Later operations don't wait for the answer.
             Task { delivered.resume(returning: await connection.confirmAlive()) }
-        case .move(let number):
-            // A newer request replaced it before it went.
-            guard let view = attempt.view, view.number == number, let paneID = view.paneID, let geometry else { return }
-            await feed.retarget(request: number, columns: geometry.cols, rows: geometry.rows)
-            // The focus and zoom of a request it replaced, still waiting for the lane, don't go.
-            await connection.dropWaitingCommands(Self.paneFocusMethod)
-            await connection.dropWaitingCommands(Self.paneZoomMethod)
-            // Whether it leaves the tab on screen is known only now: another client may have moved the
-            // session since it was asked.
-            if let tab = tab(ofPane: paneID), tab != onScreenTab {
-                if attempt.view?.number == number { attempt.view?.zooms = true }
-                await undoZoomOnScreen(on: connection)
-            }
-            await connection.sendCommandWhileShown(Self.paneFocusMethod, params: ["pane_id": paneID]) {
-                [weak self] reply in
-                Task { @MainActor [weak self] in
-                    self?.focusAnswered(number, paneID: paneID, attempt: attempt, reply: reply)
-                }
-            }
+        case .move(let paneID, let fromAnotherTab):
+            guard let geometry, let started = await feed.start(
+                .moved(pane: paneID, fromAnotherTab: fromAnotherTab, columns: geometry.cols, rows: geometry.rows),
+                within: connectionTiming.activation
+            ), let pane = started.pane else { return }
+            await go(to: pane, request: started.request, leavingTab: started.leavesTab, on: connection, feed: feed, attempt: attempt)
         case .zoom(let paneID, let zoomed, let tab, let completing):
-            if let completing, completing.request != attempt.view?.number { return }
+            // A request's zoom goes only while it waits for it; the zoom button's only while none is in
+            // progress, since a zoom focuses its pane.
+            if let completing {
+                guard await feed.awaitsLastStep(completing) else { return }
+            } else {
+                guard await feed.isSettled() else { return }
+            }
             await sendZoom(paneID, zoomed: zoomed, tab: tab, completing: completing, on: connection, feed: feed)
         }
     }
@@ -1353,7 +1298,6 @@ final class HerdrScreenModel {
         }
         self.snapshot = snapshot
         ownedZoom.reconcile(with: snapshot)
-        arrive(attempt)
         agents.project(snapshot, completions: completions)
         acknowledgeShownAgents()
         if snapshot.focusedPaneID != focusedPaneID {
@@ -1485,7 +1429,6 @@ final class HerdrScreenModel {
         attempt.closeCause = cause
         attempt.finishOperations()
         attempt.task?.cancel()
-        attempt.activationDeadline?.cancel()
         if attempt === self.attempt { resumeSizeWaiter() }
         Task { [engine, id = attempt.id] in await engine.endConnection(id) }
         if let connection = attempt.connection {
@@ -1495,72 +1438,51 @@ final class HerdrScreenModel {
 
     /// Shows the session while the root wants it on screen and hides it otherwise. Herdr takes the
     /// newest of a show and a hide, so each change is sent at once, even while the last is unanswered.
+    /// A pane asked for goes right after the show, as part of it.
     private func reconcileVisibility() {
         guard let attempt, isCurrent(attempt), attempt.isOpen, attempt.hasSnapshot, let geometry
         else { return }
         let wanted = isSelected && appPhase != .background
-        guard wanted != attempt.requestedShown else { return }
-        attempt.activationDeadline?.cancel()
-        attempt.activationDeadline = nil
-        if wanted {
-            let number = nextViewRequest(attempt)
-            // A pane asked for goes right after the show, as part of it, and the show completes there.
-            let reveal = takePendingReveal().flatMap { $0 == focusedPaneID ? nil : $0 }
-            attempt.view = ViewRequest(number: number, show: number, paneID: reveal, zooms: true)
-            awaitActivation(of: attempt, request: number)
-            attempt.ask(.show(geometry, request: number))
-            if reveal != nil { attempt.ask(.move(number)) }
-        } else {
-            attempt.view = nil
-            attempt.ask(.hide)
-        }
+        guard wanted != attempt.wantsShown else { return }
+        attempt.wantsShown = wanted
+        attempt.visibilityPending = true
+        attempt.ask(wanted ? .show(geometry, pane: takePendingReveal()) : .hide)
         // Input is offered only once a show completes, and closes as soon as a hide is asked.
         didChange()
     }
 
-    /// Herdr's answers and a frame showing them must all be in within the request's time, as in Herdr's
-    /// client (`activation.rs`); a request that doesn't complete is rolled back like a show Herdr refused.
-    /// A newer request starts the time again.
-    private func awaitActivation(of attempt: Attempt, request: UInt64) {
-        let attemptID = attempt.id
-        attempt.activationDeadline?.cancel()
-        attempt.activationDeadline = Task { [weak self, deadline = connectionTiming.activation] in
-            try? await Task.sleep(for: deadline)
-            guard !Task.isCancelled else { return }
-            self?.activationTimedOut(attemptID, request: request)
+    /// The engine's view requests, in its order: the screen reads the newest one started and the newest
+    /// one completed.
+    private func viewRequestUpdated(_ update: HerdrEngineUpdate) {
+        switch update {
+        case .started(let request, let kind, let showing, let connection):
+            guard let attempt, attempt.id == connection, isCurrent(attempt) else { return }
+            attempt.request = (request, kind, showing)
+            if kind != .move, (kind == .show) == attempt.wantsShown { attempt.visibilityPending = false }
+        case .reached(let request, let zooms, let snapshot, let connection):
+            guard let attempt, attempt.id == connection, isCurrent(attempt) else { return }
+            reached(request, zooms: zooms, snapshot: snapshot, attempt: attempt)
+        case .activated(let request, let connection):
+            guard let attempt, attempt.id == connection, isCurrent(attempt) else { return }
+            attempt.activatedRequest = request
+            acknowledgeShownAgents()
+        case .timedOut(_, let connection):
+            // Herdr's answers and a frame showing them must all be in within the request's time, as in
+            // Herdr's client (`activation.rs`); a request that doesn't complete is rolled back like a show
+            // Herdr refused.
+            guard let attempt, attempt.id == connection, isCurrent(attempt) else { return }
+            end(attempt, Self.activationTimeout, recovery: .retry, unresponsive: true)
+        default:
+            break
         }
-    }
-
-    /// A request of the show on screen completed. One a newer request replaced before the engine took it
-    /// over still completes its show; the newer one keeps its time.
-    private func activated(_ request: UInt64, connection: UInt64) {
-        guard let attempt, isCurrent(attempt), attempt.id == connection, let view = attempt.view,
-              request >= view.show, request > attempt.activatedRequest ?? 0
-        else { return }
-        attempt.activatedRequest = request
-        if request == view.number {
-            attempt.activationDeadline?.cancel()
-            attempt.activationDeadline = nil
-        }
-        acknowledgeShownAgents()
-        didChange()
-    }
-
-    private func activationTimedOut(_ attemptID: UInt64, request: UInt64) {
-        guard let attempt, attempt.id == attemptID, isCurrent(attempt),
-              request == attempt.view?.number, attempt.activatedRequest != request
-        else { return }
-        attempt.view = nil
-        end(attempt, Self.activationTimeout, recovery: .retry, unresponsive: true)
     }
 
     /// Herdr's client rolls a refused show back and stays on what it showed before; a Remux session
     /// screen has nothing else to show, so the connection ends, which takes the session off Herdr's
     /// screen, and the session reconnects. A show Herdr doesn't answer runs out of its time instead.
-    private func showFailed(_ attemptID: UInt64, show: UInt64, error: Error) {
-        guard let attempt, attempt.id == attemptID, isCurrent(attempt), show == attempt.view?.show else { return }
+    private func showFailed(_ attemptID: UInt64, error: Error) {
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt) else { return }
         if case .connectionEnded? = error as? HerdrCommandError { return }
-        attempt.view = nil
         end(attempt, TerminalDisconnectReason(kind: .runtime, message: error.localizedDescription), recovery: .retry)
     }
 
@@ -1652,8 +1574,8 @@ final class HerdrScreenModel {
             if let attempt, attempt.id == connection {
                 end(attempt, error.terminalDisconnectReason(on: target.server), recovery: Self.recovery(connectionFailedWith: error, opened: true))
             }
-        case .activated(let request, let connection):
-            activated(request, connection: connection)
+        case .started, .reached, .activated, .timedOut:
+            viewRequestUpdated(update)
         }
         didChange()
     }
