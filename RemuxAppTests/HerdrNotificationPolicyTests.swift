@@ -108,9 +108,9 @@ final class HerdrNotificationPolicyTests: XCTestCase {
         try receive(.custom, "first", at: 0)
         try receive(.custom, "second", at: 0)
         let first = try XCTUnwrap(policy.visible?.banner)
-        policy.dismiss(first.id, at: at(1))
+        policy.dismiss(first.id, at: at(1)) { self.sessions[$0] }
         XCTAssertEqual(shown, "second")
-        policy.dismiss(first.id, at: at(2))
+        policy.dismiss(first.id, at: at(2)) { self.sessions[$0] }
         XCTAssertEqual(shown, "second", "dismissing a banner no longer on screen took another")
         XCTAssertEqual(policy.visible?.until, at(6))
     }
@@ -120,7 +120,7 @@ final class HerdrNotificationPolicyTests: XCTestCase {
         try receive(.custom, "agents", at: 0)
         try receive(.custom, "other", from: other, at: 0)
         try receive(.custom, "agents later", at: 0)
-        policy.retire(agents, at: at(1))
+        policy.retire(agents, at: at(1)) { self.sessions[$0] }
         XCTAssertEqual(shown, "other")
         advance(to: 6)
         XCTAssertNil(shown)
@@ -215,5 +215,54 @@ final class HerdrNotificationPolicyTests: XCTestCase {
         XCTAssertEqual(shown, "other tab")
         advance(to: 19)
         XCTAssertEqual(shown, "other session")
+    }
+
+    // MARK: - Waiting behind the banner on screen
+
+    /// A banner on screen until 5 s, and waiting behind it the given agent notifications, about panes
+    /// `p2`, `p3` and so on in tab `t2`, all still true when they fall due at 1 s.
+    private func waitBehindABanner(_ notifications: [(HerdrSemanticNotification.Kind, String)]) throws {
+        try receive(.custom, "on screen", at: 0)
+        for (index, (kind, title)) in notifications.enumerated() {
+            try receive(kind, title, pane: "p\(index + 2)", tab: "t2", at: 0)
+        }
+        advance(to: 1)
+        XCTAssertEqual(shown, "on screen")
+    }
+
+    func testAWaitingBannerWhoseAgentIsNoLongerWaitingIsDropped() throws {
+        sessions[agents] = session(["p2": .blocked])
+        try waitBehindABanner([(.needsAttention, "attention")])
+        sessions[agents] = session(["p2": .working])
+        advance(to: 5)
+        XCTAssertNil(shown)
+        XCTAssertNil(policy.nextDeadline)
+    }
+
+    func testAWaitingBannerForTheTabNowOnScreenIsDropped() throws {
+        sessions[agents] = session(["p2": .blocked])
+        try waitBehindABanner([(.needsAttention, "attention")])
+        sessions[agents] = session(shown: true, tab: "t2", ["p2": .blocked])
+        advance(to: 5)
+        XCTAssertNil(shown)
+    }
+
+    /// A finished agent that reads as working again by the time its turn comes has resumed.
+    func testAWaitingFinishedBannerWhoseAgentWorksAgainIsDropped() throws {
+        sessions[agents] = session(["p2": .done])
+        try waitBehindABanner([(.finished, "done")])
+        sessions[agents] = session(["p2": .working])
+        advance(to: 5)
+        XCTAssertNil(shown)
+        XCTAssertNil(policy.nextDeadline)
+    }
+
+    func testTheFirstWaitingBannerStillTrueShows() throws {
+        sessions[agents] = session(["p2": .blocked, "p3": .blocked])
+        try waitBehindABanner([(.needsAttention, "stale"), (.needsAttention, "still waiting")])
+        sessions[agents] = session(["p2": .working, "p3": .blocked])
+        advance(to: 5)
+        XCTAssertEqual(shown, "still waiting")
+        XCTAssertEqual(policy.visible?.until, at(13))
     }
 }

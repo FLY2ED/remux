@@ -35,9 +35,11 @@ struct HerdrNotificationPlace: Equatable, Sendable {
 /// every open Herdr session as Herdr's client applies them across its machines.
 ///
 /// One notification is on screen at a time, for a time set by its kind, and up to eight wait behind it,
-/// the oldest dropped first. An agent's notification waits Herdr's default toast delay, then shows only
-/// if the agent is still in the state it reports, and never for the tab on screen. A newer notification
-/// for a pane replaces that pane's earlier one wherever it is.
+/// the oldest dropped first. An agent's notification waits Herdr's default toast delay. A notification
+/// takes the screen, when due or when its turn comes after waiting, only if its agent is still in the
+/// state it reports and its tab isn't on screen; otherwise it is dropped. Herdr's client checks only when
+/// a notification falls due, so one that waited could show for a tab already on screen. A newer
+/// notification for a pane replaces that pane's earlier one wherever it is.
 struct HerdrNotificationPolicy {
     /// Where a notification came from, as the banner names it and its tap needs it.
     struct Origin: Equatable, Sendable {
@@ -83,7 +85,6 @@ struct HerdrNotificationPolicy {
         let banner: Banner
         var due: ContinuousClock.Instant
         let expires: ContinuousClock.Instant
-        let checksState: Bool
     }
 
     private var pending: [Pending] = []
@@ -111,16 +112,14 @@ struct HerdrNotificationPolicy {
             queued.removeAll(where: samePane)
             if let visible, samePane(visible.banner) {
                 self.visible = nil
-                promoteQueued(at: now)
+                promoteQueued(at: now, sessions: sessions)
             }
         }
         nextID += 1
         pending.append(Pending(
             banner: Banner(id: nextID, origin: origin, notification: notification),
             due: now + delay,
-            expires: now + Self.completionEvidenceGrace,
-            // A finished agent is checked even without a delay: Herdr's word that it finished is a hint.
-            checksState: delay > .zero || notification.kind == .finished
+            expires: now + Self.completionEvidenceGrace
         ))
         advance(to: now, sessions: sessions)
     }
@@ -129,7 +128,7 @@ struct HerdrNotificationPolicy {
     mutating func advance(to now: ContinuousClock.Instant, sessions: Sessions) {
         if let visible, now >= visible.until {
             self.visible = nil
-            promoteQueued(at: now)
+            promoteQueued(at: now, sessions: sessions)
         }
         let waiting = pending
         pending.removeAll()
@@ -140,38 +139,33 @@ struct HerdrNotificationPolicy {
             }
             let notification = entry.banner.notification
             let session = sessions(entry.banner.origin.workspaceID)
-            if entry.checksState {
-                switch Self.validation(of: notification, in: session) {
-                case .current:
-                    break
-                case .awaitingSnapshot where now < entry.expires:
-                    entry.due = min(now + Self.completionRecheck, entry.expires)
-                    pending.append(entry)
-                    continue
-                case .awaitingSnapshot, .stale:
-                    continue
-                }
+            // Herdr's word that an agent finished is a hint: one that still reads as working gets a moment
+            // for the snapshot that says otherwise.
+            if now < entry.expires, Self.validation(of: notification, in: session) == .awaitingSnapshot {
+                entry.due = min(now + Self.completionRecheck, entry.expires)
+                pending.append(entry)
+                continue
             }
-            if !Self.targetIsShown(notification, in: session) {
+            if Self.mayShow(notification, in: session) {
                 show(entry.banner, at: now)
             }
         }
     }
 
     /// The banner on screen goes, as when it is tapped, and the next one shows.
-    mutating func dismiss(_ id: Banner.ID, at now: ContinuousClock.Instant) {
+    mutating func dismiss(_ id: Banner.ID, at now: ContinuousClock.Instant, sessions: Sessions) {
         guard visible?.banner.id == id else { return }
         visible = nil
-        promoteQueued(at: now)
+        promoteQueued(at: now, sessions: sessions)
     }
 
     /// Drops every notification of a session that closed or whose server restarted: its panes are gone.
-    mutating func retire(_ workspaceID: SavedWorkspace.ID, at now: ContinuousClock.Instant) {
+    mutating func retire(_ workspaceID: SavedWorkspace.ID, at now: ContinuousClock.Instant, sessions: Sessions) {
         pending.removeAll { $0.banner.origin.workspaceID == workspaceID }
         queued.removeAll { $0.origin.workspaceID == workspaceID }
         if visible?.banner.origin.workspaceID == workspaceID {
             visible = nil
-            promoteQueued(at: now)
+            promoteQueued(at: now, sessions: sessions)
         }
     }
 
@@ -184,28 +178,47 @@ struct HerdrNotificationPolicy {
         queued.append(banner)
     }
 
-    private mutating func promoteQueued(at now: ContinuousClock.Instant) {
-        guard !queued.isEmpty else { return }
-        let banner = queued.removeFirst()
-        visible = (banner, now + Self.displayTime(of: banner.notification.kind))
+    /// The first waiting banner that may still take the screen shows; those that may not are dropped.
+    private mutating func promoteQueued(at now: ContinuousClock.Instant, sessions: Sessions) {
+        while !queued.isEmpty {
+            let banner = queued.removeFirst()
+            guard Self.mayShow(banner.notification, in: sessions(banner.origin.workspaceID)) else { continue }
+            visible = (banner, now + Self.displayTime(of: banner.notification.kind))
+            return
+        }
     }
 
-    /// Whether the agent is still in the state the notification reports. A notification with no pane
-    /// can't be checked, so a finished one without a pane isn't shown.
+    /// Whether a notification may take the screen now: its agent is still in the state it reports, and
+    /// its tab isn't the one on screen. A finished agent that reads as working again has resumed.
+    private static func mayShow(
+        _ notification: HerdrSemanticNotification,
+        in session: HerdrNotificationSessionState?
+    ) -> Bool {
+        validation(of: notification, in: session) == .current && !targetIsShown(notification, in: session)
+    }
+
+    /// Whether the agent is still in the state the notification reports. Only an agent's notifications
+    /// report a state; one with no pane can't be checked, so a finished one without a pane isn't shown.
     private static func validation(
         of notification: HerdrSemanticNotification,
         in session: HerdrNotificationSessionState?
     ) -> Validation {
+        switch notification.kind {
+        case .updateInstalled, .custom:
+            return .current
+        case .needsAttention, .finished:
+            break
+        }
         guard let paneID = notification.paneID else {
             return notification.kind == .finished ? .stale : .current
         }
         guard let status = session?.agentStatuses[paneID] else { return .awaitingSnapshot }
         switch (notification.kind, status) {
-        case (.needsAttention, .blocked), (.finished, .done), (.updateInstalled, _), (.custom, _):
+        case (.needsAttention, .blocked), (.finished, .done):
             return .current
         case (.finished, .working):
             return .awaitingSnapshot
-        case (.needsAttention, _), (.finished, _):
+        default:
             return .stale
         }
     }
@@ -240,12 +253,12 @@ final class HerdrNotificationCenter: ObservableObject {
     }
 
     func dismiss(_ id: HerdrNotificationPolicy.Banner.ID) {
-        policy.dismiss(id, at: .now)
+        policy.dismiss(id, at: .now) { self.sessions($0) }
         update()
     }
 
     func retire(_ workspaceID: SavedWorkspace.ID) {
-        policy.retire(workspaceID, at: .now)
+        policy.retire(workspaceID, at: .now) { self.sessions($0) }
         update()
     }
 
