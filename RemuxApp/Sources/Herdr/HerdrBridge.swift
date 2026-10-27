@@ -146,11 +146,11 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
     ///
     /// Whether the SSH connection may carry the next opening is decided here. It may when nothing says
     /// the path is bad, as Herdr's client keeps its shared SSH connection for its next bridge whatever
-    /// ended the last. It may not when the closer doubts the path, having given up an opening or heard
-    /// nothing in time, or when the channel failed, a write included: it is given back as not reusable
-    /// before returning, so a reconnect right after never gets it again, which needs nothing from the
-    /// server. A reusable close finishes in the background, since it waits for the server to answer the
-    /// channel close.
+    /// ended the last. It may not when the closer doubts the path, having given up waiting for the
+    /// welcome or heard nothing in time, or when the channel failed, a write included: it is given back
+    /// as not reusable before returning, so a reconnect right after never gets it again, which needs
+    /// nothing from the server. A reusable close finishes in the background, since it waits for the
+    /// server to answer the channel close.
     func close(_ cause: HerdrBridgeCloseCause) async {
         let (connection, disposition, writes) = lock.withLock { () -> (RemuxSSHExecConnection?, RemuxSSHRootLeaseDisposition, [CheckedContinuation<Void, Error>]) in
             var channelFailed = writeFailed

@@ -19,11 +19,12 @@ protocol HerdrBridgeTransport: Sendable {
 /// Why a bridge closes, as far as its closer knows. Whether the channel itself failed is the bridge's
 /// own to know.
 enum HerdrBridgeCloseCause: Equatable, Sendable {
-    /// Nothing says the path is bad: Remux closed an open connection, or the connection ended on what
-    /// came from the other side, as Herdr refusing the hello or shutting down, or the bridge's stream
-    /// ending.
+    /// Nothing says the path is bad: Remux closed an open connection, or a bridge it had written nothing
+    /// to, or the connection ended on what came from the other side, as Herdr refusing the hello or
+    /// shutting down, or the bridge's stream ending.
     case finished
-    /// Given up before the connection opened, so whether the path still works is unknown.
+    /// Given up before the welcome came, after the hello went or as the app went to the background, so
+    /// whether the path still works is unknown.
     case givenUpWhileOpening
     /// Herdr didn't answer in time.
     case unresponsive

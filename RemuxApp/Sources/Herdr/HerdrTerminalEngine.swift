@@ -169,13 +169,12 @@ struct HerdrEngineFeed: Sendable {
 
     /// The zoom button's zoom of `pane`, the pane Herdr has focused.
     func setZoom(_ zoomed: Bool, ofPane pane: String) async {
-        await engine.enqueue(Self.zoom(pane, zoomed: zoomed, reportsFailure: true), connection: connection)
+        await engine.enqueue(Self.zoom(pane, zoomed: zoomed, purpose: .zoom(pane: pane, zoomed: zoomed)), connection: connection)
     }
 
-    /// The pane sheet's question for the layout of `pane`'s zoomed tab: the zoom it already has, which
-    /// changes nothing and answers with the layout.
+    /// The pane sheet's question for the layout of `pane`'s zoomed tab.
     func askLayout(ofPane pane: String) async {
-        await engine.enqueue(Self.zoom(pane, zoomed: true, reportsFailure: false), connection: connection)
+        await engine.enqueue(Self.zoom(pane, zoomed: true, purpose: .layout(pane: pane)), connection: connection)
     }
 
     /// Remux's zoom off the tab on screen before the connection closes, if Herdr can take it at once;
@@ -188,11 +187,15 @@ struct HerdrEngineFeed: Sendable {
         await engine.resize(columns: columns, rows: rows, connection: connection)
     }
 
-    private static func zoom(_ pane: String, zoomed: Bool, reportsFailure: Bool) -> HerdrCommandLane.Command {
+    private static func zoom(
+        _ pane: String,
+        zoomed: Bool,
+        purpose: HerdrCommandLane.Command.Purpose
+    ) -> HerdrCommandLane.Command {
         HerdrCommandLane.Command(
             method: HerdrScreenModel.paneZoomMethod,
             params: HerdrScreenModel.zoomParams(pane, zoomed: zoomed),
-            purpose: .zoom(pane: pane, zoomed: zoomed, reportsFailure: reportsFailure)
+            purpose: purpose
         )
     }
 }
@@ -281,6 +284,10 @@ actor HerdrTerminalEngine {
         /// The show whose answer gives the floor; nil for a hide, and for a move on a session whose show
         /// completed, which met its floor.
         let show: UInt64?
+        /// When it times out. A move that carries on a show keeps the show's, as Herdr's client keeps an
+        /// activation's deadline through a retarget (`activation.rs` `retarget`); any other move has its
+        /// own, as a navigation on a shown session is a request of its own there. Nil for a hide.
+        let due: ContinuousClock.Instant?
         var columns: UInt16
         var rows: UInt16
         /// The projection revision Herdr's acknowledgement returned, once it arrives.
@@ -552,10 +559,12 @@ actor HerdrTerminalEngine {
             } else if let kept, let snapshot, let tabID = snapshot.focusedTabID, policy.zooms(tabID, in: snapshot) {
                 steps = [.zoom(kept, navigates: false)]
             }
+            let due = ContinuousClock.now + deadline
             request = ViewRequest(
                 id: id,
                 kind: .show,
                 show: id,
+                due: due,
                 columns: max(geometry.cols, 1),
                 rows: max(geometry.rows, 1),
                 destination: pane,
@@ -571,7 +580,7 @@ actor HerdrTerminalEngine {
                 outbox.send([.shellResize(HerdrConnection.atLeastOneCell(geometry)), message, .focus(true)])
                 outbox.setSurfaceActive(true)
             }
-            begin(id, kind: .show, showing: true, within: deadline)
+            begin(id, kind: .show, showing: true, until: due)
             if message == nil {
                 // Herdr names its requests by its boot, which comes with its first snapshot.
                 continuation.yield(.showRefused(
@@ -588,10 +597,12 @@ actor HerdrTerminalEngine {
             }
             let id = nextRequest()
             let zooms = taken?.zooms == true || fromAnotherTab || Self.leaves(to: pane, in: snapshot)
+            let due = (taken?.show != nil ? taken?.due : nil) ?? ContinuousClock.now + deadline
             request = ViewRequest(
                 id: id,
                 kind: .move,
                 show: taken?.show,
+                due: due,
                 columns: max(columns, 1),
                 rows: max(rows, 1),
                 floor: taken == nil ? 0 : taken?.floor,
@@ -604,7 +615,7 @@ actor HerdrTerminalEngine {
                     : taken?.received
             )
             lane.replaceSteps(plan(to: pane, zooms: zooms, policy: policy, in: snapshot), for: id)
-            begin(id, kind: .move, showing: taken?.show != nil, within: deadline)
+            begin(id, kind: .move, showing: taken?.show != nil, until: due)
         }
     }
 
@@ -613,8 +624,8 @@ actor HerdrTerminalEngine {
         return requests
     }
 
-    private func begin(_ id: UInt64, kind: HerdrViewKind, showing: Bool, within deadline: Duration) {
-        startDeadline(for: id, within: deadline)
+    private func begin(_ id: UInt64, kind: HerdrViewKind, showing: Bool, until due: ContinuousClock.Instant) {
+        startDeadline(for: id, until: due)
         continuation.yield(.started(request: id, kind: kind, showing: showing, connection: connection))
         dispatch()
     }
@@ -648,7 +659,7 @@ actor HerdrTerminalEngine {
         lane.takeWaiting().forEach { fail($0, .notSent) }
         let id = nextRequest()
         request = ViewRequest(
-            id: id, kind: .hide, show: nil, columns: 1, rows: 1, destination: nil, kept: nil, zooms: false
+            id: id, kind: .hide, show: nil, due: nil, columns: 1, rows: 1, destination: nil, kept: nil, zooms: false
         )
         cancelDeadline()
         // A hide Herdr doesn't confirm leaves only its stale foreground on the server.
@@ -824,14 +835,17 @@ actor HerdrTerminalEngine {
         }
     }
 
-    /// Why a command can't go now, if it can't: Herdr refuses commands from a hidden session; and a zoom
+    /// Why a command can't go now, if it can't: Herdr refuses commands from a hidden session; a zoom
     /// outside a request focuses its pane, so it goes only while no request is in progress and that pane
-    /// is the focused one.
+    /// is the focused one; and the layout question goes only while the tab it asks about is still zoomed.
     private func refusal(of command: HerdrCommandLane.Command, in snapshot: HerdrSnapshot) -> HerdrCommandError? {
         guard let request, request.kind != .hide else { return .notSent }
         switch command.purpose {
-        case .zoom(let pane, _, _):
+        case .zoom(let pane, _):
             return request.inProgress || snapshot.focusedPaneID != pane ? .notSent : nil
+        case .layout(let pane):
+            let zoomed = snapshot.tabs.contains { $0.tabID == snapshot.focusedTabID && $0.zoomed }
+            return request.inProgress || snapshot.focusedPaneID != pane || !zoomed ? .notSent : nil
         case .unzoom, .other:
             return nil
         }
@@ -924,8 +938,10 @@ actor HerdrTerminalEngine {
             completeIfReady()
         case .command(let command):
             switch command.purpose {
-            case .zoom(_, _, let reportsFailure):
-                zoomAnswered(result, seen: inFlight.snapshots, reportsFailure: reportsFailure)
+            case .zoom:
+                zoomAnswered(result, seen: inFlight.snapshots, reportsFailure: true)
+            case .layout:
+                zoomAnswered(result, seen: inFlight.snapshots, reportsFailure: false)
             case .unzoom(_, let closed):
                 zoomAnswered(result, seen: inFlight.snapshots, reportsFailure: false)
                 closed?()
@@ -1030,11 +1046,11 @@ actor HerdrTerminalEngine {
         continuation.yield(.activated(request: request.id, connection: connection))
     }
 
-    private func startDeadline(for id: UInt64, within duration: Duration) {
+    private func startDeadline(for id: UInt64, until due: ContinuousClock.Instant) {
         deadline?.cancel()
         let connection = self.connection
         deadline = Task { [weak self] in
-            try? await Task.sleep(for: duration)
+            try? await Task.sleep(until: due, clock: .continuous)
             guard !Task.isCancelled else { return }
             await self?.expire(request: id, connection: connection)
         }

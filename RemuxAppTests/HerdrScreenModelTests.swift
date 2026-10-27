@@ -801,6 +801,30 @@ final class HerdrScreenModelTests: XCTestCase {
         )])
     }
 
+    /// A new size goes to Herdr while its show is still unanswered, as Herdr's client sends every resize to
+    /// the session it shows, which the show made this one.
+    func testAResizeGoesBeforeTheShowIsAnswered() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge()
+        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        harness.setScreenSize()
+        let model = harness.model
+        model.setSelected(true)
+        var index = 0
+        _ = try await harness.nextSurfaceSet(bridge, from: &index)
+        index += 1
+
+        model.terminalScreenAdapter.prepareInitialViewport(size: CGSize(width: 390, height: 500), scale: 3)
+        let resized = try XCTUnwrap(model.measurement)
+        let sent = try await harness.writes(bridge, from: index, count: 1)
+        XCTAssertEqual(sent[0], .resize(
+            cols: resized.controlViewport.columns,
+            rows: resized.controlViewport.rows,
+            cellWidth: resized.cellMetrics.pixelWidth,
+            cellHeight: resized.cellMetrics.pixelHeight
+        ))
+    }
+
     /// Only the newest size goes out: sizes changing faster than the queue sends them replace the one
     /// waiting, while other calls keep their order.
     func testOnlyTheNewestOfSeveralQueuedSizesIsSent() async throws {
@@ -924,8 +948,8 @@ final class HerdrScreenModelTests: XCTestCase {
 
     // MARK: - Stop and reconnect
 
-    /// Stopped before the screen has a size: the bridge closes once, as an opening given up, no hello goes
-    /// out, and nothing more is reported.
+    /// Stopped before the screen has a size: the bridge closes, no hello goes out, and nothing more is
+    /// reported.
     func testStopBeforeTheScreenHasASizeClosesTheBridge() async throws {
         let harness = await makeHarness()
         let bridge = try await harness.bridge()
@@ -934,7 +958,7 @@ final class HerdrScreenModelTests: XCTestCase {
         // The opening may still be returning the bridge when the stop comes; the stop waits for it.
         let closes = await bridge.closes
         let written = await bridge.writtenCount
-        XCTAssertEqual(closes, [.givenUpWhileOpening])
+        XCTAssertEqual(closes, [.finished])
         XCTAssertEqual(written, 0)
         harness.setScreenSize()
         XCTAssertEqual(harness.states.count, reportsBeforeStop)
@@ -1289,9 +1313,9 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(closes, [.givenUpWhileOpening])
     }
 
-    /// A bridge whose opening returns after a reconnect replaced its attempt is closed once, as an
-    /// opening given up, as one cancelled while it opened is.
-    func testABridgeOpenedAfterAReconnectReplacedItsAttemptIsClosedAsGivenUp() async throws {
+    /// A bridge whose opening returns after a reconnect replaced its attempt keeps its SSH connection for
+    /// the next opening, as that attempt's own bridge would.
+    func testABridgeOpenedAfterAReconnectReplacedItsAttemptIsReused() async throws {
         let harness = await makeHarness(bridgeOpeningTakes: .milliseconds(200))
         harness.setScreenSize()
         let bridges = harness.bridges
@@ -1302,7 +1326,7 @@ final class HerdrScreenModelTests: XCTestCase {
 
         let bridge = try await harness.bridge(0)
         let closes = try await allCloses(of: bridge, harness)
-        XCTAssertEqual(closes, [.givenUpWhileOpening])
+        XCTAssertEqual(closes, [.finished])
     }
 
     /// A reconnect while the bridge is still opening cancels that opening, which makes no bridge.
@@ -1367,8 +1391,8 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(closes, [.givenUpWhileOpening])
     }
 
-    /// A stop while the bridge opens waits for the opening: a bridge it still returns is closed once, as
-    /// an opening given up, before the stop returns.
+    /// A stop while the bridge opens waits for the opening: a bridge it still returns is closed once before
+    /// the stop returns, keeping its SSH connection, since nothing was written to it.
     func testAStopWhileTheBridgeOpensClosesTheLateBridgeBeforeReturning() async throws {
         let harness = await makeHarness(bridgeOpeningTakes: .milliseconds(200))
         harness.setScreenSize()
@@ -1380,7 +1404,7 @@ final class HerdrScreenModelTests: XCTestCase {
         await harness.model.stop()
         let bridge = try await harness.bridge(0)
         let closes = await bridge.closes
-        XCTAssertEqual(closes, [.givenUpWhileOpening])
+        XCTAssertEqual(closes, [.finished])
     }
 
     /// A show Herdr refuses ends the connection, which takes the session off Herdr's screen; nothing is

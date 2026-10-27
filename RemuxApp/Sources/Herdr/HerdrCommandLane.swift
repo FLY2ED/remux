@@ -37,10 +37,14 @@ struct HerdrCommandLane {
     /// A command other than a view request's step, and what it is for.
     struct Command: Sendable {
         enum Purpose {
-            /// A zoom of `pane` outside a request: the zoom button's, which reports a failure, or the pane
-            /// sheet's question for a tab's layout, which doesn't. Each goes only while no request is in
-            /// progress and `pane` is focused, since a zoom focuses its pane.
-            case zoom(pane: String, zoomed: Bool, reportsFailure: Bool)
+            /// The zoom button's zoom of `pane`, whose failure the screen reports. It goes only while no
+            /// request is in progress and `pane` is focused, since a zoom focuses its pane.
+            case zoom(pane: String, zoomed: Bool)
+            /// The pane sheet's question for the layout of `pane`'s zoomed tab: the zoom the tab has, which
+            /// changes nothing and answers with the layout. It goes as the zoom button's does, and only while
+            /// the tab is still zoomed, since another client may have unzoomed it meanwhile and the question
+            /// would zoom it again for everyone.
+            case layout(pane: String)
             /// Remux's zoom off the tab on screen, as the session leaves the screen or closes; `closed` once
             /// it is answered or fails.
             case unzoom(pane: String, closed: (@Sendable () -> Void)?)

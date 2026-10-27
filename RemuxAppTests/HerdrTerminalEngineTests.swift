@@ -608,6 +608,101 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// A move that takes over a show keeps the show's time, as Herdr's client keeps an activation's deadline
+    /// through a retarget: it times out when the show would have.
+    func testAMoveThatTakesOverAShowKeepsItsTime() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, _) = await connect(engine)
+        await feed.receive(try Self.places(revision: 1))
+
+        let began = ContinuousClock.now
+        _ = try await start(feed, updates, Self.show(), within: .milliseconds(400))
+        try await Task.sleep(for: .milliseconds(300))
+        let move = try await start(feed, updates, Self.move("Q"), within: .milliseconds(400))
+        guard case .timedOut(let request, _) = try await updates.next() else { return XCTFail("the move didn't time out") }
+        XCTAssertEqual(request, move)
+        XCTAssertLessThan(ContinuousClock.now - began, .milliseconds(600), "the move started the show's time over")
+        await engine.stop()
+    }
+
+    /// A move that takes over a move on a shown session has its own time: only a show's carries on.
+    func testAMoveThatTakesOverAMoveHasItsOwnTime() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shown(feed, updates, outbox, panes: Self.atP)
+
+        _ = try await start(feed, updates, Self.move("Q"), within: .milliseconds(400))
+        try await Task.sleep(for: .milliseconds(300))
+        let movedAgain = ContinuousClock.now
+        let move = try await start(feed, updates, Self.move("R", fromAnotherTab: true), within: .milliseconds(400))
+        guard case .timedOut(let request, _) = try await updates.next() else { return XCTFail("the move didn't time out") }
+        XCTAssertEqual(request, move)
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now - movedAgain, .milliseconds(350), "the move kept the time of the move it took over")
+        await engine.stop()
+    }
+
+    /// The pane sheet's question for a zoomed tab's layout, waiting for the lane, doesn't go once another
+    /// client has unzoomed the tab: it asks for the zoom the tab has, so it would zoom it again for everyone.
+    func testALayoutQuestionForATabAnotherClientUnzoomedDoesNotGo() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shownZoomed(feed, updates, outbox)
+        let answers = Answers()
+
+        await feed.command("worktree.list", params: [String: String](), answered: answers.record)
+        await feed.askLayout(ofPane: "P")
+        // Another client unzooms the tab while the question waits.
+        await feed.receive(try Self.places(revision: 3))
+        try await answer(feed, outbox)
+        _ = try await answers.next().get()
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "worktree.list"], "the question zoomed the tab again")
+        await engine.stop()
+        _ = await updates.drain()
+        XCTAssertEqual(updates.zoomAnswers.last?.failure, .notSent)
+        XCTAssertEqual(updates.zoomAnswers.last?.reportsFailure, false)
+    }
+
+    /// A command's caller hears when the connection ends, whether its command was in flight or waiting.
+    func testACommandsCallerHearsTheConnectionEnd() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shown(feed, updates, outbox, panes: Self.atP)
+        let answers = Answers()
+
+        await feed.command("worktree.list", params: [String: String](), answered: answers.record)
+        await feed.command("tab.focus", params: ["tab_id": "t2"], answered: answers.record)
+        await engine.endConnection(feed.connection)
+        let inFlight = try await answers.next()
+        let waiting = try await answers.next()
+        XCTAssertEqual([inFlight.failure, waiting.failure], [.connectionEnded, .connectionEnded])
+        await engine.stop()
+    }
+
+    /// Herdr's refusal of a show a newer one replaced changes nothing: the newer show completes, and
+    /// nothing goes out to undo either.
+    func testAnOlderShowsRefusalDoesNotUndoANewerShow() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        await feed.receive(try Self.places(revision: 1))
+        _ = try await start(feed, updates, Self.show())
+        _ = try await start(feed, updates, .hidden)
+        let newer = try await start(feed, updates, Self.show())
+        let sets = try outbox.surfaceSets()
+        await feed.receive(try Self.chunk(HerdrConnectionTests.reply(id: sets[0].id, error: ("refused", "refused"))))
+        await feed.receive(try Self.chunk(HerdrServerScript.surfaceSetReply(id: sets[2].id, active: true, projection: 1)))
+        await feed.receive(.surface(try Self.surface(revision: 1, lines: ["one ", "two "], panes: Self.atP)))
+        try await activation(newer, updates)
+        XCTAssertEqual(try outbox.surfaceSets().map(\.active), [true, false, true], "something went to undo a show")
+        await engine.stop()
+        let rest = await updates.drain()
+        XCTAssertFalse(rest.contains { if case .showRefused = $0 { true } else { false } }, "\(rest)")
+    }
+
     /// A move whose focus Herdr answered, after which another client takes the session elsewhere before
     /// any frame at the pane, ends there as Herdr shows it.
     func testAMoveOvertakenElsewhereEndsAsHerdrShowsIt() async throws {

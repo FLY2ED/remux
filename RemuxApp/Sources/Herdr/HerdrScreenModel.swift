@@ -108,6 +108,9 @@ final class HerdrScreenModel {
         /// The connection, from the moment its bridge opened: from then on only the connection closes
         /// the bridge.
         var connection: HerdrConnection?
+        /// The hello is on its way to Herdr: from then on, until the welcome, whether the path works is
+        /// unknown.
+        var helloSent = false
         /// The connection's welcome came and the model took it.
         var isOpen = false
         /// Herdr's surface switch names the snapshot's boot, so nothing is shown before one arrives.
@@ -427,7 +430,7 @@ final class HerdrScreenModel {
         readySince = nil
         guard let attempt, !attempt.ended, !attempt.isOpen else { return }
         // Not a failure: it is opened again on return.
-        giveUp(attempt)
+        giveUp(attempt, suspending: true)
         recoveryDue = recoveryDue ?? .now
     }
 
@@ -1058,6 +1061,7 @@ final class HerdrScreenModel {
         // Frames can arrive before `open` returns; the engine paints them at the hello's cell size.
         await engine.setCellSize(widthPx: size.cellWidthPx, heightPx: size.cellHeightPx)
         await engine.beginConnection(attempt.id, outbox: connection.outbox)
+        attempt.helloSent = true
         do {
             try await connection.open(
                 hello: HerdrHello(
@@ -1400,12 +1404,16 @@ final class HerdrScreenModel {
 
     /// Gives the attempt up, once, whatever ends it: a failure, a replacement, the background or a stop.
     /// Its operations end, its opening stops, the engine drops what its connection still sends, and the
-    /// connection closes, telling the bridge whether Herdr went silent or the attempt was still opening.
-    /// A bridge that opens afterwards closes the same way.
-    private func giveUp(_ attempt: Attempt, unresponsive: Bool = false) {
+    /// connection closes, telling the bridge whether Herdr went silent or the path is in doubt: the
+    /// attempt was waiting for its welcome, or the app is going to the background, where its SSH
+    /// connection may not survive. A bridge that opens afterwards closes the same way; one given up
+    /// otherwise before anything was written to it opened fine, so its SSH connection can carry the next
+    /// opening.
+    private func giveUp(_ attempt: Attempt, unresponsive: Bool = false, suspending: Bool = false) {
         guard !attempt.ended else { return }
         let cause: HerdrBridgeCloseCause = unresponsive ? .unresponsive
-            : attempt.isOpen ? .finished : .givenUpWhileOpening
+            : attempt.isOpen ? .finished
+            : suspending || attempt.helloSent ? .givenUpWhileOpening : .finished
         attempt.closeCause = cause
         attempt.finishOperations()
         attempt.task?.cancel()
