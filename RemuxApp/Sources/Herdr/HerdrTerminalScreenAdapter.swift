@@ -314,7 +314,11 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
 
     func claimActiveTmuxViewportIfNeeded() {}
 
-    func refreshPaneMetadata(inTopLevel id: UUID) {}
+    /// The pane sheet is opening over the tab: a zoomed tab's map may lack places Herdr can report.
+    func refreshPaneMetadata(inTopLevel id: UUID) {
+        guard let model, let layout = model.layout, topLevelID(for: layout) == id else { return }
+        model.fillTabMapIfNeeded()
+    }
 
     func focusPane(_ id: UUID) -> GhosttyTerminalActionOutcome {
         guard let paneID = paneID(for: id), model?.focusPane(paneID) == true else {

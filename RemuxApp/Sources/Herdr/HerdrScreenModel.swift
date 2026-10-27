@@ -222,6 +222,8 @@ final class HerdrScreenModel {
     /// Tabs the user unzoomed with the pane sheet's button, which the setting leaves alone after.
     private var tabsUnzoomedByUser: Set<HerdrTabKey> = []
     private var tabMap: HerdrTabMap?
+    /// The zoomed tab's panes the map had no place for when Remux last asked Herdr for its layout.
+    private var askedTabMapGap: HerdrTabMapGap?
     private var terminals: [String: HerdrRetainedTerminal] = [:]
     private var surfaces: [String: HerdrPaneSurface] = [:]
     private var paneScrolls: [String: HerdrPaneScroll] = [:]
@@ -670,6 +672,37 @@ final class HerdrScreenModel {
             self?.zoomAnswered(answer, bootID: bootID, reportingFailure: true)
         }
         return true
+    }
+
+    /// The pane sheet is opening. A zoomed tab's map places the panes its frame doesn't draw from the
+    /// newest full layout Herdr reported, and a tab zoomed before Remux saw it, as by another client
+    /// while the setting is off, has none. Herdr's endpoint has no layout query, so Remux asks for the
+    /// zoom the tab already has: Herdr changes nothing and answers with the tab's full layout, which
+    /// fills the map as any zoom's answer does. It asks once for each set of missing panes, and only
+    /// when no command is in flight, since Herdr refuses one then.
+    func fillTabMapIfNeeded() {
+        guard let attempt, isCurrent(attempt), let connection = attempt.connection, attempt.isActivated,
+              let layout, let tab = layout.tab, tab.zoomed, let snapshot, snapshot.bootID == layout.bootID,
+              snapshot.focusedTabID == tab.tabID, let paneID = snapshot.focusedPaneID
+        else { return }
+        let gap = HerdrTabMapGap(
+            tab: HerdrTabKey(bootID: layout.bootID, tabID: tab.tabID),
+            paneIDs: Set(layout.panes.lazy.map(\.paneID).filter { self.mapRect(ofPane: $0) == nil })
+        )
+        guard !gap.paneIDs.isEmpty, gap != askedTabMapGap else { return }
+        askedTabMapGap = gap
+        Task { [weak self] in
+            let sent = await connection.sendCommandIfIdle(
+                Self.paneZoomMethod,
+                params: Self.zoomParams(paneID, zoomed: true)
+            ) { [weak self] reply in
+                Task { @MainActor [weak self] in
+                    self?.zoomAnswered(reply.map(\.json), bootID: gap.tab.bootID, reportingFailure: false)
+                }
+            }
+            // Held back by a command in flight, the gap is asked for at the next opening.
+            if !sent, self?.askedTabMapGap == gap { self?.askedTabMapGap = nil }
+        }
     }
 
     /// The zoom behind a show goes out after it, so Herdr takes it from a client on screen: at once, or,

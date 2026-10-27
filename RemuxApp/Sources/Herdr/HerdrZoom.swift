@@ -105,3 +105,9 @@ struct HerdrTabMap: Equatable {
     let tabID: String
     let rects: [String: HerdrSurfaceRect]
 }
+
+/// The panes of a zoomed tab that its map has no place for.
+struct HerdrTabMapGap: Equatable {
+    let tab: HerdrTabKey
+    let paneIDs: Set<String>
+}

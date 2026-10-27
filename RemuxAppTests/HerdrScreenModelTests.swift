@@ -2095,6 +2095,96 @@ final class HerdrScreenModelTests: XCTestCase {
         _ = try await nextWrite(session.bridge, from: &index, paneZoom)
     }
 
+    /// A tab zoomed elsewhere, shown with the setting off, has no places for the panes its frame doesn't
+    /// draw. Opening the pane sheet asks Herdr for the zoom the tab has, on the pane it shows; the answer
+    /// changes nothing and maps every pane, and opening the sheet again asks nothing more.
+    func testThePaneSheetMapsATabZoomedElsewhere() async throws {
+        let harness = await makeHarness()
+        let session = try await shownTab(harness, zoomed: true)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let topLevel = try topLevel(harness)
+        XCTAssertEqual(adapter.paneSelectionSheetRenderProjection(topLevelID: topLevel).panes.map { $0.frame != nil }, [true, false])
+
+        adapter.refreshPaneMetadata(inTopLevel: topLevel)
+        let asked = index
+        try await harness.waitUntil("the sheet didn't ask for the tab's layout") { await session.bridge.writtenCount > asked }
+        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        XCTAssertEqual([zoom.paneID, zoom.mode], ["w1:p1", "on"])
+        await session.bridge.serve(HerdrServerScript.zoomReply(id: zoom.id, changed: false, zoomed: true, panes: Self.places(2)))
+        try await waitForMap(harness)
+
+        adapter.refreshPaneMetadata(inTopLevel: topLevel)
+        try await Task.sleep(for: .milliseconds(150))
+        let written = await session.bridge.writtenCount
+        XCTAssertEqual(written, index, "the sheet asked again")
+    }
+
+    /// The sheet asks nothing when the map places every pane already, here from the show's zoom.
+    func testThePaneSheetAsksNothingWhenTheMapIsComplete() async throws {
+        let harness = await makeHarness(settings: Self.zooming)
+        let session = try await shownTab(harness, zoomingOnShow: true)
+        var index = session.next
+
+        harness.model.terminalScreenAdapter.refreshPaneMetadata(inTopLevel: try topLevel(harness))
+        try await Task.sleep(for: .milliseconds(150))
+        let written = await session.bridge.writtenCount
+        XCTAssertEqual(written, index, "the sheet asked for a layout it had")
+        // Leaving undoes the zoom without waiting, so the test's stop doesn't wait for Herdr's answer.
+        harness.model.setSelected(false)
+        _ = try await nextWrite(session.bridge, from: &index, paneZoom)
+    }
+
+    /// While a command is in flight the sheet asks nothing, as Herdr would refuse it; an opening after
+    /// the command is answered asks.
+    func testThePaneSheetAsksForTheMapOnlyWhenNoCommandIsInFlight() async throws {
+        let harness = await makeHarness()
+        let session = try await shownTab(harness, zoomed: true)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let topLevel = try topLevel(harness)
+        XCTAssertTrue(harness.model.focusPane("w1:p2"))
+        let focus = try await nextWrite(session.bridge, from: &index, paneFocus)
+
+        adapter.refreshPaneMetadata(inTopLevel: topLevel)
+        try await Task.sleep(for: .milliseconds(150))
+        let waiting = await session.bridge.writtenCount
+        XCTAssertEqual(waiting, index, "the sheet asked while a command was in flight")
+
+        await session.bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
+        let asked = index
+        try await harness.waitUntil("the next opening didn't ask") {
+            adapter.refreshPaneMetadata(inTopLevel: topLevel)
+            return await session.bridge.writtenCount > asked
+        }
+        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        XCTAssertEqual([zoom.paneID, zoom.mode], ["w1:p1", "on"])
+    }
+
+    /// A failed answer leaves the map as it was, and the same missing panes aren't asked for again.
+    func testAFailedMapAnswerLeavesTheMapAndIsNotAskedAgain() async throws {
+        let harness = await makeHarness()
+        let session = try await shownTab(harness, zoomed: true)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let topLevel = try topLevel(harness)
+
+        adapter.refreshPaneMetadata(inTopLevel: topLevel)
+        let asked = index
+        try await harness.waitUntil("the sheet didn't ask for the tab's layout") { await session.bridge.writtenCount > asked }
+        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        await session.bridge.serve(
+            HerdrConnectionTests.reply(id: zoom.id, error: ("pane_layout_unavailable", "pane layout unavailable"))
+        )
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(adapter.paneSelectionSheetRenderProjection(topLevelID: topLevel).panes.map { $0.frame != nil }, [true, false])
+
+        adapter.refreshPaneMetadata(inTopLevel: topLevel)
+        try await Task.sleep(for: .milliseconds(150))
+        let written = await session.bridge.writtenCount
+        XCTAssertEqual(written, index, "the same missing panes were asked for again")
+    }
+
     /// Ending the session on screen undoes the zoom Remux made first, and closes the connection once
     /// Herdr has answered, so the unzoom isn't lost with it.
     func testEndingTheSessionUndoesTheZoomBeforeClosing() async throws {
