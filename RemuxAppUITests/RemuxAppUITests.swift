@@ -1775,6 +1775,73 @@ final class RemuxAppUITests: XCTestCase {
         captureLiveHerdrStep("6-scrolled", in: configuration)
     }
 
+    /// Copy on a Herdr pane is Herdr's text of the selection: an OSC 8 link the pane wraps onto two rows
+    /// pastes as the whole link on one line, as does a plain-text one once Herdr has found the rest of it,
+    /// and a word pastes as itself. A selection made over the history moves with its line when a swipe
+    /// scrolls Herdr's history.
+    func testLiveHerdrSelectionCopyWhenConfigured() throws {
+        let configuration = try launchLiveHerdrApp()
+        openFirstSavedSession()
+        waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
+        let terminal = app.otherElements["terminal.screen"].firstMatch
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10))
+        // A row and a half down, a press lands on the text's first or second row, whether or not Herdr
+        // draws a border above the pane.
+        let topRows = terminal.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 20, dy: 26))
+
+        let token = UUID().uuidString.prefix(8).lowercased()
+        let url = "https://example.com/\(token)/" + String(repeating: "p", count: 60)
+        UIPasteboard.general.string = "REMUX_HERDR_LINK_COPY_SENTINEL"
+        sendTerminalCommand(#"clear; printf '\033]8;;"# + url + #"\033\\"# + url + #"\033]8;;\033\\\n'"#)
+        hideKeyboardIfPresent()
+        guard waitForStableLiveTerminalScreenshot(attachmentName: "herdr-wrapped-link-ready") != nil else { return }
+        topRows.press(forDuration: 0.70)
+        let linkCopy = waitForCopyMenuItem(timeout: 5)
+        captureLiveHerdrStep("c1-wrapped-link-selected", in: configuration)
+        linkCopy.tap()
+        XCTAssertEqual(pasteIntoEmptyComposer(), url, "A link the pane wraps should copy whole, on one line.")
+        captureLiveHerdrStep("c2-link-pasted", in: configuration)
+        clearAndCloseComposer()
+
+        let plainURL = "https://example.org/\(token)/" + String(repeating: "q", count: 60)
+        UIPasteboard.general.string = "REMUX_HERDR_PLAIN_LINK_COPY_SENTINEL"
+        sendTerminalCommand("clear; printf '%s\\n' \(plainURL)")
+        hideKeyboardIfPresent()
+        guard waitForStableLiveTerminalScreenshot(attachmentName: "herdr-plain-link-ready") != nil else { return }
+        topRows.press(forDuration: 0.70)
+        let plainCopy = waitForCopyMenuItem(timeout: 5)
+        captureLiveHerdrStep("c2b-plain-link-grown", in: configuration)
+        plainCopy.tap()
+        XCTAssertEqual(
+            pasteIntoEmptyComposer(),
+            plainURL,
+            "A plain-text link the pane wraps should grow to the whole link and copy on one line."
+        )
+        clearAndCloseComposer()
+
+        let word = "herdrword-\(token)"
+        UIPasteboard.general.string = "REMUX_HERDR_WORD_COPY_SENTINEL"
+        sendTerminalCommand("clear; printf '%s\\n%s\\n' \(word) \(word)")
+        hideKeyboardIfPresent()
+        guard waitForStableLiveTerminalScreenshot(attachmentName: "herdr-word-ready") != nil else { return }
+        topRows.press(forDuration: 0.70)
+        waitForCopyMenuItem(timeout: 5).tap()
+        XCTAssertEqual(pasteIntoEmptyComposer(), word, "A word should copy as itself.")
+        clearAndCloseComposer()
+
+        sendTerminalCommand("clear; seq -f 'scrolled line %g' 1 120")
+        hideKeyboardIfPresent()
+        guard waitForStableLiveTerminalScreenshot(attachmentName: "herdr-history-ready") != nil else { return }
+        topRows.press(forDuration: 0.70)
+        XCTAssertTrue(waitForCopyMenuItem(timeout: 5).exists)
+        captureLiveHerdrStep("c3-history-word-selected", in: configuration)
+        let swipe = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4))
+        swipe.press(forDuration: 0.05, thenDragTo: swipe.withOffset(CGVector(dx: 0, dy: 70)))
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "Herdr scrolls and the highlight follows")], timeout: 2)
+        captureLiveHerdrStep("c4-selection-followed-scroll", in: configuration)
+        XCTAssertEqual(app.state, .runningForeground)
+    }
+
     /// Opens Panes over a Herdr session whose tab has `paneCount` panes, checks that the pane picker maps
     /// every one, also while the tab is zoomed, and returns its Zoom switch.
     private func openHerdrPanesZoomSwitch(paneCount: Int) -> XCUIElement {

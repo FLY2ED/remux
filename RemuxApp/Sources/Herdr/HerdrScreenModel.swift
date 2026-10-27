@@ -649,7 +649,7 @@ final class HerdrScreenModel {
             return .surfaceRejected
         }
         for message in messages {
-            target.attempt.ask(.input(paneID: target.paneID, events: message, delivered: nil))
+            ask(input: message, toPane: target.paneID, on: target.attempt, delivered: nil)
         }
         return .accepted
     }
@@ -673,8 +673,22 @@ final class HerdrScreenModel {
               (try? HerdrConnection.checkLimits(events)) != nil
         else { return false }
         return await withCheckedContinuation { delivered in
-            attempt.ask(.input(paneID: paneID, events: events, delivered: delivered))
+            ask(input: events, toPane: paneID, on: attempt, delivered: delivered)
         }
+    }
+
+    /// All input for a pane goes this way. Input other than the wheel ends the pane's selection, as Herdr's
+    /// client ends its own on a key, text or a paste, whatever sends it.
+    private func ask(
+        input events: [HerdrInputEvent],
+        toPane paneID: String,
+        on attempt: Attempt,
+        delivered: CheckedContinuation<Bool, Never>?
+    ) {
+        if events.contains(where: { if case .mouse = $0 { false } else { true } }) {
+            surfaces[paneID]?.renderer.managedSurface?.endSelection()
+        }
+        attempt.ask(.input(paneID: paneID, events: events, delivered: delivered))
     }
 
     /// Remux's own move to a pane, the one way a tap on a pane, a notification's pane or a list of the
@@ -1010,6 +1024,71 @@ final class HerdrScreenModel {
               let managed = surfaces[paneID]?.renderer.managedSurface
         else { return }
         managed.setRemoteScroll(scroll.scrollState, route: scroll.route)
+    }
+
+    // MARK: - Selection
+
+    /// The text of a selection in `paneID`, read by Herdr, which keeps the pane's history and joins its
+    /// wrapped lines. The read waits in line behind the commands asked before it and for Herdr's answer as
+    /// long as Herdr's client waits for a command. A read that can't go or fails says so, as Herdr's client
+    /// does, and returns nil.
+    func readSelection(_ selection: GhosttyHistorySelection, inPane paneID: String) async -> String? {
+        guard let attempt = shownAttempt, let connection = attempt.connection else {
+            notices.replaced()
+            terminalScreenAdapter.presentFailure(Self.copyFailureLabel)
+            return nil
+        }
+        do {
+            let reply = try await connection.command(
+                Self.paneSelectionReadMethod,
+                params: HerdrSelectionRead(paneID: paneID, selection: selection)
+            )
+            let text = try HerdrSelectionRead.text(fromReply: reply)
+            notices.succeeded(Self.paneSelectionReadMethod, bootID: layout?.bootID)
+            return text
+        } catch {
+            if isCurrent(attempt) {
+                presentFailure(of: Self.paneSelectionReadMethod, label: Self.copyFailureLabel, error)
+            }
+            return nil
+        }
+    }
+
+    /// The whole of the plain-text link at `cell`, a history cell of `paneID`, which Herdr finds across the
+    /// pane's wrapped rows; nil when there is none. It is asked about the frame the pane's terminal shows,
+    /// and its regions, rows of that frame's viewport, come back as history rows. The answer holds only
+    /// while the terminal still shows that frame: as Herdr's client does, one found in content or a viewport
+    /// that has changed since is dropped. As for Herdr's client the question is optional, so a failure says
+    /// nothing.
+    func resolveLink(at cell: GhosttyTerminalCell, inPane paneID: String) async -> GhosttyHistorySelection? {
+        guard let connection = shownAttempt?.connection,
+              let content = await engine.content(ofPane: paneID),
+              let request = HerdrLinkResolve(paneID: paneID, cell: cell, content: content),
+              let reply = try? await connection.command(Self.paneLinkResolveMethod, params: request),
+              await engine.content(ofPane: paneID) == content
+        else { return nil }
+        return try? request.link(fromReply: reply)
+    }
+
+    /// Herdr's client ends a pane's selection when the pane's width changes, since Herdr rewraps its lines
+    /// and their rows move, and when its program switches screens. A change of height keeps the rows, and
+    /// on the phone the keyboard makes one, so the selection stays.
+    private func endSelections(movedBy layout: HerdrPaneLayout) {
+        for pane in layout.panes {
+            guard let width = pane.innerRect?.width,
+                  let previous = self.layout?.panes.first(where: { $0.paneID == pane.paneID })?.innerRect?.width,
+                  width != previous
+            else { continue }
+            surfaces[pane.paneID]?.renderer.managedSurface?.endSelection()
+        }
+    }
+
+    private func endSelections(movedBy scrolls: [String: HerdrPaneScroll]) {
+        for (paneID, scroll) in scrolls {
+            guard let previous = paneScrolls[paneID], previous.alternateScreenActive != scroll.alternateScreenActive
+            else { continue }
+            surfaces[paneID]?.renderer.managedSurface?.endSelection()
+        }
     }
 
     private func inputFailed(_ attemptID: UInt64) {
@@ -1551,6 +1630,7 @@ final class HerdrScreenModel {
             }
             createRendererIfPossible(paneID)
         case .layout(let layout):
+            endSelections(movedBy: layout)
             self.layout = layout
             if let tab = layout.tab, !tab.zoomed {
                 let drawn = layout.panes.compactMap { pane in pane.hasTextArea ? pane.innerRect.map { (pane.paneID, $0) } : nil }
@@ -1582,6 +1662,7 @@ final class HerdrScreenModel {
             // Only what counts as seen follows it; the screen has nothing new to show.
             return
         case .paneScroll(let scrolls):
+            endSelections(movedBy: scrolls)
             paneScrolls = scrolls
             for paneID in surfaces.keys {
                 applyScroll(toPane: paneID)
@@ -1791,7 +1872,10 @@ final class HerdrScreenModel {
 
     nonisolated static let paneFocusMethod = "pane.focus"
     nonisolated static let paneZoomMethod = "pane.zoom"
+    nonisolated static let paneSelectionReadMethod = "pane.selection.read"
+    nonisolated static let paneLinkResolveMethod = "pane.link.resolve"
     private static let inputFailureLabel = "input"
+    private static let copyFailureLabel = "copy"
     private static let focusFailureLabel = "select pane"
     private static let zoomFailureLabel = "zoom pane"
 
