@@ -2017,8 +2017,9 @@ private struct TerminalSettingsView: View {
                 Text("Windows & Panes")
             } footer: {
                 Text(
-                    "You can override this per window from Panes. Remux normally clears zooms "
-                        + "it applied when closing. If one remains on the server, use prefix + z."
+                    "tmux windows and Herdr tabs with more than one pane show one pane at a time. "
+                        + "To see all of a window's or tab's panes, turn Zoom off in Panes. Other devices see "
+                        + "the zoom while you're in a Herdr session, and until you end a tmux session."
                 )
             }
             .libraryHomeListRowSurface()
