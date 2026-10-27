@@ -315,8 +315,10 @@ final class HerdrScreenModel {
         recoveryTimer = nil
         readySince = nil
         guard let attempt, !attempt.ended, attempt.connection == nil else { return }
-        // Not a failure: it is opened again on return.
-        retire(attempt)
+        // Not a failure: it is opened again on return. Whether its path still works is unknown, so its
+        // SSH connection isn't offered to the next one, which would wait on a dead one; an opening under
+        // way closes its own the same way.
+        retire(attempt, reusable: false)
         recoveryDue = recoveryDue ?? .now
     }
 

@@ -243,7 +243,8 @@ actor HerdrConnection {
         onEvent: @escaping @Sendable (HerdrConnectionEvent) async -> Void
     ) async throws -> HerdrConnection {
         // Neither a stalled write nor a read ends when its task is cancelled, so the timeout and a
-        // cancelled open close the transport, which ends both. A timeout means the path may be dead.
+        // cancelled open close the transport, which ends both. Neither knows whether the path still
+        // works, so the SSH connection isn't offered to the next opening, which would wait on a dead one.
         let timer = Task {
             try await Task.sleep(for: timing.welcome)
             await transport.close(reusable: false)
@@ -256,7 +257,7 @@ actor HerdrConnection {
                 try? await transport.write(HerdrClientMessage.hello(hello).frame)
                 return try await readWelcome(from: transport)
             } onCancel: {
-                Task { await transport.close(reusable: true) }
+                Task { await transport.close(reusable: false) }
             }
             timer.cancel()
             try validate(welcome)

@@ -102,6 +102,20 @@ final class HerdrConnectionTests: XCTestCase {
         XCTAssertEqual(reusable, false)
     }
 
+    /// A cancelled open can't tell whether the path works either: the SSH connection isn't reused.
+    func testACancelledOpenClosesWithoutReusingTheConnection() async throws {
+        let transport = FakeBridgeTransport()
+        let (sentHello, relaxedTiming) = (hello, timing())
+        let opening = Task {
+            try await HerdrConnection.open(transport: transport, hello: sentHello, appActive: false, timing: relaxedTiming, onEvent: { _ in })
+        }
+        _ = try await transport.written(0)
+        opening.cancel()
+        _ = await opening.result
+        let reusable = await transport.closedReusable
+        XCTAssertEqual(reusable, false)
+    }
+
     /// The deadline covers the hello too: a write that never completes still times out.
     func testAStalledHelloTimesOutAndCloses() async throws {
         let transport = FakeBridgeTransport()

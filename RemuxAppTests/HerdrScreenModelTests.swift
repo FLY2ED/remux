@@ -1156,6 +1156,20 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertFalse(harness.states.contains { $0.disconnectedReason != nil }, "\(harness.states)")
     }
 
+    /// Going to the background while a connection waits for Herdr's welcome gives it up without offering
+    /// its SSH connection to the next one: whether that path still works is unknown.
+    func testTheBackgroundGivesUpAnOpeningWithoutReusingItsConnection() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge(0)
+        harness.setScreenSize()
+        _ = try await harness.writes(bridge, count: 1)
+
+        harness.model.handleAppLifecyclePhase(.background)
+        try await harness.waitUntil("the opening wasn't given up") { await bridge.isClosed }
+        let reusable = await bridge.closedReusable
+        XCTAssertEqual(reusable, false)
+    }
+
     /// Back from the background, a connection that stayed open is shown again at once and checks itself
     /// with a ping meanwhile, as Herdr's client does after a resume: neither waits for the other.
     func testComingBackShowsTheSessionAtOnceAndPingsTheConnection() async throws {
