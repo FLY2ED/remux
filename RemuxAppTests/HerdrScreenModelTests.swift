@@ -2053,4 +2053,185 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(harness.model.presentation(ofPane: "w1:p1"), .pending)
         XCTAssertFalse(harness.model.isInputAvailable)
     }
+
+    // MARK: - Notifications and bells
+
+    private static let notification = HerdrServerScript.notification(
+        .needsAttention,
+        title: "claude needs attention",
+        body: "w1 · 1 · build",
+        agent: "claude",
+        workspace: "w1",
+        tab: "t2",
+        pane: "w1:p3"
+    )
+
+    /// Herdr sends its notifications to every connection, so a session that isn't on screen hands them
+    /// on with the server boot their pane ids belong to; a reconnect to a restarted server says so.
+    func testAHiddenSessionHandsOnItsNotificationsAndAServerRestart() async throws {
+        let harness = await makeHarness()
+        let bridge = try await connectedSession(harness, lines: ["one"])
+
+        await bridge.serve(Self.notification)
+        try await harness.waitUntil("the notification wasn't handed on") { !harness.stateLog.notifications.isEmpty }
+        guard case .received(let notification, let bootID)? = harness.stateLog.notifications.first else {
+            return XCTFail("expected a notification, got \(harness.stateLog.notifications)")
+        }
+        XCTAssertEqual(notification.title, "claude needs attention")
+        XCTAssertEqual(notification.paneID, "w1:p3")
+        XCTAssertEqual(bootID, "boot")
+
+        XCTAssertTrue(harness.model.reconnect())
+        let restarted = try await harness.bridge(1)
+        await restarted.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1, boot: "boot-2"))
+        try await harness.waitUntil("the restart wasn't reported") {
+            harness.stateLog.notifications.last == .serverRestarted
+        }
+        XCTAssertEqual(harness.stateLog.notifications.count, 2)
+    }
+
+    /// What the notification rules read: the snapshot's focused tab, whether the session is shown, and
+    /// each agent's status as this phone shows it. An agent that finished work while its pane was off
+    /// screen reads as done, from Herdr's record of the completion.
+    func testTheNotificationStateFollowsTheSnapshotAndHerdrsCompletions() async throws {
+        let harness = await makeHarness()
+        let bridge = try await connectedSession(harness, lines: ["one"])
+        await bridge.serve(
+            HerdrServerScript.snapshot(revision: 2, otherTabs: ["t2"], agents: [
+                HerdrServerScript.snapshotAgent("w1:p3", tab: "t2", status: .working, stateChange: 3),
+            ])
+                + HerdrServerScript.agentCompletions(revision: 3, ["w1:p3": 4])
+                + HerdrServerScript.snapshot(revision: 3, otherTabs: ["t2"], agents: [
+                    HerdrServerScript.snapshotAgent("w1:p3", tab: "t2", status: .idle, stateChange: 4),
+                ])
+        )
+        try await harness.waitUntil("the finished agent didn't read as done") {
+            harness.model.notificationState?.agentStatuses["w1:p3"] == .done
+        }
+        XCTAssertEqual(harness.model.notificationState?.focusedTabID, "t1")
+        XCTAssertEqual(harness.model.notificationState?.focusedWorkspaceID, "w1")
+        XCTAssertEqual(harness.model.notificationState?.isShown, false)
+        harness.model.setSelected(true)
+        XCTAssertEqual(harness.model.notificationState?.isShown, true)
+    }
+
+    /// An agent whose pane is on this phone's screen when it finishes has been seen, so it reads as idle.
+    func testAnAgentFinishingOnScreenReadsAsSeen() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        await session.bridge.serve(
+            HerdrServerScript.snapshot(revision: 2, agents: [
+                HerdrServerScript.snapshotAgent("w1:p2", status: .working, stateChange: 3),
+            ])
+                + HerdrServerScript.agentCompletions(revision: 3, ["w1:p2": 4])
+                + HerdrServerScript.snapshot(revision: 3, agents: [
+                    HerdrServerScript.snapshotAgent("w1:p2", status: .idle, stateChange: 4),
+                ])
+        )
+        try await harness.waitUntil("the agent's state didn't arrive") {
+            harness.model.notificationState?.agentStatuses["w1:p2"] == .idle
+        }
+    }
+
+    /// A bell rings the session on screen, as Ghostty's bell border, until the user types or the session
+    /// is shown again.
+    func testABellRingsUntilTheUserTypesOrTheSessionIsShownAgain() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        let adapter = harness.model.terminalScreenAdapter
+        XCTAssertFalse(adapter.terminalScreenPresentationProjection.isBellRinging)
+
+        await session.bridge.serve(HerdrServerScript.bell())
+        try await harness.waitUntil("the bell didn't ring") {
+            adapter.terminalScreenPresentationProjection.isBellRinging
+        }
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("x"), .accepted)
+        XCTAssertFalse(adapter.terminalScreenPresentationProjection.isBellRinging)
+
+        await session.bridge.serve(HerdrServerScript.bell(count: 2))
+        try await harness.waitUntil("the bell didn't ring again") {
+            adapter.terminalScreenPresentationProjection.isBellRinging
+        }
+        harness.model.setSelected(false)
+        harness.model.setSelected(true)
+        XCTAssertFalse(adapter.terminalScreenPresentationProjection.isBellRinging)
+    }
+
+    /// A hidden session asked to go to a pane in another tab asks Herdr to focus it right after the show,
+    /// as Herdr's client sends `pane.focus` with the activation; Herdr then shows the pane's tab.
+    func testARevealedPaneIsFocusedRightAfterTheShow() async throws {
+        let harness = await makeHarness()
+        let bridge = try await revealableSession(harness)
+
+        harness.model.reveal(paneID: "w1:p3", bootID: "boot")
+        try await Task.sleep(for: .milliseconds(100))
+        let whileHidden = await bridge.writtenCount
+        harness.model.setSelected(true)
+        var index = whileHidden
+        let show = try await harness.nextSurfaceSet(bridge, from: &index)
+        XCTAssertTrue(show.active)
+        let focus = try await nextWrite(bridge, from: &index, paneFocus)
+        XCTAssertEqual(focus.paneID, "w1:p3")
+        for write in try await harness.writes(bridge, count: whileHidden) {
+            XCTAssertNil(paneFocus(write), "a pane was focused while hidden")
+        }
+    }
+
+    /// A pane is gone to only on the server boot its id came from, and only while it exists; on the
+    /// session on screen it is gone to at once.
+    func testARevealGoesOnlyToAPaneThatStillExists() async throws {
+        let harness = await makeHarness()
+        let bridge = try await revealableSession(harness)
+
+        harness.model.reveal(paneID: "w1:p3", bootID: "old-boot")
+        harness.model.setSelected(true)
+        var index = 0
+        let show = try await harness.nextSurfaceSet(bridge, from: &index)
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        harness.model.reveal(paneID: "w1:gone", bootID: "boot")
+        harness.model.reveal(paneID: "w1:p3", bootID: "boot")
+        let focus = try await nextWrite(bridge, from: &index, paneFocus)
+        XCTAssertEqual(focus.paneID, "w1:p3")
+        await bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
+        try await Task.sleep(for: .milliseconds(100))
+        let written = await bridge.writtenCount
+        for write in try await harness.writes(bridge, from: index, count: written - index) {
+            XCTAssertNil(paneFocus(write), "another pane was focused")
+        }
+    }
+
+    /// A pane asked for belongs to the show it was asked for: a session left before it could be shown
+    /// doesn't go there on a later show.
+    func testARevealIsForgottenWhenTheSessionIsLeftFirst() async throws {
+        let harness = await makeHarness()
+        harness.model.reveal(paneID: "w1:p3", bootID: "boot")
+        harness.model.setSelected(true)
+        harness.model.setSelected(false)
+        let bridge = try await revealableSession(harness)
+
+        harness.model.setSelected(true)
+        var index = 0
+        let show = try await harness.nextSurfaceSet(bridge, from: &index)
+        XCTAssertTrue(show.active)
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        try await Task.sleep(for: .milliseconds(150))
+        let written = await bridge.writtenCount
+        for write in try await harness.writes(bridge, from: index, count: written - index) {
+            XCTAssertNil(paneFocus(write), "a forgotten pane was focused")
+        }
+    }
+
+    /// A hidden, connected session whose snapshot has pane `w1:p1` in tab `t1` and `w1:p3` in tab `t2`.
+    private func revealableSession(_ harness: HerdrModelHarness) async throws -> FakeBridgeTransport {
+        let bridge = try await harness.bridge()
+        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(
+            revision: 1,
+            otherTabs: ["t2"],
+            panes: [HerdrServerScript.snapshotPane("w1:p1"), HerdrServerScript.snapshotPane("w1:p3", tab: "t2")]
+        ))
+        await bridge.serve(HerdrServerScript.surface(projection: 1, revision: 1, lines: ["one"], panes: Self.onePane))
+        harness.setScreenSize()
+        try await harness.waitUntil("the session didn't connect") { harness.model.stateTraceLabel == "hidden" }
+        return bridge
+    }
 }

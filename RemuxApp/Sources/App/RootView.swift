@@ -118,6 +118,12 @@ private struct RemuxWorkspaceShell: View {
             activeTerminalLayer
             routeLayer
         }
+        .overlay(alignment: .top) {
+            HerdrNotificationBannerLayer(
+                center: model.herdrNotifications,
+                onOpen: model.openHerdrNotification
+            )
+        }
         .preferredColorScheme(shownTerminalColorScheme)
         .onAppear {
             model.handleAppLifecyclePhase(

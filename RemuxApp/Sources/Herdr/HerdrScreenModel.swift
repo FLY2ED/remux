@@ -45,6 +45,14 @@ final class HerdrScreenModel {
     let sessionInstanceID: UUID
     let terminalScreenAdapter = HerdrTerminalScreenAdapter()
 
+    /// What the model tells its owner about the session's notifications.
+    enum NotificationEvent: Equatable {
+        /// A Herdr notification, with the server boot whose pane ids it uses.
+        case received(HerdrSemanticNotification, bootID: String?)
+        /// The server restarted, so earlier notifications point at panes that are gone.
+        case serverRestarted
+    }
+
     /// What the model asks of the connection and the engine, in the order it asks.
     private enum Operation: Sendable {
         case show(HerdrSurfaceGeometry, request: UInt64)
@@ -54,6 +62,8 @@ final class HerdrScreenModel {
         case appActive(Bool)
         /// `delivered`, when given, learns whether Herdr has the input.
         case input(paneID: String, events: [HerdrInputEvent], delivered: CheckedContinuation<Bool, Never>?)
+        /// A `pane.focus` that must reach Herdr after the operations asked before it.
+        case focusPane(String)
 
         /// Tells whoever waits on the operation that it won't be carried out.
         func abandon() {
@@ -176,6 +186,7 @@ final class HerdrScreenModel {
     private let connectionTiming: HerdrConnection.Timing
     private let recoveryTiming: RecoveryTiming
     private let onRuntimeStateChange: (TerminalRuntimeStateUpdate) -> Void
+    private let onNotification: (NotificationEvent) -> Void
     private let engine: HerdrTerminalEngine
     private let makeRendererFence: RendererFenceFactory
     private var runtime: GhosttyKitRuntime?
@@ -212,6 +223,14 @@ final class HerdrScreenModel {
     private var sizeKnownSince: ContinuousClock.Instant?
 
     private(set) var layout: HerdrPaneLayout?
+    /// The newest snapshot, kept across a reconnect until the new connection's first.
+    private var snapshot: HerdrSnapshot?
+    private var agents = HerdrAgentPresentation()
+    /// A pane to go to once the session is shown, and the server boot its id belongs to.
+    private var pendingReveal: (paneID: String, bootID: String?)?
+    /// Rung by the session on screen, until the user next types or the session is shown again, as a
+    /// Ghostty surface keeps its bell.
+    private(set) var isBellRinging = false
     /// The pane keys go to and the screen highlights: the newest snapshot's focused pane, as in
     /// Herdr's client. A pane can be focused before its first frame arrives.
     private(set) var focusedPaneID: String?
@@ -238,6 +257,7 @@ final class HerdrScreenModel {
         sessionInstanceID: UUID,
         openBridge: @escaping BridgeOpener,
         onRuntimeStateChange: @escaping (TerminalRuntimeStateUpdate) -> Void,
+        onNotification: @escaping (NotificationEvent) -> Void,
         connectionTiming: HerdrConnection.Timing = HerdrConnection.Timing(),
         recoveryTiming: RecoveryTiming = RecoveryTiming(),
         engine: HerdrTerminalEngine = HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1),
@@ -249,6 +269,7 @@ final class HerdrScreenModel {
         self.sessionInstanceID = sessionInstanceID
         self.openBridge = openBridge
         self.onRuntimeStateChange = onRuntimeStateChange
+        self.onNotification = onNotification
         self.connectionTiming = connectionTiming
         self.recoveryTiming = recoveryTiming
         self.engine = engine
@@ -285,8 +306,35 @@ final class HerdrScreenModel {
     func setSelected(_ selected: Bool) {
         guard !stopped, selected != isSelected else { return }
         isSelected = selected
+        if selected {
+            // Shown again, the session has the user's eyes, as a refocused Ghostty surface drops its bell.
+            isBellRinging = false
+        } else {
+            // A pane asked for applies to the show it was asked for.
+            pendingReveal = nil
+        }
         reconcilePresentationActivity()
         reconcileVisibility()
+    }
+
+    /// Goes to `paneID` as Herdr's client goes to a notification's pane: `pane.focus` takes this
+    /// client to the pane's tab and focuses it there. It is sent once the session is shown, right after
+    /// the show, and only on the server boot the pane id came from, while the pane is still there.
+    func reveal(paneID: String, bootID: String?) {
+        guard !stopped else { return }
+        pendingReveal = (paneID, bootID)
+        sendPendingReveal()
+    }
+
+    private func sendPendingReveal() {
+        guard let reveal = pendingReveal, let attempt, isCurrent(attempt), attempt.connection != nil,
+              attempt.requestedShown, let snapshot
+        else { return }
+        pendingReveal = nil
+        guard reveal.bootID.map({ $0 == snapshot.bootID }) ?? true,
+              snapshot.panes.contains(where: { $0.paneID == reveal.paneID })
+        else { return }
+        attempt.ask(.focusPane(reveal.paneID))
     }
 
     /// The background hides the session; the app's other phases leave it on screen.
@@ -476,6 +524,17 @@ final class HerdrScreenModel {
         surfaces[paneID]
     }
 
+    /// What Herdr's notification rules read of this session, once a snapshot has arrived.
+    var notificationState: HerdrNotificationSessionState? {
+        guard let snapshot else { return nil }
+        return HerdrNotificationSessionState(
+            isShown: isSelected,
+            focusedWorkspaceID: snapshot.focusedWorkspaceID,
+            focusedTabID: snapshot.focusedTabID,
+            agentStatuses: agents.statuses
+        )
+    }
+
     func presentation(ofPane paneID: String?) -> TerminalPanePresentation {
         guard let paneID else { return .pending }
         if let failure = presentationFailures[paneID] { return .failed(failure) }
@@ -507,6 +566,7 @@ final class HerdrScreenModel {
     func sendText(_ text: String) -> FocusedTerminalInputSubmissionResult {
         guard !text.isEmpty else { return .empty }
         guard let target = inputTarget else { return .transportUnavailable }
+        silenceBell()
         return send(
             HerdrInputTranslator.events(forText: text, reportsAllKeys: target.attempt.reportsAllKeys),
             to: target
@@ -516,6 +576,7 @@ final class HerdrScreenModel {
     func sendPaste(_ text: String) -> FocusedTerminalInputSubmissionResult {
         guard !text.isEmpty else { return .empty }
         guard let target = inputTarget else { return .transportUnavailable }
+        silenceBell()
         return send([.paste(text)], to: target)
     }
 
@@ -525,7 +586,15 @@ final class HerdrScreenModel {
         guard let event = HerdrInputTranslator.event(for: key) else {
             return key.action == .release ? .accepted : .surfaceRejected
         }
+        silenceBell()
         return send([event], to: target)
+    }
+
+    /// Typing answers the bell, as a key press does on a Ghostty surface.
+    private func silenceBell() {
+        guard isBellRinging else { return }
+        isBellRinging = false
+        didChange()
     }
 
     /// Input is accepted once queued behind the session's earlier operations; Herdr doesn't
@@ -566,6 +635,7 @@ final class HerdrScreenModel {
         guard let attempt = shownAttempt, presentation(ofPane: paneID) == .ready, layout?.hasPopup == false,
               (try? HerdrConnection.checkLimits(events)) != nil
         else { return false }
+        silenceBell()
         return await withCheckedContinuation { delivered in
             attempt.ask(.input(paneID: paneID, events: events, delivered: delivered))
         }
@@ -577,12 +647,16 @@ final class HerdrScreenModel {
         guard let attempt, isCurrent(attempt), let connection = attempt.connection,
               attempt.isActivated
         else { return false }
+        focus(paneID, attempt: attempt, connection: connection)
+        return true
+    }
+
+    private func focus(_ paneID: String, attempt: Attempt, connection: HerdrConnection) {
         if attempt.focusInFlight {
             attempt.waitingFocus = paneID
         } else if paneID != focusedPaneID {
             requestFocus(paneID, attempt: attempt, connection: connection)
         }
-        return true
     }
 
     private func requestFocus(_ paneID: String, attempt: Attempt, connection: HerdrConnection) {
@@ -760,7 +834,7 @@ final class HerdrScreenModel {
                 operation.abandon()
                 break
             }
-            await perform(operation, on: connection, feed: feed, attemptID: attempt.id)
+            await perform(operation, on: connection, feed: feed, attempt: attempt)
         }
     }
 
@@ -810,8 +884,9 @@ final class HerdrScreenModel {
         _ operation: Operation,
         on connection: HerdrConnection,
         feed: HerdrEngineFeed,
-        attemptID: UInt64
+        attempt: Attempt
     ) async {
+        let attemptID = attempt.id
         switch operation {
         case .show(let geometry, let request):
             await feed.beginActivation(request: request, columns: geometry.cols, rows: geometry.rows)
@@ -855,6 +930,8 @@ final class HerdrScreenModel {
             // Herdr acknowledges no input, but answers a ping only after reading everything sent before
             // it. Later operations don't wait for the answer.
             Task { delivered.resume(returning: await connection.confirmAlive()) }
+        case .focusPane(let paneID):
+            focus(paneID, attempt: attempt, connection: connection)
         }
     }
 
@@ -868,9 +945,9 @@ final class HerdrScreenModel {
         { [weak model] event in
             guard let model else { return }
             switch event {
-            case .snapshot(let snapshot):
+            case .snapshot(let snapshot, let completions):
                 await feed.receive(snapshot)
-                Task { @MainActor in model.snapshotArrived(attemptID, focusedPaneID: snapshot.focusedPaneID) }
+                Task { @MainActor in model.snapshotArrived(attemptID, snapshot, completions: completions) }
             case .surface(let output):
                 await feed.receive(output)
             case .ended(let error):
@@ -879,7 +956,11 @@ final class HerdrScreenModel {
                 Task { @MainActor in model.inputRefused(attemptID, message: message) }
             case .keyboardReportAll(let enabled):
                 Task { @MainActor in model.keyboardReportAllChanged(attemptID, enabled) }
-            case .bell, .notification, .clipboard:
+            case .notification(let notification):
+                Task { @MainActor in model.notificationArrived(attemptID, notification) }
+            case .bell:
+                Task { @MainActor in model.bellRang(attemptID) }
+            case .clipboard:
                 break
             }
         }
@@ -932,11 +1013,17 @@ final class HerdrScreenModel {
         sizeWaiter = nil
     }
 
-    private func snapshotArrived(_ attemptID: UInt64, focusedPaneID: String?) {
+    private func snapshotArrived(_ attemptID: UInt64, _ snapshot: HerdrSnapshot, completions: [String: UInt64]?) {
         guard let attempt, attempt.id == attemptID, isCurrent(attempt) else { return }
         if appPhase != .background, readySince == nil { readySince = .now }
-        if focusedPaneID != self.focusedPaneID {
-            self.focusedPaneID = focusedPaneID
+        if let previous = self.snapshot?.bootID, previous != snapshot.bootID {
+            onNotification(.serverRestarted)
+        }
+        self.snapshot = snapshot
+        agents.project(snapshot, completions: completions)
+        acknowledgeShownAgents()
+        if snapshot.focusedPaneID != focusedPaneID {
+            focusedPaneID = snapshot.focusedPaneID
             reconcilePresentationActivity()
             didChange()
         }
@@ -946,6 +1033,28 @@ final class HerdrScreenModel {
         failure = nil
         reconcileVisibility()
         readinessChanged()
+    }
+
+    /// Herdr sends its notifications to every connection, shown or hidden; the owner decides what
+    /// reaches the screen. The boot is known once this connection's first snapshot is in.
+    private func notificationArrived(_ attemptID: UInt64, _ notification: HerdrSemanticNotification) {
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt) else { return }
+        onNotification(.received(notification, bootID: attempt.hasSnapshot ? snapshot?.bootID : nil))
+    }
+
+    /// Herdr rings only the session in front, which the connection checks; a bell that comes after the
+    /// session left the screen has no one to ring for.
+    private func bellRang(_ attemptID: UInt64) {
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt), isSelected, !isBellRinging else { return }
+        isBellRinging = true
+        didChange()
+    }
+
+    /// The panes on screen show their agents as they are now, as Herdr's client counts a pane it
+    /// presents while its terminal has focus as seen.
+    private func acknowledgeShownAgents() {
+        guard appPhase == .active, shownAttempt != nil, let layout, layout.bootID == snapshot?.bootID else { return }
+        agents.acknowledge(panes: Set(layout.panes.map(\.paneID)))
     }
 
     /// A reconnect reads as one until the new connection is ready.
@@ -1067,6 +1176,7 @@ final class HerdrScreenModel {
         if wanted {
             awaitActivation(of: attempt, request: attempt.visibilityRequests)
             attempt.ask(.show(geometry, request: attempt.visibilityRequests))
+            sendPendingReveal()
         } else {
             attempt.ask(.hide)
         }
@@ -1092,6 +1202,7 @@ final class HerdrScreenModel {
         attempt.activatedRequest = request
         attempt.activationDeadline?.cancel()
         attempt.activationDeadline = nil
+        acknowledgeShownAgents()
         readinessChanged()
     }
 
@@ -1175,6 +1286,7 @@ final class HerdrScreenModel {
                 }
             }
             reconcilePresentationActivity()
+            acknowledgeShownAgents()
         case .paneScroll(let scrolls):
             paneScrolls = scrolls
             for paneID in surfaces.keys {

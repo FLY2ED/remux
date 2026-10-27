@@ -382,7 +382,8 @@ final class HerdrLiveConnectionTests: XCTestCase {
                     trace: trace
                 ))
             },
-            onRuntimeStateChange: { _ in }
+            onRuntimeStateChange: { _ in },
+            onNotification: { _ in }
         )
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 600))
         window.rootViewController = UIViewController()
@@ -684,7 +685,7 @@ actor HerdrLiveEventLog {
 
     func append(_ event: HerdrConnectionEvent) {
         switch event {
-        case .snapshot(let snapshot):
+        case .snapshot(let snapshot, _):
             snapshots.append(snapshot)
         case .surface:
             surfaceCount += 1
