@@ -242,7 +242,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await feed.acknowledgeActivation(request: 1, floor: 1)
         await feed.receive(try Self.tabSnapshot(revision: 1, zoomed: false))
         await feed.receive(.surface(try Self.surface(revision: 1, lines: ["o t ", "w o "], panes: two)))
-        await feed.settleZoom(request: 1, answer: Self.zoomAnswer(sentAfter: 0, answeredAfter: 1))
+        await feed.settle(request: 1, answer: Self.zoomAnswer(sentAfter: 0, answeredAfter: 1))
         await feed.receive(try Self.tabSnapshot(revision: 2, zoomed: true))
         await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["one ", "two "], panes: one)))
         guard case .paneTerminal("P", _) = try await updates.next(),
@@ -257,7 +257,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await feed.acknowledgeActivation(request: 2, floor: 3)
         await feed.receive(try Self.tabSnapshot(revision: 3, zoomed: true))
         await feed.receive(.surface(try Self.surface(projection: 3, revision: 3, lines: ["one ", "two "], panes: one)))
-        await feed.settleZoom(request: 2, answer: Self.zoomAnswer(sentAfter: 2, answeredAfter: 3))
+        await feed.settle(request: 2, answer: Self.zoomAnswer(sentAfter: 2, answeredAfter: 3))
         guard case .activated(2, _) = try await updates.next() else {
             return XCTFail("an answer after the zoomed frame didn't complete the show")
         }
@@ -267,9 +267,47 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await feed.acknowledgeActivation(request: 3, floor: 4)
         await feed.receive(try Self.tabSnapshot(revision: 4, zoomed: true))
         await feed.receive(.surface(try Self.surface(projection: 4, revision: 4, lines: ["one ", "two "], panes: one)))
-        await feed.settleZoom(request: 3, answer: nil)
+        await feed.settle(request: 3, answer: nil)
         guard case .activated(3, _) = try await updates.next() else {
             return XCTFail("a zoom that didn't go held the show")
+        }
+        await engine.stop()
+    }
+
+    /// A move to another tab holds the frames until one from after the move's last command: neither the
+    /// tab left as its zoom comes off nor the tab reached before its zoom is drawn, only the tab reached
+    /// as it ends up. A move whose focus fails shows the newest frame at once.
+    func testAMoveToAnotherTabShowsOnlyTheTabItReaches() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection(1)
+        let one = [Self.pane("P", x: 0, width: 4, height: 2)]
+        let two = [Self.pane("P", x: 0, width: 2, height: 2), Self.pane("Q", x: 2, width: 2, height: 2)]
+        await feed.receive(try Self.tabSnapshot(revision: 1, zoomed: true))
+        await feed.receive(.surface(try Self.surface(revision: 1, lines: ["one ", "two "], panes: one)))
+        _ = try await updates.terminal(for: "P")
+        _ = try await updates.nextLayout()
+        _ = try await updates.nextPaneScroll()
+
+        await feed.holdForMove(request: 5)
+        await feed.receive(try Self.tabSnapshot(revision: 2, zoomed: false))
+        await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["o t ", "w o "], panes: two)))
+        await feed.receive(try Self.tabSnapshot(revision: 3, zoomed: false))
+        await feed.receive(.surface(try Self.surface(projection: 3, revision: 3, lines: ["a b ", "c d "], panes: two)))
+        await feed.settle(request: 5, answer: Self.zoomAnswer(sentAfter: 3, answeredAfter: 3))
+        await feed.receive(try Self.tabSnapshot(revision: 4, zoomed: true))
+        await feed.receive(.surface(try Self.surface(projection: 4, revision: 4, lines: ["new ", "tab "], panes: one)))
+        guard case .activated(5, _) = try await updates.next() else {
+            return XCTFail("a frame from before the move's zoom was drawn")
+        }
+
+        await feed.holdForMove(request: 6)
+        await feed.receive(try Self.tabSnapshot(revision: 5, zoomed: false))
+        await feed.receive(.surface(try Self.surface(projection: 5, revision: 5, lines: ["o t ", "w o "], panes: two)))
+        await feed.settle(request: 6, answer: nil)
+        _ = try await updates.terminal(for: "Q")
+        while true {
+            if case .activated(6, _) = try await updates.next() { break }
         }
         await engine.stop()
     }
@@ -989,8 +1027,8 @@ final class HerdrTerminalEngineTests: XCTestCase {
     }
 
     /// Herdr's answer zooming tab `t1`, sent and answered after the given snapshots.
-    static func zoomAnswer(sentAfter: UInt64, answeredAfter: UInt64) -> HerdrTerminalEngine.ZoomAnswer {
-        HerdrTerminalEngine.ZoomAnswer(tabID: "t1", zoomed: true, sentAfter: sentAfter, answeredAfter: answeredAfter)
+    static func zoomAnswer(sentAfter: UInt64, answeredAfter: UInt64) -> HerdrTerminalEngine.CommandAnswer {
+        HerdrTerminalEngine.CommandAnswer(sentAfter: sentAfter, answeredAfter: answeredAfter, zoom: ("t1", true))
     }
 
     static func cells(_ text: String) -> [HerdrCell] {

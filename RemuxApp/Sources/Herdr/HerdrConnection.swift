@@ -218,6 +218,8 @@ actor HerdrConnection {
     /// Made again with the welcome's encodings.
     private var decoder = HerdrSurfaceDecoder(deltaNegotiated: false, scrollNegotiated: false)
     private var bootID: String?
+    /// The tab on screen in the newest snapshot.
+    private var focusedTabID: String?
     /// The newest agent completions, waiting for the snapshot they belong to.
     private var pendingCompletions: HerdrAgentCompletions?
     private var isActive = false
@@ -243,8 +245,7 @@ actor HerdrConnection {
     private var writeQueue: [[UInt8]] = []
     private var isWriting = false
 
-    /// A request awaiting its final chunk. After a cancellation, or for a hide sent without waiting,
-    /// nobody waits, but the entry stays until the reply, or a command's timeout, frees the lane.
+    /// A request awaiting its final chunk. Nobody waits for a hide's, but the entry stays until its reply.
     private struct Pending {
         var waiter: Waiter?
         var data: [UInt8] = []
@@ -252,8 +253,6 @@ actor HerdrConnection {
     }
 
     private enum Waiter {
-        /// A caller awaiting the reply's JSON.
-        case caller(CheckedContinuation<Data, Error>)
         /// A show sent with `sendShow`: its answer goes to `answered`.
         case show(answered: @Sendable (Result<UInt64, Error>) -> Void)
         /// A command sent without a caller awaiting it, after the snapshot `sentAfter`: its reply goes
@@ -264,22 +263,18 @@ actor HerdrConnection {
     /// Gets a command's reply, or its failure.
     typealias CommandAnswered = @Sendable (Result<HerdrCommandReply, Error>) -> Void
 
-    /// Waiting for the lane: a caller, or a command for a show (`sendCommandWhileShown`).
-    private enum LaneWaiter {
-        case caller(CheckedContinuation<Void, Error>)
-        case command(QueuedCommand)
-    }
-
+    /// A command waiting for the lane (`sendCommandWhileShown`).
     private struct QueuedCommand {
         let method: String
         let params: any Encodable & Sendable
+        /// The tab it is for, when it goes only while that tab is on screen.
+        let tabID: String?
         let answered: CommandAnswered
     }
 
     private var pending: [String: Pending] = [:]
     private var laneBusy = false
-    private var nextTicket: UInt64 = 0
-    private var laneWaiters: [(ticket: UInt64, waiter: LaneWaiter)] = []
+    private var waitingCommands: [QueuedCommand] = []
     /// The newest snapshot's revision on this connection.
     private var snapshotRevision: UInt64 = 0
     private var healthTask: Task<Void, Never>?
@@ -447,6 +442,7 @@ actor HerdrConnection {
             switch try HerdrEndpointControl.parse(kind: kind, data: data) {
             case .snapshot(let snapshot):
                 bootID = snapshot.bootID
+                focusedTabID = snapshot.focusedTabID
                 snapshotRevision = snapshot.revision
                 await onEvent(.snapshot(snapshot, completions: takeCompletions(for: snapshot)))
             case .agentCompletions(let completions):
@@ -563,9 +559,7 @@ actor HerdrConnection {
     func sendHide() {
         guard !ended, let request = try? surfaceSet(active: false) else { return }
         isActive = false
-        let dropped = laneWaiters.compactMap { if case .command(let command) = $0.waiter { command } else { nil } }
-        laneWaiters.removeAll { if case .command = $0.waiter { true } else { false } }
-        dropped.forEach { $0.answered(.failure(HerdrCommandError.notSent)) }
+        dropWaitingCommands { _ in true }
         register(request.id, waiter: nil, holdsLane: false, timeout: nil,
                  method: Self.surfaceSetMethod, sending: [.focus(false), request.message])
     }
@@ -674,31 +668,12 @@ actor HerdrConnection {
 
     // MARK: - Commands
 
-    /// Runs one endpoint command and returns its reply JSON (`{"id", "result"}`). Commands run one at a
-    /// time, as in Herdr's client; a later one waits for the lane, which frees when the reply arrives or
-    /// the command times out. A command cancelled while it waits is never sent; one cancelled after it
-    /// was sent stops waiting, and its reply or timeout still frees the lane.
-    func command(_ method: String, params: some Encodable & Sendable) async throws -> Data {
-        guard negotiated?.methods.contains(method) == true else { throw HerdrCommandError.unsupported(method: method) }
-        try await acquireLane()
-        let id = makeID("c")
-        let message: HerdrClientMessage
-        do {
-            try Task.checkCancellation()
-            guard !ended else { throw HerdrCommandError.connectionEnded }
-            guard let bootID else { throw HerdrCommandError.noSnapshot }
-            message = try HerdrClientMessage.endpointRequest(bootID: bootID, id: id, method: method, params: params)
-        } catch {
-            releaseLane()
-            throw error
-        }
-        return try await reply(to: id, method: method, holdsLane: true, timeout: timing.command, sending: [message])
-    }
-
+    /// Endpoint commands run one at a time, as in Herdr's client: one goes once the command in flight is
+    /// answered or times out. Its reply comes as JSON (`{"id", "result"}`).
+    ///
     /// Sends a command only if it can go at once: the session is shown and no command is in flight.
     /// Returns whether it went, once it is queued behind everything sent before it; `answered` gets its
-    /// reply, with the JSON `command` returns, or its failure within `timeout` (Herdr's command timeout
-    /// unless given). Herdr refuses a command while another is in flight or while the session is hidden
+    /// reply, or its failure within `timeout` (Herdr's command timeout unless given). Herdr refuses a command while another is in flight or while the session is hidden
     /// (`endpoint_requests.rs`), so one that would have to wait isn't sent.
     func sendCommandIfIdle(
         _ method: String,
@@ -729,28 +704,44 @@ actor HerdrConnection {
         }
     }
 
-    /// Sends a command for the show just sent: at once if no command is in flight, else once the lane
-    /// frees, unless a hide comes first (`sendHide`). Returns false, sending nothing, when the session
-    /// isn't shown or the server lacks the method; a command that waited and was dropped fails with
-    /// `notSent`.
+    /// Sends a command for the session on screen: at once if no command is in flight, else once the lane
+    /// frees, unless a hide (`sendHide`) or its owner (`dropWaitingCommands`) drops it first. With
+    /// `tabID`, it goes only while the newest snapshot has that tab on screen: a `pane.zoom` focuses its
+    /// target, so one for a tab another client has since left would take the session back. `answered`
+    /// gets its reply, or why it failed or didn't go: `notSent` for one the session no longer wants.
     func sendCommandWhileShown(
         _ method: String,
         params: some Encodable & Sendable,
+        onTab tabID: String? = nil,
         answered: @escaping CommandAnswered
-    ) -> Bool {
-        guard !ended, isActive, negotiated?.methods.contains(method) == true else { return false }
+    ) {
+        guard !ended else { return answered(.failure(HerdrCommandError.connectionEnded)) }
+        guard negotiated?.methods.contains(method) == true else {
+            return answered(.failure(HerdrCommandError.unsupported(method: method)))
+        }
+        guard isActive, tabID.map({ $0 == focusedTabID }) ?? true else {
+            return answered(.failure(HerdrCommandError.notSent))
+        }
         guard laneBusy else {
             laneBusy = true
-            guard send(method, params: params, timeout: nil, answered: answered) else {
+            if !send(method, params: params, timeout: nil, answered: answered) {
                 releaseLane()
-                return false
+                answered(.failure(HerdrCommandError.notSent))
             }
-            return true
+            return
         }
-        nextTicket += 1
-        let command = QueuedCommand(method: method, params: params, answered: answered)
-        laneWaiters.append((nextTicket, .command(command)))
-        return true
+        waitingCommands.append(QueuedCommand(method: method, params: params, tabID: tabID, answered: answered))
+    }
+
+    /// The `method` commands still waiting for the lane don't go: what they were for has been replaced.
+    func dropWaitingCommands(_ method: String) {
+        dropWaitingCommands { $0 == method }
+    }
+
+    private func dropWaitingCommands(where matches: (String) -> Bool) {
+        let dropped = waitingCommands.filter { matches($0.method) }
+        waitingCommands.removeAll { matches($0.method) }
+        dropped.forEach { $0.answered(.failure(HerdrCommandError.notSent)) }
     }
 
     /// Registers and queues a command that holds the lane; false when it can't be encoded.
@@ -767,24 +758,6 @@ actor HerdrConnection {
         register(id, waiter: .command(answered: answered, sentAfter: snapshotRevision), holdsLane: true,
                  timeout: timeout ?? timing.command, method: method, sending: [message])
         return true
-    }
-
-    private func reply(
-        to id: String,
-        method: String,
-        holdsLane: Bool,
-        timeout: Duration,
-        sending messages: [HerdrClientMessage]
-    ) async throws -> Data {
-        guard !ended else { throw HerdrCommandError.connectionEnded }
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                register(id, waiter: .caller(continuation), holdsLane: holdsLane, timeout: timeout,
-                         method: method, sending: messages)
-            }
-        } onCancel: {
-            Task { await self.stopWaiting(for: id) }
-        }
     }
 
     /// Registers the reply for `id`, then queues `messages` in order, all before any other actor work,
@@ -809,8 +782,6 @@ actor HerdrConnection {
 
     private func resolve(_ waiter: Waiter?, with result: Result<Data, Error>) {
         switch waiter {
-        case .caller(let continuation)?:
-            continuation.resume(with: result)
         case .show(let answered)?:
             answered(result.flatMap { data in Result { try Self.shownRevision(from: data) } })
         case .command(let answered, let sentAfter)?:
@@ -820,19 +791,12 @@ actor HerdrConnection {
         }
     }
 
-    /// Herdr's client retires a request that didn't answer in time: the caller fails, the lane frees,
-    /// and the late reply is dropped, as `receive` drops every reply to an unknown request.
+    /// Herdr's client retires a command that didn't answer in time: it fails, the lane frees, and the
+    /// late reply is dropped, as `receive` drops every reply to an unknown request.
     private func expire(_ id: String, method: String) {
         guard let request = pending.removeValue(forKey: id) else { return }
         resolve(request.waiter, with: .failure(HerdrCommandError.timedOut(method: method)))
         if request.holdsLane { releaseLane() }
-    }
-
-    private func stopWaiting(for id: String) {
-        guard var request = pending[id], case .caller(let continuation)? = request.waiter else { return }
-        request.waiter = nil
-        pending[id] = request
-        continuation.resume(throwing: CancellationError())
     }
 
     private func receive(_ chunk: HerdrResponseChunk) {
@@ -863,44 +827,16 @@ actor HerdrConnection {
         }
     }
 
-    /// Takes the lane, waiting in line while it's busy. A waiter whose task is cancelled leaves the
-    /// line without the lane.
-    private func acquireLane() async throws {
-        guard laneBusy else {
-            laneBusy = true
-            return
-        }
-        nextTicket += 1
-        let ticket = nextTicket
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                laneWaiters.append((ticket, .caller(continuation)))
-            }
-        } onCancel: {
-            Task { await self.leaveLine(ticket) }
-        }
-    }
-
-    private func leaveLine(_ ticket: UInt64) {
-        guard let index = laneWaiters.firstIndex(where: { $0.ticket == ticket }),
-              case .caller(let continuation) = laneWaiters[index].waiter
-        else { return }
-        laneWaiters.remove(at: index)
-        continuation.resume(throwing: CancellationError())
-    }
-
-    /// Passes the lane straight to the next waiter. A command that can't be sent passes it on to the one
-    /// after it.
+    /// Passes the lane straight to the next waiting command. One that can't be sent, or whose tab is no
+    /// longer on screen, passes it on to the one after it.
     private func releaseLane() {
-        while !laneWaiters.isEmpty {
-            switch laneWaiters.removeFirst().waiter {
-            case .caller(let continuation):
-                continuation.resume()
+        while !waitingCommands.isEmpty {
+            let command = waitingCommands.removeFirst()
+            if command.tabID.map({ $0 == focusedTabID }) ?? true,
+               send(command.method, params: command.params, timeout: nil, answered: command.answered) {
                 return
-            case .command(let command):
-                if send(command.method, params: command.params, timeout: nil, answered: command.answered) { return }
-                command.answered(.failure(HerdrCommandError.notSent))
             }
+            command.answered(.failure(HerdrCommandError.notSent))
         }
         laneBusy = false
     }
@@ -1054,17 +990,10 @@ actor HerdrConnection {
             check.waiter.resume(returning: false)
         }
         pongWaiters.removeAll()
-        let waiters = laneWaiters
-        laneWaiters.removeAll()
+        let waiting = waitingCommands
+        waitingCommands.removeAll()
         laneBusy = false
-        for (_, waiter) in waiters {
-            switch waiter {
-            case .caller(let continuation):
-                continuation.resume(throwing: HerdrCommandError.connectionEnded)
-            case .command(let command):
-                command.answered(.failure(HerdrCommandError.connectionEnded))
-            }
-        }
+        waiting.forEach { $0.answered(.failure(HerdrCommandError.connectionEnded)) }
         await transport.close(cause)
     }
 }

@@ -388,10 +388,9 @@ final class HerdrConnectionTests: XCTestCase {
         async let first = connection.command("worktree.list", params: [String: String]())
         let firstRequest = try Self.request(try await transport.written(1))
         let (replies, answered) = AsyncStream.makeStream(of: Result<HerdrCommandReply, Error>.self)
-        let sent = await connection.sendCommandWhileShown("pane.focus", params: ["pane_id": "w1:p1"]) {
+        await connection.sendCommandWhileShown("pane.focus", params: ["pane_id": "w1:p1"]) {
             answered.yield($0)
         }
-        XCTAssertTrue(sent)
 
         await connection.sendHide()
         var iterator = replies.makeAsyncIterator()
@@ -484,48 +483,63 @@ final class HerdrConnectionTests: XCTestCase {
         XCTAssertEqual(String(decoding: answer, as: UTF8.self), #"{"id":"\#(nextRequest.id)","result":{"type":"ok"}}"#)
     }
 
-    /// A command cancelled while it waits for the lane is never sent.
-    func testACommandCancelledInLineIsNeverSent() async throws {
+    /// A waiting command its owner drops doesn't go, and the commands of other methods still go in turn.
+    func testAWaitingCommandItsOwnerDropsIsNotSent() async throws {
         let (connection, transport, _) = try await openedSession(surfaceActive: true)
         async let first = connection.command("worktree.list", params: [String: String]())
         let firstRequest = try Self.request(try await transport.written(1))
-        let queued = Task { try await connection.command("tab.focus", params: ["tab_id": "w1:t1"]) }
+        let zoom = Task { try await connection.command("pane.zoom", params: ["pane_id": "w1:p1", "mode": "on"]) }
+        async let focus = connection.command("pane.focus", params: ["pane_id": "w1:p1"])
         try await Task.sleep(for: .milliseconds(30))
-        queued.cancel()
-        do {
-            _ = try await queued.value
-            XCTFail("answered")
-        } catch is CancellationError {}
 
+        await connection.dropWaitingCommands("pane.zoom")
+        do {
+            _ = try await zoom.value
+            XCTFail("answered")
+        } catch let error as HerdrCommandError {
+            XCTAssertEqual(error, .notSent)
+        }
         await transport.serve(Self.reply(id: firstRequest.id, json: #"{"type":"ok"}"#))
         _ = try await first
-        async let next = connection.command("pane.focus", params: ["pane_id": "w1:p1"])
-        let nextRequest = try Self.request(try await transport.written(2))
-        XCTAssertEqual(nextRequest.method, "pane.focus")
-        await transport.serve(Self.reply(id: nextRequest.id, json: #"{"type":"ok"}"#))
-        _ = try await next
+        let next = try Self.request(try await transport.written(2))
+        XCTAssertEqual(next.method, "pane.focus")
+        await transport.serve(Self.reply(id: next.id, json: #"{"type":"ok"}"#))
+        _ = try await focus
     }
 
-    /// A command cancelled after it was sent returns at once; its late reply still frees the lane.
-    func testACancelledSentCommandReturnsAtOnceAndItsReplyFreesTheLane() async throws {
-        let (connection, transport, _) = try await openedSession(surfaceActive: true)
-        let slow = Task { try await connection.command("worktree.list", params: [String: String]()) }
-        let slowRequest = try Self.request(try await transport.written(1))
-        slow.cancel()
-        do {
-            _ = try await slow.value
-            XCTFail("answered")
-        } catch is CancellationError {}
-
-        async let next = connection.command("pane.focus", params: ["pane_id": "w1:p1"])
+    /// A command for a tab goes only while the newest snapshot has that tab on screen, whether it would
+    /// go at once or after the command in flight: a zoom focuses its target, so one for a tab another
+    /// client has since left would take the session back.
+    func testACommandForATabNoLongerOnScreenIsNotSent() async throws {
+        let (connection, transport, events) = try await openedSession(surfaceActive: true)
+        let boot = "68169-1791562319387415000"
+        await transport.serve(HerdrServerScript.snapshot(revision: 100, boot: boot, focusedTab: "t1"))
+        await events.waitForCount(2)
+        async let first = connection.command("worktree.list", params: [String: String]())
+        let firstRequest = try Self.request(try await transport.written(1))
+        let waiting = Task {
+            try await connection.command("pane.zoom", params: ["pane_id": "w1:p1", "mode": "on"], onTab: "t1")
+        }
         try await Task.sleep(for: .milliseconds(30))
-        let count = await transport.writtenCount
-        XCTAssertEqual(count, 2)
-        await transport.serve(Self.reply(id: slowRequest.id, json: #"{"type":"ok"}"#))
-        let nextRequest = try Self.request(try await transport.written(2))
-        XCTAssertEqual(nextRequest.method, "pane.focus")
-        await transport.serve(Self.reply(id: nextRequest.id, json: #"{"type":"ok"}"#))
-        _ = try await next
+
+        await transport.serve(HerdrServerScript.snapshot(revision: 101, boot: boot, focusedTab: "t2"))
+        await events.waitForCount(3)
+        await transport.serve(Self.reply(id: firstRequest.id, json: #"{"type":"ok"}"#))
+        _ = try await first
+        do {
+            _ = try await waiting.value
+            XCTFail("sent")
+        } catch let error as HerdrCommandError {
+            XCTAssertEqual(error, .notSent)
+        }
+        do {
+            _ = try await connection.command("pane.zoom", params: ["pane_id": "w1:p1", "mode": "on"], onTab: "t1")
+            XCTFail("sent")
+        } catch let error as HerdrCommandError {
+            XCTAssertEqual(error, .notSent)
+        }
+        let written = await transport.writtenCount
+        XCTAssertEqual(written, 2, "the hello and the first command")
     }
 
     /// A command's reply says where it fell among the snapshots: the newest one when it went out, for a
@@ -536,10 +550,9 @@ final class HerdrConnectionTests: XCTestCase {
         async let first = connection.command("worktree.list", params: [String: String]())
         let firstRequest = try Self.request(try await transport.written(1))
         let (replies, answered) = AsyncStream.makeStream(of: Result<HerdrCommandReply, Error>.self)
-        let sent = await connection.sendCommandWhileShown("pane.focus", params: ["pane_id": "w1:p1"]) {
+        await connection.sendCommandWhileShown("pane.focus", params: ["pane_id": "w1:p1"]) {
             answered.yield($0)
         }
-        XCTAssertTrue(sent)
 
         await transport.serve(HerdrServerScript.snapshot(revision: 100, boot: boot))
         await events.waitForCount(2)
@@ -1255,6 +1268,13 @@ extension HerdrConnection {
         let connection = HerdrConnection(transport: transport, timing: timing, onEvent: onEvent)
         try await connection.open(hello: hello, appActive: appActive)
         return connection
+    }
+
+    /// `sendCommandWhileShown`, waiting for the reply's JSON.
+    func command(_ method: String, params: some Encodable & Sendable, onTab tabID: String? = nil) async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            sendCommandWhileShown(method, params: params, onTab: tabID) { continuation.resume(with: $0.map(\.json)) }
+        }
     }
 
     /// `sendShow`, waiting for Herdr's answer.
