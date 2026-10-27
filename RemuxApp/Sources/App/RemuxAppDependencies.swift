@@ -674,7 +674,7 @@ struct RemuxAppDependencies: Sendable {
 
         func write(_ bytes: [UInt8]) async throws {}
 
-        func close(reusable: Bool) async {}
+        func close(_ cause: HerdrBridgeCloseCause) async {}
     }
 
     /// Presents `challenge` as the server's Tailscale SSH check and waits
