@@ -186,6 +186,19 @@ final class HerdrWireTests: XCTestCase {
 
     // MARK: - Named controls
 
+    /// Herdr sends a completion as the agent's state change number, per pane.
+    func testAgentCompletionsAreReadPerPane() throws {
+        XCTAssertEqual(
+            try HerdrEndpointControl.parse(
+                kind: HerdrControlKind.agentCompletions,
+                data: #"{"boot_id":"b","revision":4,"completions":{"w1:p1":7,"w2:p3":2}}"#
+            ),
+            .agentCompletions(HerdrAgentCompletions(bootID: "b", revision: 4, completions: ["w1:p1": 7, "w2:p3": 2]))
+        )
+    }
+
+    /// Kinds Remux doesn't use are ignored, and so are completions it can't read, as in Herdr's client:
+    /// they only refine the snapshot.
     func testControlKindsRemuxDoesNotUseAreIgnored() throws {
         XCTAssertEqual(try HerdrEndpointControl.parse(kind: "endpoint.future.v9", data: "{"), .ignored(kind: "endpoint.future.v9"))
         XCTAssertEqual(
@@ -812,7 +825,18 @@ extension HerdrWireTests {
             case .surfaceReuse(let reuse):
                 XCTAssertEqual(reuse, entry.reuse, context)
                 XCTAssertTrue(reuse.surface.frame.cells.isEmpty, context)
-            case .welcome, .snapshot, .healthPong, .ignored:
+            case .agentCompletions(let completions):
+                let expected = try JSONSerialization.jsonObject(with: Data(data.utf8)) as? [String: Any]
+                XCTAssertEqual(completions.bootID, expected?["boot_id"] as? String, context)
+                XCTAssertEqual(completions.revision, (expected?["revision"] as? NSNumber)?.uint64Value, context)
+                XCTAssertEqual(
+                    completions.completions,
+                    (expected?["completions"] as? [String: NSNumber])?.mapValues(\.uint64Value),
+                    context
+                )
+            case .ignored(let ignored):
+                XCTAssertNotEqual(ignored, HerdrControlKind.agentCompletions, "recorded completions weren't read: \(context)")
+            case .welcome, .snapshot, .healthPong:
                 break
             }
         default:

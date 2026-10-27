@@ -60,6 +60,9 @@ enum HerdrEngineUpdate: Sendable {
     /// The show `request` on `connection` completed: a frame that arrived after it, at or after the floor
     /// Herdr acknowledged and at the requested size, is painted. Follows that frame's layout.
     case activated(request: UInt64, connection: UInt64)
+    /// The frame on screen now was drawn against snapshot `projectionRevision` and shows these panes,
+    /// whose agents the user can see. Comes before that frame's layout.
+    case presented(bootID: String, projectionRevision: UInt64, paneIDs: Set<String>, connection: UInt64)
 }
 
 /// One connection's way into the engine. Once a later connection begins, this one's events are
@@ -124,6 +127,12 @@ actor HerdrTerminalEngine {
         let surfaceRevision: UInt64
     }
 
+    private struct PresentedFrame: Equatable {
+        let bootID: String
+        let projectionRevision: UInt64
+        let paneIDs: Set<String>
+    }
+
     /// A show in progress, as Herdr's client tracks one (`activation/model.rs`): only frames painted
     /// after it began count, so the last frame from before a hide never completes it.
     private struct Activation {
@@ -163,6 +172,7 @@ actor HerdrTerminalEngine {
     private var failedPaneIDs: Set<String> = []
     private var bootID: String?
     private var paintedSurface: PaintedSurface?
+    private var presentedFrame: PresentedFrame?
     private var activation: Activation?
     private var layout: HerdrPaneLayout?
     private var paneScrolls: [String: HerdrPaneScroll] = [:]
@@ -192,6 +202,7 @@ actor HerdrTerminalEngine {
         if state == .failed { state = .running }
         presentation = HerdrPresentation()
         paintedSurface = nil
+        presentedFrame = nil
         activation = nil
         failedPaneIDs.removeAll()
         return HerdrEngineFeed(engine: self, connection: connection)
@@ -323,6 +334,16 @@ actor HerdrTerminalEngine {
         let listed = Set(surface.panes.map(\.paneID))
         panes = panes.filter { listed.contains($0.key) }
         failedPaneIDs.formIntersection(listed)
+        let frame = PresentedFrame(bootID: surface.bootID, projectionRevision: surface.projectionRevision, paneIDs: listed)
+        if frame != presentedFrame {
+            presentedFrame = frame
+            continuation.yield(.presented(
+                bootID: frame.bootID,
+                projectionRevision: frame.projectionRevision,
+                paneIDs: frame.paneIDs,
+                connection: connection
+            ))
+        }
         publishLayout(of: surface, snapshot: snapshot)
         publishScroll(of: surface)
         if activation != nil {

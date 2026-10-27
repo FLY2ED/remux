@@ -37,6 +37,29 @@ final class TerminalSettingsTests: XCTestCase {
         XCTAssertEqual(settings.toolbarKeys, .default)
     }
 
+    func testHapticsAreOnByDefaultAndForSettingsSavedBeforeThem() throws {
+        XCTAssertTrue(TerminalSettings.default.vibratesForBellsAndAgents)
+        XCTAssertTrue(TerminalSettings.default.vibratesForKeysAndButtons)
+
+        let data = Data(#"{"fontSize":16,"theme":"remuxLight"}"#.utf8)
+        let settings = try JSONDecoder().decode(TerminalSettings.self, from: data)
+
+        XCTAssertTrue(settings.vibratesForBellsAndAgents)
+        XCTAssertTrue(settings.vibratesForKeysAndButtons)
+    }
+
+    func testEachHapticsSwitchIsSavedOnItsOwn() throws {
+        for (bells, keys) in [(false, true), (true, false), (false, false)] {
+            var settings = TerminalSettings.default
+            settings.vibratesForBellsAndAgents = bells
+            settings.vibratesForKeysAndButtons = keys
+
+            let decoded = try JSONDecoder().decode(TerminalSettings.self, from: JSONEncoder().encode(settings))
+
+            XCTAssertEqual(decoded, settings)
+        }
+    }
+
     func testToolbarKeysExposeCompactAndAccessibleTitles() {
         XCTAssertEqual(TerminalToolbarKey.control.toolbarTitle, "ctrl")
         XCTAssertEqual(TerminalToolbarKey.control.settingsTitle, "Control")

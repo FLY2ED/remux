@@ -118,6 +118,14 @@ private struct RemuxWorkspaceShell: View {
             activeTerminalLayer
             routeLayer
         }
+        .background {
+            HerdrNotificationBannerWindow(
+                center: model.herdrNotifications,
+                shownWorkspaceID: selectedTerminalID,
+                holdsUnsavedInput: model.connectionSetup != nil,
+                onOpen: openHerdrNotification
+            )
+        }
         .preferredColorScheme(shownTerminalColorScheme)
         .onAppear {
             model.handleAppLifecyclePhase(
@@ -489,6 +497,13 @@ private struct RemuxWorkspaceShell: View {
                 isSessionSwitcherPresented = false
             }
         }
+    }
+
+    /// The banner's window has closed whatever was presented; the sheet this shell keeps state for
+    /// follows. A server or session form being filled in never gets here: its typing is kept.
+    private func openHerdrNotification(_ banner: HerdrNotificationPolicy.Banner) {
+        isSessionSwitcherPresented = false
+        model.openHerdrNotification(banner)
     }
 
     private func cancelSessionSetupIfNeeded() {
@@ -2033,6 +2048,26 @@ private struct TerminalSettingsView: View {
             }
             .libraryHomeListRowSurface()
 
+            // Only a phone vibrates.
+            if UIDevice.current.userInterfaceIdiom == .phone {
+                Section("Haptics") {
+                    Toggle(isOn: vibratesForBellsAndAgentsBinding) {
+                        Text("Bells and agents")
+                        Text("Vibrate when a program rings the bell, or an agent needs you or finishes.")
+                    }
+                    .tint(LibraryHomePalette.controlAccent)
+                    .accessibilityIdentifier("settings.haptics.bells-and-agents")
+
+                    Toggle(isOn: vibratesForKeysAndButtonsBinding) {
+                        Text("Keys and buttons")
+                        Text("Vibrate when you press toolbar keys and buttons in Remux.")
+                    }
+                    .tint(LibraryHomePalette.controlAccent)
+                    .accessibilityIdentifier("settings.haptics.keys-and-buttons")
+                }
+                .libraryHomeListRowSurface()
+            }
+
             Section {
                 Toggle("Allow older RSA host keys", isOn: allowInsecureRSAHostKeysBinding)
                     .tint(LibraryHomePalette.controlAccent)
@@ -2109,6 +2144,26 @@ private struct TerminalSettingsView: View {
             get: { settings.zoomMultipaneWindowsByDefault },
             set: { value in
                 settings.zoomMultipaneWindowsByDefault = value
+                sourceSettings = settings
+            }
+        )
+    }
+
+    private var vibratesForBellsAndAgentsBinding: Binding<Bool> {
+        Binding(
+            get: { settings.vibratesForBellsAndAgents },
+            set: { value in
+                settings.vibratesForBellsAndAgents = value
+                sourceSettings = settings
+            }
+        )
+    }
+
+    private var vibratesForKeysAndButtonsBinding: Binding<Bool> {
+        Binding(
+            get: { settings.vibratesForKeysAndButtons },
+            set: { value in
+                settings.vibratesForKeysAndButtons = value
                 sourceSettings = settings
             }
         )

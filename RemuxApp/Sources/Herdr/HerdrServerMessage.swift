@@ -173,6 +173,7 @@ enum HerdrControlKind {
     static let surfaceScroll = "endpoint.surface-scroll.v1"
     static let healthPing = "endpoint.health.ping.v1"
     static let healthPong = "endpoint.health.pong.v1"
+    static let agentCompletions = "endpoint.agent-completions.v1"
 }
 
 enum HerdrEndpointControl: Equatable, Sendable {
@@ -182,14 +183,22 @@ enum HerdrEndpointControl: Equatable, Sendable {
     case surfaceDelta(HerdrSurfaceDelta)
     case surfaceScroll(HerdrSurfaceScroll)
     case healthPong(data: String)
-    /// A kind Remux doesn't use: agent completions and agent view, the presentation fence's reply,
-    /// and kinds added after generation 1. Herdr adds features as new kinds, so they are ignored.
+    case agentCompletions(HerdrAgentCompletions)
+    /// A kind Remux doesn't use: agent view, the presentation fence's reply, and kinds added after
+    /// generation 1. Herdr adds features as new kinds, so they are ignored.
     case ignored(kind: String)
 
     /// Parses a control. Invalid data in a kind Remux relies on, or any `shell.snapshot.*` kind other
     /// than v1 (an unnegotiated codec), is an error, as in Herdr's client, where these errors fail the
-    /// connection.
+    /// connection. Agent completions only refine what the snapshot says, so Herdr's client ignores ones
+    /// it can't read, and so does Remux.
     static func parse(kind: String, data: String) throws -> HerdrEndpointControl {
+        if kind == HerdrControlKind.agentCompletions {
+            guard let completions = try? JSONDecoder().decode(HerdrAgentCompletions.self, from: Data(data.utf8)) else {
+                return .ignored(kind: kind)
+            }
+            return .agentCompletions(completions)
+        }
         do {
             switch kind {
             case HerdrControlKind.welcome:
@@ -255,6 +264,19 @@ struct HerdrWelcome: Equatable, Sendable, Decodable {
         methods = try container.decodeIfPresent([String].self, forKey: .methods) ?? []
         capabilities = try container.decodeIfPresent([String].self, forKey: .capabilities) ?? []
         error = try container.decodeIfPresent(Rejection.self, forKey: .error)
+    }
+}
+
+/// `endpoint.agent-completions.v1`, which Herdr sends just before the snapshot of the same revision: for
+/// each agent pane whose agent last finished work, the state change at which it did.
+struct HerdrAgentCompletions: Equatable, Sendable, Decodable {
+    let bootID: String
+    let revision: UInt64
+    let completions: [String: UInt64]
+
+    private enum CodingKeys: String, CodingKey {
+        case bootID = "boot_id"
+        case revision, completions
     }
 }
 

@@ -4872,6 +4872,159 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertEqual(hosts, ["build.example.test", "updated.example.com"])
     }
 
+    /// An agent waiting in another tab of a Herdr session behind Home shows as a banner naming the
+    /// session; tapping it opens the session and asks Herdr to focus the agent's pane right after the
+    /// show, which takes the phone to the pane's tab.
+    func testTappingAHerdrNotificationOpensItsSessionAtItsPane() async throws {
+        let (harness, workspace, bridge) = try await connectedHerdrSession(agentStatus: .blocked)
+        await harness.model.showLibrary()
+        XCTAssertEqual(harness.model.state, .library)
+
+        await bridge.serve(HerdrServerScript.notification(
+            .needsAttention,
+            title: "claude needs attention",
+            body: "w1 · 1 · build",
+            agent: "claude",
+            workspace: "w1",
+            tab: "t2",
+            pane: "w1:p3"
+        ))
+        let shown = await waitUntil(timeout: 3) { harness.model.herdrNotifications.banner != nil }
+        XCTAssertTrue(shown, "no banner")
+        let banner = try XCTUnwrap(harness.model.herdrNotifications.banner)
+        XCTAssertEqual(banner.notification.title, "claude needs attention")
+        XCTAssertEqual(banner.origin.sessionName, "agents")
+        XCTAssertEqual(banner.origin.serverName, "Build Host")
+        XCTAssertEqual(banner.origin.place, HerdrNotificationPlace(workspace: "remux", tab: "t2"))
+        XCTAssertEqual(
+            HerdrNotificationBannerContent(banner, fromShownSession: false).place,
+            "Build Host · agents · remux › t2"
+        )
+
+        let beforeTap = await bridge.writtenCount
+        harness.model.openHerdrNotification(banner)
+
+        XCTAssertEqual(harness.model.state, .terminal(workspace.id))
+        XCTAssertNil(harness.model.herdrNotifications.banner)
+        var writes: [ClientWrite] = []
+        for position in beforeTap..<(beforeTap + 4) {
+            writes.append(try ClientWrite.decode(try await bridge.written(position)))
+        }
+        let show = try XCTUnwrap(writes.firstIndex { if case .surfaceSet(_, true) = $0 { true } else { false } })
+        let focus = try XCTUnwrap(writes.firstIndex { if case .paneFocus(_, "w1:p3") = $0 { true } else { false } })
+        XCTAssertLessThan(show, focus)
+    }
+
+    /// Nothing shows for the tab on screen; a session's banner goes when the session is closed.
+    func testAHerdrBannerSkipsTheTabOnScreenAndGoesWithItsSession() async throws {
+        let (harness, workspace, bridge) = try await connectedHerdrSession(agentStatus: .blocked, agentTab: "t1")
+        await bridge.serve(HerdrServerScript.notification(
+            .needsAttention,
+            title: "claude needs attention",
+            workspace: "w1",
+            tab: "t1",
+            pane: "w1:p3"
+        ))
+        try await Task.sleep(for: .milliseconds(1300))
+        XCTAssertNil(harness.model.herdrNotifications.banner, "a banner showed for the tab on screen")
+
+        await bridge.serve(HerdrServerScript.notification(.custom, title: "build passed"))
+        let shown = await waitUntil(timeout: 2) { harness.model.herdrNotifications.banner != nil }
+        XCTAssertTrue(shown, "no banner")
+        harness.model.disconnectActiveSession(workspace.id)
+        XCTAssertNil(harness.model.herdrNotifications.banner)
+    }
+
+    /// A bell in the Herdr session on screen vibrates at once, and an agent's banner for another tab
+    /// when it shows, as its pairing with the bell decides.
+    func testAHerdrBellAndAnAgentsBannerVibrate() async throws {
+        let (harness, _, bridge) = try await connectedHerdrSession(agentStatus: .blocked)
+        let recorder = VibrationRecorder()
+        harness.model.herdrNotifications.vibrate = { recorder.alerts.append($0) }
+
+        await bridge.serve(HerdrServerScript.bell() + HerdrServerScript.notification(
+            .needsAttention,
+            title: "claude needs attention",
+            workspace: "w1",
+            tab: "t2",
+            pane: "w1:p3"
+        ))
+        let rang = await waitUntil(timeout: 5) { recorder.alerts.first == .bell }
+        XCTAssertTrue(rang, "the bell didn't vibrate: \(recorder.alerts)")
+        let shown = await waitUntil(timeout: 5) { harness.model.herdrNotifications.banner != nil }
+        XCTAssertTrue(shown, "no banner")
+        let banner = try XCTUnwrap(harness.model.herdrNotifications.banner)
+        XCTAssertEqual(recorder.alerts, [.bell, try XCTUnwrap(banner.alert)])
+    }
+
+    /// The Haptics switches apply as loaded at launch and as soon as they change.
+    func testHapticsFollowTheSettings() async throws {
+        addTeardownBlock { @MainActor in Haptic.follow(.default) }
+        var saved = TerminalSettings.default
+        saved.vibratesForBellsAndAgents = false
+        let harness = makeHarness(settings: saved)
+        await harness.model.load()
+        XCTAssertFalse(Haptic.rules.allows(.bellsAndAgents))
+        XCTAssertTrue(Haptic.rules.allows(.keysAndButtons))
+
+        await harness.model.updateTerminalSettings { settings in
+            settings.vibratesForBellsAndAgents = true
+            settings.vibratesForKeysAndButtons = false
+        }
+        XCTAssertTrue(Haptic.rules.allows(.bellsAndAgents))
+        XCTAssertFalse(Haptic.rules.allows(.keysAndButtons))
+    }
+
+    @MainActor
+    private final class VibrationRecorder {
+        var alerts: [HapticAlert] = []
+    }
+
+    /// A Herdr session shown and connected, its snapshot with tab `t1` in front, a second tab `t2`, and
+    /// an agent in pane `w1:p3` of `agentTab`. It returns once the show is sent: Herdr rings only the
+    /// session in front, so a bell comes after it.
+    private func connectedHerdrSession(
+        agentStatus: HerdrAgentStatus,
+        agentTab: String = "t2"
+    ) async throws -> (RemuxRootModelHarness, SavedWorkspace, FakeBridgeTransport) {
+        let pair = makePasswordBackedServer()
+        let workspace = SavedWorkspace(serverID: pair.server.id, backend: .herdr, sessionName: "agents")
+        let opener = RecordingHerdrBridgeOpener()
+        let harness = makeHarness(
+            servers: [pair.server],
+            workspaces: [workspace],
+            identities: [pair.identity],
+            herdrBridgeOpener: { target, _, _ in await opener.open(target) }
+        )
+        try await harness.credentialHelper.savePassword("secret", for: pair.server.id)
+        await harness.model.load()
+        await harness.model.connect(to: workspace.id)
+        let session = try XCTUnwrap(harness.model.activeSessions.first)
+        guard case .herdr(let model) = harness.model.terminalRuntime(for: session) else {
+            XCTFail("expected a Herdr runtime")
+            throw CancellationError()
+        }
+        addTeardownBlock { @MainActor in await model.stop() }
+        model.terminalScreenAdapter.prepareInitialViewport(size: CGSize(width: 390, height: 844), scale: 3)
+        let bridge = try await opener.bridge(0)
+        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(
+            revision: 1,
+            workspaceLabel: "remux",
+            otherTabs: ["t2"],
+            panes: [HerdrServerScript.snapshotPane("w1:p1"), HerdrServerScript.snapshotPane("w1:p3", tab: agentTab)],
+            agents: [HerdrServerScript.snapshotAgent("w1:p3", tab: agentTab, status: agentStatus, stateChange: 2)]
+        ))
+        let connected = await waitUntil(timeout: 3) { model.notificationState != nil && model.isConnectionOpen }
+        XCTAssertTrue(connected, "the session didn't connect")
+        var position = 0
+        while true {
+            let write = try ClientWrite.decode(try await bridge.written(position))
+            position += 1
+            if case .surfaceSet(_, true) = write { break }
+        }
+        return (harness, workspace, bridge)
+    }
+
     /// Opening a Herdr session leaves the server's tmux discovery running: only a connected tmux session
     /// starts discovery again, and the bridge shares the server's pooled SSH connection with it.
     func testOpeningAHerdrSessionLeavesTmuxDiscoveryRunning() async throws {
