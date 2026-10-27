@@ -41,7 +41,7 @@ final class HerdrBridgeTests: XCTestCase {
         ])
         let bytes = try await Self.read(from: bridge, count: 7)
         XCTAssertEqual(String(decoding: bytes, as: UTF8.self), "payload")
-        await bridge.close(reusable: true)
+        await bridge.close(.finished)
     }
 
     /// What the server's startup files print before the marker never reaches the protocol.
@@ -53,7 +53,7 @@ final class HerdrBridgeTests: XCTestCase {
         ])
         let bytes = try await Self.read(from: bridge, count: 7)
         XCTAssertEqual(String(decoding: bytes, as: UTF8.self), "payload")
-        await bridge.close(reusable: true)
+        await bridge.close(.finished)
     }
 
     /// More than one SSH window (2 MiB) arrives over several reads, from a single server write that the
@@ -65,7 +65,7 @@ final class HerdrBridgeTests: XCTestCase {
         ])
         let bytes = try await Self.read(from: bridge, count: payload.count)
         XCTAssertEqual(Data(bytes), payload)
-        await bridge.close(reusable: true)
+        await bridge.close(.finished)
     }
 
     /// On a dead path the server never answers the channel close; closing still ends the waiting read
@@ -78,7 +78,7 @@ final class HerdrBridgeTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(50))
         try await server.stopReadingFromClients()
         let started = ContinuousClock.now
-        await bridge.close(reusable: false)
+        await bridge.close(.unresponsive)
         let result = try await reading.value
         XCTAssertNil(result)
         XCTAssertLessThan(ContinuousClock.now - started, .seconds(1))
@@ -112,7 +112,7 @@ final class HerdrBridgeTests: XCTestCase {
         XCTAssertNil(outcome.result, "the write finished although the server stopped reading")
 
         let started = ContinuousClock.now
-        await bridge.close(reusable: true)
+        await bridge.close(.finished)
         while outcome.result == nil, ContinuousClock.now - started < .seconds(2) {
             try await Task.sleep(for: .milliseconds(10))
         }
@@ -133,14 +133,16 @@ final class HerdrBridgeTests: XCTestCase {
         try await server.stopReadingFromClients()
 
         let started = ContinuousClock.now
-        await bridge.close(reusable: false)
+        await bridge.close(.unresponsive)
         XCTAssertLessThan(ContinuousClock.now - started, .seconds(1))
         XCTAssertFalse(root.sshRoot.rootChannel.isActive, "the SSH connection is still open")
     }
 
-    /// After an unreusable close returns, the pool no longer offers that SSH connection, so a reconnect
-    /// made right away gets a new one.
-    func testAnUnreusableCloseLeavesThePoolBeforeReturning() async throws {
+    /// The bridge decides from its close's cause whether the pool offers its SSH connection again: not
+    /// after an opening was given up or Herdr went silent, and then not even right after the close
+    /// returns, so a reconnect made at once gets a new one; after anything else it does, as Herdr's
+    /// client keeps its SSH connection for its next bridge.
+    func testTheCloseCauseDecidesWhetherThePoolOffersTheSSHConnectionAgain() async throws {
         let server = try await SSHPublicKeyLiveTestServer.start(username: "remux")
         defer { server.stop() }
         let trace = RemuxTransportStartupTrace(flowID: "herdr-bridge-pool-test")
@@ -177,7 +179,11 @@ final class HerdrBridgeTests: XCTestCase {
         let pool = RemuxSSHRootService()
         addTeardownBlock { await pool.closeAllConnectionsForTesting() }
 
-        for _ in 0..<5 {
+        let causes: [(HerdrBridgeCloseCause, offeredAgain: Bool)] = [
+            (.givenUpWhileOpening, false), (.unresponsive, false), (.finished, true),
+            (.unresponsive, false), (.finished, true), (.givenUpWhileOpening, false),
+        ]
+        for (cause, offeredAgain) in causes {
             let prepared = await pool.preparedRoot(for: key, configuration: configuration, trace: trace)
             let root = try await prepared.sshRoot()
             let bridge = try await HerdrSSHBridge.open(
@@ -186,11 +192,12 @@ final class HerdrBridgeTests: XCTestCase {
                 session: "pool",
                 trace: trace
             )
-            await bridge.close(reusable: false)
+            await bridge.close(cause)
 
             let next = await pool.preparedRoot(for: key, configuration: configuration, trace: trace)
             let nextRoot = try await next.sshRoot()
-            XCTAssertFalse(nextRoot === root, "the pool offered the connection the bridge gave up")
+            XCTAssertEqual(nextRoot === root, offeredAgain, "\(cause)")
+            // Each round starts on a new SSH connection.
             let claimed = try await next.claim(nextRoot, trace: trace)
             await claimed.release(.invalidated)
         }
@@ -239,7 +246,7 @@ final class HerdrBridgeTests: XCTestCase {
             }
             group.addTask {
                 try await Task.sleep(for: .seconds(5))
-                await bridge.close(reusable: true)
+                await bridge.close(.finished)
                 return []
             }
             let first = try await group.next() ?? []

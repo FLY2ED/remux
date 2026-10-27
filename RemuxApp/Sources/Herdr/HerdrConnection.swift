@@ -10,9 +10,22 @@ protocol HerdrBridgeTransport: Sendable {
     func read() async throws -> [UInt8]?
     func write(_ bytes: [UInt8]) async throws
     /// Ends the stream at once: a pending read returns nil, pending writes fail, and the call doesn't
-    /// wait for the other side. `reusable` is false when the connection saw the path go silent, so
-    /// whatever carries the stream shouldn't be reused.
-    func close(reusable: Bool) async
+    /// wait for the other side. `cause` says what the closer knows of the path, which decides whether
+    /// whatever carries the stream may carry the next one.
+    func close(_ cause: HerdrBridgeCloseCause) async
+}
+
+/// Why a bridge closes, as far as its closer knows. Whether the channel itself failed is the bridge's
+/// own to know.
+enum HerdrBridgeCloseCause: Equatable, Sendable {
+    /// Nothing says the path is bad: Remux closed an open connection, or the connection ended on what
+    /// came from the other side, as Herdr refusing the hello or shutting down, or the bridge's stream
+    /// ending.
+    case finished
+    /// Given up before the connection opened, so whether the path still works is unknown.
+    case givenUpWhileOpening
+    /// Herdr didn't answer in time.
+    case unresponsive
 }
 
 /// What a connection hands to its screen, in wire order. Events can arrive before `open` returns.
@@ -148,7 +161,9 @@ struct HerdrCommandReply: Sendable {
     let answeredAfter: UInt64
 }
 
-/// One endpoint connection to a Herdr server (generation 1).
+/// One endpoint connection to a Herdr server (generation 1). It owns its bridge from the moment it is
+/// made: only the connection closes it, whether its owner closes the connection, the welcome doesn't
+/// come in time, or the connection fails.
 ///
 /// It sends Remux's hello and checks the welcome, then reads server messages in order and hands them to
 /// its screen, reading again only after the screen has taken them. Surface messages are decoded here,
@@ -175,7 +190,8 @@ actor HerdrConnection {
         var deliveryRecheck: Duration = .seconds(1)
         /// Herdr's command timeout.
         var command: Duration = .seconds(60)
-        /// Herdr's activation timeout, for `surface.set`.
+        /// Herdr's activation timeout: a show's answer and a frame after it must both come within it. The
+        /// screen holds a show to it; the connection only sends the show and reads the answer.
         var activation: Duration = .seconds(5)
     }
 
@@ -190,21 +206,21 @@ actor HerdrConnection {
     static let maxInputBytes = 1024 * 1024
     static let surfaceSetMethod = "client_shell.surface.set"
 
-    nonisolated let negotiated: Negotiated
+    /// What the welcome offered, once it came.
+    private(set) var negotiated: Negotiated?
     private let transport: any HerdrBridgeTransport
     private let timing: Timing
     private let onEvent: @Sendable (HerdrConnectionEvent) async -> Void
-    private let openedAt = ContinuousClock.now
+    /// When the welcome came.
+    private var openedAt = ContinuousClock.now
 
-    private var splitter: HerdrFrameSplitter
-    private var decoder: HerdrSurfaceDecoder
+    private var splitter = HerdrFrameSplitter()
+    /// Made again with the welcome's encodings.
+    private var decoder = HerdrSurfaceDecoder(deltaNegotiated: false, scrollNegotiated: false)
     private var bootID: String?
     /// The newest agent completions, waiting for the snapshot they belong to.
     private var pendingCompletions: HerdrAgentCompletions?
     private var isActive = false
-    /// Counts shows and hides. Herdr keeps one surface switch per connection and the last request
-    /// sets it, so a failed show rolls back only while it is still the newest request.
-    private var visibilityRequests: UInt64 = 0
     private var ended = false
     /// Why the connection ended, for the reader to report; nil after a close Remux asked for.
     private var endReason: HerdrConnectionError?
@@ -228,7 +244,7 @@ actor HerdrConnection {
     private var isWriting = false
 
     /// A request awaiting its final chunk. After a cancellation, or for a hide sent without waiting,
-    /// nobody waits, but the entry stays until the reply or the timeout frees the lane.
+    /// nobody waits, but the entry stays until the reply, or a command's timeout, frees the lane.
     private struct Pending {
         var waiter: Waiter?
         var data: [UInt8] = []
@@ -238,9 +254,8 @@ actor HerdrConnection {
     private enum Waiter {
         /// A caller awaiting the reply's JSON.
         case caller(CheckedContinuation<Data, Error>)
-        /// A show sent with `sendShow`: its answer goes to `answered`, after the same rollback as a
-        /// failed `show`.
-        case show(position: UInt64, answered: @Sendable (Result<UInt64, Error>) -> Void)
+        /// A show sent with `sendShow`: its answer goes to `answered`.
+        case show(answered: @Sendable (Result<UInt64, Error>) -> Void)
         /// A command sent without a caller awaiting it, after the snapshot `sentAfter`: its reply goes
         /// to `answered`.
         case command(answered: CommandAnswered, sentAfter: UInt64)
@@ -258,8 +273,6 @@ actor HerdrConnection {
     private struct QueuedCommand {
         let method: String
         let params: any Encodable & Sendable
-        /// The show it belongs to, as `visibilityRequests` counted it.
-        let show: UInt64
         let answered: CommandAnswered
     }
 
@@ -273,82 +286,52 @@ actor HerdrConnection {
 
     // MARK: - Opening
 
-    /// Sends the hello, waits for the welcome and starts reading. `appActive` starts the health check
-    /// when the app is in the foreground (`setAppActive`).
-    static func open(
+    /// Takes over `transport`, which only the connection closes from here on.
+    init(
         transport: any HerdrBridgeTransport,
-        hello: HerdrHello,
-        appActive: Bool,
         timing: Timing = Timing(),
-        onEvent: @escaping @Sendable (HerdrConnectionEvent) async -> Void
-    ) async throws -> HerdrConnection {
-        // Neither a stalled write nor a read ends when its task is cancelled, so the timeout and a
-        // cancelled open close the transport, which ends both. Neither knows whether the path still
-        // works, so the SSH connection isn't offered to the next opening, which would wait on a dead one.
-        let timer = Task {
-            try await Task.sleep(for: timing.welcome)
-            await transport.close(reusable: false)
-        }
-        let welcome: HerdrWelcome
-        let splitter: HerdrFrameSplitter
-        do {
-            (welcome, splitter) = try await withTaskCancellationHandler {
-                // A failed write ends the stream, and the read then reports why.
-                try? await transport.write(HerdrClientMessage.hello(hello).frame)
-                return try await readWelcome(from: transport)
-            } onCancel: {
-                Task { await transport.close(reusable: false) }
-            }
-            timer.cancel()
-            try validate(welcome)
-            try Task.checkCancellation()
-        } catch {
-            timer.cancel()
-            if case .success = await timer.result {
-                throw HerdrConnectionError.handshakeTimedOut
-            }
-            let cancelled = Task.isCancelled
-            await transport.close(reusable: !cancelled)
-            throw cancelled ? CancellationError() : Self.connectionError(error)
-        }
-        let connection = HerdrConnection(
-            transport: transport,
-            negotiated: Negotiated(
-                serverVersion: welcome.serverVersion,
-                methods: Set(welcome.methods),
-                delta: welcome.capabilities.contains("surface_delta"),
-                scroll: welcome.capabilities.contains("surface_scroll")
-            ),
-            splitter: splitter,
-            surfaceActive: hello.surfaceActive,
-            timing: timing,
-            onEvent: onEvent
-        )
-        await connection.start(appActive: appActive)
-        return connection
-    }
-
-    private init(
-        transport: any HerdrBridgeTransport,
-        negotiated: Negotiated,
-        splitter: HerdrFrameSplitter,
-        surfaceActive: Bool,
-        timing: Timing,
         onEvent: @escaping @Sendable (HerdrConnectionEvent) async -> Void
     ) {
         self.transport = transport
-        self.negotiated = negotiated
-        self.splitter = splitter
-        self.decoder = HerdrSurfaceDecoder(deltaNegotiated: negotiated.delta, scrollNegotiated: negotiated.scroll)
-        self.isActive = surfaceActive
         self.timing = timing
         self.onEvent = onEvent
     }
 
-    private static func readWelcome(
-        from transport: any HerdrBridgeTransport
-    ) async throws -> (HerdrWelcome, HerdrFrameSplitter) {
-        var splitter = HerdrFrameSplitter()
+    /// Sends the hello, waits for the welcome and starts reading. `appActive` starts the health check
+    /// when the app is in the foreground (`setAppActive`). Throws why it didn't open: what the server or
+    /// the bridge said, no welcome in time, or `CancellationError` once its owner closed it.
+    func open(hello: HerdrHello, appActive: Bool) async throws {
+        // Neither a stalled write nor a read ends by itself, so the deadline ends the connection, whose
+        // bridge then ends both.
+        let deadline = Task {
+            try await Task.sleep(for: self.timing.welcome)
+            await self.end(.handshakeTimedOut)
+        }
+        defer { deadline.cancel() }
+        do {
+            guard !ended else { throw HerdrConnectionError.closed }
+            // A failed write ends the stream, and the read then reports why.
+            try? await transport.write(HerdrClientMessage.hello(hello).frame)
+            let welcome = try await readWelcome()
+            try Self.validate(welcome)
+            guard !ended else { throw HerdrConnectionError.closed }
+            let negotiated = Negotiated(
+                serverVersion: welcome.serverVersion,
+                methods: Set(welcome.methods),
+                delta: welcome.capabilities.contains("surface_delta"),
+                scroll: welcome.capabilities.contains("surface_scroll")
+            )
+            self.negotiated = negotiated
+            decoder = HerdrSurfaceDecoder(deltaNegotiated: negotiated.delta, scrollNegotiated: negotiated.scroll)
+            isActive = hello.surfaceActive
+        } catch {
+            await end(Self.connectionError(error))
+            throw endReason ?? CancellationError()
+        }
+        start(appActive: appActive)
+    }
+
+    private func readWelcome() async throws -> HerdrWelcome {
         while true {
             if let payload = try splitter.nextPayload() {
                 let message = try HerdrServerMessage.decode(payload)
@@ -363,7 +346,7 @@ actor HerdrConnection {
                 else {
                     throw HerdrConnectionError.incompatible("its first message wasn't a welcome")
                 }
-                return (welcome, splitter)
+                return welcome
             }
             guard let chunk = try await transport.read() else { throw HerdrConnectionError.closed }
             splitter.append(chunk)
@@ -411,6 +394,7 @@ actor HerdrConnection {
     }
 
     private func start(appActive: Bool) {
+        openedAt = .now
         Task { await self.readLoop() }
         self.appActive = appActive
         startHealthCheck()
@@ -549,81 +533,41 @@ actor HerdrConnection {
     // MARK: - Showing and hiding
 
     /// Shows the session as Herdr's own client does: the tab takes this size (at least one cell each
-    /// way), the surface activates, then the phone takes focus. Returns the projection floor from
-    /// `surface.set`; the next full surface is at least that revision. If Herdr doesn't acknowledge it
-    /// within the activation timeout, the show is rolled back as Herdr's client rolls it back, unless a
-    /// newer show or hide was asked for meanwhile: as in Herdr's client, the newest request wins.
-    func show(_ geometry: HerdrSurfaceGeometry) async throws -> UInt64 {
-        let show = try prepareShow(geometry)
-        do {
-            let data = try await reply(
-                to: show.id,
-                method: Self.surfaceSetMethod,
-                holdsLane: false,
-                timeout: timing.activation,
-                sending: show.messages
-            )
-            return try Self.acknowledgedRevision(from: data, active: true)
-        } catch {
-            if show.position == visibilityRequests { rollBackShow() }
-            throw error
-        }
-    }
-
-    /// Sends a show as `show(_:)` does and returns once it is queued, so a caller sending its calls one
-    /// after another can send a hide behind it while it is unanswered. `answered` gets Herdr's answer
-    /// on this connection.
+    /// way), the surface activates, then the phone takes focus. Returns once the show is queued, so a
+    /// caller sending its calls one after another can send a hide behind it while it is unanswered.
+    /// `answered` gets the projection floor from `surface.set`, which the next full surface reaches, or
+    /// why the show failed. Herdr answers a show even while a command is in flight; how long to wait for
+    /// the answer is the caller's.
     func sendShow(_ geometry: HerdrSurfaceGeometry, answered: @escaping @Sendable (Result<UInt64, Error>) -> Void) {
-        let show: (id: String, position: UInt64, messages: [HerdrClientMessage])
+        guard !ended else {
+            answered(.failure(HerdrCommandError.connectionEnded))
+            return
+        }
+        let request: (id: String, message: HerdrClientMessage)
         do {
-            show = try prepareShow(geometry)
+            request = try surfaceSet(active: true)
         } catch {
             answered(.failure(error))
             return
         }
-        guard !ended else {
-            resolve(.show(position: show.position, answered: answered), with: .failure(HerdrCommandError.connectionEnded))
-            return
-        }
-        register(show.id, waiter: .show(position: show.position, answered: answered), holdsLane: false,
-                 timeout: timing.activation, method: Self.surfaceSetMethod, sending: show.messages)
-    }
-
-    private func prepareShow(
-        _ geometry: HerdrSurfaceGeometry
-    ) throws -> (id: String, position: UInt64, messages: [HerdrClientMessage]) {
-        let (id, request) = try surfaceSet(active: true)
-        visibilityRequests += 1
         isActive = true
-        return (id, visibilityRequests, [.shellResize(Self.atLeastOneCell(geometry)), request, .focus(true)])
+        register(request.id, waiter: .show(answered: answered), holdsLane: false, timeout: nil,
+                 method: Self.surfaceSetMethod,
+                 sending: [.shellResize(Self.atLeastOneCell(geometry)), request.message, .focus(true)])
     }
 
-    /// Hides the session. Focus goes first, while still active: deactivation keeps the stored focus,
-    /// so without it the next show's focus would be ignored.
-    func hide() async throws {
-        let hide = try prepareHide()
-        let data = try await reply(
-            to: hide.id,
-            method: Self.surfaceSetMethod,
-            holdsLane: false,
-            timeout: timing.activation,
-            sending: hide.messages
-        )
-        _ = try Self.acknowledgedRevision(from: data, active: false)
-    }
-
-    /// Sends a hide as `hide()` does and returns once it is queued; its answer isn't waited for.
+    /// Hides the session and returns once the hide is queued; its answer isn't waited for. Focus goes
+    /// first, while still active: deactivation keeps the stored focus, so without it the next show's
+    /// focus would be ignored. A command waiting to follow the show doesn't go: Herdr refuses commands
+    /// from a hidden session, and the next show sends its own.
     func sendHide() {
-        guard let hide = try? prepareHide(), !ended else { return }
-        register(hide.id, waiter: nil, holdsLane: false, timeout: timing.activation,
-                 method: Self.surfaceSetMethod, sending: hide.messages)
-    }
-
-    private func prepareHide() throws -> (id: String, messages: [HerdrClientMessage]) {
-        let (id, request) = try surfaceSet(active: false)
-        visibilityRequests += 1
+        guard !ended, let request = try? surfaceSet(active: false) else { return }
         isActive = false
-        return (id, [.focus(false), request])
+        let dropped = laneWaiters.compactMap { if case .command(let command) = $0.waiter { command } else { nil } }
+        laneWaiters.removeAll { if case .command = $0.waiter { true } else { false } }
+        dropped.forEach { $0.answered(.failure(HerdrCommandError.notSent)) }
+        register(request.id, waiter: nil, holdsLane: false, timeout: nil,
+                 method: Self.surfaceSetMethod, sending: [.focus(false), request.message])
     }
 
     /// Gives the session on screen a new size, as Herdr's client does whenever its terminal resizes,
@@ -643,13 +587,6 @@ actor HerdrConnection {
         )
     }
 
-    private func rollBackShow() {
-        isActive = false
-        guard let release = try? surfaceSet(active: false) else { return }
-        enqueue(.focus(false))
-        enqueue(release.message)
-    }
-
     private func surfaceSet(active: Bool) throws -> (id: String, message: HerdrClientMessage) {
         guard let bootID else { throw HerdrCommandError.noSnapshot }
         let id = makeID("s")
@@ -662,8 +599,8 @@ actor HerdrConnection {
         return (id, message)
     }
 
-    /// As in Herdr's client, the reply must confirm the requested state.
-    private static func acknowledgedRevision(from data: Data, active: Bool) throws -> UInt64 {
+    /// As in Herdr's client, the reply must confirm the show.
+    private static func shownRevision(from data: Data) throws -> UInt64 {
         struct Reply: Decodable {
             struct Result: Decodable {
                 let active: Bool
@@ -680,7 +617,7 @@ actor HerdrConnection {
         guard let result = try? JSONDecoder().decode(Reply.self, from: data).result else {
             throw HerdrConnectionError.incompatible("its surface.set reply couldn't be read")
         }
-        guard result.active == active else { throw HerdrCommandError.notAcknowledged }
+        guard result.active else { throw HerdrCommandError.notAcknowledged }
         return result.projectionRevision
     }
 
@@ -742,7 +679,7 @@ actor HerdrConnection {
     /// the command times out. A command cancelled while it waits is never sent; one cancelled after it
     /// was sent stops waiting, and its reply or timeout still frees the lane.
     func command(_ method: String, params: some Encodable & Sendable) async throws -> Data {
-        guard negotiated.methods.contains(method) else { throw HerdrCommandError.unsupported(method: method) }
+        guard negotiated?.methods.contains(method) == true else { throw HerdrCommandError.unsupported(method: method) }
         try await acquireLane()
         let id = makeID("c")
         let message: HerdrClientMessage
@@ -769,7 +706,7 @@ actor HerdrConnection {
         timeout: Duration? = nil,
         answered: @escaping CommandAnswered
     ) -> Bool {
-        guard !ended, isActive, !laneBusy, negotiated.methods.contains(method) else { return false }
+        guard !ended, isActive, !laneBusy, negotiated?.methods.contains(method) == true else { return false }
         laneBusy = true
         guard send(method, params: params, timeout: timeout, answered: answered) else {
             releaseLane()
@@ -793,16 +730,15 @@ actor HerdrConnection {
     }
 
     /// Sends a command for the show just sent: at once if no command is in flight, else once the lane
-    /// frees, and then only while that show is still the newest show or hide, since Herdr refuses commands
-    /// from a hidden session and a later show sends its own. Returns false, sending nothing, when the
-    /// session isn't shown or the server lacks the method; a command that waited and was dropped fails
-    /// with `notSent`.
+    /// frees, unless a hide comes first (`sendHide`). Returns false, sending nothing, when the session
+    /// isn't shown or the server lacks the method; a command that waited and was dropped fails with
+    /// `notSent`.
     func sendCommandWhileShown(
         _ method: String,
         params: some Encodable & Sendable,
         answered: @escaping CommandAnswered
     ) -> Bool {
-        guard !ended, isActive, negotiated.methods.contains(method) else { return false }
+        guard !ended, isActive, negotiated?.methods.contains(method) == true else { return false }
         guard laneBusy else {
             laneBusy = true
             guard send(method, params: params, timeout: nil, answered: answered) else {
@@ -812,7 +748,7 @@ actor HerdrConnection {
             return true
         }
         nextTicket += 1
-        let command = QueuedCommand(method: method, params: params, show: visibilityRequests, answered: answered)
+        let command = QueuedCommand(method: method, params: params, answered: answered)
         laneWaiters.append((nextTicket, .command(command)))
         return true
     }
@@ -852,17 +788,19 @@ actor HerdrConnection {
     }
 
     /// Registers the reply for `id`, then queues `messages` in order, all before any other actor work,
-    /// so a step's messages go out together and its reply can't arrive unregistered.
+    /// so a step's messages go out together and its reply can't arrive unregistered. A request without
+    /// a `timeout` waits for its reply until the connection ends.
     private func register(
         _ id: String,
         waiter: Waiter?,
         holdsLane: Bool,
-        timeout: Duration,
+        timeout: Duration?,
         method: String,
         sending messages: [HerdrClientMessage]
     ) {
         pending[id] = Pending(waiter: waiter, holdsLane: holdsLane)
         messages.forEach(enqueue)
+        guard let timeout else { return }
         Task {
             try? await Task.sleep(for: timeout)
             await self.expire(id, method: method)
@@ -873,12 +811,8 @@ actor HerdrConnection {
         switch waiter {
         case .caller(let continuation)?:
             continuation.resume(with: result)
-        case .show(let position, let answered)?:
-            let floor = result.flatMap { data in
-                Result { try Self.acknowledgedRevision(from: data, active: true) }
-            }
-            if case .failure = floor, position == visibilityRequests { rollBackShow() }
-            answered(floor)
+        case .show(let answered)?:
+            answered(result.flatMap { data in Result { try Self.shownRevision(from: data) } })
         case .command(let answered, let sentAfter)?:
             answered(result.map { HerdrCommandReply(json: $0, sentAfter: sentAfter, answeredAfter: snapshotRevision) })
         case nil:
@@ -955,8 +889,8 @@ actor HerdrConnection {
         continuation.resume(throwing: CancellationError())
     }
 
-    /// Passes the lane straight to the next waiter. A command for a show that is no longer the newest
-    /// isn't sent; the lane goes on to the one after it.
+    /// Passes the lane straight to the next waiter. A command that can't be sent passes it on to the one
+    /// after it.
     private func releaseLane() {
         while !laneWaiters.isEmpty {
             switch laneWaiters.removeFirst().waiter {
@@ -964,10 +898,6 @@ actor HerdrConnection {
                 continuation.resume()
                 return
             case .command(let command):
-                guard !ended, isActive, command.show == visibilityRequests else {
-                    command.answered(.failure(HerdrCommandError.notSent))
-                    continue
-                }
                 if send(command.method, params: command.params, timeout: nil, answered: command.answered) { return }
                 command.answered(.failure(HerdrCommandError.notSent))
             }
@@ -1089,23 +1019,27 @@ actor HerdrConnection {
     /// Ends the connection; no `ended` event follows, not even for an end found earlier that the screen
     /// hasn't been told about yet. Nothing is written first: Herdr removes an endpoint client whose
     /// stream ends just as one that sends `Detach`, and the bridge passes the end of its input on.
-    /// `reusable` is false when the caller found the path silent.
-    func close(reusable: Bool = true) async {
+    /// `cause` is what the owner knows of the path.
+    func close(_ cause: HerdrBridgeCloseCause) async {
         endReason = nil
         guard !ended else { return }
-        finish()
-        await transport.close(reusable: reusable)
+        await finish(cause)
     }
 
     /// The reader reports `error` once the screen has taken what it was given.
     private func end(_ error: HerdrConnectionError) async {
         guard !ended else { return }
         endReason = error
-        finish()
-        await transport.close(reusable: error != .unresponsive)
+        switch error {
+        case .unresponsive, .handshakeTimedOut:
+            await finish(.unresponsive)
+        default:
+            await finish(.finished)
+        }
     }
 
-    private func finish() {
+    /// The one way the connection ends: every waiter learns it, then the bridge closes with `cause`.
+    private func finish(_ cause: HerdrBridgeCloseCause) async {
         ended = true
         isActive = false
         healthTask?.cancel()
@@ -1131,5 +1065,6 @@ actor HerdrConnection {
                 command.answered(.failure(HerdrCommandError.connectionEnded))
             }
         }
+        await transport.close(cause)
     }
 }

@@ -47,10 +47,12 @@ final class HerdrConnectionTests: XCTestCase {
         let events = EventRecorder()
         let connection = try await HerdrConnection.open(transport: transport, hello: hello, appActive: false, timing: relaxed, onEvent: events.record)
 
-        XCTAssertEqual(connection.negotiated.methods.count, 40)
-        XCTAssertEqual(connection.negotiated.serverVersion, "0.9.3")
-        XCTAssertTrue(connection.negotiated.delta)
-        XCTAssertTrue(connection.negotiated.scroll)
+        let offered = await connection.negotiated
+        let negotiated = try XCTUnwrap(offered)
+        XCTAssertEqual(negotiated.methods.count, 40)
+        XCTAssertEqual(negotiated.serverVersion, "0.9.3")
+        XCTAssertTrue(negotiated.delta)
+        XCTAssertTrue(negotiated.scroll)
         let first = try await transport.written(0)
         XCTAssertEqual(first, HerdrClientMessage.hello(hello).frame)
 
@@ -97,23 +99,43 @@ final class HerdrConnectionTests: XCTestCase {
         } catch let error as HerdrConnectionError {
             XCTAssertEqual(error, .handshakeTimedOut)
         }
-        // No answer means the path may be dead: the SSH connection isn't reused.
-        let reusable = await transport.closedReusable
-        XCTAssertEqual(reusable, false)
+        // No answer means the path may be dead.
+        let closes = await transport.closes
+        XCTAssertEqual(closes, [.unresponsive])
     }
 
-    /// A cancelled open can't tell whether the path works either: the SSH connection isn't reused.
-    func testACancelledOpenClosesWithoutReusingTheConnection() async throws {
+    /// The connection owns its bridge from the start: closed by its owner during the handshake, it closes
+    /// the bridge once, with the owner's cause, and its opening throws `CancellationError`.
+    func testClosingDuringTheHandshakeClosesTheBridgeOnceWithTheOwnersCause() async throws {
         let transport = FakeBridgeTransport()
-        let (sentHello, relaxedTiming) = (hello, timing())
-        let opening = Task {
-            try await HerdrConnection.open(transport: transport, hello: sentHello, appActive: false, timing: relaxedTiming, onEvent: { _ in })
-        }
+        let connection = HerdrConnection(transport: transport, timing: timing(), onEvent: { _ in })
+        let sentHello = hello
+        let opening = Task { try await connection.open(hello: sentHello, appActive: false) }
         _ = try await transport.written(0)
-        opening.cancel()
-        _ = await opening.result
-        let reusable = await transport.closedReusable
-        XCTAssertEqual(reusable, false)
+
+        await connection.close(.givenUpWhileOpening)
+        let result = await opening.result
+        guard case .failure(let error) = result, error is CancellationError else {
+            return XCTFail("expected a cancelled opening, got \(result)")
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        let closes = await transport.closes
+        XCTAssertEqual(closes, [.givenUpWhileOpening])
+    }
+
+    /// A connection its owner closed before it opened sends nothing and doesn't open.
+    func testAConnectionClosedBeforeItOpensSendsNothing() async throws {
+        let transport = FakeBridgeTransport()
+        let connection = HerdrConnection(transport: transport, timing: timing(), onEvent: { _ in })
+        await connection.close(.givenUpWhileOpening)
+        do {
+            try await connection.open(hello: hello, appActive: false)
+            XCTFail("opened")
+        } catch is CancellationError {}
+        let written = await transport.writtenCount
+        let closes = await transport.closes
+        XCTAssertEqual(written, 0)
+        XCTAssertEqual(closes, [.givenUpWhileOpening])
     }
 
     /// The deadline covers the hello too: a write that never completes still times out.
@@ -134,20 +156,19 @@ final class HerdrConnectionTests: XCTestCase {
             returned.fulfill()
         }
         await fulfillment(of: [returned], timeout: 2)
-        let reusable = await transport.closedReusable
-        XCTAssertEqual(reusable, false)
+        let closes = await transport.closes
+        XCTAssertEqual(closes, [.unresponsive])
     }
 
-    /// Cancelling the open while the hello is stalled returns at once.
-    func testCancellingTheOpenDuringAStalledHelloReturns() async throws {
+    /// Closing the connection while the hello is stalled ends its opening at once.
+    func testClosingDuringAStalledHelloEndsTheOpening() async throws {
         let transport = FakeBridgeTransport()
         await transport.stallWrites()
-        let (sentHello, slowTiming) = (hello, relaxed)
-        let opening = Task {
-            try await HerdrConnection.open(transport: transport, hello: sentHello, appActive: false, timing: slowTiming, onEvent: { _ in })
-        }
+        let connection = HerdrConnection(transport: transport, timing: relaxed, onEvent: { _ in })
+        let sentHello = hello
+        let opening = Task { try await connection.open(hello: sentHello, appActive: false) }
         await transport.waitForStalledWrites(1)
-        opening.cancel()
+        await connection.close(.givenUpWhileOpening)
         let returned = expectation(description: "open returned")
         Task {
             if case .failure(let error) = await opening.result {
@@ -221,27 +242,17 @@ final class HerdrConnectionTests: XCTestCase {
         }
     }
 
-    /// A read doesn't end when its task is cancelled, so cancelling the open closes the transport.
-    func testCancellingTheOpenClosesTheTransportAndOpensNothing() async throws {
+    /// Herdr answered, refusing the hello: the bridge closes once, keeping the path for the next opening.
+    func testARefusedHelloClosesTheBridgeOnceAsFinished() async throws {
         let transport = FakeBridgeTransport()
-        let (sentHello, slowTiming) = (hello, relaxed)
-        let opening = Task {
-            try await HerdrConnection.open(transport: transport, hello: sentHello, appActive: false, timing: slowTiming, onEvent: { _ in })
-        }
-        _ = try await transport.written(0)
-        opening.cancel()
-        let returned = expectation(description: "open returned")
-        Task {
-            if case .failure(let error) = await opening.result {
-                XCTAssertTrue(error is CancellationError, "\(error)")
-            } else {
-                XCTFail("opened")
-            }
-            returned.fulfill()
-        }
-        await fulfillment(of: [returned], timeout: 2)
-        let closed = await transport.isClosed
-        XCTAssertTrue(closed)
+        await transport.serve(try Self.recording("herdr-03-handshake-rejections-gen2"))
+        await transport.finishServing()
+        do {
+            _ = try await HerdrConnection.open(transport: transport, hello: hello, appActive: false, timing: relaxed, onEvent: { _ in })
+            XCTFail("opened")
+        } catch is HerdrConnectionError {}
+        let closes = await transport.closes
+        XCTAssertEqual(closes, [.finished])
     }
 
     // MARK: - Showing, hiding and input
@@ -264,13 +275,11 @@ final class HerdrConnectionTests: XCTestCase {
         let revision = try await floor
         XCTAssertEqual(revision, 4)
 
-        async let hidden: Void = connection.hide()
+        await connection.sendHide()
         let unfocus = try await transport.written(4)
         let unset = try Self.request(try await transport.written(5))
         XCTAssertEqual(unfocus, HerdrClientMessage.focus(false).frame)
         XCTAssertEqual(unset.params, ["active": false])
-        await transport.serve(Self.reply(id: unset.id, json: #"{"type":"client_shell_surface_set","active":false,"projection_revision":4}"#))
-        try await hidden
     }
 
     /// As Herdr's client, a show asks for at least one cell each way.
@@ -321,77 +330,79 @@ final class HerdrConnectionTests: XCTestCase {
         XCTAssertEqual(kinds, ["snapshot", "ended(\(HerdrConnectionError.wire(.invalidSurfaceUpdate("surface delta without a baseline"))))"])
     }
 
-    /// A show Herdr doesn't acknowledge in time, or acknowledges as inactive, is rolled back as
-    /// Herdr's client rolls it back: focus off, then the surface off; input is refused again.
-    func testAnUnacknowledgedShowIsRolledBack() async throws {
-        for answer in [nil, #"{"type":"client_shell_surface_set","active":false,"projection_revision":2}"#] {
-            let (connection, transport, _) = try await openedSession(surfaceActive: false, timing: timing(activation: .milliseconds(100)))
+    /// A show Herdr answers with the other state, or with an answer Remux can't read, fails; nothing is
+    /// sent to undo it, since its owner ends the connection, which takes the session off Herdr's screen.
+    func testARefusedShowFailsAndSendsNothingMore() async throws {
+        let answers = [
+            #"{"type":"client_shell_surface_set","active":false,"projection_revision":2}"#,
+            #"{"type":"client_shell_surface_set"}"#,
+        ]
+        for answer in answers {
+            let (connection, transport, _) = try await openedSession(surfaceActive: false)
             async let floor = connection.show(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 40, rows: 12))
             let set = try Self.request(try await transport.written(2))
-            if let answer {
-                await transport.serve(Self.reply(id: set.id, json: answer))
-            }
+            _ = try await transport.written(3)
+            await transport.serve(Self.reply(id: set.id, json: answer))
             do {
                 _ = try await floor
                 XCTFail("shown")
-            } catch let error as HerdrCommandError {
-                XCTAssertEqual(error, answer == nil ? .timedOut(method: "client_shell.surface.set") : .notAcknowledged)
+            } catch {
+                XCTAssertNotEqual(error as? HerdrCommandError, .connectionEnded)
             }
-            let unfocus = try await transport.written(4)
-            XCTAssertEqual(unfocus, HerdrClientMessage.focus(false).frame)
-            let release = try Self.request(try await transport.written(5))
-            XCTAssertEqual(release.params, ["active": false])
+            try await Task.sleep(for: .milliseconds(30))
+            let written = await transport.writtenCount
+            XCTAssertEqual(written, 4, "the hello and the show")
+        }
+    }
+
+    /// How long a show may take is its owner's to decide: the connection waits for Herdr's answer until
+    /// it ends.
+    func testAShowWaitsForItsAnswerUntilTheConnectionEnds() async throws {
+        let (connection, transport, _) = try await openedSession(
+            surfaceActive: false,
+            timing: timing(activation: .milliseconds(50))
+        )
+        let answer = AnswerBox()
+        let showing = Task {
             do {
-                try await connection.send([.text("a")], toPane: "w1:p1")
-                XCTFail("sent")
-            } catch let error as HerdrInputError {
-                XCTAssertEqual(error, .inactive)
+                _ = try await connection.show(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 40, rows: 12))
+            } catch {
+                await answer.set(error as? HerdrCommandError == .connectionEnded)
             }
         }
+        _ = try await transport.written(3)
+        try await Task.sleep(for: .milliseconds(200))
+        let early = await answer.value
+        XCTAssertNil(early, "the show failed on its own")
+
+        await connection.close(.finished)
+        await showing.value
+        let ended = await answer.value
+        XCTAssertEqual(ended, true)
     }
 
-    /// The newest show or hide wins: Herdr keeps one surface switch per connection, so a show that
-    /// fails after a newer show must not turn the surface off again.
-    func testAnOlderShowFailingLaterDoesNotUndoANewerShow() async throws {
-        let (connection, transport, _) = try await openedSession(surfaceActive: false)
-        let geometry = HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 40, rows: 12)
-        let older = Task { try await connection.show(geometry) }
-        _ = try await transport.written(3)
-        async let newer = connection.show(geometry)
-        let set = try Self.request(try await transport.written(5))
-        await transport.serve(Self.reply(id: set.id, json: #"{"type":"client_shell_surface_set","active":true,"projection_revision":4}"#))
-        _ = try await newer
-        older.cancel()
-        _ = await older.result
-
-        try await Task.sleep(for: .milliseconds(30))
-        let written = await transport.writtenCount
-        XCTAssertEqual(written, 7, "the hello and both shows, with no rollback")
-        try await connection.send([.text("a")], toPane: "w1:p1")
-    }
-
-    /// Likewise a show that fails after a newer hide sends nothing more: the hide already turned the
-    /// surface off.
-    func testAnOlderShowFailingLaterAfterAHideSendsNothingMore() async throws {
-        let (connection, transport, _) = try await openedSession(surfaceActive: false)
-        let older = Task { try await connection.show(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 40, rows: 12)) }
-        _ = try await transport.written(3)
-        async let hidden: Void = connection.hide()
-        let unset = try Self.request(try await transport.written(5))
-        await transport.serve(Self.reply(id: unset.id, json: #"{"type":"client_shell_surface_set","active":false,"projection_revision":4}"#))
-        try await hidden
-        older.cancel()
-        _ = await older.result
-
-        try await Task.sleep(for: .milliseconds(30))
-        let written = await transport.writtenCount
-        XCTAssertEqual(written, 6, "the hello, the show and the hide")
-        do {
-            try await connection.send([.text("a")], toPane: "w1:p1")
-            XCTFail("sent")
-        } catch let error as HerdrInputError {
-            XCTAssertEqual(error, .inactive)
+    /// A command waiting to follow a show doesn't go once a hide is asked: Herdr refuses commands from a
+    /// hidden session, and the next show sends its own.
+    func testAHideDropsTheCommandWaitingToFollowTheShow() async throws {
+        let (connection, transport, _) = try await openedSession(surfaceActive: true)
+        async let first = connection.command("worktree.list", params: [String: String]())
+        let firstRequest = try Self.request(try await transport.written(1))
+        let (replies, answered) = AsyncStream.makeStream(of: Result<HerdrCommandReply, Error>.self)
+        let sent = await connection.sendCommandWhileShown("pane.focus", params: ["pane_id": "w1:p1"]) {
+            answered.yield($0)
         }
+        XCTAssertTrue(sent)
+
+        await connection.sendHide()
+        var iterator = replies.makeAsyncIterator()
+        let next = await iterator.next()
+        guard case .failure(let error)? = next else { return XCTFail("the waiting command wasn't dropped") }
+        XCTAssertEqual(error as? HerdrCommandError, .notSent)
+        await transport.serve(Self.reply(id: firstRequest.id, json: #"{"type":"ok"}"#))
+        _ = try await first
+        try await Task.sleep(for: .milliseconds(30))
+        let written = await transport.writtenCount
+        XCTAssertEqual(written, 4, "the hello, the command and the hide")
     }
 
     func testInputIsRefusedWhileHiddenOrOverHerdrsLimits() async throws {
@@ -568,8 +579,8 @@ final class HerdrConnectionTests: XCTestCase {
         XCTAssertEqual(try Self.control(ping).kind, HerdrControlKind.healthPing)
         let kinds = await events.waitForEnd().map(\.kind)
         XCTAssertEqual(kinds.last, "ended(unresponsive)")
-        let reusable = await transport.closedReusable
-        XCTAssertEqual(reusable, false)
+        let closes = await transport.closes
+        XCTAssertEqual(closes, [.unresponsive])
     }
 
     /// As Herdr's client, a connection whose session never arrives fails.
@@ -584,7 +595,7 @@ final class HerdrConnectionTests: XCTestCase {
             timing: timing(firstSnapshot: .milliseconds(100)),
             onEvent: events.record
         )
-        addTeardownBlock { await connection.close() }
+        addTeardownBlock { await connection.close(.finished) }
         let kinds = await events.waitForEnd().map(\.kind)
         XCTAssertEqual(kinds, ["ended(unresponsive)"])
     }
@@ -701,7 +712,7 @@ final class HerdrConnectionTests: XCTestCase {
             timing: timing(pingAfterSilence: .milliseconds(50), unansweredPing: .milliseconds(100)),
             onEvent: events.record
         )
-        addTeardownBlock { await connection.close() }
+        addTeardownBlock { await connection.close(.finished) }
         let ping = try Self.control(try await transport.written(1))
         XCTAssertEqual(ping.kind, HerdrControlKind.healthPing)
         try await Task.sleep(for: .milliseconds(500))
@@ -726,7 +737,7 @@ final class HerdrConnectionTests: XCTestCase {
             timing: timing(unansweredPing: .milliseconds(100)),
             onEvent: events.record
         )
-        addTeardownBlock { await connection.close() }
+        addTeardownBlock { await connection.close(.finished) }
         let answer = AnswerBox()
         let check = Task { await answer.set(await connection.confirmAlive()) }
         _ = try await transport.written(1)
@@ -754,7 +765,7 @@ final class HerdrConnectionTests: XCTestCase {
             timing: timing(unansweredPing: .milliseconds(300), firstSnapshot: .milliseconds(400)),
             onEvent: events.record
         )
-        addTeardownBlock { await connection.close() }
+        addTeardownBlock { await connection.close(.finished) }
         let bells = Task {
             while !Task.isCancelled {
                 await transport.serve(HerdrWire.frame([9, 1]))
@@ -849,15 +860,15 @@ final class HerdrConnectionTests: XCTestCase {
         await transport.waitForStalledWrites(1)
         let command = Task { try await connection.command("pane.focus", params: ["pane_id": "w1:p1"]) }
 
-        await connection.close()
+        await connection.close(.finished)
         do {
             _ = try await command.value
             XCTFail("answered")
         } catch let error as HerdrCommandError {
             XCTAssertEqual(error, .connectionEnded)
         }
-        let reusable = await transport.closedReusable
-        XCTAssertEqual(reusable, true)
+        let closes = await transport.closes
+        XCTAssertEqual(closes, [.finished])
         let written = await transport.writtenCount
         XCTAssertEqual(written, 1, "only the hello")
         try await Task.sleep(for: .milliseconds(30))
@@ -882,7 +893,7 @@ final class HerdrConnectionTests: XCTestCase {
         let closedByTheFailure = await transport.isClosed
         XCTAssertTrue(closedByTheFailure)
 
-        await connection.close()
+        await connection.close(.finished)
         await events.release()
         try await Task.sleep(for: .milliseconds(50))
         let ended = await events.hasEnded
@@ -956,7 +967,7 @@ final class HerdrConnectionTests: XCTestCase {
         )
         addTeardownBlock {
             await events.release()
-            await connection.close()
+            await connection.close(.finished)
         }
 
         await transport.serve(
@@ -1018,7 +1029,7 @@ final class HerdrConnectionTests: XCTestCase {
         )
         addTeardownBlock {
             await events.release()
-            await connection.close()
+            await connection.close(.finished)
         }
         await events.waitForCount(1)
         return (connection, transport, events)
@@ -1129,8 +1140,8 @@ actor FakeBridgeTransport: HerdrBridgeTransport {
     private var stalledWrites: [CheckedContinuation<Void, Error>] = []
     private(set) var reads = 0
     private(set) var isClosed = false
-    /// What the first close said about reusing the connection underneath.
-    private(set) var closedReusable: Bool?
+    /// Every close's cause, in order.
+    private(set) var closes: [HerdrBridgeCloseCause] = []
 
     var writtenCount: Int { writes.count }
 
@@ -1223,12 +1234,34 @@ actor FakeBridgeTransport: HerdrBridgeTransport {
         ready.forEach { $0.1.resume(returning: writes[$0.0]) }
     }
 
-    func close(reusable: Bool) async {
-        if !isClosed { closedReusable = reusable }
+    func close(_ cause: HerdrBridgeCloseCause) async {
+        closes.append(cause)
         isClosed = true
         stalledWrites.forEach { $0.resume(throwing: CancellationError()) }
         stalledWrites.removeAll()
         finishServing()
+    }
+}
+
+extension HerdrConnection {
+    /// A connection over `transport`, once it has opened.
+    static func open(
+        transport: any HerdrBridgeTransport,
+        hello: HerdrHello,
+        appActive: Bool,
+        timing: Timing = Timing(),
+        onEvent: @escaping @Sendable (HerdrConnectionEvent) async -> Void
+    ) async throws -> HerdrConnection {
+        let connection = HerdrConnection(transport: transport, timing: timing, onEvent: onEvent)
+        try await connection.open(hello: hello, appActive: appActive)
+        return connection
+    }
+
+    /// `sendShow`, waiting for Herdr's answer.
+    func show(_ geometry: HerdrSurfaceGeometry) async throws -> UInt64 {
+        try await withCheckedThrowingContinuation { continuation in
+            sendShow(geometry) { continuation.resume(with: $0) }
+        }
     }
 }
 

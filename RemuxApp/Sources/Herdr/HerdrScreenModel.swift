@@ -76,7 +76,7 @@ final class HerdrScreenModel {
     }
 
     /// One connection to the server, from opening its bridge to its end. A reconnect replaces it, and
-    /// the panes keep their last frame meanwhile.
+    /// the panes keep their last frame meanwhile. Its id names its connection to the engine.
     ///
     /// Its task opens the connection, then carries out the operations one at a time, in the order they
     /// were asked for. Herdr takes the newest of a show and a hide, so that order is the session's
@@ -85,22 +85,23 @@ final class HerdrScreenModel {
     private final class Attempt {
         let id: UInt64
         var task: Task<Void, Never>?
-        /// The bridge, while the hello waits for the screen's size.
-        var transport: (any HerdrBridgeTransport)?
+        /// The connection, from the moment its bridge opened: from then on only the connection closes
+        /// the bridge.
         var connection: HerdrConnection?
-        var feed: HerdrEngineFeed?
+        /// The connection's welcome came and the model took it.
+        var isOpen = false
         /// Herdr's surface switch names the snapshot's boot, so nothing is shown before one arrives.
         var hasSnapshot = false
         var requestedShown = false
+        /// Numbers the shows and hides asked for; a show's number names it to the engine.
         var visibilityRequests: UInt64 = 0
         /// The newest show Herdr completed: its answer and a frame sent after it are in.
         var activatedRequest: UInt64?
         var activationDeadline: Task<Void, Never>?
-        var ended = false
-        /// Whether its SSH connection may serve the next opening, as its retirement decided. A bridge or
-        /// connection that opens after the retirement closes the same way, so a path the retirement
-        /// doubted isn't offered again.
-        var reusable = true
+        /// How the attempt's bridge closes, set once it is given up; nil while it is under way.
+        var closeCause: HerdrBridgeCloseCause?
+        /// The give-up's close of the connection.
+        var closing: Task<Void, Never>?
         /// Whether the focused pane asks for every key as an escape code.
         var reportsAllKeys = false
         /// A `pane.focus` waits for Herdr's answer. Taps meanwhile wait for it, and only the newest is
@@ -115,10 +116,25 @@ final class HerdrScreenModel {
             self.id = id
         }
 
-        /// Shown, and the newest show completed. Until then the panes keep their last frame and take
-        /// no input, as Herdr's client freezes input while a show is in progress.
+        var ended: Bool { closeCause != nil }
+
+        /// The session reads as connected: the connection is open with its first snapshot and, while the
+        /// session is shown, has completed a show, so the panes show its frames.
+        var isReady: Bool {
+            isOpen && hasSnapshot && (!requestedShown || activatedRequest != nil)
+        }
+
+        /// Ready and shown, with no show in progress: the session takes input and commands. A session
+        /// shown again keeps its last frame and reads as connected meanwhile, but takes no input, as
+        /// Herdr's client freezes input while a show is in progress.
         var isActivated: Bool {
-            requestedShown && activatedRequest == visibilityRequests
+            isReady && requestedShown && activatedRequest == visibilityRequests
+        }
+
+        /// Returns once the attempt's task has returned and its give-up has closed its connection.
+        func closed() async {
+            await task?.value
+            await closing?.value
         }
 
         /// Queued while the connection opens, and carried out once it is open. Only the newest size
@@ -306,7 +322,7 @@ final class HerdrScreenModel {
                 self?.handle(update)
             }
         }
-        startAttempt()
+        restart()
     }
 
     /// True when no connection is open or opening, so the root may replace this model without dropping
@@ -339,7 +355,7 @@ final class HerdrScreenModel {
     }
 
     private func sendPendingReveal() {
-        guard let reveal = pendingReveal, let attempt, isCurrent(attempt), attempt.connection != nil,
+        guard let reveal = pendingReveal, let attempt, isCurrent(attempt), attempt.isOpen,
               attempt.requestedShown, let snapshot
         else { return }
         pendingReveal = nil
@@ -377,19 +393,15 @@ final class HerdrScreenModel {
         recoveryTimer?.cancel()
         recoveryTimer = nil
         readySince = nil
-        guard let attempt, !attempt.ended, attempt.connection == nil else { return }
-        // Not a failure: it is opened again on return. Whether its path still works is unknown, so its
-        // SSH connection isn't offered to the next one, which would wait on a dead one; an opening under
-        // way closes its own the same way.
-        retire(attempt, reusable: false)
+        guard let attempt, !attempt.ended, !attempt.isOpen else { return }
+        // Not a failure: it is opened again on return.
+        giveUp(attempt)
         recoveryDue = recoveryDue ?? .now
     }
 
     private func leaveBackground() {
         wokeAt = .now
-        guard recoveryDue != nil else { return }
-        recoveryDue = .now
-        startRecoveryTimer()
+        if recoveryDue != nil { restart() }
     }
 
     /// Live settings: the renderers take the new appearance in place, and Herdr gets the new colours.
@@ -459,17 +471,11 @@ final class HerdrScreenModel {
     @discardableResult
     func reconnect() -> Bool {
         guard !stopped, runtime != nil else { return false }
-        cancelRecovery()
         isReconnecting = false
         failuresInARow = 0
-        openAgain()
+        failure = nil
+        restart()
         return true
-    }
-
-    private func openAgain() {
-        if let attempt { retire(attempt) }
-        startAttempt()
-        retryFailedPanes()
     }
 
     /// Closes the connection, lets the engine finish its event and free the pane producers, waits for
@@ -486,7 +492,6 @@ final class HerdrScreenModel {
             .flatMap { connection in paneToUnzoom.map { (connection, $0) } }
         stopped = true
         cancelRecovery()
-        resumeSizeWaiter()
         if let (connection, paneID) = unzoom {
             _ = await connection.commandIfIdle(
                 Self.paneZoomMethod,
@@ -495,15 +500,8 @@ final class HerdrScreenModel {
             )
         }
         if let attempt {
-            attempt.finishOperations()
-            attempt.task?.cancel()
-            if let connection = attempt.connection {
-                await connection.close(reusable: attempt.reusable)
-            } else if let transport = attempt.transport {
-                await transport.close(reusable: attempt.reusable)
-            }
-            // An opening still under way closes what it opened once it sees the stop.
-            await attempt.task?.value
+            giveUp(attempt)
+            await attempt.closed()
         }
         await engine.stop()
         if !creatingTerminals.isEmpty {
@@ -527,28 +525,27 @@ final class HerdrScreenModel {
 
     var runtimePhase: GhosttyTerminalRuntimePhase {
         if let failure { return .failed(message: failure.message, reason: failure) }
-        guard let attempt, !attempt.ended, attempt.connection != nil else { return .starting }
+        guard let attempt, !attempt.ended, attempt.isOpen else { return .starting }
         return .running
     }
 
     var isConnectionOpen: Bool {
         guard let attempt else { return false }
-        return attempt.connection != nil && !attempt.ended
+        return attempt.isOpen && !attempt.ended
     }
 
-    /// The session reads as connected once its current connection has a snapshot and, while the session
-    /// is shown, a show completed on it. Until then the panes show the last connection's frame, which
-    /// takes no input.
+    /// The session reads as connected once its current connection is ready (`Attempt.isReady`). Until
+    /// then the panes show the last connection's frame, which takes no input.
     var isConnectionReady: Bool {
-        guard let attempt, isCurrent(attempt), attempt.connection != nil, attempt.hasSnapshot else { return false }
-        return !attempt.requestedShown || attempt.activatedRequest != nil
+        guard let attempt, isCurrent(attempt) else { return false }
+        return attempt.isReady
     }
 
     var stateTraceLabel: String {
         if stopped { return "released" }
         if failure != nil { return "ended" }
         if isReconnecting { return "reconnecting" }
-        guard let attempt, attempt.connection != nil else { return "connecting" }
+        guard let attempt, attempt.isOpen else { return "connecting" }
         guard attempt.requestedShown else { return "hidden" }
         return attempt.isActivated ? "shown" : "showing"
     }
@@ -591,8 +588,7 @@ final class HerdrScreenModel {
     }
 
     private var shownAttempt: Attempt? {
-        guard let attempt, isCurrent(attempt), attempt.connection != nil, attempt.isActivated
-        else { return nil }
+        guard let attempt, isCurrent(attempt), attempt.isActivated else { return nil }
         return attempt
     }
 
@@ -960,31 +956,35 @@ final class HerdrScreenModel {
 
     // MARK: - Connection
 
-    /// A recheck keeps saying what needs attention until it connects.
-    private func startAttempt(keepingFailure: Bool = false) {
+    /// Gives up the current attempt, if any, and starts a new one: the session's first connection, a
+    /// reconnect the user asks for, and a reconnect by itself, when its delay is up or the app comes back.
+    /// The panes keep their terminals, so the last frame stays on screen until the new connection's
+    /// first; pane failures say to reconnect, so the failed panes are tried again. A recheck keeps saying
+    /// what needs attention until it connects.
+    private func restart() {
+        cancelRecovery()
+        if let attempt { giveUp(attempt) }
         attemptCount += 1
         let attempt = Attempt(id: attemptCount)
         self.attempt = attempt
         readySince = nil
-        if !keepingFailure { failure = nil }
         attempt.task = Task { [weak self] in await self?.run(attempt) }
+        retryFailedPanes()
         reconcilePresentationActivity()
         didChange()
     }
 
     /// Once the connection is open, the attempt's operations are carried out in order.
     private func run(_ attempt: Attempt) async {
-        // Whoever retires the attempt closes its bridge.
-        guard let (transport, size) = await bridgeAndScreenSize(for: attempt) else { return }
+        let feed = HerdrEngineFeed(engine: engine, connection: attempt.id)
+        guard let size = await connectionAndScreenSize(for: attempt, feed: feed),
+              let connection = attempt.connection
+        else { return }
         // Frames can arrive before `open` returns; the engine paints them at the hello's cell size.
         await engine.setCellSize(widthPx: size.cellWidthPx, heightPx: size.cellHeightPx)
-        let feed = await engine.beginConnection()
-        guard isCurrent(attempt) else { return }
-        attempt.feed = feed
-        let connection: HerdrConnection
+        await engine.beginConnection(attempt.id)
         do {
-            connection = try await HerdrConnection.open(
-                transport: transport,
+            try await connection.open(
                 hello: HerdrHello(
                     cellWidthPx: size.cellWidthPx,
                     cellHeightPx: size.cellHeightPx,
@@ -992,21 +992,16 @@ final class HerdrScreenModel {
                     rows: size.rows,
                     surfaceActive: false
                 ),
-                appActive: appPhase != .background,
-                timing: connectionTiming,
-                onEvent: Self.eventHandler(feed: feed, attemptID: attempt.id, model: self)
+                appActive: appPhase != .background
             )
         } catch {
-            guard isCurrent(attempt) else { return }
-            end(attempt, disconnectReason(connectionFailedWith: error), recovery: Self.recovery(connectionFailedWith: error, opened: false))
+            if isCurrent(attempt) {
+                end(attempt, disconnectReason(connectionFailedWith: error), recovery: Self.recovery(connectionFailedWith: error, opened: false))
+            }
             return
         }
-        guard isCurrent(attempt) else {
-            await connection.close(reusable: attempt.reusable)
-            return
-        }
-        attempt.transport = nil
-        attempt.connection = connection
+        guard isCurrent(attempt) else { return }
+        attempt.isOpen = true
         if let themeReport { attempt.ask(.theme(themeReport)) }
         reconcileVisibility()
         reconcilePresentationActivity()
@@ -1020,44 +1015,43 @@ final class HerdrScreenModel {
         }
     }
 
-    /// A bridge and the screen size for its hello, or nil when the attempt is over. The bridge opens at
-    /// once, so its setup overlaps the screen's layout. A bridge still waiting for a size at the hello
-    /// deadline is closed, and another opens once the size arrives.
-    private func bridgeAndScreenSize(
-        for attempt: Attempt
-    ) async -> (any HerdrBridgeTransport, HerdrSurfaceGeometry)? {
+    /// The attempt's connection, in `attempt.connection`, and the screen's size for its hello, or nil when
+    /// the attempt is over. The bridge opens at once, so its setup overlaps the screen's first layout, and
+    /// goes straight to the connection, which the attempt's give-up closes. A connection still waiting for
+    /// a size at the hello deadline is closed, and another opens once the size is known.
+    private func connectionAndScreenSize(for attempt: Attempt, feed: HerdrEngineFeed) async -> HerdrSurfaceGeometry? {
         while true {
             // Herdr's clock starts when the bridge reaches its socket, which can be before the opening
             // returns.
             let deadline = ContinuousClock.now + Self.helloDeadline
-            guard let transport = await openTransport(for: attempt) else { return nil }
-            if let size = await screenSize(for: attempt, until: deadline) { return (transport, size) }
+            let transport: any HerdrBridgeTransport
+            do {
+                transport = try await openBridge()
+            } catch {
+                // A cancelled opening releases what it claimed.
+                if isCurrent(attempt) {
+                    let reason = disconnectReason(openingBridgeFailedWith: error)
+                    end(attempt, reason, recovery: Self.recovery(openingBridgeFailedWith: error, reason: reason))
+                }
+                return nil
+            }
+            // A bridge that opens after the attempt was given up closes the way the give-up decided.
+            if let cause = attempt.closeCause {
+                await transport.close(cause)
+                return nil
+            }
+            let connection = HerdrConnection(
+                transport: transport,
+                timing: connectionTiming,
+                onEvent: Self.eventHandler(feed: feed, attemptID: attempt.id, model: self)
+            )
+            attempt.connection = connection
+            if let size = await screenSize(for: attempt, until: deadline) { return size }
             guard isCurrent(attempt) else { return nil }
-            attempt.transport = nil
-            await transport.close(reusable: true)
+            await connection.close(.finished)
+            attempt.connection = nil
             guard await screenSize(for: attempt, until: nil) != nil else { return nil }
         }
-    }
-
-    /// The attempt's bridge, or nil when the opening failed, which is reported, or the attempt is over.
-    private func openTransport(for attempt: Attempt) async -> (any HerdrBridgeTransport)? {
-        let transport: any HerdrBridgeTransport
-        do {
-            transport = try await openBridge()
-        } catch {
-            // A cancelled opening releases what it claimed.
-            if isCurrent(attempt) {
-                let reason = disconnectReason(openingBridgeFailedWith: error)
-                end(attempt, reason, recovery: Self.recovery(openingBridgeFailedWith: error, reason: reason))
-            }
-            return nil
-        }
-        guard isCurrent(attempt) else {
-            await transport.close(reusable: attempt.reusable)
-            return nil
-        }
-        attempt.transport = transport
-        return transport
     }
 
     /// Each operation returns once its messages are queued on the connection; Herdr's answer to a show
@@ -1230,7 +1224,7 @@ final class HerdrScreenModel {
         hasConnected = true
         failure = nil
         reconcileVisibility()
-        readinessChanged()
+        didChange()
     }
 
     /// Herdr sends its notifications to every connection, shown or hidden; the owner decides what
@@ -1258,16 +1252,10 @@ final class HerdrScreenModel {
     /// acknowledges nothing.
     private func acknowledgeShownAgents() {
         guard appPhase == .active, let attempt = shownAttempt, let frame = presentedFrame,
-              frame.connection == attempt.feed?.connection, let snapshot,
+              frame.connection == attempt.id, let snapshot,
               frame.bootID == snapshot.bootID, frame.projectionRevision == snapshot.revision
         else { return }
         agents.acknowledge(panes: frame.paneIDs)
-    }
-
-    /// A reconnect reads as one until the new connection is ready.
-    private func readinessChanged() {
-        if isConnectionReady { isReconnecting = false }
-        didChange()
     }
 
     private func connectionEnded(_ attemptID: UInt64, _ error: HerdrConnectionError) {
@@ -1276,15 +1264,15 @@ final class HerdrScreenModel {
     }
 
     /// Ends the attempt and reports why. A connection Remux closes sends no `ended` event, so whoever
-    /// finds the reason reports it here. `reusable` is false when Herdr didn't answer in time.
+    /// finds the reason reports it here. `unresponsive` when Herdr didn't answer in time.
     private func end(
         _ attempt: Attempt,
         _ reason: TerminalDisconnectReason,
         recovery: Recovery,
-        reusable: Bool = true
+        unresponsive: Bool = false
     ) {
         guard isCurrent(attempt) else { return }
-        retire(attempt, reusable: reusable)
+        giveUp(attempt, unresponsive: unresponsive)
         let stayedUp = readySince.map { ContinuousClock.now - $0 >= recoveryTiming.stable } ?? false
         readySince = nil
         // A session that never opened says why instead of retrying.
@@ -1334,17 +1322,8 @@ final class HerdrScreenModel {
         recoveryTimer = Task { [weak self] in
             try? await Task.sleep(until: due, clock: .continuous)
             guard !Task.isCancelled else { return }
-            self?.recover()
+            self?.restart()
         }
-    }
-
-    private func recover() {
-        guard !stopped, appPhase != .background, recoveryDue != nil else { return }
-        recoveryDue = nil
-        recoveryTimer = nil
-        if let attempt { retire(attempt) }
-        startAttempt(keepingFailure: failure != nil)
-        retryFailedPanes()
     }
 
     private func cancelRecovery() {
@@ -1353,29 +1332,29 @@ final class HerdrScreenModel {
         recoveryDue = nil
     }
 
-    /// A connection Herdr didn't answer in time may be on a dead path, so it isn't `reusable`: its SSH
-    /// connection isn't offered to the next one, which would wait on it. Only the first retire counts, so
-    /// a later one can't offer a path an earlier one doubted.
-    private func retire(_ attempt: Attempt, reusable: Bool = true) {
+    /// Gives the attempt up, once, whatever ends it: a failure, a replacement, the background or a stop.
+    /// Its operations end, its opening stops, the engine drops what its connection still sends, and the
+    /// connection closes, telling the bridge whether Herdr went silent or the attempt was still opening.
+    /// A bridge that opens afterwards closes the same way.
+    private func giveUp(_ attempt: Attempt, unresponsive: Bool = false) {
         guard !attempt.ended else { return }
-        attempt.ended = true
-        attempt.reusable = reusable
+        let cause: HerdrBridgeCloseCause = unresponsive ? .unresponsive
+            : attempt.isOpen ? .finished : .givenUpWhileOpening
+        attempt.closeCause = cause
         attempt.finishOperations()
         attempt.task?.cancel()
         attempt.activationDeadline?.cancel()
         if attempt === self.attempt { resumeSizeWaiter() }
+        Task { [engine, id = attempt.id] in await engine.endConnection(id) }
         if let connection = attempt.connection {
-            Task { await connection.close(reusable: reusable) }
-        } else if let transport = attempt.transport {
-            Task { await transport.close(reusable: reusable) }
+            attempt.closing = Task { await connection.close(cause) }
         }
     }
 
     /// Shows the session while the root wants it on screen and hides it otherwise. Herdr takes the
     /// newest of a show and a hide, so each change is sent at once, even while the last is unanswered.
     private func reconcileVisibility() {
-        guard let attempt, isCurrent(attempt), attempt.hasSnapshot,
-              attempt.connection != nil, let geometry
+        guard let attempt, isCurrent(attempt), attempt.isOpen, attempt.hasSnapshot, let geometry
         else { return }
         let wanted = isSelected && appPhase != .background
         guard wanted != attempt.requestedShown else { return }
@@ -1406,14 +1385,14 @@ final class HerdrScreenModel {
     }
 
     private func activated(_ request: UInt64, connection: UInt64) {
-        guard let attempt, isCurrent(attempt), attempt.feed?.connection == connection,
+        guard let attempt, isCurrent(attempt), attempt.id == connection,
               attempt.requestedShown, request == attempt.visibilityRequests
         else { return }
         attempt.activatedRequest = request
         attempt.activationDeadline?.cancel()
         attempt.activationDeadline = nil
         acknowledgeShownAgents()
-        readinessChanged()
+        didChange()
     }
 
     private func activationTimedOut(_ attemptID: UInt64, request: UInt64) {
@@ -1421,20 +1400,19 @@ final class HerdrScreenModel {
               attempt.requestedShown, request == attempt.visibilityRequests, attempt.activatedRequest != request
         else { return }
         attempt.requestedShown = false
-        end(attempt, Self.activationTimeout, recovery: .retry, reusable: false)
+        end(attempt, Self.activationTimeout, recovery: .retry, unresponsive: true)
     }
 
-    /// Herdr's client rolls a failed show back and stays on what it showed before; a Remux session
-    /// screen has nothing else to show, so the connection ends and the root offers a reconnect.
+    /// Herdr's client rolls a refused show back and stays on what it showed before; a Remux session
+    /// screen has nothing else to show, so the connection ends, which takes the session off Herdr's
+    /// screen, and the session reconnects. A show Herdr doesn't answer runs out of its time instead.
     private func showFailed(_ attemptID: UInt64, request: UInt64, error: Error) {
         guard let attempt, attempt.id == attemptID, isCurrent(attempt),
               request == attempt.visibilityRequests
         else { return }
         if case .connectionEnded? = error as? HerdrCommandError { return }
         attempt.requestedShown = false
-        let answered: Bool
-        if case .timedOut? = error as? HerdrCommandError { answered = false } else { answered = true }
-        end(attempt, Self.disconnectReason(showFailedWith: error), recovery: .retry, reusable: answered)
+        end(attempt, TerminalDisconnectReason(kind: .runtime, message: error.localizedDescription), recovery: .retry)
     }
 
     /// Herdr stores a client's theme and uses it whenever that client is in front, so one full report
@@ -1522,7 +1500,7 @@ final class HerdrScreenModel {
         case .rendererWakeFailed(let paneID):
             surfaces[paneID]?.renderer.failPresentation(message: Self.rendererFailureMessage)
         case .failed(let error, let connection):
-            if let attempt, attempt.feed?.connection == connection {
+            if let attempt, attempt.id == connection {
                 end(attempt, error.terminalDisconnectReason(on: target.server), recovery: Self.recovery(connectionFailedWith: error, opened: true))
             }
         case .activated(let request, let connection):
@@ -1682,6 +1660,8 @@ final class HerdrScreenModel {
 
     private func didChange() {
         guard !stopped else { return }
+        // A reconnect reads as one until the session is ready again, shown or not.
+        if isConnectionReady { isReconnecting = false }
         terminalScreenAdapter.objectWillChange.send()
         let readiness = terminalScreenAdapter.terminalScreenPresentationProjection.readiness
         var state = TerminalReadinessProjector.runtimeState(readiness)
@@ -1782,13 +1762,6 @@ final class HerdrScreenModel {
         default:
             return .none
         }
-    }
-
-    private static func disconnectReason(showFailedWith error: Error) -> TerminalDisconnectReason {
-        if case .timedOut? = error as? HerdrCommandError {
-            return TerminalDisconnectReason(kind: .transportIO, message: error.localizedDescription)
-        }
-        return TerminalDisconnectReason(kind: .runtime, message: error.localizedDescription)
     }
 }
 

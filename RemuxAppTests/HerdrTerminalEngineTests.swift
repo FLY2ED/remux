@@ -34,7 +34,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testPanesArePaintedBeforeTheirRenderersExist() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         await feed.receive(try Self.snapshot(revision: 1))
         await feed.receive(.surface(try Self.surface(
             revision: 1,
@@ -58,7 +58,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAPatchChangesOnlyTheRowsItTouches() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         let panes = [Self.pane("L", x: 0, width: 8, height: 2), Self.pane("R", x: 10, width: 7, height: 2)]
         await feed.receive(try Self.snapshot(revision: 1))
         await feed.receive(.surface(try Self.surface(revision: 1, lines: ["left 1    right 1", "left 2    right 2"], panes: panes)))
@@ -86,7 +86,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAShowCompletesOnAFrameAfterItAtTheAcknowledgedRevisionAndSize() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         let panes = [Self.pane("P", x: 0, width: 4, height: 2)]
         await feed.receive(try Self.snapshot(revision: 1))
         await feed.receive(.surface(try Self.surface(revision: 1, lines: ["one ", "two "], panes: panes)))
@@ -117,7 +117,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAFrameOfANewSnapshotReportsThePanesItShows() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         let two = [Self.pane("A", x: 0, width: 2, height: 1), Self.pane("B", x: 3, width: 2, height: 1)]
         await feed.receive(try Self.snapshot(revision: 1))
         await feed.receive(.surface(try Self.surface(revision: 1, lines: ["ab cd"], panes: two)))
@@ -144,7 +144,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAFrameBeforeTheAnswerCountsAndAResizeNeedsAFrameAtTheNewSize() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         let panes = [Self.pane("P", x: 0, width: 4, height: 2)]
         await feed.receive(try Self.snapshot(revision: 1))
 
@@ -174,7 +174,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAShowWaitsForTheFrameOfASnapshotNewerThanThePaintedOne() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         await feed.receive(try Self.snapshot(revision: 1))
 
         await feed.beginActivation(request: 1, columns: 4, rows: 2)
@@ -206,7 +206,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testFramesAfterAHideWaitForTheNextShow() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         let one = [Self.pane("P", x: 0, width: 4, height: 2)]
         let two = [Self.pane("P", x: 0, width: 2, height: 2), Self.pane("Q", x: 2, width: 2, height: 2)]
         await feed.receive(try Self.snapshot(revision: 1))
@@ -234,7 +234,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAShowCarryingAZoomCompletesOnAFrameFromAfterTheZoom() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         let one = [Self.pane("P", x: 0, width: 4, height: 2)]
         let two = [Self.pane("P", x: 0, width: 2, height: 2), Self.pane("Q", x: 2, width: 2, height: 2)]
 
@@ -279,7 +279,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAResizedPaneIsRepaintedAtItsNewSize() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         await feed.receive(try Self.snapshot(revision: 1))
         await feed.receive(.surface(try Self.surface(
             revision: 1,
@@ -312,7 +312,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
             guard let negotiated = fixture.golden.negotiated else { continue }
             let engine = makeEngine()
             let updates = UpdateLog(engine)
-            let feed = await engine.beginConnection()
+            let feed = await engine.beginConnection(1)
             var decoder = HerdrSurfaceDecoder(deltaNegotiated: negotiated.delta, scrollNegotiated: negotiated.scroll)
             var reference = HerdrPresentation()
             var splitter = HerdrFrameSplitter()
@@ -364,7 +364,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAPaneMissingFromTheNextFrameIsDropped() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         await feed.receive(try Self.snapshot(revision: 1))
         await feed.receive(.surface(try Self.surface(
             revision: 1,
@@ -389,7 +389,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAPanesScrollingGoesOutWhenItChanges() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         await feed.receive(try Self.snapshot(revision: 1))
         func surface(_ revision: UInt64, max: Int, mouse: Bool = false) throws -> HerdrSurfaceDecoder.Output {
             .surface(try Self.surface(
@@ -428,7 +428,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAPaneWithoutRoomGetsANewTerminalWhenItHasRoomAgain() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         await feed.receive(try Self.snapshot(revision: 1))
         await feed.receive(.surface(try Self.surface(revision: 1, lines: ["ab"], panes: [Self.pane("P", x: 0, width: 2, height: 1)])))
         let first = try await updates.terminal(for: "P")
@@ -454,7 +454,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testANewBootGivesItsPanesNewTerminals() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         await feed.receive(try Self.snapshot(revision: 1, boot: "one"))
         await feed.receive(.surface(try Self.surface(boot: "one", revision: 1, lines: ["one"], panes: [Self.pane("P", x: 0, width: 3, height: 1)])))
         let first = try await updates.terminal(for: "P")
@@ -479,7 +479,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testALaterConnectionDropsTheEarlierOnesEventsAndKeepsThePanes() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let first = await engine.beginConnection()
+        let first = await engine.beginConnection(1)
         let panes = [Self.pane("P", x: 0, width: 3, height: 1)]
         await first.receive(try Self.snapshot(revision: 1))
         await first.receive(.surface(try Self.surface(revision: 1, lines: ["one"], panes: panes)))
@@ -488,7 +488,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         _ = try await updates.nextPaneScroll()
         let renderer = try await makeRenderer(engine: engine, paneID: "P", terminal: terminal, columns: 3, rows: 1)
 
-        let second = await engine.beginConnection()
+        let second = await engine.beginConnection(2)
         await first.receive(.patch(try Self.patch(
             base: 1,
             rows: [HerdrPatchRow(x: 0, y: 0, cells: Self.cells("old"))],
@@ -512,6 +512,42 @@ final class HerdrTerminalEngineTests: XCTestCase {
         XCTAssertEqual(layout.tab, nil)
     }
 
+    /// The owner numbers its connections in the order it makes them. Once it ends one, that connection's
+    /// events are dropped and the last frame stays; a connection that begins after a newer one began or
+    /// ended, as a given-up opening's late one does, changes nothing.
+    func testAnEndedConnectionsEventsAreDroppedAndAnOlderOneCannotBeginAgain() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let panes = [Self.pane("P", x: 0, width: 3, height: 1)]
+        let second = await engine.beginConnection(2)
+        await second.receive(try Self.snapshot(revision: 1))
+        await second.receive(.surface(try Self.surface(revision: 1, lines: ["one"], panes: panes)))
+        let terminal = try await updates.terminal(for: "P")
+        let renderer = try await makeRenderer(engine: engine, paneID: "P", terminal: terminal, columns: 3, rows: 1)
+
+        let first = await engine.beginConnection(1)
+        await first.receive(try Self.snapshot(revision: 1))
+        await first.receive(.surface(try Self.surface(revision: 1, lines: ["old"], panes: panes)))
+        XCTAssertEqual(rows(of: renderer, columns: 3, rows: 1), ["one"])
+
+        await engine.endConnection(2)
+        await second.receive(.patch(try Self.patch(
+            base: 1,
+            rows: [HerdrPatchRow(x: 0, y: 0, cells: Self.cells("two"))],
+            panes: panes
+        )))
+        _ = await engine.beginConnection(2)
+        await second.receive(try Self.snapshot(revision: 2))
+        await second.receive(.surface(try Self.surface(revision: 2, lines: ["two"], panes: panes)))
+        XCTAssertEqual(rows(of: renderer, columns: 3, rows: 1), ["one"])
+
+        let third = await engine.beginConnection(3)
+        await third.receive(try Self.snapshot(revision: 1))
+        await third.receive(.surface(try Self.surface(revision: 1, lines: ["new"], panes: panes)))
+        XCTAssertEqual(rows(of: renderer, columns: 3, rows: 1), ["new"])
+        await engine.stop()
+    }
+
     /// A pane Ghostty couldn't paint stays unpainted for the rest of its connection, and gets a new
     /// terminal from the next connection's first frame.
     func testAFailedPaneGetsANewTerminalFromTheNextConnection() async throws {
@@ -519,7 +555,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let engine = makeEngine(producerFailure: producerFailure)
         let updates = UpdateLog(engine)
         let panes = [Self.pane("P", x: 0, width: 3, height: 1)]
-        let first = await engine.beginConnection()
+        let first = await engine.beginConnection(1)
         await first.receive(try Self.snapshot(revision: 1))
         await first.receive(.surface(try Self.surface(revision: 1, lines: ["one"], panes: panes)))
         let failed = try await updates.terminal(for: "P")
@@ -542,7 +578,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
             panes: panes
         )))
 
-        let second = await engine.beginConnection()
+        let second = await engine.beginConnection(2)
         await second.receive(try Self.snapshot(revision: 1))
         await second.receive(.surface(try Self.surface(revision: 1, lines: ["new"], panes: panes)))
         guard case .paneTerminal("P", let fresh) = try await updates.next() else {
@@ -558,7 +594,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAnUnindexableSurfaceIsAWireFailure() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         await feed.receive(try Self.snapshot(revision: 1))
         await feed.receive(.surface(try Self.surface(
             revision: 1,
@@ -581,7 +617,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAnImageIsDrawnInItsPaneAtItsCells() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         let image = Self.redImage(pane: "R")
         await feed.receive(try Self.snapshot(revision: 1))
         await feed.receive(.surface(try Self.surface(
@@ -609,7 +645,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAPaneBackFromAnotherTabDrawsTheImageHerdrKept() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         let image = Self.redImage(pane: "P")
         let lines = ["first   ", "second  ", "third   "]
         await feed.receive(try Self.snapshot(revision: 1))
@@ -650,7 +686,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAPlacementFollowsEachFramesScene() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         let image = Self.redImage(pane: "P")
         let lines = ["one     ", "two     ", "three   ", "four    "]
         let panes = [Self.pane("P", x: 0, width: 8, height: 4)]
@@ -690,7 +726,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAReplacedImageShowsTheOldOneUntilItsBytesArrive() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         let old = Self.image(pane: "P", version: 7)
         let new = Self.image(pane: "P", version: 8)
         let marker = Self.image(pane: "P", id: 9)
@@ -745,7 +781,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testRegistrationGoesThroughTheEngineAndUnregistrationFencesWakes() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         let panes = [Self.pane("P", x: 0, width: 4, height: 1)]
         await feed.receive(try Self.snapshot(revision: 1))
         await feed.receive(.surface(try Self.surface(revision: 1, lines: ["abcd"], panes: panes)))
@@ -777,7 +813,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testStopWithWorkInFlight() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         let panes = [Self.pane("P", x: 0, width: 4, height: 1)]
         await feed.receive(try Self.snapshot(revision: 1))
         await feed.receive(.surface(try Self.surface(revision: 1, lines: ["abcd"], panes: panes)))

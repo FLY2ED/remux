@@ -30,9 +30,10 @@ final class HerdrLiveConnectionTests: XCTestCase {
             onEvent: { await log.append($0) }
         )
         // Teardown blocks run last first, so the connection closes before the fixture stops Herdr.
-        addTeardownBlock { await connection.close() }
-        XCTAssertTrue(connection.negotiated.delta)
-        XCTAssertTrue(connection.negotiated.scroll)
+        addTeardownBlock { await connection.close(.finished) }
+        let negotiated = await connection.negotiated
+        XCTAssertEqual(negotiated?.delta, true)
+        XCTAssertEqual(negotiated?.scroll, true)
 
         // The server opens its first workspace when the bridge starts it.
         let paneID = try await log.snapshot(timeout: .seconds(15)) { !$0.panes.isEmpty }.panes[0].paneID
@@ -792,7 +793,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
             onEvent: { await log.append($0) }
         )
         // Teardown blocks run last first, so the connection closes before the fixture stops Herdr.
-        addTeardownBlock { await connection.close() }
+        addTeardownBlock { await connection.close(.finished) }
         let paneID = try await log.snapshot(timeout: .seconds(15)) { !$0.panes.isEmpty }.panes[0].paneID
         return Live(fixture: fixture, trace: trace, log: log, connection: connection, paneID: paneID)
     }
@@ -923,8 +924,8 @@ actor HerdrLiveSlowUplink: HerdrBridgeTransport {
         isSending = false
     }
 
-    func close(reusable: Bool) async {
-        await bridge.close(reusable: reusable)
+    func close(_ cause: HerdrBridgeCloseCause) async {
+        await bridge.close(cause)
     }
 }
 
@@ -949,8 +950,8 @@ actor HerdrLivePingCounter: HerdrBridgeTransport {
         try await bridge.write(bytes)
     }
 
-    func close(reusable: Bool) async {
-        await bridge.close(reusable: reusable)
+    func close(_ cause: HerdrBridgeCloseCause) async {
+        await bridge.close(cause)
     }
 }
 

@@ -72,8 +72,9 @@ enum HerdrEngineUpdate: Sendable {
     case presented(bootID: String, projectionRevision: UInt64, paneIDs: Set<String>, connection: UInt64)
 }
 
-/// One connection's way into the engine. Once a later connection begins, this one's events are
-/// dropped, so a replaced connection's late frames never reach the panes.
+/// One connection's way into the engine, named by its owner's attempt. Once that connection ends or a
+/// later one begins, its events are dropped, so a replaced connection's late frames never reach the
+/// panes.
 struct HerdrEngineFeed: Sendable {
     let engine: HerdrTerminalEngine
     let connection: UInt64
@@ -134,7 +135,9 @@ actor HerdrTerminalEngine {
 
     private enum State {
         case running
-        case failed
+        /// No connection's frames are painted: none has begun, the last one ended, or it sent a surface
+        /// Remux can't index. The next connection to begin is painted.
+        case idle
         case stopped
     }
 
@@ -237,8 +240,8 @@ actor HerdrTerminalEngine {
     }
 
     private let continuation: AsyncStream<HerdrEngineUpdate>.Continuation
-    private var state = State.running
-    /// The connection whose events are painted; zero until the first begins.
+    private var state = State.idle
+    /// The newest connection begun or ended; its events are painted while running.
     private var connection: UInt64 = 0
     private var presentation = HerdrPresentation()
     /// Kept across connections: its keys name their bytes, and each scene keeps only what Herdr counts
@@ -283,17 +286,29 @@ actor HerdrTerminalEngine {
     /// Herdr's revisions restart with each connection, so the new one starts a new presentation. The
     /// panes keep their terminals and last paint: the same server boot's next frame is painted as a
     /// change from it, and until then the last frame stays on screen. A pane Ghostty couldn't paint
-    /// gets a new terminal from that frame.
-    func beginConnection() -> HerdrEngineFeed {
-        connection += 1
-        if state == .failed { state = .running }
+    /// gets a new terminal from that frame. Connections are numbered in the order their owner made them,
+    /// so one that begins after a newer one began or ended changes nothing.
+    @discardableResult
+    func beginConnection(_ connection: UInt64) -> HerdrEngineFeed {
+        let feed = HerdrEngineFeed(engine: self, connection: connection)
+        guard state != .stopped, connection > self.connection else { return feed }
+        self.connection = connection
+        state = .running
         presentation = HerdrPresentation()
         paintedSurface = nil
         presentedFrame = nil
         activation = nil
         holdsFrames = false
         failedPaneIDs.removeAll()
-        return HerdrEngineFeed(engine: self, connection: connection)
+        return feed
+    }
+
+    /// The connection's owner gave it up: nothing it still sends is painted, and the panes keep their
+    /// last frame.
+    func endConnection(_ connection: UInt64) {
+        guard state != .stopped, connection >= self.connection else { return }
+        self.connection = connection
+        state = .idle
     }
 
     // MARK: - Showing
@@ -389,7 +404,7 @@ actor HerdrTerminalEngine {
             do {
                 try presentation.receive(surface)
             } catch {
-                state = .failed
+                state = .idle
                 continuation.yield(.failed(.wire(error), connection: connection))
                 return
             }
