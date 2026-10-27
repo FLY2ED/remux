@@ -100,7 +100,15 @@ final class HerdrLiveConnectionTests: XCTestCase {
         XCTAssertEqual(snapshot.focusedPaneID, live.paneID)
         let other = try XCTUnwrap(snapshot.panes.first { $0.paneID != live.paneID }).paneID
 
-        _ = try await live.connection.command(HerdrScreenModel.paneFocusMethod, params: ["pane_id": other])
+        let request = try HerdrClientMessage.endpointRequest(
+            bootID: snapshot.bootID,
+            id: "focus",
+            method: HerdrScreenModel.paneFocusMethod,
+            params: ["pane_id": other]
+        )
+        live.connection.outbox.send([request])
+        let reply = try await live.log.reply(to: "focus", timeout: .seconds(15))
+        if case .failure(let failure) = HerdrCommandLane.result(of: reply) { XCTFail("\(failure)") }
         _ = try await live.log.snapshot(timeout: .seconds(15)) { $0.focusedPaneID == other }
     }
 
@@ -1397,11 +1405,17 @@ actor HerdrLiveEventLog {
     private(set) var surfaceCount = 0
     private(set) var reportsAllKeys = false
     private(set) var endReason: HerdrConnectionError?
+    /// Each request's reply, once its last chunk is in, and the chunks of those still coming.
+    private var replies: [String: [UInt8]] = [:]
+    private var partialReplies: [String: [UInt8]] = [:]
 
     func append(_ event: HerdrConnectionEvent) {
         switch event {
         case .snapshot(let snapshot, _):
             snapshots.append(snapshot)
+        case .response(let chunk):
+            partialReplies[chunk.requestID, default: []] += chunk.data
+            if chunk.isFinal { replies[chunk.requestID] = partialReplies.removeValue(forKey: chunk.requestID) }
         case .surface:
             surfaceCount += 1
         case .ended(let reason):
@@ -1422,6 +1436,17 @@ actor HerdrLiveEventLog {
         guard reportsAllKeys else {
             throw HerdrLiveError(description: "Herdr didn't report that the pane asks for every key")
         }
+    }
+
+    /// Herdr's whole reply to the request `id`, waiting up to `timeout` for it.
+    func reply(to id: String, timeout: Duration) async throws -> [UInt8] {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if let reply = replies[id] { return reply }
+            if let endReason { throw endReason }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw HerdrLiveError(description: "Herdr didn't answer \(id) within \(timeout)")
     }
 
     /// The newest snapshot that satisfies `condition`, waiting up to `timeout` for one.

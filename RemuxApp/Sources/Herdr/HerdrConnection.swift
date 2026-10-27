@@ -1,4 +1,5 @@
 import Foundation
+import NIOConcurrencyHelpers
 
 /// The byte stream to a Herdr server: the bridge's stdin and stdout. Reads are pulled: the next
 /// bytes are read only when the connection asks, so a screen that falls behind holds the server back
@@ -43,6 +44,8 @@ enum HerdrConnectionEvent: Sendable {
     case inputRefused(message: String)
     /// Whether the focused pane asks for every key as an escape code.
     case keyboardReportAll(Bool)
+    /// Part of Herdr's answer to an endpoint request, which only the engine sends.
+    case response(HerdrResponseChunk)
     /// The connection ended; nothing follows.
     case ended(HerdrConnectionError)
 }
@@ -153,12 +156,89 @@ enum HerdrInputError: Error, Equatable, LocalizedError {
 /// A command's reply, and where it fell among the session's snapshots. Herdr sends snapshots and replies
 /// in one ordered stream and applies a command before it replies, so a snapshot received before the
 /// command went out was built before it, and one received after the reply was built after it.
+/// `HerdrCommandLane` makes it.
 struct HerdrCommandReply: Sendable {
     let json: Data
     /// The revision of the newest snapshot when the command went out.
     let sentAfter: UInt64
     /// The revision of the newest snapshot when the reply came.
     let answeredAfter: UInt64
+}
+
+/// Where a connection's messages go out, in the order they are sent: the connection's own, and the
+/// endpoint requests the engine sends, in the same turn it decides them, so no decision waits for
+/// another actor before its message is in line.
+protocol HerdrOutbound: Sendable {
+    func send(_ messages: [HerdrClientMessage])
+    /// The session is shown or hidden, as the show or hide just sent says; input goes only while shown.
+    func setSurfaceActive(_ active: Bool)
+}
+
+/// The connection's writer: one ordered queue of frames, written to the bridge one at a time, which any
+/// actor can add to without waiting. After the connection ends nothing more is queued.
+final class HerdrOutbox: HerdrOutbound, @unchecked Sendable {
+    private let lock = NIOLock()
+    private let transport: any HerdrBridgeTransport
+    private var writeFailed: (@Sendable (Error) -> Void)?
+    private var queue: [[UInt8]] = []
+    private var writing = false
+    private var closed = false
+    private var active = false
+
+    init(transport: any HerdrBridgeTransport) {
+        self.transport = transport
+    }
+
+    /// Who hears of a write the bridge fails.
+    func onWriteFailure(_ handler: @escaping @Sendable (Error) -> Void) {
+        lock.withLock { writeFailed = handler }
+    }
+
+    var isSurfaceActive: Bool {
+        lock.withLock { active && !closed }
+    }
+
+    func setSurfaceActive(_ active: Bool) {
+        lock.withLock { self.active = active }
+    }
+
+    func send(_ messages: [HerdrClientMessage]) {
+        let starts = lock.withLock { () -> Bool in
+            guard !closed else { return false }
+            queue.append(contentsOf: messages.map(\.frame))
+            guard !writing else { return false }
+            writing = true
+            return true
+        }
+        if starts { Task { await self.drain() } }
+    }
+
+    /// Nothing more goes out, and what is queued is dropped.
+    func close() {
+        lock.withLock {
+            closed = true
+            active = false
+            queue.removeAll()
+        }
+    }
+
+    private func drain() async {
+        while true {
+            let next = lock.withLock { () -> [UInt8]? in
+                guard !closed, !queue.isEmpty else {
+                    writing = false
+                    return nil
+                }
+                return queue.removeFirst()
+            }
+            guard let next else { return }
+            do {
+                try await transport.write(next)
+            } catch {
+                lock.withLock { writeFailed }?(error)
+            }
+        }
+    }
 }
 
 /// One endpoint connection to a Herdr server (generation 1). It owns its bridge from the moment it is
@@ -168,10 +248,10 @@ struct HerdrCommandReply: Sendable {
 /// It sends Remux's hello and checks the welcome, then reads server messages in order and hands them to
 /// its screen, reading again only after the screen has taken them. Surface messages are decoded here,
 /// with the negotiated encodings, as Herdr's client decodes them in its reader, so the decoder sees
-/// every one of them in order from the first. All writes go through one ordered
-/// writer. Commands run one at a time; `client_shell.surface.set` bypasses that lane, because Herdr
-/// answers it even while a command is in flight. Timings and rules follow Herdr's own client unless a
-/// comment gives Remux's reason.
+/// every one of them in order from the first. All writes go through one ordered writer, the `outbox`.
+/// Endpoint requests are the engine's: it sends them through the outbox and gets their answers, in wire
+/// order with the snapshots and surfaces, as `response` events. Timings and rules follow Herdr's own
+/// client unless a comment gives Remux's reason.
 actor HerdrConnection {
     struct Timing: Sendable {
         /// Remux's SSH channel is open before this starts. Herdr allows 60 s because its window also
@@ -218,11 +298,8 @@ actor HerdrConnection {
     /// Made again with the welcome's encodings.
     private var decoder = HerdrSurfaceDecoder(deltaNegotiated: false, scrollNegotiated: false)
     private var bootID: String?
-    /// The pane Herdr has focused in the newest snapshot.
-    private var focusedPaneID: String?
     /// The newest agent completions, waiting for the snapshot they belong to.
     private var pendingCompletions: HerdrAgentCompletions?
-    private var isActive = false
     private var ended = false
     /// Why the connection ended, for the reader to report; nil after a close Remux asked for.
     private var endReason: HerdrConnectionError?
@@ -241,42 +318,8 @@ actor HerdrConnection {
     /// Alive checks waiting for their own ping's reply, each with when its reply limit started.
     private var pongWaiters: [String: (since: ContinuousClock.Instant, waiter: CheckedContinuation<Bool, Never>)] = [:]
     private var nextID: UInt64 = 0
-
-    private var writeQueue: [[UInt8]] = []
-    private var isWriting = false
-
-    /// A request awaiting its final chunk. Nobody waits for a hide's, but the entry stays until its reply.
-    private struct Pending {
-        var waiter: Waiter?
-        var data: [UInt8] = []
-        var holdsLane: Bool
-    }
-
-    private enum Waiter {
-        /// A show sent with `sendShow`: its answer goes to `answered`.
-        case show(answered: @Sendable (Result<UInt64, Error>) -> Void)
-        /// A command sent without a caller awaiting it, after the snapshot `sentAfter`: its reply goes
-        /// to `answered`.
-        case command(answered: CommandAnswered, sentAfter: UInt64)
-    }
-
-    /// Gets a command's reply, or its failure.
-    typealias CommandAnswered = @Sendable (Result<HerdrCommandReply, Error>) -> Void
-
-    /// A command waiting for the lane (`sendCommandWhileShown`).
-    private struct QueuedCommand {
-        let method: String
-        let params: any Encodable & Sendable
-        /// The pane it is for, when it goes only while Herdr has that pane focused.
-        let paneID: String?
-        let answered: CommandAnswered
-    }
-
-    private var pending: [String: Pending] = [:]
-    private var laneBusy = false
-    private var waitingCommands: [QueuedCommand] = []
-    /// The newest snapshot's revision on this connection.
-    private var snapshotRevision: UInt64 = 0
+    /// Every message the connection and the engine send goes out through it, in order.
+    nonisolated let outbox: HerdrOutbox
     private var healthTask: Task<Void, Never>?
 
     // MARK: - Opening
@@ -290,6 +333,14 @@ actor HerdrConnection {
         self.transport = transport
         self.timing = timing
         self.onEvent = onEvent
+        outbox = HerdrOutbox(transport: transport)
+        outbox.onWriteFailure { [weak self] error in
+            Task { await self?.writeFailed(error) }
+        }
+    }
+
+    private func writeFailed(_ error: Error) async {
+        await end(Self.connectionError(error))
     }
 
     /// Sends the hello, waits for the welcome and starts reading. `appActive` starts the health check
@@ -318,7 +369,7 @@ actor HerdrConnection {
             )
             self.negotiated = negotiated
             decoder = HerdrSurfaceDecoder(deltaNegotiated: negotiated.delta, scrollNegotiated: negotiated.scroll)
-            isActive = hello.surfaceActive
+            outbox.setSurfaceActive(hello.surfaceActive)
         } catch {
             await end(Self.connectionError(error))
             throw endReason ?? CancellationError()
@@ -442,8 +493,6 @@ actor HerdrConnection {
             switch try HerdrEndpointControl.parse(kind: kind, data: data) {
             case .snapshot(let snapshot):
                 bootID = snapshot.bootID
-                focusedPaneID = snapshot.focusedPaneID
-                snapshotRevision = snapshot.revision
                 await onEvent(.snapshot(snapshot, completions: takeCompletions(for: snapshot)))
             case .agentCompletions(let completions):
                 receive(completions)
@@ -464,17 +513,17 @@ actor HerdrConnection {
         case .paneSurfacePatch(let patch):
             await onEvent(.surface(try decoder.decode(.patch(patch))))
         case .responseChunk(let chunk):
-            receive(chunk)
+            await onEvent(.response(chunk))
         case .terminalBell(let count):
-            if isActive { await onEvent(.bell(count: count)) }
+            if outbox.isSurfaceActive { await onEvent(.bell(count: count)) }
         case .semanticNotification(let notification):
             await onEvent(.notification(notification))
         case .clipboard(let base64):
-            if isActive { await onEvent(.clipboard(base64: base64)) }
+            if outbox.isSurfaceActive { await onEvent(.clipboard(base64: base64)) }
         case .clientShellError(let message):
-            if isActive { await onEvent(.inputRefused(message: message)) }
+            if outbox.isSurfaceActive { await onEvent(.inputRefused(message: message)) }
         case .keyboardReportAll(let enabled):
-            if isActive { await onEvent(.keyboardReportAll(enabled)) }
+            if outbox.isSurfaceActive { await onEvent(.keyboardReportAll(enabled)) }
         case .serverShutdown(let reason):
             throw HerdrConnectionError.serverShutdown(reason: reason)
         case .mouseCapture, .windowTitle, .reloadSoundConfig, .notify, .unused:
@@ -508,112 +557,25 @@ actor HerdrConnection {
 
     private func enqueue(_ message: HerdrClientMessage) {
         guard !ended else { return }
-        writeQueue.append(message.frame)
-        guard !isWriting else { return }
-        isWriting = true
-        Task { await self.drainWrites() }
-    }
-
-    private func drainWrites() async {
-        while !ended, !writeQueue.isEmpty {
-            let frame = writeQueue.removeFirst()
-            do {
-                try await transport.write(frame)
-            } catch {
-                await end(Self.connectionError(error))
-            }
-        }
-        isWriting = false
-    }
-
-    // MARK: - Showing and hiding
-
-    /// Shows the session as Herdr's own client does: the tab takes this size (at least one cell each
-    /// way), the surface activates, then the phone takes focus. Returns once the show is queued, so a
-    /// caller sending its calls one after another can send a hide behind it while it is unanswered.
-    /// `answered` gets the projection floor from `surface.set`, which the next full surface reaches, or
-    /// why the show failed. Herdr answers a show even while a command is in flight; how long to wait for
-    /// it is the caller's, and one Herdr leaves unanswered is retired after Herdr's command time, so a
-    /// show the session has since replaced doesn't wait for ever.
-    func sendShow(_ geometry: HerdrSurfaceGeometry, answered: @escaping @Sendable (Result<UInt64, Error>) -> Void) {
-        guard !ended else {
-            answered(.failure(HerdrCommandError.connectionEnded))
-            return
-        }
-        let request: (id: String, message: HerdrClientMessage)
-        do {
-            request = try surfaceSet(active: true)
-        } catch {
-            answered(.failure(error))
-            return
-        }
-        isActive = true
-        register(request.id, waiter: .show(answered: answered), holdsLane: false, timeout: timing.command,
-                 method: Self.surfaceSetMethod,
-                 sending: [.shellResize(Self.atLeastOneCell(geometry)), request.message, .focus(true)])
-    }
-
-    /// Hides the session and returns once the hide is queued; its answer isn't waited for. Focus goes
-    /// first, while still active: deactivation keeps the stored focus, so without it the next show's
-    /// focus would be ignored. A command waiting to follow the show doesn't go: Herdr refuses commands
-    /// from a hidden session, and the next show sends its own.
-    func sendHide() {
-        guard !ended, let request = try? surfaceSet(active: false) else { return }
-        isActive = false
-        dropWaitingCommands { _ in true }
-        register(request.id, waiter: nil, holdsLane: false, timeout: timing.command,
-                 method: Self.surfaceSetMethod, sending: [.focus(false), request.message])
+        outbox.send([message])
     }
 
     /// Gives the session on screen a new size, as Herdr's client does whenever its terminal resizes,
     /// also while a show is still being answered. Herdr's client sends sizes only to the session it
     /// shows; a hidden one gets its size with the next show, so nothing is sent while hidden.
     func resize(_ geometry: HerdrSurfaceGeometry) {
-        guard isActive else { return }
+        guard outbox.isSurfaceActive else { return }
         enqueue(.shellResize(Self.atLeastOneCell(geometry)))
     }
 
-    private static func atLeastOneCell(_ geometry: HerdrSurfaceGeometry) -> HerdrSurfaceGeometry {
+    /// Herdr takes a size of at least one cell each way.
+    static func atLeastOneCell(_ geometry: HerdrSurfaceGeometry) -> HerdrSurfaceGeometry {
         HerdrSurfaceGeometry(
             cellWidthPx: geometry.cellWidthPx,
             cellHeightPx: geometry.cellHeightPx,
             cols: max(geometry.cols, 1),
             rows: max(geometry.rows, 1)
         )
-    }
-
-    private func surfaceSet(active: Bool) throws -> (id: String, message: HerdrClientMessage) {
-        guard let bootID else { throw HerdrCommandError.noSnapshot }
-        let id = makeID("s")
-        let message = try HerdrClientMessage.endpointRequest(
-            bootID: bootID,
-            id: id,
-            method: Self.surfaceSetMethod,
-            params: ["active": active]
-        )
-        return (id, message)
-    }
-
-    /// As in Herdr's client, the reply must confirm the show.
-    private static func shownRevision(from data: Data) throws -> UInt64 {
-        struct Reply: Decodable {
-            struct Result: Decodable {
-                let active: Bool
-                let projectionRevision: UInt64
-
-                private enum CodingKeys: String, CodingKey {
-                    case active
-                    case projectionRevision = "projection_revision"
-                }
-            }
-
-            let result: Result
-        }
-        guard let result = try? JSONDecoder().decode(Reply.self, from: data).result else {
-            throw HerdrConnectionError.incompatible("its surface.set reply couldn't be read")
-        }
-        guard result.active else { throw HerdrCommandError.notAcknowledged }
-        return result.projectionRevision
     }
 
     // MARK: - Input
@@ -638,7 +600,7 @@ actor HerdrConnection {
 
     private func checkCanSend(_ events: [HerdrInputEvent]) throws {
         guard !ended else { throw HerdrInputError.connectionEnded }
-        guard isActive else { throw HerdrInputError.inactive }
+        guard outbox.isSurfaceActive else { throw HerdrInputError.inactive }
         try Self.checkLimits(events)
     }
 
@@ -665,187 +627,6 @@ actor HerdrConnection {
         }
         guard expanded <= maxInputEvents else { throw HerdrInputError.tooManyEvents(expanded) }
         guard bytes <= maxInputBytes else { throw HerdrInputError.tooLarge(bytes: bytes) }
-    }
-
-    // MARK: - Commands
-
-    /// Endpoint commands run one at a time, as in Herdr's client: one goes once the command in flight is
-    /// answered or times out. Its reply comes as JSON (`{"id", "result"}`).
-    ///
-    /// Sends a command only if it can go at once: the session is shown and no command is in flight.
-    /// Returns whether it went, once it is queued behind everything sent before it; `answered` gets its
-    /// reply, or its failure within `timeout` (Herdr's command timeout unless given). Herdr refuses a
-    /// command while another is in flight or while the session is hidden (`endpoint_requests.rs`), so one
-    /// that would have to wait isn't sent. With `paneID`, it goes only while Herdr has that pane focused.
-    func sendCommandIfIdle(
-        _ method: String,
-        params: some Encodable & Sendable,
-        whileFocused paneID: String? = nil,
-        timeout: Duration? = nil,
-        answered: @escaping CommandAnswered
-    ) -> Bool {
-        guard !ended, isActive, !laneBusy, negotiated?.methods.contains(method) == true,
-              paneID.map({ $0 == focusedPaneID }) ?? true
-        else { return false }
-        laneBusy = true
-        guard send(method, params: params, timeout: timeout, answered: answered) else {
-            releaseLane()
-            return false
-        }
-        return true
-    }
-
-    /// `sendCommandIfIdle`, waiting for the reply: nil when the command didn't go.
-    func commandIfIdle(
-        _ method: String,
-        params: some Encodable & Sendable,
-        whileFocused paneID: String? = nil,
-        timeout: Duration? = nil
-    ) async -> Result<Data, Error>? {
-        await withCheckedContinuation { continuation in
-            let sent = sendCommandIfIdle(method, params: params, whileFocused: paneID, timeout: timeout) { result in
-                continuation.resume(returning: result.map(\.json))
-            }
-            if !sent { continuation.resume(returning: nil) }
-        }
-    }
-
-    /// Sends a command for the session on screen: at once if no command is in flight, else once the lane
-    /// frees, unless a hide (`sendHide`) or its owner (`dropWaitingCommands`) drops it first. With
-    /// `paneID`, it goes only while the newest snapshot has that pane focused, checked as it goes out: a
-    /// `pane.zoom` focuses its target, so one for a pane another client has since moved away from would
-    /// take the session back. `answered` gets its reply, or why it failed or didn't go: `notSent` for one
-    /// the session no longer wants.
-    func sendCommandWhileShown(
-        _ method: String,
-        params: some Encodable & Sendable,
-        whileFocused paneID: String? = nil,
-        answered: @escaping CommandAnswered
-    ) {
-        guard !ended else { return answered(.failure(HerdrCommandError.connectionEnded)) }
-        guard negotiated?.methods.contains(method) == true else {
-            return answered(.failure(HerdrCommandError.unsupported(method: method)))
-        }
-        guard isActive, paneID.map({ $0 == focusedPaneID }) ?? true else {
-            return answered(.failure(HerdrCommandError.notSent))
-        }
-        guard laneBusy else {
-            laneBusy = true
-            if !send(method, params: params, timeout: nil, answered: answered) {
-                releaseLane()
-                answered(.failure(HerdrCommandError.notSent))
-            }
-            return
-        }
-        waitingCommands.append(QueuedCommand(method: method, params: params, paneID: paneID, answered: answered))
-    }
-
-    /// The `method` commands still waiting for the lane don't go: what they were for has been replaced.
-    func dropWaitingCommands(_ method: String) {
-        dropWaitingCommands { $0 == method }
-    }
-
-    private func dropWaitingCommands(where matches: (String) -> Bool) {
-        let dropped = waitingCommands.filter { matches($0.method) }
-        waitingCommands.removeAll { matches($0.method) }
-        dropped.forEach { $0.answered(.failure(HerdrCommandError.notSent)) }
-    }
-
-    /// Registers and queues a command that holds the lane; false when it can't be encoded.
-    private func send(
-        _ method: String,
-        params: any Encodable & Sendable,
-        timeout: Duration?,
-        answered: @escaping CommandAnswered
-    ) -> Bool {
-        guard let bootID else { return false }
-        let id = makeID("c")
-        guard let message = try? HerdrClientMessage.endpointRequest(bootID: bootID, id: id, method: method, params: params)
-        else { return false }
-        register(id, waiter: .command(answered: answered, sentAfter: snapshotRevision), holdsLane: true,
-                 timeout: timeout ?? timing.command, method: method, sending: [message])
-        return true
-    }
-
-    /// Registers the reply for `id`, then queues `messages` in order, all before any other actor work,
-    /// so a step's messages go out together and its reply can't arrive unregistered. A request without
-    /// a `timeout` waits for its reply until the connection ends.
-    private func register(
-        _ id: String,
-        waiter: Waiter?,
-        holdsLane: Bool,
-        timeout: Duration?,
-        method: String,
-        sending messages: [HerdrClientMessage]
-    ) {
-        pending[id] = Pending(waiter: waiter, holdsLane: holdsLane)
-        messages.forEach(enqueue)
-        guard let timeout else { return }
-        Task {
-            try? await Task.sleep(for: timeout)
-            await self.expire(id, method: method)
-        }
-    }
-
-    private func resolve(_ waiter: Waiter?, with result: Result<Data, Error>) {
-        switch waiter {
-        case .show(let answered)?:
-            answered(result.flatMap { data in Result { try Self.shownRevision(from: data) } })
-        case .command(let answered, let sentAfter)?:
-            answered(result.map { HerdrCommandReply(json: $0, sentAfter: sentAfter, answeredAfter: snapshotRevision) })
-        case nil:
-            break
-        }
-    }
-
-    /// Herdr's client retires a command that didn't answer in time: it fails, the lane frees, and the
-    /// late reply is dropped, as `receive` drops every reply to an unknown request.
-    private func expire(_ id: String, method: String) {
-        guard let request = pending.removeValue(forKey: id) else { return }
-        resolve(request.waiter, with: .failure(HerdrCommandError.timedOut(method: method)))
-        if request.holdsLane { releaseLane() }
-    }
-
-    private func receive(_ chunk: HerdrResponseChunk) {
-        guard var request = pending[chunk.requestID] else { return }
-        if request.waiter != nil {
-            request.data += chunk.data
-        }
-        guard chunk.isFinal else {
-            pending[chunk.requestID] = request
-            return
-        }
-        pending[chunk.requestID] = nil
-        if request.holdsLane { releaseLane() }
-        guard let waiter = request.waiter else { return }
-        let data = Data(request.data)
-        struct Failure: Decodable {
-            struct Body: Decodable {
-                let code: String
-                let message: String
-            }
-
-            let error: Body?
-        }
-        if let failure = try? JSONDecoder().decode(Failure.self, from: data), let error = failure.error {
-            resolve(waiter, with: .failure(HerdrCommandError.failed(code: error.code, message: error.message)))
-        } else {
-            resolve(waiter, with: .success(data))
-        }
-    }
-
-    /// Passes the lane straight to the next waiting command. One that can't be sent, or whose pane Herdr
-    /// no longer has focused, passes it on to the one after it.
-    private func releaseLane() {
-        while !waitingCommands.isEmpty {
-            let command = waitingCommands.removeFirst()
-            if command.paneID.map({ $0 == focusedPaneID }) ?? true,
-               send(command.method, params: command.params, timeout: nil, answered: command.answered) {
-                return
-            }
-            command.answered(.failure(HerdrCommandError.notSent))
-        }
-        laneBusy = false
     }
 
     private func makeID(_ prefix: String) -> String {
@@ -981,26 +762,18 @@ actor HerdrConnection {
         }
     }
 
-    /// The one way the connection ends: every waiter learns it, then the bridge closes with `cause`.
+    /// The one way the connection ends: nothing more is written, every alive check learns it, then the
+    /// bridge closes with `cause`. The engine fails the requests it sent when the connection's owner ends
+    /// it there.
     private func finish(_ cause: HerdrBridgeCloseCause) async {
         ended = true
-        isActive = false
+        outbox.close()
         healthTask?.cancel()
         healthTask = nil
-        writeQueue.removeAll()
-        let ending = pending.values
-        pending.removeAll()
-        for request in ending {
-            resolve(request.waiter, with: .failure(HerdrCommandError.connectionEnded))
-        }
         for check in pongWaiters.values {
             check.waiter.resume(returning: false)
         }
         pongWaiters.removeAll()
-        let waiting = waitingCommands
-        waitingCommands.removeAll()
-        laneBusy = false
-        waiting.forEach { $0.answered(.failure(HerdrCommandError.connectionEnded)) }
         await transport.close(cause)
     }
 }

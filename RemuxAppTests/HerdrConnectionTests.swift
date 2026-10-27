@@ -257,44 +257,8 @@ final class HerdrConnectionTests: XCTestCase {
 
     // MARK: - Showing, hiding and input
 
-    /// Show sends resize, `surface.set(true)` and focus in Herdr's client order; hide sends focus first.
-    func testShowAndHideFollowHerdrsOrder() async throws {
-        let (connection, transport, _) = try await openedSession(surfaceActive: false)
-        let geometry = HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 40, rows: 12)
-
-        async let floor = connection.show(geometry)
-        let resize = try await transport.written(1)
-        let set = try await transport.written(2)
-        let focus = try await transport.written(3)
-        XCTAssertEqual(resize, HerdrClientMessage.shellResize(geometry).frame)
-        let request = try Self.request(set)
-        XCTAssertEqual(request.method, "client_shell.surface.set")
-        XCTAssertEqual(request.params, ["active": true])
-        XCTAssertEqual(focus, HerdrClientMessage.focus(true).frame)
-        await transport.serve(Self.reply(id: request.id, json: #"{"type":"client_shell_surface_set","active":true,"projection_revision":4}"#))
-        let revision = try await floor
-        XCTAssertEqual(revision, 4)
-
-        await connection.sendHide()
-        let unfocus = try await transport.written(4)
-        let unset = try Self.request(try await transport.written(5))
-        XCTAssertEqual(unfocus, HerdrClientMessage.focus(false).frame)
-        XCTAssertEqual(unset.params, ["active": false])
-    }
-
-    /// As Herdr's client, a show asks for at least one cell each way.
-    func testShowAsksForAtLeastOneCell() async throws {
-        let (connection, transport, _) = try await openedSession(surfaceActive: false)
-        async let floor = connection.show(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 0, rows: 0))
-        let resize = try await transport.written(1)
-        XCTAssertEqual(resize, HerdrClientMessage.shellResize(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 1, rows: 1)).frame)
-        let set = try Self.request(try await transport.written(2))
-        await transport.serve(Self.reply(id: set.id, json: #"{"type":"client_shell_surface_set","active":true,"projection_revision":2}"#))
-        _ = try await floor
-    }
-
-    /// As Herdr's client, a new size goes to the session on screen, also while its show is being
-    /// answered, and to no hidden session: the next show carries it.
+    /// As Herdr's client, a new size goes only to the session on screen, also while its show is being
+    /// answered: a hidden one gets its size with the next show. It asks for at least one cell each way.
     func testResizeGoesOnlyToTheSessionOnScreen() async throws {
         let (connection, transport, _) = try await openedSession(surfaceActive: false)
         let size = HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 30, rows: 10)
@@ -303,18 +267,13 @@ final class HerdrConnectionTests: XCTestCase {
         let writtenWhileHidden = await transport.writtenCount
         XCTAssertEqual(writtenWhileHidden, 1)
 
-        async let floor = connection.show(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 40, rows: 12))
-        let set = try Self.request(try await transport.written(2))
-        _ = try await transport.written(3)
+        connection.outbox.setSurfaceActive(true)
         await connection.resize(size)
-        let resizeDuringShow = try await transport.written(4)
-        XCTAssertEqual(resizeDuringShow, HerdrClientMessage.shellResize(size).frame)
-        await transport.serve(Self.reply(id: set.id, json: #"{"type":"client_shell_surface_set","active":true,"projection_revision":3}"#))
-        _ = try await floor
-
+        let resizeWhileShown = try await transport.written(1)
+        XCTAssertEqual(resizeWhileShown, HerdrClientMessage.shellResize(size).frame)
         await connection.resize(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 0, rows: 0))
-        let resizeWhileShown = try await transport.written(5)
-        XCTAssertEqual(resizeWhileShown, HerdrClientMessage.shellResize(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 1, rows: 1)).frame)
+        let atLeastOneCell = try await transport.written(2)
+        XCTAssertEqual(atLeastOneCell, HerdrClientMessage.shellResize(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 1, rows: 1)).frame)
     }
 
     /// A surface the decoder can't apply ends the connection as a wire failure, as in Herdr's client.
@@ -328,80 +287,6 @@ final class HerdrConnectionTests: XCTestCase {
         await transport.serve(HerdrWire.frame(delta))
         let kinds = await events.waitForEnd().map(\.kind)
         XCTAssertEqual(kinds, ["snapshot", "ended(\(HerdrConnectionError.wire(.invalidSurfaceUpdate("surface delta without a baseline"))))"])
-    }
-
-    /// A show Herdr answers with the other state, or with an answer Remux can't read, fails; nothing is
-    /// sent to undo it, since its owner ends the connection, which takes the session off Herdr's screen.
-    func testARefusedShowFailsAndSendsNothingMore() async throws {
-        let answers = [
-            #"{"type":"client_shell_surface_set","active":false,"projection_revision":2}"#,
-            #"{"type":"client_shell_surface_set"}"#,
-        ]
-        for answer in answers {
-            let (connection, transport, _) = try await openedSession(surfaceActive: false)
-            async let floor = connection.show(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 40, rows: 12))
-            let set = try Self.request(try await transport.written(2))
-            _ = try await transport.written(3)
-            await transport.serve(Self.reply(id: set.id, json: answer))
-            do {
-                _ = try await floor
-                XCTFail("shown")
-            } catch {
-                XCTAssertNotEqual(error as? HerdrCommandError, .connectionEnded)
-            }
-            try await Task.sleep(for: .milliseconds(30))
-            let written = await transport.writtenCount
-            XCTAssertEqual(written, 4, "the hello and the show")
-        }
-    }
-
-    /// How long a show may take is its owner's to decide: the connection waits for Herdr's answer until
-    /// it ends.
-    func testAShowWaitsForItsAnswerUntilTheConnectionEnds() async throws {
-        let (connection, transport, _) = try await openedSession(
-            surfaceActive: false,
-            timing: timing(activation: .milliseconds(50))
-        )
-        let answer = AnswerBox()
-        let showing = Task {
-            do {
-                _ = try await connection.show(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 40, rows: 12))
-            } catch {
-                await answer.set(error as? HerdrCommandError == .connectionEnded)
-            }
-        }
-        _ = try await transport.written(3)
-        try await Task.sleep(for: .milliseconds(200))
-        let early = await answer.value
-        XCTAssertNil(early, "the show failed on its own")
-
-        await connection.close(.finished)
-        await showing.value
-        let ended = await answer.value
-        XCTAssertEqual(ended, true)
-    }
-
-    /// A command waiting to follow a show doesn't go once a hide is asked: Herdr refuses commands from a
-    /// hidden session, and the next show sends its own.
-    func testAHideDropsTheCommandWaitingToFollowTheShow() async throws {
-        let (connection, transport, _) = try await openedSession(surfaceActive: true)
-        async let first = connection.command("worktree.list", params: [String: String]())
-        let firstRequest = try Self.request(try await transport.written(1))
-        let (replies, answered) = AsyncStream.makeStream(of: Result<HerdrCommandReply, Error>.self)
-        await connection.sendCommandWhileShown("pane.focus", params: ["pane_id": "w1:p1"]) {
-            answered.yield($0)
-        }
-
-        await connection.sendHide()
-        var iterator = replies.makeAsyncIterator()
-        let next = await iterator.next()
-        guard case .failure(let error)? = next else { return XCTFail("the waiting command wasn't dropped") }
-        XCTAssertEqual(error as? HerdrCommandError, .notSent)
-        await transport.serve(Self.reply(id: firstRequest.id, json: #"{"type":"ok"}"#))
-        _ = try await first
-        try await Task.sleep(for: .milliseconds(30))
-        let written = await transport.writtenCount
-        XCTAssertEqual(written, 4, "the hello, the command and the hide")
     }
 
     func testInputIsRefusedWhileHiddenOrOverHerdrsLimits() async throws {
@@ -434,151 +319,44 @@ final class HerdrConnectionTests: XCTestCase {
         _ = transport
     }
 
-    // MARK: - Commands
+    // MARK: - Replies
 
-    /// One command at a time; the second goes out only once the first's final chunk arrives.
-    func testCommandsRunOneAtATimeAndJoinChunks() async throws {
+    /// Every reply chunk reaches the screen as it comes, in wire order with the snapshots: the engine,
+    /// which sent the requests, joins and judges them.
+    func testRepliesReachTheScreenInWireOrder() async throws {
+        let (_, transport, events) = try await openedSession(surfaceActive: true)
+        let boot = "68169-1791562319387415000"
+        await transport.serve(
+            Self.chunk(id: "c1", data: Array(#"{"id":"c1","#.utf8), final: false)
+                + HerdrServerScript.snapshot(revision: 100, boot: boot)
+                + Self.chunk(id: "c1", data: Array(#""result":{}}"#.utf8), final: true)
+        )
+        await events.waitForCount(4)
+        let kinds = await events.events.map(\.kind)
+        XCTAssertEqual(kinds, ["snapshot", "response(c1)", "snapshot", "response(c1, final)"])
+    }
+
+    /// The connection's own messages and the requests the engine sends share one writer, which keeps the
+    /// order they were sent in; once the connection ends nothing more goes out.
+    func testEveryWriteGoesOutInTheOrderSent() async throws {
         let (connection, transport, _) = try await openedSession(surfaceActive: true)
-        async let first = connection.command("pane.focus", params: ["pane_id": "w1:p1"])
-        let firstRequest = try Self.request(try await transport.written(1))
-        async let second = connection.command("tab.focus", params: ["tab_id": "w1:t1"])
+        let request = try HerdrClientMessage.endpointRequest(
+            bootID: "boot",
+            id: "c1",
+            method: "worktree.list",
+            params: [String: String]()
+        )
+        let size = HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 30, rows: 10)
+        connection.outbox.send([request, .focus(true)])
+        await connection.resize(size)
+        let written = [try await transport.written(1), try await transport.written(2), try await transport.written(3)]
+        XCTAssertEqual(written, [request.frame, HerdrClientMessage.focus(true).frame, HerdrClientMessage.shellResize(size).frame])
+
+        await connection.close(.finished)
+        connection.outbox.send([request])
         try await Task.sleep(for: .milliseconds(30))
         let count = await transport.writtenCount
-        XCTAssertEqual(count, 2)
-
-        let body = Array(#"{"id":"\#(firstRequest.id)","result":{"type":"ok"}}"#.utf8)
-        await transport.serve(Self.chunk(id: firstRequest.id, data: Array(body.prefix(10)), final: false))
-        await transport.serve(Self.chunk(id: firstRequest.id, data: Array(body.dropFirst(10)), final: true))
-        let firstReply = try await first
-        XCTAssertEqual(firstReply, Data(body))
-
-        let secondRequest = try Self.request(try await transport.written(2))
-        XCTAssertEqual(secondRequest.method, "tab.focus")
-        await transport.serve(Self.reply(id: secondRequest.id, error: ("not_found", "no tab")))
-        do {
-            _ = try await second
-            XCTFail("succeeded")
-        } catch let error as HerdrCommandError {
-            XCTAssertEqual(error, .failed(code: "not_found", message: "no tab"))
-        }
-    }
-
-    /// As Herdr's client, a timed-out command frees the lane for the next one, and its late reply is
-    /// dropped instead of answering anything else.
-    func testATimedOutCommandFreesTheLaneAndItsLateReplyIsDropped() async throws {
-        let (connection, transport, _) = try await openedSession(surfaceActive: true, timing: timing(command: .milliseconds(100)))
-        do {
-            _ = try await connection.command("worktree.list", params: [String: String]())
-            XCTFail("answered")
-        } catch let error as HerdrCommandError {
-            XCTAssertEqual(error, .timedOut(method: "worktree.list"))
-        }
-        let slow = try Self.request(try await transport.written(1))
-        async let next = connection.command("pane.focus", params: ["pane_id": "w1:p1"])
-        let nextRequest = try Self.request(try await transport.written(2))
-        XCTAssertEqual(nextRequest.method, "pane.focus")
-        await transport.serve(Self.reply(id: slow.id, json: #"{"type":"late"}"#))
-        await transport.serve(Self.reply(id: nextRequest.id, json: #"{"type":"ok"}"#))
-        let answer = try await next
-        XCTAssertEqual(String(decoding: answer, as: UTF8.self), #"{"id":"\#(nextRequest.id)","result":{"type":"ok"}}"#)
-    }
-
-    /// A waiting command its owner drops doesn't go, and the commands of other methods still go in turn.
-    func testAWaitingCommandItsOwnerDropsIsNotSent() async throws {
-        let (connection, transport, _) = try await openedSession(surfaceActive: true)
-        async let first = connection.command("worktree.list", params: [String: String]())
-        let firstRequest = try Self.request(try await transport.written(1))
-        let zoom = Task { try await connection.command("pane.zoom", params: ["pane_id": "w1:p1", "mode": "on"]) }
-        async let focus = connection.command("pane.focus", params: ["pane_id": "w1:p1"])
-        try await Task.sleep(for: .milliseconds(30))
-
-        await connection.dropWaitingCommands("pane.zoom")
-        do {
-            _ = try await zoom.value
-            XCTFail("answered")
-        } catch let error as HerdrCommandError {
-            XCTAssertEqual(error, .notSent)
-        }
-        await transport.serve(Self.reply(id: firstRequest.id, json: #"{"type":"ok"}"#))
-        _ = try await first
-        let next = try Self.request(try await transport.written(2))
-        XCTAssertEqual(next.method, "pane.focus")
-        await transport.serve(Self.reply(id: next.id, json: #"{"type":"ok"}"#))
-        _ = try await focus
-    }
-
-    /// A command for a pane goes only while the newest snapshot has that pane focused, whether it would go
-    /// at once or after the command in flight: a zoom focuses its target, so one for a pane another
-    /// client has since moved away from, on its tab or to another, would take the session back.
-    func testACommandForAPaneNoLongerFocusedIsNotSent() async throws {
-        let (connection, transport, events) = try await openedSession(surfaceActive: true)
-        let boot = "68169-1791562319387415000"
-        await transport.serve(HerdrServerScript.snapshot(revision: 100, boot: boot, focusedPane: "w1:p1"))
-        await events.waitForCount(2)
-        async let first = connection.command("worktree.list", params: [String: String]())
-        let firstRequest = try Self.request(try await transport.written(1))
-        let waiting = Task {
-            try await connection.command("pane.zoom", params: ["pane_id": "w1:p1", "mode": "on"], whileFocused: "w1:p1")
-        }
-        try await Task.sleep(for: .milliseconds(30))
-
-        // Another client focuses the tab's other pane.
-        await transport.serve(HerdrServerScript.snapshot(revision: 101, boot: boot, focusedPane: "w1:p2"))
-        await events.waitForCount(3)
-        await transport.serve(Self.reply(id: firstRequest.id, json: #"{"type":"ok"}"#))
-        _ = try await first
-        do {
-            _ = try await waiting.value
-            XCTFail("sent")
-        } catch let error as HerdrCommandError {
-            XCTAssertEqual(error, .notSent)
-        }
-        do {
-            _ = try await connection.command("pane.zoom", params: ["pane_id": "w1:p1", "mode": "on"], whileFocused: "w1:p1")
-            XCTFail("sent")
-        } catch let error as HerdrCommandError {
-            XCTAssertEqual(error, .notSent)
-        }
-        let written = await transport.writtenCount
-        XCTAssertEqual(written, 2, "the hello and the first command")
-    }
-
-    /// A command's reply says where it fell among the snapshots: the newest one when it went out, for a
-    /// command that waited for the lane the newest as the lane freed, and the newest when its reply came.
-    func testACommandsReplySaysWhichSnapshotsCameBeforeItWentAndBeforeItsReply() async throws {
-        let (connection, transport, events) = try await openedSession(surfaceActive: true)
-        let boot = "68169-1791562319387415000"
-        async let first = connection.command("worktree.list", params: [String: String]())
-        let firstRequest = try Self.request(try await transport.written(1))
-        let (replies, answered) = AsyncStream.makeStream(of: Result<HerdrCommandReply, Error>.self)
-        await connection.sendCommandWhileShown("pane.focus", params: ["pane_id": "w1:p1"]) {
-            answered.yield($0)
-        }
-
-        await transport.serve(HerdrServerScript.snapshot(revision: 100, boot: boot))
-        await events.waitForCount(2)
-        await transport.serve(Self.reply(id: firstRequest.id, json: #"{"type":"ok"}"#))
-        _ = try await first
-        let request = try Self.request(try await transport.written(2))
-        XCTAssertEqual(request.method, "pane.focus")
-        await transport.serve(HerdrServerScript.snapshot(revision: 101, boot: boot))
-        await transport.serve(Self.reply(id: request.id, json: #"{"type":"ok"}"#))
-        var iterator = replies.makeAsyncIterator()
-        let next = await iterator.next()
-        let reply = try XCTUnwrap(next).get()
-        XCTAssertEqual([reply.sentAfter, reply.answeredAfter], [100, 101])
-    }
-
-    func testAMethodTheServerDoesNotAdvertiseFailsAlone() async throws {
-        let (connection, _, events) = try await openedSession(surfaceActive: true)
-        do {
-            _ = try await connection.command("pane.read", params: [String: String]())
-            XCTFail("sent")
-        } catch let error as HerdrCommandError {
-            XCTAssertEqual(error, .unsupported(method: "pane.read"))
-        }
-        let ended = await events.hasEnded
-        XCTAssertFalse(ended)
+        XCTAssertEqual(count, 4)
     }
 
     // MARK: - Health
@@ -865,22 +643,21 @@ final class HerdrConnectionTests: XCTestCase {
 
     // MARK: - Closing
 
-    /// Closing takes over before anything can wait: a write stuck in the transport, a command waiting
-    /// for its reply and the stream ending meanwhile bring no `ended` event, and nothing more is written.
+    /// Closing takes over before anything can wait: a write stuck in the transport, a request queued
+    /// behind it and the stream ending meanwhile bring no `ended` event, and nothing more is written.
     func testCloseDoesNotWaitOnTheTransportOrReportAnEnd() async throws {
         let (connection, transport, events) = try await openedSession(surfaceActive: true)
         await transport.stallWrites()
         try await connection.send([.text("a")], toPane: "w1:p1")
         await transport.waitForStalledWrites(1)
-        let command = Task { try await connection.command("pane.focus", params: ["pane_id": "w1:p1"]) }
+        connection.outbox.send([try HerdrClientMessage.endpointRequest(
+            bootID: "boot",
+            id: "c1",
+            method: HerdrScreenModel.paneFocusMethod,
+            params: ["pane_id": "w1:p1"]
+        )])
 
         await connection.close(.finished)
-        do {
-            _ = try await command.value
-            XCTFail("answered")
-        } catch let error as HerdrCommandError {
-            XCTAssertEqual(error, .connectionEnded)
-        }
         let closes = await transport.closes
         XCTAssertEqual(closes, [.finished])
         let written = await transport.writtenCount
@@ -1270,20 +1047,6 @@ extension HerdrConnection {
         try await connection.open(hello: hello, appActive: appActive)
         return connection
     }
-
-    /// `sendCommandWhileShown`, waiting for the reply's JSON.
-    func command(_ method: String, params: some Encodable & Sendable, whileFocused paneID: String? = nil) async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            sendCommandWhileShown(method, params: params, whileFocused: paneID) { continuation.resume(with: $0.map(\.json)) }
-        }
-    }
-
-    /// `sendShow`, waiting for Herdr's answer.
-    func show(_ geometry: HerdrSurfaceGeometry) async throws -> UInt64 {
-        try await withCheckedThrowingContinuation { continuation in
-            sendShow(geometry) { continuation.resume(with: $0) }
-        }
-    }
 }
 
 /// An answer that arrives later, or nil while it hasn't.
@@ -1352,6 +1115,7 @@ extension HerdrConnectionEvent {
         case .clipboard: return "clipboard"
         case .inputRefused: return "inputRefused"
         case .keyboardReportAll(let enabled): return "keyboardReportAll(\(enabled))"
+        case .response(let chunk): return "response(\(chunk.requestID)\(chunk.isFinal ? ", final" : ""))"
         case .ended(let error):
             switch error {
             case .serverShutdown: return "ended(serverShutdown)"

@@ -27,6 +27,8 @@ struct HerdrPaneZoomResult: Equatable, Sendable {
 
     let zoomChanged: Bool
     let zoomed: Bool
+    /// The pane focused after the zoom: a zoom focuses its target.
+    let focusedPaneID: String
     let layout: Layout
 
     /// Reads the result from the reply `{"id", "result": {"type": "pane_zoom", "zoom": {...}}}`.
@@ -39,10 +41,12 @@ struct HerdrPaneZoomResult: Equatable, Sendable {
             struct Zoom: Decodable {
                 let zoomChanged: Bool
                 let zoomed: Bool
+                let focusedPaneID: String
                 let layout: Layout
 
                 private enum CodingKeys: String, CodingKey {
                     case zoomChanged = "zoom_changed"
+                    case focusedPaneID = "focused_pane_id"
                     case zoomed, layout
                 }
             }
@@ -52,6 +56,7 @@ struct HerdrPaneZoomResult: Equatable, Sendable {
         let zoom = try JSONDecoder().decode(Reply.self, from: reply).result.zoom
         zoomChanged = zoom.zoomChanged
         zoomed = zoom.zoomed
+        focusedPaneID = zoom.focusedPaneID
         layout = zoom.layout
     }
 }
@@ -66,29 +71,38 @@ struct HerdrPaneZoomResult: Equatable, Sendable {
 /// left, and Remux undoes that zoom only while its tab is on screen, since an unzoom focuses its target.
 struct HerdrOwnedZoom: Equatable {
     private var tab: HerdrTabKey?
+    /// The pane the zoom focused, until the next snapshot: Herdr can answer a command before it sends
+    /// the snapshot showing it, and the session is on the zoomed tab meanwhile.
+    private var answeredPane: String?
+
+    /// The tab Remux zoomed, if any.
+    var tabID: String? { tab?.tabID }
 
     mutating func record(_ answer: HerdrPaneZoomResult, bootID: String) {
         guard answer.zoomChanged else { return }
         let answered = HerdrTabKey(bootID: bootID, tabID: answer.layout.tabID)
         if answer.zoomed {
             tab = answered
+            answeredPane = answer.focusedPaneID
         } else if tab == answered {
             tab = nil
+            answeredPane = nil
         }
     }
 
     mutating func reconcile(with snapshot: HerdrSnapshot) {
+        answeredPane = nil
         guard let tab else { return }
         if tab.bootID != snapshot.bootID || !snapshot.tabs.contains(where: { $0.tabID == tab.tabID && $0.zoomed }) {
             self.tab = nil
         }
     }
 
-    /// The pane to unzoom the tab with when the session leaves the screen: the tab's focused pane, since an
-    /// unzoom focuses its target. Nil unless the tab Remux zoomed is the one on screen.
+    /// The pane to unzoom the tab with as the session leaves it: the tab's focused pane, since an unzoom
+    /// focuses its target. Nil unless the tab Remux zoomed is the one on screen.
     func paneToUnzoom(in snapshot: HerdrSnapshot) -> String? {
-        guard let tab, tab.bootID == snapshot.bootID, tab.tabID == snapshot.focusedTabID else { return nil }
-        return snapshot.focusedPaneID
+        guard let tab, tab.bootID == snapshot.bootID else { return nil }
+        return tab.tabID == snapshot.focusedTabID ? snapshot.focusedPaneID : answeredPane
     }
 }
 
