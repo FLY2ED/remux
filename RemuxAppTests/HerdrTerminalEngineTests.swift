@@ -10,6 +10,8 @@ final class HerdrTerminalEngineTests: XCTestCase {
     private var runtime: GhosttyKitRuntime!
     private var measurement: GhosttyTerminalViewportMeasurement!
     private var renderers: [TerminalPaneRenderer] = []
+    /// Holds the renderers' views, as on screen, while a test reads their pixels.
+    private var window: UIWindow?
 
     override func setUp() async throws {
         runtime = try GhosttyKitRuntime(terminalSettings: .default)
@@ -20,6 +22,8 @@ final class HerdrTerminalEngineTests: XCTestCase {
         for renderer in renderers {
             await close(renderer)
         }
+        window?.isHidden = true
+        window = nil
         measurement = nil
         runtime = nil
     }
@@ -463,6 +467,116 @@ final class HerdrTerminalEngineTests: XCTestCase {
         XCTAssertTrue(after.isEmpty, "\(after)")
     }
 
+    // MARK: - Images
+
+    /// An image Herdr places in a pane is drawn by that pane's terminal at its cells, counted from the
+    /// pane's own text area, and by no other pane's.
+    func testAnImageIsDrawnInItsPaneAtItsCells() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection()
+        let image = Self.redImage(pane: "R")
+        await feed.receive(try Self.snapshot(revision: 1))
+        await feed.receive(.surface(try Self.surface(
+            revision: 1,
+            lines: ["left 1    right 1 ", "left 2    right 2 ", "                  ", "                  "],
+            panes: [Self.pane("L", x: 0, y: 1, width: 8, height: 3), Self.pane("R", x: 10, y: 1, width: 8, height: 3)],
+            graphics: Self.scene(placing: image, at: [(x: 13, y: 2, columns: 3, rows: 2)], sendingBytes: true)
+        )))
+        let terminals = try await updates.terminals(count: 2)
+        let left = try await makeRenderer(engine: engine, paneID: "L", terminal: try XCTUnwrap(terminals["L"]), columns: 8, rows: 3)
+        let right = try await makeRenderer(engine: engine, paneID: "R", terminal: try XCTUnwrap(terminals["R"]), columns: 8, rows: 3)
+
+        let drawn = try await cellColor(of: right, column: 4, row: 1.5, until: \.isRed)
+        XCTAssertTrue(drawn.isRed, "the image's cells in its pane: \(drawn)")
+        let outside = try await cellColor(of: right, column: 1, row: 0, until: { !$0.isRed })
+        XCTAssertFalse(outside.isRed, "a cell of the pane the image doesn't cover: \(outside)")
+        let otherPane = try await cellColor(of: left, column: 4, row: 1.5, until: { !$0.isRed })
+        XCTAssertFalse(otherPane.isRed, "the same cells in the other pane: \(otherPane)")
+        await engine.stop()
+    }
+
+    /// Herdr sends an image's bytes once and then only places it. A pane whose terminal is new, here
+    /// back after another tab was shown while Herdr kept the image, draws it from the bytes Herdr sent
+    /// before.
+    func testAPaneBackFromAnotherTabDrawsTheImageHerdrKept() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection()
+        let image = Self.redImage(pane: "P")
+        let lines = ["first   ", "second  ", "third   "]
+        await feed.receive(try Self.snapshot(revision: 1))
+        await feed.receive(.surface(try Self.surface(
+            revision: 1,
+            lines: lines,
+            panes: [Self.pane("P", x: 0, width: 8, height: 3)],
+            graphics: Self.scene(placing: image, at: [(x: 2, y: 0, columns: 4, rows: 2)], sendingBytes: true)
+        )))
+        let first = try await updates.terminal(for: "P")
+
+        await feed.receive(try Self.snapshot(revision: 2))
+        await feed.receive(.surface(try Self.surface(
+            projection: 2,
+            revision: 2,
+            lines: lines,
+            panes: [Self.pane("Q", x: 0, width: 8, height: 3)],
+            graphics: Self.scene(retaining: image)
+        )))
+        await feed.receive(try Self.snapshot(revision: 3))
+        await feed.receive(.surface(try Self.surface(
+            projection: 3,
+            revision: 3,
+            lines: lines,
+            panes: [Self.pane("P", x: 0, width: 8, height: 3)],
+            graphics: Self.scene(placing: image, at: [(x: 2, y: 0, columns: 4, rows: 2)], sendingBytes: false)
+        )))
+        let back = try await updates.terminal(for: "P")
+        XCTAssertFalse(first === back)
+        let renderer = try await makeRenderer(engine: engine, paneID: "P", terminal: back, columns: 8, rows: 3)
+        let drawn = try await cellColor(of: renderer, column: 4, row: 1, until: \.isRed)
+        XCTAssertTrue(drawn.isRed, "the kept image in the pane's new terminal: \(drawn)")
+        await engine.stop()
+    }
+
+    /// Each frame's scene is the whole of what is placed: a placement Herdr moves is drawn at its new
+    /// cells and not at its old ones, and one it no longer lists is gone.
+    func testAPlacementFollowsEachFramesScene() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection()
+        let image = Self.redImage(pane: "P")
+        let lines = ["one     ", "two     ", "three   ", "four    "]
+        let panes = [Self.pane("P", x: 0, width: 8, height: 4)]
+        await feed.receive(try Self.snapshot(revision: 1))
+        await feed.receive(.surface(try Self.surface(
+            revision: 1,
+            lines: lines,
+            panes: panes,
+            graphics: Self.scene(placing: image, at: [(x: 4, y: 0, columns: 3, rows: 1)], sendingBytes: true)
+        )))
+        let renderer = try await makeRenderer(
+            engine: engine, paneID: "P", terminal: try await updates.terminal(for: "P"), columns: 8, rows: 4
+        )
+        let placed = try await cellColor(of: renderer, column: 5, row: 0, until: \.isRed)
+        XCTAssertTrue(placed.isRed, "\(placed)")
+
+        await feed.receive(.surface(try Self.surface(
+            revision: 2,
+            lines: lines,
+            panes: panes,
+            graphics: Self.scene(placing: image, at: [(x: 4, y: 2, columns: 3, rows: 1)], sendingBytes: false)
+        )))
+        let moved = try await cellColor(of: renderer, column: 5, row: 2, until: \.isRed)
+        XCTAssertTrue(moved.isRed, "the new cells: \(moved)")
+        let left = try await cellColor(of: renderer, column: 5, row: 0, until: { !$0.isRed })
+        XCTAssertFalse(left.isRed, "the old cells: \(left)")
+
+        await feed.receive(.surface(try Self.surface(revision: 3, lines: lines, panes: panes)))
+        let gone = try await cellColor(of: renderer, column: 5, row: 2, until: { !$0.isRed })
+        XCTAssertFalse(gone.isRed, "a placement the scene no longer lists: \(gone)")
+        await engine.stop()
+    }
+
     // MARK: - Fence and stop
 
     /// One registered surface per pane; a closed renderer is unregistered before its surface is freed,
@@ -608,6 +722,48 @@ final class HerdrTerminalEngineTests: XCTestCase {
         RendererText.rows(of: renderer, columns: columns, rows: rows)
     }
 
+    /// The colour Ghostty draws at a point of the renderer's grid, given in cells (the middle of cell
+    /// `column` is `column + 0.5`), from frames it draws on request: the first that satisfies `done`, or
+    /// the last one after 10 s.
+    private func cellColor(
+        of renderer: TerminalPaneRenderer,
+        column: Double,
+        row: Double,
+        until done: (RendererColor) -> Bool
+    ) async throws -> RendererColor {
+        let surface = try XCTUnwrap(renderer.rawSurface)
+        if renderer.view.window == nil {
+            let window = self.window ?? UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+            window.rootViewController = window.rootViewController ?? UIViewController()
+            window.isHidden = false
+            window.rootViewController?.view.addSubview(renderer.view)
+            self.window = window
+        }
+        var size = ghostty_surface_size_s()
+        XCTAssertEqual(ghostty_terminal_surface_size(surface, &size), GHOSTTY_TERMINAL_SURFACE_RESULT_OK)
+        let point = CGRect(
+            x: (column + 0.5) * Double(size.cell_width_px),
+            y: (row + 0.5) * Double(size.cell_height_px),
+            width: 1,
+            height: 1
+        )
+        let deadline = Date().addingTimeInterval(10)
+        var last: RendererColor?
+        repeat {
+            _ = ghostty_terminal_surface_request_frame(surface)
+            ghostty_app_tick(runtime.appHandleForTesting)
+            try await Task.sleep(for: .milliseconds(50))
+            if let layer = GhosttyIOSurfaceFrame.rendererLayer(in: renderer.view.layer),
+               let frame = try? GhosttyIOSurfaceFrame.read(from: layer, sourceRect: point) {
+                let pixel = Array(frame.bytes.prefix(4))
+                let color = RendererColor(red: pixel[2], green: pixel[1], blue: pixel[0])
+                last = color
+                if done(color) { return color }
+            }
+        } while Date() < deadline
+        return try XCTUnwrap(last, "the renderer published no frame")
+    }
+
     /// Each row of the area as text without surrounding blanks; nil for a row this check can't predict
     /// (anything but printable ASCII).
     private static func expectedRows(of frame: HerdrFrame, area: HerdrSurfaceRect) -> [String?] {
@@ -634,6 +790,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     static func pane(
         _ id: String,
         x: Int,
+        y: Int = 0,
         width: Int,
         height: Int,
         focused: Bool = false,
@@ -644,20 +801,21 @@ final class HerdrTerminalEngineTests: XCTestCase {
             #"{"offset_from_bottom":\#($0.fromBottom),"max_offset_from_bottom":\#($0.max),"viewport_rows":\#($0.rows)}"#
         } ?? "null"
         return """
-        {"pane_id":"\(id)","content_revision":1,"rect":{"x":\(x),"y":0,"width":\(width),"height":\(height)},
-         "inner_rect":{"x":\(x),"y":0,"width":\(width),"height":\(height)},"scrollbar_rect":null,"scroll":\(scrollJSON),
+        {"pane_id":"\(id)","content_revision":1,"rect":{"x":\(x),"y":\(y),"width":\(width),"height":\(height)},
+         "inner_rect":{"x":\(x),"y":\(y),"width":\(width),"height":\(height)},"scrollbar_rect":null,"scroll":\(scrollJSON),
          "focused":\(focused),"mouse_reporting":\(mouseReporting),"sgr_pixel_mouse":false,
          "alternate_screen_active":false,"pixel_width":0,"pixel_height":0}
         """
     }
 
-    /// A surface of the given lines, all of one width.
+    /// A surface of the given lines, all of one width, with `graphics` as its scene.
     static func surface(
         boot: String = "boot",
         projection: UInt64 = 1,
         revision: UInt64,
         lines: [String],
-        panes: [String]
+        panes: [String],
+        graphics: String = #"{"assets":[],"placements":[],"retained_assets":[]}"#
     ) throws -> HerdrPaneSurfaceFrame {
         let width = lines.first?.count ?? 0
         precondition(lines.allSatisfy { $0.count == width })
@@ -667,8 +825,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let json = """
         {"boot_id":"\(boot)","projection_revision":\(projection),"surface_revision":\(revision),
          "frame":{"cells":[\(cells.joined(separator: ","))],"width":\(width),"height":\(lines.count),"cursor":null,"hyperlinks":[],"graphics":[]},
-         "panes":[\(panes.joined(separator: ","))],"splits":[],"popup":null,
-         "graphics":{"assets":[],"placements":[],"retained_assets":[]}}
+         "panes":[\(panes.joined(separator: ","))],"splits":[],"popup":null,"graphics":\(graphics)}
         """
         return try JSONDecoder().decode(HerdrPaneSurfaceFrame.self, from: Data(json.utf8))
     }
@@ -676,6 +833,43 @@ final class HerdrTerminalEngineTests: XCTestCase {
     static func patch(base: UInt64, rows: [HerdrPatchRow], panes: [String]) throws -> HerdrPaneSurfacePatch {
         try HerdrPresentationTests.patch(base: base, rows: rows, panes: panes)
     }
+
+    /// The key of a solid red 2×2 RGBA image from terminal image 7 of pane `pane`.
+    static func redImage(pane: String) -> String {
+        #"{"source":{"Terminal":{"target":{"Pane":{"pane_id":"\#(pane)"}},"image_id":7}},"#
+            + #""image_width":2,"image_height":2,"format":"Rgba","data_len":16,"data_fingerprint":7}"#
+    }
+
+    /// A scene placing `image` at each of `cells` (in the frame's cells), carrying its bytes or not.
+    static func scene(
+        placing image: String,
+        at cells: [(x: Int, y: Int, columns: Int, rows: Int)],
+        sendingBytes: Bool
+    ) -> String {
+        let pixels = Array(repeating: "255,0,0,255", count: 4).joined(separator: ",")
+        let assets = sendingBytes ? #"[{"key":\#(image),"data":[\#(pixels)]}]"# : "[]"
+        let placements = cells.enumerated().map { index, cell in
+            #"{"asset":\#(image),"logical_placement_id":\#(index + 1),"x":\#(cell.x),"y":\#(cell.y),"#
+                + #""cols":\#(cell.columns),"rows":\#(cell.rows),"source_x":0,"source_y":0,"source_width":0,"#
+                + #""source_height":0,"x_offset":0,"y_offset":0,"z":0,"scrollback_offset":0}"#
+        }
+        return #"{"assets":\#(assets),"placements":[\#(placements.joined(separator: ","))],"retained_assets":[]}"#
+    }
+
+    /// A scene that places nothing and keeps `image`, as Herdr keeps an image whose pane is out of view.
+    static func scene(retaining image: String) -> String {
+        #"{"assets":[],"placements":[],"retained_assets":[\#(image)]}"#
+    }
+}
+
+/// A colour read from a renderer's frame.
+struct RendererColor: Equatable {
+    let red: UInt8
+    let green: UInt8
+    let blue: UInt8
+
+    /// The red of the test images, through Ghostty's colour handling.
+    var isRed: Bool { red > 200 && green < 80 && blue < 80 }
 }
 
 /// The engine's updates, read in order through the stream's one iterator.
