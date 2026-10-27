@@ -55,6 +55,11 @@ struct HerdrNoticePolicy {
         }
     }
 
+    /// Another notice took the screen, so the one shown before no longer holds back its repeat.
+    mutating func replaced() {
+        visible = nil
+    }
+
     /// `method` worked, so its next timeout is shown again.
     mutating func succeeded(_ method: String, bootID: String?) {
         seen.remove(Key(bootID: bootID ?? Self.noBoot, kind: .timeout, code: method))

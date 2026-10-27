@@ -18,6 +18,16 @@ final class HerdrNoticePolicyTests: XCTestCase {
         XCTAssertTrue(policy.shows("pane.focus", failedWith: refused, bootID: "a"))
     }
 
+    /// A refusal held back while it is on screen is shown again once another notice replaced it.
+    func testARefusalThatAnotherNoticeReplacedIsShownAgain() {
+        var policy = HerdrNoticePolicy(visibleFor: .seconds(60))
+        let busy = HerdrCommandError.failed(code: "endpoint_busy", message: "busy")
+        XCTAssertTrue(policy.shows("pane.focus", failedWith: busy, bootID: "a"))
+        XCTAssertFalse(policy.shows("pane.focus", failedWith: busy, bootID: "a"))
+        policy.replaced()
+        XCTAssertTrue(policy.shows("pane.focus", failedWith: busy, bootID: "a"))
+    }
+
     func testAnswersThatNoLongerApplyAndAnEndedConnectionSayNothing() {
         var policy = HerdrNoticePolicy(visibleFor: .seconds(4))
         for code in ["stale_target", "stale_content", "confirmation_required"] {

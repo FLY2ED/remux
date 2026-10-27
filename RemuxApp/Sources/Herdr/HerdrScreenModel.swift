@@ -445,7 +445,7 @@ final class HerdrScreenModel {
         do {
             try messages.forEach(HerdrConnection.checkLimits)
         } catch {
-            terminalScreenAdapter.presentFailure(Self.inputFailureLabel)
+            presentInputFailure()
             return .surfaceRejected
         }
         for message in messages {
@@ -585,6 +585,13 @@ final class HerdrScreenModel {
 
     private func inputFailed(_ attemptID: UInt64) {
         guard let attempt, attempt.id == attemptID, isCurrent(attempt), !attempt.ended else { return }
+        presentInputFailure()
+    }
+
+    /// A failure Remux finds itself, which Herdr's rules don't hold back. It replaces any notice on
+    /// screen, as Herdr's client keeps one.
+    private func presentInputFailure() {
+        notices.replaced()
         terminalScreenAdapter.presentFailure(Self.inputFailureLabel)
     }
 
