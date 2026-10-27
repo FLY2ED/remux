@@ -139,6 +139,21 @@ final class HerdrBorderLineTests: XCTestCase {
         ])
     }
 
+    /// Herdr's own wide label (`ui/panes.rs` tests): `1 模块组织（已定）` in a 12-column pane is ` 1 模块… `.
+    /// Ratatui leaves the cell each wide character covers in the default colour, and the line under
+    /// it keeps the label's colour.
+    func testALineUnderAWideLabelKeepsTheLabelsColour() throws {
+        let surface = try Self.surface(
+            lines: ["┌ 1 模 块 … ─┐", "│xxxxxxxxx │", "└──────────┘"],
+            colors: ["AAAAA.A.AAAA", "A.........-A", "AAAAAAAAAAAA"],
+            textAreas: [(1, 1, 9, 1)]
+        )
+
+        XCTAssertEqual(HerdrBorderLine.lines(in: surface).map(Self.describe), [
+            "h0 1-23 A", "h2 1-23 A", "v0 1-5 A", "v11 1-5 A",
+        ])
+    }
+
     /// With `pane_gaps = false` a label can follow the T where a focused neighbour's accent line meets
     /// the labelled pane's grey border. Herdr writes the label in its pane's colour, and the line under
     /// it takes that colour too.

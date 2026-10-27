@@ -155,9 +155,14 @@ extension HerdrBorderLine {
                         finish()
                         continue
                     }
-                    if near, let first = writtenOver {
+                    if near, let first = writtenOver, let reaching = run?.color {
+                        // Ratatui's `set_stringn` resets the cell a wide character covers, which
+                        // leaves it in the default colour: it takes its character's colour instead.
+                        var previous = reaching
                         for covered in first..<index {
-                            guard case .other(let coveredColor) = cell(covered) else { continue }
+                            guard case .other(var coveredColor) = cell(covered) else { continue }
+                            if coveredColor.value == .default { coveredColor = previous }
+                            previous = coveredColor
                             let start = UInt32(covered) * 2
                             add(start: start, end: start + 2, color: coveredColor, near: true, far: true)
                         }
