@@ -1897,6 +1897,53 @@ final class RemuxAppUITests: XCTestCase {
         captureLiveHerdrStep("w10-new-tab", in: configuration)
     }
 
+    /// The session `locked` that Herdr can't reach, on the tabs test's server, saved as the server's latest
+    /// session: the server row's Resume Latest is disabled, as the session's own row is, and doesn't open it,
+    /// and its swipe actions leave out Resume.
+    func testLiveHerdrUnreachableLatestSessionIsNotResumedFromItsServerWhenConfigured() throws {
+        let configuration = try launchLiveHerdrApp(sessionName: "locked")
+        let server = app.descendants(matching: .any).matching(identifier: "library.server.row").firstMatch
+        let terminal = app.otherElements["terminal.screen"]
+
+        // The server's sessions are listed once its host key is trusted.
+        openFirstServerDetail()
+        let hostKey = app.buttons["library.server.host-key"]
+        XCTAssertTrue(hostKey.waitForExistence(timeout: 20), "The server page didn't ask to verify the server.")
+        hostKey.tap()
+        let trust = app.alerts.firstMatch
+        XCTAssertTrue(trust.waitForExistence(timeout: 5))
+        let fingerprint = try XCTUnwrap(configuration.expectedHostKey.split(separator: " ").last.map(String.init))
+        guard trust.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", fingerprint)).firstMatch.exists else {
+            XCTFail("Refusing to trust a host key other than the fixture's.")
+            return
+        }
+        trust.buttons["Trust Server"].tap()
+        let locked = app.descendants(matching: .any)
+            .matching(identifier: "library.session.resume")
+            .matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "locked", "Unavailable"))
+            .firstMatch
+        XCTAssertTrue(locked.waitForExistence(timeout: 20), "The saved session Herdr can't reach wasn't shown unavailable.")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(server.waitForExistence(timeout: 5))
+
+        server.press(forDuration: 1.2)
+        let resumeLatest = app.buttons["Resume Latest"]
+        XCTAssertTrue(resumeLatest.waitForExistence(timeout: 5), "The server row's menu didn't open.")
+        XCTAssertFalse(resumeLatest.isEnabled, "Resume Latest offered the session Herdr can't reach.")
+        captureLiveHerdrStep("u1-resume-latest-disabled", in: configuration)
+        resumeLatest.tap()
+        XCTAssertFalse(terminal.waitForExistence(timeout: 3), "Resume Latest opened the session Herdr can't reach.")
+        if resumeLatest.exists {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)).tap()
+            XCTAssertTrue(resumeLatest.waitForNonExistence(timeout: 5))
+        }
+
+        server.swipeLeft()
+        XCTAssertTrue(app.buttons["Delete"].waitForExistence(timeout: 5), "The server row's swipe actions didn't open.")
+        XCTAssertFalse(app.buttons["Resume"].exists, "The Resume swipe offered the session Herdr can't reach.")
+        captureLiveHerdrStep("u2-resume-swipe-not-offered", in: configuration)
+    }
+
     /// Opens Panes over a Herdr session whose tab has `paneCount` panes, checks that the pane picker maps
     /// every one, also while the tab is zoomed, and returns its Zoom switch.
     private func openHerdrPanesZoomSwitch(paneCount: Int) -> XCUIElement {
@@ -2016,8 +2063,11 @@ final class RemuxAppUITests: XCTestCase {
         try Data().write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(step).request"))
     }
 
-    /// Launches the app with the live Herdr configuration's server saved, for a test that opens it.
-    private func launchLiveHerdrApp(requiringSteps: Bool = false) throws -> LiveHerdrConfiguration {
+    /// Launches the app with the live Herdr configuration's server saved, with its session or `sessionName`.
+    private func launchLiveHerdrApp(
+        sessionName: String? = nil,
+        requiringSteps: Bool = false
+    ) throws -> LiveHerdrConfiguration {
         guard let path = ProcessInfo.processInfo.environment["REMUX_LIVE_HERDR_UI_CONFIG"], !path.isEmpty else {
             throw XCTSkip("Set REMUX_LIVE_HERDR_UI_CONFIG to run the live Herdr UI test.")
         }
@@ -2034,7 +2084,7 @@ final class RemuxAppUITests: XCTestCase {
         app.launchEnvironment["REMUX_DEBUG_SERVER_PORT"] = configuration.port ?? "22"
         app.launchEnvironment["REMUX_DEBUG_SERVER_USERNAME"] = configuration.username
         app.launchEnvironment["REMUX_DEBUG_CREDENTIALS_FILE"] = path
-        app.launchEnvironment["REMUX_DEBUG_HERDR_SESSION"] = configuration.sessionName
+        app.launchEnvironment["REMUX_DEBUG_HERDR_SESSION"] = sessionName ?? configuration.sessionName
         app.launchEnvironment["REMUX_DEBUG_HERDR_EXECUTABLE_PATH"] = configuration.herdrExecutablePath
         if let tmuxExecutablePath = configuration.tmuxExecutablePath {
             app.launchEnvironment["REMUX_DEBUG_TMUX_EXECUTABLE_PATH"] = tmuxExecutablePath

@@ -1186,6 +1186,9 @@ private struct ConnectionLibraryView: View {
             ForEach(snapshot.servers) { server in
                 let workspaces = visibleWorkspaces(for: server.id)
                 let latest = workspaces.first
+                let latestUnavailableReason = latest.flatMap {
+                    discoveries[server.id]?.unavailableReason(of: $0.locator)
+                }
 
                 NavigationLink {
                     serverDetail(
@@ -1218,6 +1221,7 @@ private struct ConnectionLibraryView: View {
                         } label: {
                             Label("Resume Latest", systemImage: "play.fill")
                         }
+                        .disabled(latestUnavailableReason != nil)
                     }
 
                     Button {
@@ -1238,7 +1242,8 @@ private struct ConnectionLibraryView: View {
                     }
                     .tint(.red)
 
-                    if let latest {
+                    // A swipe action can't be disabled, so it isn't offered for a session that can't open.
+                    if let latest, latestUnavailableReason == nil {
                         Button("Resume") {
                             onConnect(latest.id)
                         }
