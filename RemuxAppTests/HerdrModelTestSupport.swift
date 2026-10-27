@@ -73,6 +73,8 @@ enum HerdrServerScript {
         var scroll: (fromBottom: UInt64, max: UInt64, rows: UInt64)?
         var mouseReporting = false
         var alternateScreen = false
+        /// Even, as Herdr's is between changes.
+        var contentRevision: UInt64 = 2
         /// The pane with Herdr's borders around its text area, when it has any.
         var rect: (x: UInt16, y: UInt16, width: UInt16, height: UInt16)?
     }
@@ -192,16 +194,19 @@ enum HerdrServerScript {
         terminalTitleStripped: String? = nil,
         agent: String? = nil,
         displayAgent: String? = nil,
+        workspace: String = "w1",
         tab: String = "t1",
         status: HerdrAgentStatus = .working,
-        stateChange: UInt64 = 1
+        stateChange: UInt64 = 1,
+        stateLabels: [(state: String, word: String)] = []
     ) -> String {
-        """
-        {"pane_id":"\(paneID)","workspace_id":"w1","tab_id":"\(tab)","name":\(json(name)),
+        let labels = stateLabels.map { "[\(json($0.state)),\(json($0.word))]" }.joined(separator: ",")
+        return """
+        {"pane_id":"\(paneID)","workspace_id":"\(workspace)","tab_id":"\(tab)","name":\(json(name)),
          "display_agent":\(json(displayAgent)),"agent":\(json(agent)),"title":\(json(title)),
          "terminal_title":null,"terminal_title_stripped":\(json(terminalTitleStripped)),
          "agent_status":"\(status.rawValue)","state_change_seq":\(stateChange),
-         "state_labels":[],"tokens":[],"focused":false}
+         "state_labels":[\(labels)],"tokens":[],"focused":false}
         """
     }
 
@@ -228,7 +233,7 @@ enum HerdrServerScript {
         frame(lines, foreground: foreground, to: &writer)
         writer.array(panes) { writer, pane in
             writer.string(pane.id)
-            writer.u64(1)
+            writer.u64(pane.contentRevision)
             let textArea = (x: pane.x, y: pane.y, width: pane.width, height: pane.height)
             for rect in [pane.rect ?? textArea, textArea] {
                 writer.u16(rect.x)

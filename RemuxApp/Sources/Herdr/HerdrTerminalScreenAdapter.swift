@@ -89,13 +89,14 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
     }
 
     private var topologySnapshot: GhosttyRuntimeSurfaceTopologySnapshot {
-        guard let layout = model?.layout else { return .empty }
+        guard let model, let layout = model.layout else { return .empty }
         let id = topLevelID(for: layout)
         let tab = GhosttyTopLevelSurface(
             id: id,
             name: layout.tab?.label ?? "",
             leafIDs: listedPanes.map { surfaceID(forPane: $0.paneID) },
-            focusedLeafID: focusedPaneID.map { surfaceID(forPane: $0) }
+            focusedLeafID: focusedPaneID.map { surfaceID(forPane: $0) },
+            agentStatus: layout.tab.flatMap { model.agents.status(ofTab: $0.tabID) }
         )
         return GhosttyRuntimeSurfaceTopologySnapshot(topLevels: [tab], selectedTopLevelID: id)
     }
@@ -134,7 +135,8 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
                 visibleFrame: drawn,
                 isFocused: pane.paneID == focusedPaneID,
                 currentCommand: pane.name,
-                currentPath: pane.path
+                currentPath: pane.path,
+                agent: model.agents.state(ofPane: pane.paneID)
             )
         }
         return GhosttyTerminalViewportPresentationProjection(
@@ -328,6 +330,36 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     ) -> GhosttyMouseInputSubmissionOutcome {
         guard let model, let paneID = paneID(for: surfaceID) else { return .missingTarget(surfaceID) }
         return model.scroll(event, inPane: paneID) ? .sent : .surfaceRejected
+    }
+
+    /// Herdr keeps the pane's history and knows where its lines wrap, so it reads the selection.
+    func selectedText(in surfaceID: UUID) async -> String? {
+        guard let model, let paneID = paneID(for: surfaceID),
+              let selection = managedSurface(for: surfaceID)?.historySelection
+        else { return nil }
+        return await model.readSelection(selection, inPane: paneID)
+    }
+
+    /// Herdr's frames don't say where lines wrap, so the pane's terminal cuts a link the pane wraps at the
+    /// row's edge. A link or word reaching a row's edge may be part of one, and Herdr finds the whole link,
+    /// as its client asks it for a plain-text link's cells; an OSC 8 link, or one inside a row, is whole.
+    func completeLinkSelection(
+        in surfaceID: UUID,
+        at point: CGPoint,
+        selected: GhosttyLongPressSelection
+    ) async -> Bool {
+        guard selected != .explicitLink, let model, let paneID = paneID(for: surfaceID),
+              let surface = managedSurface(for: surfaceID),
+              let selection = surface.historySelection,
+              selection.reachesRowEdge(columns: surface.controlSurface.viewportSize.columns),
+              let pressed = surface.historyCell(at: point)
+        else { return false }
+        guard let link = await model.resolveLink(at: pressed, inPane: paneID), link != selection,
+              // A selection changed meanwhile is the user's.
+              surface.historySelection == selection,
+              case .snapshot(let snapshot) = surface.select(link)
+        else { return false }
+        return snapshot.isActive
     }
 
     // MARK: Topology actions
