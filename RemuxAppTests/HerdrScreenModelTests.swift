@@ -352,6 +352,52 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(adapter.topLevelNoun, .tab)
     }
 
+    /// The screen draws Herdr's pane borders where Herdr's frame has them, in the colours Herdr gave them
+    /// as the phone's terminal shows them: here a named colour from the phone's palette. The ends of a
+    /// box's sides meet in its corners.
+    func testTheScreenDrawsHerdrsBordersInHerdrsColours() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge()
+        await bridge.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1))
+        await bridge.serve(HerdrServerScript.surface(
+            projection: 1,
+            revision: 1,
+            lines: ["┌──┐┌──┐", "│ab││cd│", "└──┘└──┘"],
+            panes: [
+                .init(id: "w1:p1", x: 1, y: 1, width: 2, height: 1, focused: true, rect: (0, 0, 4, 3)),
+                .init(id: "w1:p2", x: 5, y: 1, width: 2, height: 1, rect: (4, 0, 4, 3)),
+            ],
+            // ratatui's named Blue.
+            foreground: Dictionary(uniqueKeysWithValues: "┌┐└┘─│".map { ($0, UInt32(5)) })
+        ))
+        harness.setScreenSize()
+        let adapter = harness.model.terminalScreenAdapter
+        try await harness.waitUntil("the borders weren't laid out") {
+            !adapter.terminalScreenPresentationProjection.viewport.paneLines.isEmpty
+        }
+
+        let blue = try XCTUnwrap(harness.model.terminalColors?.palette[4])
+        func line(_ orientation: GhosttyPaneLine.Orientation, _ position: CGFloat, _ start: CGFloat, _ end: CGFloat)
+            -> GhosttyPaneLine
+        {
+            GhosttyPaneLine(
+                orientation: orientation, position: position, start: start, end: end,
+                ink: .color(red: blue.red, green: blue.green, blue: blue.blue), width: 1, cap: .square
+            )
+        }
+        let viewport = adapter.terminalScreenPresentationProjection.viewport
+        XCTAssertEqual(viewport.paneLines, [
+            line(.horizontal, 0.5, 0.5, 3.5), line(.horizontal, 0.5, 4.5, 7.5),
+            line(.horizontal, 2.5, 0.5, 3.5), line(.horizontal, 2.5, 4.5, 7.5),
+            line(.vertical, 0.5, 0.5, 2.5), line(.vertical, 3.5, 0.5, 2.5),
+            line(.vertical, 4.5, 0.5, 2.5), line(.vertical, 7.5, 0.5, 2.5),
+        ])
+        XCTAssertEqual(viewport.panes.map(\.normalFrame), [
+            GhosttyTerminalGridRect(x: 1, y: 1, columns: 2, rows: 1),
+            GhosttyTerminalGridRect(x: 5, y: 1, columns: 2, rows: 1),
+        ])
+    }
+
     /// The pane sheet shows, as for a tmux pane, the folder of the pane's foreground program, and names
     /// each pane as Herdr's pane navigator does within a tab: its manual label or agent's name, else
     /// its title, else its agent's kind, else "terminal", numbered by its place among the tab's panes

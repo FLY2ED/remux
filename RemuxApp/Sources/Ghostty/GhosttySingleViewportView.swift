@@ -301,8 +301,8 @@ private final class GhosttyCompositeViewportContainerView: UIView,
     override func draw(_ rect: CGRect) {
         super.draw(rect)
 
-        let visiblePanes = projection.panes.filter { $0.visibleFrame != nil }
-        guard visiblePanes.count > 1,
+        let lines = projection.paneLines
+        guard !lines.isEmpty,
               let grid = projection.windowGrid,
               let cell = projection.cellMetrics,
               let layout = GhosttyCompositeViewportLayout(
@@ -314,58 +314,45 @@ private final class GhosttyCompositeViewportContainerView: UIView,
         else { return }
 
         let canvas = CGRect(origin: layout.origin, size: layout.canvasSize)
-        let separatorLineWidth: CGFloat = 1
-        let focusedSeparatorLineWidth: CGFloat = 2
-        let separators = GhosttyPaneSeparatorLayout.segments(
-            for: visiblePanes.compactMap { pane in
-                pane.visibleFrame.map {
-                    GhosttyPaneSeparatorLayout.Pane(id: pane.id, frame: $0)
-                }
-            }
-        )
-        let separatorPath = CGMutablePath()
-        for separator in separators {
-            addSeparator(
-                to: separatorPath,
-                frame: separator.frame(
-                    origin: layout.origin,
-                    cellSize: layout.cellSize,
-                    lineWidth: separatorLineWidth
-                ),
-                clippedTo: canvas
-            )
-        }
-
         context.setAllowsAntialiasing(false)
         context.setShouldAntialias(false)
-        context.setFillColor(separatorColor.cgColor)
-        context.addPath(separatorPath)
-        context.fillPath()
-
-        let focusedPaneID = visiblePanes.first(where: \.isFocused)?.id
-        let focusedPath = CGMutablePath()
-        for separator in separators {
-            guard let range = separator.focusedRange(
-                focusedPaneID: focusedPaneID,
-                paneCount: visiblePanes.count
-            ) else { continue }
-            addSeparator(
-                to: focusedPath,
-                frame: separator.frame(
-                    origin: layout.origin,
-                    cellSize: layout.cellSize,
-                    lineWidth: focusedSeparatorLineWidth,
-                    range: range
-                ),
-                clippedTo: canvas
-            )
+        // In order, so a later line draws over an earlier one; a run of lines in one ink is one fill.
+        var start = lines.startIndex
+        while start < lines.endIndex {
+            let ink = lines[start].ink
+            let end = lines[start...].firstIndex { $0.ink != ink } ?? lines.endIndex
+            let path = CGMutablePath()
+            for line in lines[start..<end] {
+                addLine(
+                    to: path,
+                    frame: line.frame(origin: layout.origin, cellSize: layout.cellSize),
+                    clippedTo: canvas
+                )
+            }
+            context.setFillColor(color(of: ink))
+            context.addPath(path)
+            context.fillPath()
+            start = end
         }
-        context.setFillColor(focusedSeparatorColor)
-        context.addPath(focusedPath)
-        context.fillPath()
     }
 
-    private func addSeparator(
+    private func color(of ink: GhosttyPaneLine.Ink) -> CGColor {
+        switch ink {
+        case .separator:
+            separatorColor.cgColor
+        case .focus:
+            focusedSeparatorColor
+        case .color(let red, let green, let blue):
+            UIColor(
+                red: CGFloat(red) / 255,
+                green: CGFloat(green) / 255,
+                blue: CGFloat(blue) / 255,
+                alpha: 1
+            ).cgColor
+        }
+    }
+
+    private func addLine(
         to path: CGMutablePath,
         frame: CGRect,
         clippedTo canvas: CGRect

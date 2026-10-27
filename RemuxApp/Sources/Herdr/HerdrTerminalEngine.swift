@@ -24,6 +24,8 @@ struct HerdrPaneLayout: Equatable, Sendable {
     let columns: UInt16
     let rows: UInt16
     let panes: [Pane]
+    /// The lines Herdr draws around and between the panes, which the crop leaves out of the panes.
+    let borders: [HerdrBorderLine]
     /// Whether a popup is open over the tab. It takes the tab's input meanwhile.
     let hasPopup: Bool
 }
@@ -406,6 +408,7 @@ actor HerdrTerminalEngine {
                     path: Self.path(ofPane: $0.paneID, in: snapshot)
                 )
             },
+            borders: HerdrBorderLine.lines(in: surface),
             hasPopup: surface.popup != nil
         )
         guard next != layout else { return }

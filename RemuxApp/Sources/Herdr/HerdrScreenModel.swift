@@ -180,6 +180,9 @@ final class HerdrScreenModel {
     private let makeRendererFence: RendererFenceFactory
     private var runtime: GhosttyKitRuntime?
     private var currentTerminalSettings: TerminalSettings
+    /// The colours of the current theme: Herdr gets them in the theme report, and Herdr's pane borders
+    /// are drawn in them. nil when Ghostty can't give them.
+    private(set) var terminalColors: GhosttyTerminalColors?
     private var reportTracker = TerminalRuntimeStateReportTracker()
     private var stopped = false
     private var failure: TerminalDisconnectReason?
@@ -262,6 +265,7 @@ final class HerdrScreenModel {
             didChange()
             return
         }
+        terminalColors = try? runtime?.terminalColors()
         let engine = self.engine
         updatesTask = Task { [weak self] in
             for await update in engine.updates {
@@ -339,6 +343,10 @@ final class HerdrScreenModel {
         try runtime?.applyTerminalSettings(settings)
         let themeChanged = settings.theme != currentTerminalSettings.theme
         currentTerminalSettings = settings
+        if themeChanged {
+            terminalColors = try? runtime?.terminalColors()
+            didChange()
+        }
         for surface in surfaces.values where !surface.renderer.isClosing {
             if !surface.renderer.applyTerminalConfiguration(theme: settings.theme) {
                 surface.renderer.failPresentation(message: Self.configurationFailureMessage)
@@ -1121,8 +1129,8 @@ final class HerdrScreenModel {
     /// Being full, each report also replaces an appearance Herdr would otherwise keep over the next
     /// background. Without a report Herdr uses another client's colours; nothing else is lost.
     private var themeReport: [HerdrHostThemeUpdate]? {
-        guard let colors = try? runtime?.terminalColors() else { return nil }
-        return Self.hostTheme(colors, appearance: currentTerminalSettings.theme.isLight ? .light : .dark)
+        guard let terminalColors else { return nil }
+        return Self.hostTheme(terminalColors, appearance: currentTerminalSettings.theme.isLight ? .light : .dark)
     }
 
     /// As Herdr's client reports its terminal: the appearance, then the colours.
