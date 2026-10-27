@@ -158,8 +158,11 @@ final class HerdrNotificationPolicyTests: XCTestCase {
         XCTAssertEqual(shown, "done")
 
         try receive(.finished, "no pane", at: 2)
-        advance(to: 10)
+        advance(to: 3)
+        XCTAssertEqual(shown, "done")
+        advance(to: 6)
         XCTAssertNil(shown)
+        XCTAssertNil(policy.nextDeadline)
     }
 
     /// Without the delay a finished agent still reading as working would get a moment for the snapshot
