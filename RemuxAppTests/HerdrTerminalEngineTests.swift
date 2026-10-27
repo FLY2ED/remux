@@ -80,9 +80,9 @@ final class HerdrTerminalEngineTests: XCTestCase {
     // MARK: - Showing
 
     /// As in Herdr's client, a show completes on a frame painted after it began, at or after the
-    /// projection revision Herdr acknowledged, and at the size asked for. The frame from before it, one
-    /// below the floor and one at another size don't complete it; the next at the floor and size does,
-    /// though none of its cells changed.
+    /// projection revision Herdr acknowledged, and at the size asked for. Frames are held meanwhile: one
+    /// below the floor and one at another size aren't drawn and don't complete it; the next at the floor
+    /// and size does, though none of its cells changed.
     func testAShowCompletesOnAFrameAfterItAtTheAcknowledgedRevisionAndSize() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
@@ -94,20 +94,21 @@ final class HerdrTerminalEngineTests: XCTestCase {
         _ = try await updates.nextPaneScroll()
 
         await feed.beginActivation(request: 1, columns: 4, rows: 2)
-        await feed.acknowledgeActivation(request: 1, floor: 2)
+        await feed.settle(request: 1, answer: nil)
+        await feed.acknowledgeActivation(show: 1, floor: 2)
         await feed.receive(.surface(try Self.surface(revision: 2, lines: ["one ", "two "], panes: panes)))
         await feed.receive(try Self.snapshot(revision: 2))
         await feed.receive(.surface(try Self.surface(projection: 2, revision: 3, lines: ["one  ", "two  "], panes: panes)))
         await feed.receive(.surface(try Self.surface(projection: 2, revision: 4, lines: ["one ", "two "], panes: panes)))
 
-        guard case .layout(let wider) = try await updates.next(),
-              case .layout(let shown) = try await updates.next(),
-              case .activated(let request, let connection) = try await updates.next()
-        else { return XCTFail("the show completed before its frame") }
-        XCTAssertEqual(wider.columns, 5)
-        XCTAssertEqual(shown.columns, 4)
+        guard case .activated(let request, let connection) = try await updates.next() else {
+            return XCTFail("a frame was drawn before the show completed")
+        }
         XCTAssertEqual(request, 1)
         XCTAssertEqual(connection, feed.connection)
+        let before = try await updates.nextPresented()
+        let shown = try await updates.nextPresented()
+        XCTAssertEqual([before.projectionRevision, shown.projectionRevision], [1, 2], "the show completed below its floor")
         await engine.stop()
     }
 
@@ -139,8 +140,9 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
-    /// A frame can arrive before Herdr's answer to the show; the answer then completes it. A resize while
-    /// the show is in progress needs a frame at the new size, as Herdr's client drops its evidence.
+    /// A frame can arrive before Herdr's answer to the show; the answer then completes it on that frame.
+    /// A resize while the show is in progress needs a frame at the new size, as Herdr's client drops its
+    /// evidence.
     func testAFrameBeforeTheAnswerCountsAndAResizeNeedsAFrameAtTheNewSize() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
@@ -149,18 +151,20 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await feed.receive(try Self.snapshot(revision: 1))
 
         await feed.beginActivation(request: 1, columns: 4, rows: 2)
+        await feed.settle(request: 1, answer: nil)
         await feed.receive(.surface(try Self.surface(revision: 1, lines: ["one ", "two "], panes: panes)))
+        await feed.acknowledgeActivation(show: 1, floor: 1)
         _ = try await updates.nextLayout()
         _ = try await updates.nextPaneScroll()
-        await feed.acknowledgeActivation(request: 1, floor: 1)
         guard case .activated(1, _) = try await updates.next() else {
             return XCTFail("the answer didn't complete the show its frame came before")
         }
 
         await feed.beginActivation(request: 2, columns: 4, rows: 2)
+        await feed.settle(request: 2, answer: nil)
         await feed.receive(.surface(try Self.surface(revision: 2, lines: ["one ", "two "], panes: panes)))
         await feed.resizeActivation(columns: 5, rows: 2)
-        await feed.acknowledgeActivation(request: 2, floor: 1)
+        await feed.acknowledgeActivation(show: 2, floor: 1)
         await feed.receive(.surface(try Self.surface(revision: 3, lines: ["one  ", "two  "], panes: panes)))
         guard case .layout(let resized) = try await updates.next(),
               case .activated(2, _) = try await updates.next()
@@ -170,7 +174,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     }
 
     /// As in Herdr's client, the frame completing a show is drawn against the newest snapshot: a snapshot
-    /// that arrives after the painted frame, before Herdr's answer, waits for its own frame.
+    /// that arrives after the received frame, before Herdr's answer, waits for its own frame.
     func testAShowWaitsForTheFrameOfASnapshotNewerThanThePaintedOne() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
@@ -178,15 +182,14 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await feed.receive(try Self.snapshot(revision: 1))
 
         await feed.beginActivation(request: 1, columns: 4, rows: 2)
+        await feed.settle(request: 1, answer: nil)
         await feed.receive(.surface(try Self.surface(
             revision: 1,
             lines: ["one ", "two "],
             panes: [Self.pane("P", x: 0, width: 4, height: 2)]
         )))
-        _ = try await updates.nextLayout()
-        _ = try await updates.nextPaneScroll()
         await feed.receive(try Self.snapshot(revision: 2))
-        await feed.acknowledgeActivation(request: 1, floor: 1)
+        await feed.acknowledgeActivation(show: 1, floor: 1)
         await feed.receive(.surface(try Self.surface(
             projection: 2,
             revision: 2,
@@ -194,6 +197,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
             panes: [Self.pane("P", x: 0, width: 4, height: 2, scroll: (fromBottom: 0, max: 5, rows: 2))]
         )))
 
+        _ = try await updates.nextLayout()
         guard case .paneScroll(let scrolls) = try await updates.next(),
               case .activated(1, _) = try await updates.next()
         else { return XCTFail("the show completed on a frame its snapshot had replaced") }
@@ -218,7 +222,8 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await feed.receive(try Self.snapshot(revision: 2))
         await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["o t ", "w o "], panes: two)))
         await feed.beginActivation(request: 1, columns: 4, rows: 2)
-        await feed.acknowledgeActivation(request: 1, floor: 3)
+        await feed.settle(request: 1, answer: nil)
+        await feed.acknowledgeActivation(show: 1, floor: 3)
         await feed.receive(try Self.snapshot(revision: 3))
         await feed.receive(.surface(try Self.surface(projection: 3, revision: 3, lines: ["one ", "two "], panes: one)))
 
@@ -228,9 +233,9 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
-    /// A show carrying Remux's zoom completes once Herdr has answered the zoom, on a frame from after it:
+    /// A show carrying Remux's zoom completes once Herdr has answered the zoom, on a frame showing it:
     /// Herdr's frame for the show from before the zoom isn't drawn, whether the answer comes before the
-    /// zoomed frame or after it. A zoom that didn't go or changed nothing holds nothing.
+    /// zoomed frame or after it. A zoom that didn't go holds nothing.
     func testAShowCarryingAZoomCompletesOnAFrameFromAfterTheZoom() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
@@ -238,8 +243,8 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let one = [Self.pane("P", x: 0, width: 4, height: 2)]
         let two = [Self.pane("P", x: 0, width: 2, height: 2), Self.pane("Q", x: 2, width: 2, height: 2)]
 
-        await feed.beginActivation(request: 1, columns: 4, rows: 2, zoomed: true)
-        await feed.acknowledgeActivation(request: 1, floor: 1)
+        await feed.beginActivation(request: 1, columns: 4, rows: 2)
+        await feed.acknowledgeActivation(show: 1, floor: 1)
         await feed.receive(try Self.tabSnapshot(revision: 1, zoomed: false))
         await feed.receive(.surface(try Self.surface(revision: 1, lines: ["o t ", "w o "], panes: two)))
         await feed.settle(request: 1, answer: Self.zoomAnswer(sentAfter: 0, answeredAfter: 1))
@@ -253,8 +258,8 @@ final class HerdrTerminalEngineTests: XCTestCase {
         guard case .activated(1, _) = try await updates.next() else { return XCTFail("the show didn't complete") }
 
         await feed.endActivation()
-        await feed.beginActivation(request: 2, columns: 4, rows: 2, zoomed: true)
-        await feed.acknowledgeActivation(request: 2, floor: 3)
+        await feed.beginActivation(request: 2, columns: 4, rows: 2)
+        await feed.acknowledgeActivation(show: 2, floor: 3)
         await feed.receive(try Self.tabSnapshot(revision: 3, zoomed: true))
         await feed.receive(.surface(try Self.surface(projection: 3, revision: 3, lines: ["one ", "two "], panes: one)))
         await feed.settle(request: 2, answer: Self.zoomAnswer(sentAfter: 2, answeredAfter: 3))
@@ -263,8 +268,8 @@ final class HerdrTerminalEngineTests: XCTestCase {
         }
 
         await feed.endActivation()
-        await feed.beginActivation(request: 3, columns: 4, rows: 2, zoomed: true)
-        await feed.acknowledgeActivation(request: 3, floor: 4)
+        await feed.beginActivation(request: 3, columns: 4, rows: 2)
+        await feed.acknowledgeActivation(show: 3, floor: 4)
         await feed.receive(try Self.tabSnapshot(revision: 4, zoomed: true))
         await feed.receive(.surface(try Self.surface(projection: 4, revision: 4, lines: ["one ", "two "], panes: one)))
         await feed.settle(request: 3, answer: nil)
@@ -274,9 +279,9 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
-    /// A move to another tab holds the frames until one from after the move's last command: neither the
-    /// tab left as its zoom comes off nor the tab reached before its zoom is drawn, only the tab reached
-    /// as it ends up. A move whose focus fails shows the newest frame at once.
+    /// A move holds the frames until one showing the move's last command: neither the tab left as its
+    /// zoom comes off nor the tab reached before its zoom is drawn, only the tab reached as it ends up. A
+    /// move whose focus fails shows the newest frame at once.
     func testAMoveToAnotherTabShowsOnlyTheTabItReaches() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
@@ -289,7 +294,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         _ = try await updates.nextLayout()
         _ = try await updates.nextPaneScroll()
 
-        await feed.holdForMove(request: 5)
+        await feed.retarget(request: 5, columns: 4, rows: 2)
         await feed.receive(try Self.tabSnapshot(revision: 2, zoomed: false))
         await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["o t ", "w o "], panes: two)))
         await feed.receive(try Self.tabSnapshot(revision: 3, zoomed: false))
@@ -301,7 +306,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
             return XCTFail("a frame from before the move's zoom was drawn")
         }
 
-        await feed.holdForMove(request: 6)
+        await feed.retarget(request: 6, columns: 4, rows: 2)
         await feed.receive(try Self.tabSnapshot(revision: 5, zoomed: false))
         await feed.receive(.surface(try Self.surface(projection: 5, revision: 5, lines: ["o t ", "w o "], panes: two)))
         await feed.settle(request: 6, answer: nil)
@@ -309,6 +314,62 @@ final class HerdrTerminalEngineTests: XCTestCase {
         while true {
             if case .activated(6, _) = try await updates.next() { break }
         }
+        await engine.stop()
+    }
+
+    /// As in Herdr's client, a move completes once its focus is answered on a frame showing its pane,
+    /// also one that came before the answer: Herdr can send the snapshot and frame first, and sends
+    /// nothing more for a move it has already made.
+    func testAMoveCompletesOnAFrameShowingItsPaneThatCameBeforeTheAnswer() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection(1)
+        let two = [Self.pane("P", x: 0, width: 2, height: 2), Self.pane("Q", x: 2, width: 2, height: 2)]
+        await feed.receive(try Self.tabSnapshot(revision: 1, zoomed: false))
+        await feed.receive(.surface(try Self.surface(revision: 1, lines: ["o t ", "w o "], panes: two)))
+        _ = try await updates.nextLayout()
+        _ = try await updates.nextPaneScroll()
+
+        await feed.retarget(request: 2, columns: 4, rows: 2)
+        await feed.receive(try Self.tabSnapshot(revision: 2, zoomed: false, focusedPane: "Q"))
+        await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["o t ", "w o "], panes: two)))
+        try await Task.sleep(for: .milliseconds(50))
+        await feed.settle(request: 2, answer: Self.focusAnswer("Q", sentAfter: 1, answeredAfter: 2))
+        guard case .activated(2, _) = try await updates.next() else {
+            return XCTFail("the move waited for a frame Herdr had already sent")
+        }
+        await engine.stop()
+    }
+
+    /// A move holds the frames from its start, also when the newest snapshot's frame hasn't come yet,
+    /// and the answer of a request it took over completes nothing.
+    func testAMoveHoldsFramesFromItsStartAndAnOlderAnswerCompletesNothing() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection(1)
+        let one = [Self.pane("P", x: 0, width: 4, height: 2)]
+        let two = [Self.pane("P", x: 0, width: 2, height: 2), Self.pane("Q", x: 2, width: 2, height: 2)]
+        await feed.receive(try Self.tabSnapshot(revision: 1, zoomed: true))
+        await feed.receive(.surface(try Self.surface(revision: 1, lines: ["one ", "two "], panes: one)))
+        _ = try await updates.nextLayout()
+        _ = try await updates.nextPaneScroll()
+
+        // The next snapshot is in, its frame not yet.
+        await feed.receive(try Self.tabSnapshot(revision: 2, zoomed: true))
+        await feed.retarget(request: 3, columns: 4, rows: 2)
+        await feed.retarget(request: 4, columns: 4, rows: 2)
+        await feed.settle(request: 3, answer: nil)
+        await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["one ", "two "], panes: one)))
+        await feed.receive(try Self.tabSnapshot(revision: 3, zoomed: false))
+        await feed.receive(.surface(try Self.surface(projection: 3, revision: 3, lines: ["o t ", "w o "], panes: two)))
+        try await Task.sleep(for: .milliseconds(50))
+        await feed.settle(request: 4, answer: nil)
+        guard case .paneTerminal("Q", _) = try await updates.next(),
+              case .layout(let reached) = try await updates.next()
+        else { return XCTFail("a frame was drawn before the newest move completed") }
+        XCTAssertEqual(reached.panes.map(\.paneID), ["P", "Q"])
+        _ = try await updates.nextPaneScroll()
+        guard case .activated(4, _) = try await updates.next() else { return XCTFail("the newest move didn't complete") }
         await engine.stop()
     }
 
@@ -1015,11 +1076,11 @@ final class HerdrTerminalEngineTests: XCTestCase {
         try HerdrPresentationTests.snapshot(revision: revision, boot: boot)
     }
 
-    /// A snapshot whose focused tab `t1` is `zoomed` or not.
-    static func tabSnapshot(revision: UInt64, zoomed: Bool) throws -> HerdrSnapshot {
+    /// A snapshot whose focused tab `t1` is `zoomed` or not, with `focusedPane` focused.
+    static func tabSnapshot(revision: UInt64, zoomed: Bool, focusedPane: String = "P") throws -> HerdrSnapshot {
         let json = """
         {"boot_id":"boot","revision":\(revision),"focused_workspace_id":"w1","focused_tab_id":"t1",
-         "focused_pane_id":"P","workspaces":[],"tabs":[{"tab_id":"t1","workspace_id":"w1","number":1,
+         "focused_pane_id":"\(focusedPane)","workspaces":[],"tabs":[{"tab_id":"t1","workspace_id":"w1","number":1,
          "label":"main","custom_label":true,"zoomed":\(zoomed),"focused":true,"agent_status":"idle"}],
          "panes":[],"agents":[]}
         """
@@ -1028,7 +1089,14 @@ final class HerdrTerminalEngineTests: XCTestCase {
 
     /// Herdr's answer zooming tab `t1`, sent and answered after the given snapshots.
     static func zoomAnswer(sentAfter: UInt64, answeredAfter: UInt64) -> HerdrTerminalEngine.CommandAnswer {
-        HerdrTerminalEngine.CommandAnswer(sentAfter: sentAfter, answeredAfter: answeredAfter, zoom: ("t1", true))
+        HerdrTerminalEngine.CommandAnswer(sentAfter: sentAfter, answeredAfter: answeredAfter) { snapshot in
+            snapshot.tabs.first { $0.tabID == "t1" }?.zoomed == true
+        }
+    }
+
+    /// Herdr's answer focusing `paneID`, sent and answered after the given snapshots.
+    static func focusAnswer(_ paneID: String, sentAfter: UInt64, answeredAfter: UInt64) -> HerdrTerminalEngine.CommandAnswer {
+        HerdrTerminalEngine.CommandAnswer(sentAfter: sentAfter, answeredAfter: answeredAfter) { $0.focusedPaneID == paneID }
     }
 
     static func cells(_ text: String) -> [HerdrCell] {

@@ -610,6 +610,24 @@ final class HerdrModelHarness {
         model.terminalScreenAdapter.prepareInitialViewport(size: CGSize(width: 390, height: 844), scale: 3)
     }
 
+    /// A screen of `columns` x `rows` cells, as a recording made at that size needs: Herdr draws at the
+    /// size the show asks for, and only such a frame completes the show.
+    func setScreenSize(columns: UInt16, rows: UInt16) throws {
+        let runtime = try GhosttyKitRuntime(terminalSettings: .default)
+        let lengths = stride(from: CGFloat(40), through: 4000, by: 1)
+        let width = try lengths.first {
+            try runtime.measureTmuxViewportLayout(size: CGSize(width: $0, height: 844), scale: 3)?.controlViewport.columns == columns
+        }
+        let height = try lengths.first {
+            try runtime.measureTmuxViewportLayout(size: CGSize(width: 390, height: $0), scale: 3)?.controlViewport.rows == rows
+        }
+        let size = CGSize(
+            width: try XCTUnwrap(width, "no screen width gives \(columns) columns"),
+            height: try XCTUnwrap(height, "no screen height gives \(rows) rows")
+        )
+        model.terminalScreenAdapter.prepareInitialViewport(size: size, scale: 3)
+    }
+
     /// A frame of `lines` at the size a show asks for, padded with blanks: Herdr answers a show with a
     /// frame at the client's size, and only such a frame completes the show.
     func shownSurface(
