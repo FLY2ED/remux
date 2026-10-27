@@ -61,8 +61,9 @@ struct HerdrPaneZoomResult: Equatable, Sendable {
 /// shows that tab unzoomed or gone, or Herdr's answer to Remux's own unzoom says so. Tabs belong to one
 /// server boot, so another boot forgets it; a reconnect to the same boot keeps it.
 ///
-/// Remux zooms only the tab on screen, and the tab on screen changes only when Remux asks or when the
-/// tab goes, so it records one tab.
+/// Remux zooms only the tab on screen, and takes its zoom off a tab before it moves the session to
+/// another, so it records one tab. When another client moves the session, the record stays with the tab
+/// left, and Remux undoes that zoom only while its tab is on screen, since an unzoom focuses its target.
 struct HerdrOwnedZoom: Equatable {
     private var tab: HerdrTabKey?
 
