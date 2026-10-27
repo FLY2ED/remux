@@ -60,6 +60,33 @@ final class SessionSwitcherProjectionTests: XCTestCase {
         XCTAssertEqual(projection.availableSessions.map(\.unavailableReason), ["Permission denied", nil])
     }
 
+    /// A saved session that its server's newest list marks unavailable shows so under Recent, with Herdr's
+    /// reason, as it does under Available: the reason has one owner, the server's discovery, keyed by the
+    /// session's backend and name. A tmux session of the same name, or another Herdr session, stays offered.
+    func testASavedSessionHerdrCannotReachIsUnavailableUnderRecent() {
+        let server = makeServer(name: "Mini")
+        let locked = SavedWorkspace(serverID: server.id, backend: .herdr, sessionName: "locked")
+        let lockedTmux = SavedWorkspace(serverID: server.id, backend: .tmux, sessionName: "locked")
+        let open = SavedWorkspace(serverID: server.id, backend: .herdr, sessionName: "open")
+        let discovery = loadedDiscovery(["locked"], herdr: [
+            DiscoveredSession(name: "locked", isRunning: false, unavailableReason: "Permission denied"),
+            DiscoveredSession(name: "open", isRunning: true),
+        ])
+        let projection = SessionSwitcherProjection(
+            snapshot: snapshot(servers: [server], workspaces: [locked, lockedTmux, open]),
+            activeSessions: [],
+            discoveries: [server.id: discovery],
+            selectedSessionID: nil
+        )
+
+        let recent = Dictionary(uniqueKeysWithValues: projection.recentSessions.map { ($0.id, $0.unavailableReason) })
+        XCTAssertEqual(recent[locked.id], .some("Permission denied"))
+        XCTAssertEqual(recent[lockedTmux.id], .some(nil))
+        XCTAssertEqual(recent[open.id], .some(nil))
+        XCTAssertEqual(discovery.unavailableReason(of: locked.locator), "Permission denied")
+        XCTAssertNil(discovery.unavailableReason(of: lockedTmux.locator))
+    }
+
     /// The switcher names a server only when none of its sessions could be listed. A missing Herdr, even
     /// where a Herdr session is saved, leaves the server's tmux sessions listed.
     func testOnlyAServerNoneOfWhoseSessionsCouldBeListedIsUnchecked() {

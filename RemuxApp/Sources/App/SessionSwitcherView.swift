@@ -29,6 +29,8 @@ struct RecentSessionSwitcherItem: Identifiable, Equatable {
     let sessionName: String
     let serverName: String
     let lastOpenedAt: Date
+    /// Why the session can't be opened, as its server's newest list says.
+    var unavailableReason: String? = nil
 }
 
 struct SessionSwitcherProjection: Equatable {
@@ -105,7 +107,8 @@ struct SessionSwitcherProjection: Equatable {
                     backend: workspace.backend,
                     sessionName: workspace.sessionName,
                     serverName: server.displayName,
-                    lastOpenedAt: workspace.lastOpenedAt
+                    lastOpenedAt: workspace.lastOpenedAt,
+                    unavailableReason: discoveries[workspace.serverID]?.unavailableReason(of: workspace.locator)
                 )
             }
 
@@ -115,14 +118,12 @@ struct SessionSwitcherProjection: Equatable {
                 return [SessionBackend.tmux, .herdr]
                     .flatMap { backend in
                         discovery[backend].sessions.map { session in
-                            AvailableSessionSwitcherItem(
-                                id: RemoteSessionIdentity(
-                                    serverID: server.id,
-                                    locator: SessionLocator(backend: backend, name: session.name)
-                                ),
+                            let locator = SessionLocator(backend: backend, name: session.name)
+                            return AvailableSessionSwitcherItem(
+                                id: RemoteSessionIdentity(serverID: server.id, locator: locator),
                                 serverName: server.displayName,
                                 isRunning: session.isRunning,
-                                unavailableReason: session.unavailableReason
+                                unavailableReason: discovery.unavailableReason(of: locator)
                             )
                         }
                     }
@@ -517,6 +518,7 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
             RecentSessionSwitcherRow(session: session)
         }
         .buttonStyle(.plain)
+        .disabled(session.unavailableReason != nil)
         .sessionSwitcherListRow(accessibilityIdentifier: "terminal.sessions.recent-session")
     }
 
@@ -799,6 +801,13 @@ private struct RecentSessionSwitcherRow: View {
                     .truncationMode(.middle)
 
                 HStack(spacing: 6) {
+                    if session.unavailableReason != nil {
+                        Text("Unavailable")
+
+                        Text("·")
+                            .accessibilityHidden(true)
+                    }
+
                     Text(session.serverName)
                         .lineLimit(1)
 
@@ -810,6 +819,13 @@ private struct RecentSessionSwitcherRow: View {
                 .font(.footnote)
                 .foregroundStyle(TerminalSelectionSheetPalette.secondary)
                 .lineLimit(1)
+
+                if let reason = session.unavailableReason {
+                    Text(reason)
+                        .font(.footnote)
+                        .foregroundStyle(TerminalSelectionSheetPalette.tertiary)
+                        .lineLimit(2)
+                }
             }
 
             Spacer(minLength: 8)
@@ -817,10 +833,13 @@ private struct RecentSessionSwitcherRow: View {
         .frame(minHeight: 52)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(session.sessionName), \(session.serverName)")
+        .accessibilityLabel(
+            ([session.sessionName, session.serverName] + [session.unavailableReason.map { "Unavailable, \($0)" }].compactMap { $0 })
+                .joined(separator: ", ")
+        )
         .accessibilityValue(SessionLastOpenedText.value(for: session.lastOpenedAt))
-        .accessibilityHint("Resume this session")
-        .accessibilityAddTraits(.isButton)
+        .accessibilityHint(session.unavailableReason == nil ? "Resume this session" : "")
+        .accessibilityAddTraits(session.unavailableReason == nil ? .isButton : [])
     }
 }
 

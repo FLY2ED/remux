@@ -313,6 +313,13 @@ struct ServerSessionDiscovery: Equatable {
         tmux.hostKeyChallenge ?? herdr.hostKeyChallenge
     }
 
+    /// Why the server's backend can't reach the session, as its newest list says: Herdr marks a session it
+    /// can't connect to (`connection_error`). Every row that offers a session, discovered or saved, reads
+    /// it here, so none offers one that can't open.
+    func unavailableReason(of locator: SessionLocator) -> String? {
+        self[locator.backend].sessions.first { $0.name == locator.name }?.unavailableReason
+    }
+
     var isLoading: Bool {
         tmux.isLoading || herdr.isLoading
     }

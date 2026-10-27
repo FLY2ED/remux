@@ -1129,6 +1129,7 @@ private struct ConnectionLibraryView: View {
             Section {
                 ForEach(visibleRecentWorkspaces) { workspace in
                     if let server = snapshot.server(id: workspace.serverID) {
+                        let unavailableReason = discoveries[server.id]?.unavailableReason(of: workspace.locator)
                         Button {
                             onConnect(workspace.id)
                         } label: {
@@ -1136,11 +1137,13 @@ private struct ConnectionLibraryView: View {
                                 server: server,
                                 workspace: workspace,
                                 runtimeState: nil,
-                                subtitleMode: .serverAndLastOpened
+                                subtitleMode: .serverAndLastOpened,
+                                unavailableReason: unavailableReason
                             )
                             .accessibilityIdentifier("library.session.resume")
                         }
                         .buttonStyle(.plain)
+                        .disabled(unavailableReason != nil)
                         .swipeActions(edge: .trailing) {
                             Button("Edit") {
                                 onEditWorkspace(server.id, workspace.id)
@@ -1452,6 +1455,7 @@ private struct ServerDetailView: View {
 
                 ForEach(visibleWorkspaces) { workspace in
                     let problem = notices.backendProblems[workspace.backend]
+                    let unavailableReason = discovery.unavailableReason(of: workspace.locator)
                     Button {
                         if problem?.isFixedByPath == true {
                             onEditServer(server.id)
@@ -1464,11 +1468,13 @@ private struct ServerDetailView: View {
                             workspace: workspace,
                             runtimeState: activeSession(for: workspace.id)?.runtimeState,
                             subtitleMode: .lastOpenedOnly,
-                            problem: problem
+                            problem: problem,
+                            unavailableReason: unavailableReason
                         )
                         .accessibilityIdentifier("library.session.resume")
                     }
                     .buttonStyle(.plain)
+                    .disabled(unavailableReason != nil)
                     .swipeActions(edge: .trailing) {
                         Button("Edit") {
                             onEditWorkspace(server.id, workspace.id)
@@ -1841,6 +1847,8 @@ private struct SessionLibraryRow: View {
     let subtitleMode: SubtitleMode
     /// What the server's last check found wrong with this session's backend.
     var problem: BackendProblem?
+    /// Why the session can't be opened, as the server's newest list says.
+    var unavailableReason: String?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -1860,9 +1868,11 @@ private struct SessionLibraryRow: View {
                 TerminalRuntimeStateIndicator(state: runtimeState)
             }
 
-            Image(systemName: "chevron.right")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.tertiary)
+            if unavailableReason == nil {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
         }
         .padding(.vertical, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1872,7 +1882,12 @@ private struct SessionLibraryRow: View {
 
     @ViewBuilder
     private var subtitle: some View {
-        if let problem {
+        if let unavailableReason {
+            Text("Unavailable: \(unavailableReason)")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        } else if let problem {
             // Wraps rather than truncates: beside a session's state, "Set path" would be cut off.
             Text(problem.sessionRowLine(for: workspace.backend))
                 .font(.footnote)
