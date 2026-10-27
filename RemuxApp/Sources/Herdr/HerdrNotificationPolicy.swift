@@ -294,6 +294,12 @@ final class HerdrNotificationCenter: ObservableObject {
         timer?.cancel()
     }
 
+    /// When the center next has something to do: a notification falling due, or the banner on screen
+    /// ending.
+    var nextDeadline: ContinuousClock.Instant? {
+        policy.nextDeadline
+    }
+
     /// A program in the session on screen rang the bell.
     func ringBell() {
         policy.ringBell(at: now())

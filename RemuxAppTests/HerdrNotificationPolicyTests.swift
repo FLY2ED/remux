@@ -301,7 +301,6 @@ final class HerdrNotificationCenterTests: XCTestCase {
     /// alert, and each vibration `HapticRules` plays for them.
     @MainActor
     private final class Harness {
-        let clock = ManualClock()
         let center: HerdrNotificationCenter
         var state = HerdrNotificationSessionState(
             isShown: true,
@@ -311,6 +310,7 @@ final class HerdrNotificationCenterTests: XCTestCase {
         )
         var vibrations: [HapticAlert] = []
         var felt: [UINotificationFeedbackGenerator.FeedbackType] = []
+        private let clock = ManualClock()
         private var rules = HapticRules()
         private let origin = HerdrNotificationPolicy.Origin(
             workspaceID: SavedWorkspace.ID(),
@@ -341,16 +341,18 @@ final class HerdrNotificationCenterTests: XCTestCase {
             center.receive(notification, from: origin)
         }
 
-        /// The banner titled `title`, once the center shows it after the clock moved on.
-        func waitForBanner(_ title: String) async throws -> HerdrNotificationPolicy.Banner {
-            let deadline = ContinuousClock.now + .seconds(5)
-            while center.banner?.notification.title != title, ContinuousClock.now < deadline {
+        /// Moves the clock on by `duration`, then waits until the center's timer has handled everything
+        /// that fell due by then.
+        func pass(_ duration: Duration) async throws {
+            clock.advance(by: duration)
+            let giveUp = ContinuousClock.now + .seconds(5)
+            while let due = center.nextDeadline, due <= clock.now {
+                guard ContinuousClock.now < giveUp else { return XCTFail("the center didn't handle what fell due") }
                 try await Task.sleep(for: .milliseconds(1))
             }
-            let banner = try XCTUnwrap(center.banner, "no banner \"\(title)\"")
-            XCTAssertEqual(banner.notification.title, title)
-            return banner
         }
+
+        var shownTitle: String? { center.banner?.notification.title }
     }
 
     func testAnAgentsBannerVibratesWhenItShowsAndWhenItsTurnComes() async throws {
@@ -360,16 +362,17 @@ final class HerdrNotificationCenterTests: XCTestCase {
         try harness.receive(.finished, "codex finished", pane: "w1:p3", tab: "t2")
         XCTAssertEqual(harness.vibrations, [], "a notification vibrated on arrival")
 
-        harness.clock.advance(by: HerdrNotificationPolicy.delay)
-        let attention = try await harness.waitForBanner("claude needs attention")
+        try await harness.pass(HerdrNotificationPolicy.delay)
+        let attention = try XCTUnwrap(harness.center.banner)
+        XCTAssertEqual(attention.notification.title, "claude needs attention")
         XCTAssertEqual(harness.vibrations, [.agentNeedsYou(cameWithBell: false)])
 
         harness.center.dismiss(attention.id)
-        XCTAssertEqual(harness.center.banner?.notification.title, "codex finished")
+        XCTAssertEqual(harness.shownTitle, "codex finished")
         XCTAssertEqual(harness.vibrations, [.agentNeedsYou(cameWithBell: false), .agentFinished(cameWithBell: false)])
     }
 
-    /// Nothing vibrates for the tab on screen, for an agent that moved on before its turn, or for a
+    /// Nothing vibrates for the tab on screen, for an agent that moved on while waiting its turn, or for a
     /// custom or update banner.
     func testOnlyAnAgentsBannerThatShowsVibrates() async throws {
         let harness = Harness()
@@ -381,10 +384,11 @@ final class HerdrNotificationCenterTests: XCTestCase {
         let custom = try XCTUnwrap(harness.center.banner)
         XCTAssertEqual(custom.notification.title, "build passed")
 
-        harness.clock.advance(by: HerdrNotificationPolicy.delay)
+        try await harness.pass(HerdrNotificationPolicy.delay)
+        XCTAssertEqual(harness.center.banner, custom, "the custom banner left before the others waited behind it")
         harness.state.agentStatuses["w1:p3"] = .working
         harness.center.dismiss(custom.id)
-        _ = try await harness.waitForBanner("herdr updated")
+        XCTAssertEqual(harness.shownTitle, "herdr updated")
         XCTAssertEqual(harness.vibrations, [])
     }
 
@@ -401,11 +405,11 @@ final class HerdrNotificationCenterTests: XCTestCase {
         harness.state.agentStatuses = ["w1:p2": .blocked]
         harness.center.ringBell()
         try harness.receive(.needsAttention, "claude needs attention", pane: "w1:p2", tab: "t2")
-        harness.clock.advance(by: .milliseconds(500))
+        try await harness.pass(.milliseconds(500))
         harness.center.ringBell()
 
-        harness.clock.advance(by: .milliseconds(500))
-        _ = try await harness.waitForBanner("claude needs attention")
+        try await harness.pass(.milliseconds(500))
+        XCTAssertEqual(harness.shownTitle, "claude needs attention")
         XCTAssertEqual(harness.felt, [.warning, .warning])
     }
 
@@ -413,11 +417,11 @@ final class HerdrNotificationCenterTests: XCTestCase {
         let harness = Harness()
         harness.state.agentStatuses = ["w1:p2": .blocked]
         try harness.receive(.needsAttention, "claude needs attention", pane: "w1:p2", tab: "t2")
-        harness.clock.advance(by: .milliseconds(20))
+        try await harness.pass(.milliseconds(20))
         harness.center.ringBell()
 
-        harness.clock.advance(by: .milliseconds(980))
-        _ = try await harness.waitForBanner("claude needs attention")
+        try await harness.pass(.milliseconds(980))
+        XCTAssertEqual(harness.shownTitle, "claude needs attention")
         XCTAssertEqual(harness.felt, [.warning])
     }
 
@@ -430,22 +434,24 @@ final class HerdrNotificationCenterTests: XCTestCase {
         let custom = try XCTUnwrap(harness.center.banner)
         harness.center.ringBell()
         try harness.receive(.needsAttention, "with the bell", pane: "w1:p2", tab: "t2")
-        harness.clock.advance(by: .milliseconds(300))
+        try await harness.pass(.milliseconds(300))
         try harness.receive(.needsAttention, "apart", pane: "w1:p3", tab: "t2")
-        harness.clock.advance(by: .milliseconds(1100))
+        try await harness.pass(.milliseconds(1100))
+        XCTAssertEqual(harness.center.banner, custom, "the custom banner left before the others waited behind it")
 
         harness.center.ringBell()
-        harness.clock.advance(by: .milliseconds(150))
+        try await harness.pass(.milliseconds(150))
         harness.center.ringBell()
-        harness.clock.advance(by: .milliseconds(150))
+        try await harness.pass(.milliseconds(150))
         XCTAssertEqual(harness.felt, [.warning, .warning, .warning])
 
         harness.center.dismiss(custom.id)
-        let paired = try await harness.waitForBanner("with the bell")
+        let paired = try XCTUnwrap(harness.center.banner)
+        XCTAssertEqual(paired.notification.title, "with the bell")
         XCTAssertEqual(harness.felt.count, 3, "the banner whose bell vibrated vibrated again")
 
         harness.center.dismiss(paired.id)
-        _ = try await harness.waitForBanner("apart")
+        XCTAssertEqual(harness.shownTitle, "apart")
         XCTAssertEqual(harness.felt, [.warning, .warning, .warning, .warning])
     }
 }

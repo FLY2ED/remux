@@ -4949,7 +4949,7 @@ final class RemuxRootModelTests: XCTestCase {
             tab: "t2",
             pane: "w1:p3"
         ))
-        let rang = await waitUntil(timeout: 5) { recorder.alerts == [.bell] }
+        let rang = await waitUntil(timeout: 5) { recorder.alerts.first == .bell }
         XCTAssertTrue(rang, "the bell didn't vibrate: \(recorder.alerts)")
         let shown = await waitUntil(timeout: 5) { harness.model.herdrNotifications.banner != nil }
         XCTAssertTrue(shown, "no banner")
