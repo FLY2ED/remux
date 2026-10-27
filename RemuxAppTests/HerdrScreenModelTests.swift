@@ -1170,6 +1170,60 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(reusable, false)
     }
 
+    /// A connection that opens as the app goes to the background, before the model has taken it, is
+    /// given up the same way: its SSH connection isn't offered to the next one.
+    func testTheBackgroundGivesUpAConnectionOpenedMeanwhileWithoutReusingIt() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge(0)
+        harness.setScreenSize()
+        _ = try await harness.writes(bridge, count: 1)
+
+        // Once the connection reads past the welcome its opening has returned, and it resumes only after
+        // the background is handled.
+        await bridge.serve(try HerdrServerScript.welcome())
+        XCTAssertTrue(Self.holdMainActor { await bridge.reads >= 2 })
+        // The bridge takes the first close it gets, so the background's own close of the bridge waits
+        // until the opening's close has come.
+        DispatchQueue.main.async { _ = Self.holdMainActor { await bridge.isClosed } }
+        harness.model.handleAppLifecyclePhase(.background)
+
+        try await harness.waitUntil("the connection wasn't given up") { await bridge.isClosed }
+        let reusable = await bridge.closedReusable
+        XCTAssertEqual(reusable, false)
+    }
+
+    /// A bridge whose opening returns after the background gave its attempt up isn't offered to the next
+    /// opening either.
+    func testABridgeOpenedAfterTheBackgroundGaveItsAttemptUpIsNotReused() async throws {
+        let harness = await makeHarness(bridgeOpeningTakes: .milliseconds(200))
+        let bridges = harness.bridges
+        try await harness.waitUntil("the opening didn't start") { await bridges.openingsStartedAt.count == 1 }
+
+        XCTAssertTrue(Self.holdMainActor { await bridges.opened.count == 1 })
+        harness.model.handleAppLifecyclePhase(.background)
+
+        let bridge = try await harness.bridge(0)
+        try await harness.waitUntil("the late bridge wasn't closed") { await bridge.isClosed }
+        let reusable = await bridge.closedReusable
+        XCTAssertEqual(reusable, false)
+    }
+
+    /// A bridge whose opening returns after a reconnect replaced its attempt keeps its SSH connection for
+    /// the next opening, as that attempt's own bridge would.
+    func testABridgeOpenedAfterAReconnectReplacedItsAttemptIsReused() async throws {
+        let harness = await makeHarness(bridgeOpeningTakes: .milliseconds(200))
+        let bridges = harness.bridges
+        try await harness.waitUntil("the opening didn't start") { await bridges.openingsStartedAt.count == 1 }
+
+        XCTAssertTrue(Self.holdMainActor { await bridges.opened.count == 1 })
+        XCTAssertTrue(harness.model.reconnect())
+
+        let bridge = try await harness.bridge(0)
+        try await harness.waitUntil("the late bridge wasn't closed") { await bridge.isClosed }
+        let reusable = await bridge.closedReusable
+        XCTAssertEqual(reusable, true)
+    }
+
     /// Back from the background, a connection that stayed open is shown again at once and checks itself
     /// with a ping meanwhile, as Herdr's client does after a resume: neither waits for the other.
     func testComingBackShowsTheSessionAtOnceAndPingsTheConnection() async throws {
@@ -1291,6 +1345,24 @@ final class HerdrScreenModelTests: XCTestCase {
             harness.shownRows() == ["w1:p1": lines] && harness.model.stateTraceLabel == "hidden"
         }
         return bridge
+    }
+
+    /// Keeps the main actor busy, as other work on it would, until `condition` holds or three seconds
+    /// pass; returns whether it held. Whatever resumes on the main actor meanwhile runs only after the
+    /// caller's next synchronous steps.
+    private nonisolated static func holdMainActor(until condition: @escaping @Sendable () async -> Bool) -> Bool {
+        let held = DispatchSemaphore(value: 0)
+        let poll = Task.detached {
+            while !(await condition()) {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            held.signal()
+        }
+        guard held.wait(timeout: .now() + 3) == .success else {
+            poll.cancel()
+            return false
+        }
+        return true
     }
 
     /// A snapshot whose data Remux can't read.
