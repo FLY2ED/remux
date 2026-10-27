@@ -84,6 +84,14 @@ struct HerdrSnapshot: Equatable, Sendable, Decodable {
         let terminalTitleStripped: String?
         let agentStatus: HerdrAgentStatus
         let stateChangeSeq: UInt64
+        /// The agent's own words for its states, as Herdr sends its `(state, word)` pairs: set by the
+        /// user's hooks with `herdr pane report-metadata --state-label`.
+        let stateLabels: [[String]]
+
+        /// The agent's own word for `status`, if its labels give one, found as Herdr's client finds it.
+        func label(for status: HerdrAgentStatus) -> String? {
+            stateLabels.first { $0.count == 2 && $0[0] == status.rawValue }?[1]
+        }
 
         private enum CodingKeys: String, CodingKey {
             case paneID = "pane_id"
@@ -96,6 +104,7 @@ struct HerdrSnapshot: Equatable, Sendable, Decodable {
             case terminalTitleStripped = "terminal_title_stripped"
             case agentStatus = "agent_status"
             case stateChangeSeq = "state_change_seq"
+            case stateLabels = "state_labels"
         }
     }
 
