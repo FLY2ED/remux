@@ -39,24 +39,40 @@ extension HerdrBorderLine {
         let width = Int(frame.width)
         let height = Int(frame.height)
         let textAreas = surface.panes.map(\.innerRect)
+        /// A cell outside the text areas.
         func cell(_ x: Int, _ y: Int) -> Cell {
-            guard !textAreas.contains(where: { $0.contains(x: x, y: y) }) else { return .text }
             let cell = frame.cells[y * width + x]
             return Strokes(glyph: cell.symbol).map { .line($0, cell.fg) } ?? .other(cell.fg)
         }
+        // Only cells outside the text areas are read: most of a frame is text, and lines are read
+        // again for every frame painted.
         var lines: [HerdrBorderLine] = []
         for y in 0..<height {
-            appendRuns(.horizontal, track: y, length: width, to: &lines) { cell($0, y) }
+            let text = textAreas.filter { y >= Int($0.y) && y < Int($0.y) + Int($0.height) }
+                .map { Int($0.x)..<(Int($0.x) + Int($0.width)) }
+            appendRuns(.horizontal, track: y, along: outside(text, length: width), to: &lines) { cell($0, y) }
         }
         for x in 0..<width {
-            appendRuns(.vertical, track: x, length: height, to: &lines) { cell(x, $0) }
+            let text = textAreas.filter { x >= Int($0.x) && x < Int($0.x) + Int($0.width) }
+                .map { Int($0.y)..<(Int($0.y) + Int($0.height)) }
+            appendRuns(.vertical, track: x, along: outside(text, length: height), to: &lines) { cell(x, $0) }
         }
         return lines
     }
 
+    /// The stretches of `0..<length` outside `text`.
+    private static func outside(_ text: [Range<Int>], length: Int) -> [Range<Int>] {
+        var stretches: [Range<Int>] = []
+        var next = 0
+        for range in text.sorted(by: { $0.lowerBound < $1.lowerBound }) {
+            if range.lowerBound > next { stretches.append(next..<min(range.lowerBound, length)) }
+            next = max(next, range.upperBound)
+        }
+        if next < length { stretches.append(next..<length) }
+        return stretches
+    }
+
     private enum Cell {
-        /// Inside a pane's text area.
-        case text
         case line(Strokes, HerdrColor)
         /// Any other cell outside the text areas: a blank, a label's text, the scrollbar.
         case other(HerdrColor)
@@ -91,11 +107,12 @@ extension HerdrBorderLine {
         }
     }
 
-    /// The runs along one row or column, `cell(i)` being its cell at `i`.
+    /// The runs along one row or column, in its `stretches` outside the text areas, `cell(i)` being its
+    /// cell at `i`. No line crosses a text area.
     private static func appendRuns(
         _ axis: Axis,
         track: Int,
-        length: Int,
+        along stretches: [Range<Int>],
         to lines: inout [HerdrBorderLine],
         cell: (Int) -> Cell
     ) {
@@ -122,32 +139,33 @@ extension HerdrBorderLine {
                 run = (start, end, color, far)
             }
         }
-        for index in 0..<length {
-            switch cell(index) {
-            case .text:
-                finish()
-            case .other:
-                if run?.reachesOn == true {
-                    writtenOver = writtenOver ?? index
-                } else {
-                    finish()
-                }
-            case .line(let strokes, let color):
-                let (near, far) = axis == .horizontal ? (strokes.left, strokes.right) : (strokes.up, strokes.down)
-                guard near || far else {
-                    finish()
-                    continue
-                }
-                if near, let first = writtenOver {
-                    for covered in first..<index {
-                        guard case .other(let coveredColor) = cell(covered) else { continue }
-                        let start = UInt32(covered) * 2
-                        add(start: start, end: start + 2, color: coveredColor, near: true, far: true)
+        for stretch in stretches {
+            finish()
+            for index in stretch {
+                switch cell(index) {
+                case .other:
+                    if run?.reachesOn == true {
+                        writtenOver = writtenOver ?? index
+                    } else {
+                        finish()
                     }
+                case .line(let strokes, let color):
+                    let (near, far) = axis == .horizontal ? (strokes.left, strokes.right) : (strokes.up, strokes.down)
+                    guard near || far else {
+                        finish()
+                        continue
+                    }
+                    if near, let first = writtenOver {
+                        for covered in first..<index {
+                            guard case .other(let coveredColor) = cell(covered) else { continue }
+                            let start = UInt32(covered) * 2
+                            add(start: start, end: start + 2, color: coveredColor, near: true, far: true)
+                        }
+                    }
+                    writtenOver = nil
+                    let start = UInt32(index) * 2
+                    add(start: start + (near ? 0 : 1), end: start + (far ? 2 : 1), color: color, near: near, far: far)
                 }
-                writtenOver = nil
-                let start = UInt32(index) * 2
-                add(start: start + (near ? 0 : 1), end: start + (far ? 2 : 1), color: color, near: near, far: far)
             }
         }
         finish()
@@ -173,11 +191,5 @@ extension HerdrColor {
         case .rgb(let red, let green, let blue):
             return GhosttyTerminalColors.Color(red: red, green: green, blue: blue)
         }
-    }
-}
-
-private extension HerdrSurfaceRect {
-    func contains(x: Int, y: Int) -> Bool {
-        x >= Int(self.x) && x < Int(self.x) + Int(width) && y >= Int(self.y) && y < Int(self.y) + Int(height)
     }
 }

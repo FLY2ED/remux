@@ -55,6 +55,47 @@ final class HerdrBorderLineTests: XCTestCase {
         XCTAssertEqual(Set(try XCTUnwrap(layout).borders.map(Self.describe)), Set(expected.map(Self.describe)))
     }
 
+    /// The engine reads the borders again for every surface, not for patches, which only change text:
+    /// after a patch, a surface for a wider left pane brings its own borders.
+    func testTheLayoutTakesTheBordersOfEachSurfaceAcrossPatches() async throws {
+        let runtime = try GhosttyKitRuntime(terminalSettings: .default)
+        defer { withExtendedLifetime(runtime) {} }
+        let engine = HerdrTerminalEngine(cellWidthPx: 9, cellHeightPx: 18)
+        let feed = await engine.beginConnection()
+        let narrow = [(x: 1, y: 1, width: 2, height: 1), (x: 5, y: 1, width: 2, height: 1)]
+        let wide = [(x: 1, y: 1, width: 3, height: 1), (x: 6, y: 1, width: 2, height: 1)]
+        await feed.receive(try HerdrPresentationTests.snapshot(revision: 1))
+        await feed.receive(.surface(try Self.surface(
+            lines: ["┌──┐┌──┐", "│ab││cd│", "└──┘└──┘"],
+            colors: ["AAAAGGGG", "A..AG..G", "AAAAGGGG"],
+            textAreas: narrow
+        )))
+        let typed = "xy".map {
+            HerdrCell(symbol: String($0), fg: HerdrColor(raw: 0), bg: HerdrColor(raw: 0), modifier: 0, skip: false, hyperlink: nil)
+        }
+        await feed.receive(.patch(try HerdrPresentationTests.patch(
+            base: 1,
+            rows: [HerdrPatchRow(x: 1, y: 1, cells: typed)],
+            panes: [Self.pane(index: 0, textArea: narrow[0])]
+        )))
+        await feed.receive(.surface(try Self.surface(
+            lines: ["┌───┐┌──┐", "│abc││cd│", "└───┘└──┘"],
+            colors: ["AAAAAGGGG", "A...AG..G", "AAAAAGGGG"],
+            textAreas: wide,
+            revision: 3
+        )))
+        await engine.stop()
+        var borders: [[String]] = []
+        for await update in engine.updates {
+            if case .layout(let layout) = update { borders.append(layout.borders.map(Self.describe)) }
+        }
+
+        XCTAssertEqual(borders, [
+            ["h0 1-7 A", "h0 9-15 G", "h2 1-7 A", "h2 9-15 G", "v0 1-5 A", "v3 1-5 A", "v4 1-5 G", "v7 1-5 G"],
+            ["h0 1-9 A", "h0 11-17 G", "h2 1-9 A", "h2 11-17 G", "v0 1-5 A", "v4 1-5 A", "v5 1-5 G", "v8 1-5 G"],
+        ])
+    }
+
     /// With `pane_gaps = false`, neighbours share one line and the lines meet in T glyphs. Herdr colours
     /// a shared line with the focused pane's accent along that pane's side (`line_touches_pane`), so a
     /// line changes colour at the T, and the lines follow those colours.
@@ -176,7 +217,8 @@ final class HerdrBorderLineTests: XCTestCase {
     private static func surface(
         lines: [String],
         colors: [String],
-        textAreas: [(x: Int, y: Int, width: Int, height: Int)]
+        textAreas: [(x: Int, y: Int, width: Int, height: Int)],
+        revision: UInt64 = 1
     ) throws -> HerdrPaneSurfaceFrame {
         let width = lines[0].count
         precondition(lines.allSatisfy { $0.count == width })
@@ -191,20 +233,23 @@ final class HerdrBorderLineTests: XCTestCase {
                 return #"{"symbol":"\#(symbol)","fg":\#(fg),"bg":0,"modifier":0,"skip":false,"hyperlink":null}"#
             }
         }
-        let panes = textAreas.enumerated().map { index, area in
-            let rect = #"{"x":\#(area.x),"y":\#(area.y),"width":\#(area.width),"height":\#(area.height)}"#
-            return """
-            {"pane_id":"p\(index)","content_revision":1,"rect":\(rect),"inner_rect":\(rect),"scrollbar_rect":null,
-             "scroll":null,"focused":false,"mouse_reporting":false,"sgr_pixel_mouse":false,
-             "alternate_screen_active":false,"pixel_width":0,"pixel_height":0}
-            """
-        }
+        let panes = textAreas.enumerated().map { pane(index: $0, textArea: $1) }
         let json = """
-        {"boot_id":"boot","projection_revision":1,"surface_revision":1,
+        {"boot_id":"boot","projection_revision":1,"surface_revision":\(revision),
          "frame":{"cells":[\(cells.joined(separator: ","))],"width":\(width),"height":\(lines.count),"cursor":null,"hyperlinks":[],"graphics":[]},
          "panes":[\(panes.joined(separator: ","))],"splits":[],"popup":null,
          "graphics":{"assets":[],"placements":[],"retained_assets":[]}}
         """
         return try JSONDecoder().decode(HerdrPaneSurfaceFrame.self, from: Data(json.utf8))
+    }
+
+    /// Pane `p<index>`, its rectangle its text area.
+    private static func pane(index: Int, textArea area: (x: Int, y: Int, width: Int, height: Int)) -> String {
+        let rect = #"{"x":\#(area.x),"y":\#(area.y),"width":\#(area.width),"height":\#(area.height)}"#
+        return """
+        {"pane_id":"p\(index)","content_revision":1,"rect":\(rect),"inner_rect":\(rect),"scrollbar_rect":null,
+         "scroll":null,"focused":false,"mouse_reporting":false,"sgr_pixel_mouse":false,
+         "alternate_screen_active":false,"pixel_width":0,"pixel_height":0}
+        """
     }
 }

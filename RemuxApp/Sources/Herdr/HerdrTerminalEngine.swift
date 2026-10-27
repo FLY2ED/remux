@@ -163,6 +163,11 @@ actor HerdrTerminalEngine {
     private var activation: Activation?
     private var layout: HerdrPaneLayout?
     private var paneScrolls: [String: HerdrPaneScroll] = [:]
+    /// Herdr's border lines in the frame painted last. A patch never changes them, since
+    /// `HerdrPresentation` takes only patches inside the panes' text areas and scrollbar columns, so
+    /// they are read again only once a surface or a snapshot may have changed what is presented.
+    private var borders: [HerdrBorderLine] = []
+    private var bordersMayHaveChanged = true
     private var cellWidthPx: UInt32
     private var cellHeightPx: UInt32
     private let makeProducer: ProducerFactory
@@ -239,6 +244,7 @@ actor HerdrTerminalEngine {
     fileprivate func receive(_ snapshot: HerdrSnapshot, connection: UInt64) {
         guard state == .running, connection == self.connection else { return }
         presentation.receive(snapshot)
+        bordersMayHaveChanged = true
         paintPresented()
     }
 
@@ -253,6 +259,7 @@ actor HerdrTerminalEngine {
                 continuation.yield(.failed(.wire(error), connection: connection))
                 return
             }
+            bordersMayHaveChanged = true
         case .patch(let patch):
             // A rejected patch leaves the current frame until the next full surface.
             _ = presentation.receive(patch)
@@ -318,6 +325,10 @@ actor HerdrTerminalEngine {
         let listed = Set(surface.panes.map(\.paneID))
         panes = panes.filter { listed.contains($0.key) }
         failedPaneIDs.formIntersection(listed)
+        if bordersMayHaveChanged {
+            borders = HerdrBorderLine.lines(in: surface)
+            bordersMayHaveChanged = false
+        }
         publishLayout(of: surface, snapshot: snapshot)
         publishScroll(of: surface)
         if activation != nil {
@@ -408,7 +419,7 @@ actor HerdrTerminalEngine {
                     path: Self.path(ofPane: $0.paneID, in: snapshot)
                 )
             },
-            borders: HerdrBorderLine.lines(in: surface),
+            borders: borders,
             hasPopup: surface.popup != nil
         )
         guard next != layout else { return }
