@@ -104,7 +104,7 @@ enum HerdrCommandError: Error, Equatable, LocalizedError {
     case notAcknowledged
     case failed(code: String, message: String)
     case connectionEnded
-    /// The command waited for the lane, and the session left the screen first.
+    /// The command didn't go: the session left the screen, or what it was for was replaced, first.
     case notSent
 
     var errorDescription: String? {
