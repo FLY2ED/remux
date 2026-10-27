@@ -426,6 +426,35 @@ final class HerdrSelectionTests: XCTestCase {
         }
     }
 
+    /// Output that replaces the pane's rows while Herdr looks for the link makes Herdr's answer stale, since
+    /// it was found in the frame before: it is dropped, as Herdr's client drops one, and the selection
+    /// stays as it was.
+    func testALinkFoundInRowsReplacedMeanwhileChangesNothing() async throws {
+        var session = try await shownSession(scroll: (1, 40, 3), lines: Self.linkLines, width: 20)
+        let surface = try session.surface()
+        let press = session.point(row: 0, column: 8)
+        XCTAssertEqual(session.longPress(at: press), .link)
+        let selection = surface.historySelection
+
+        let completion = Task { await session.adapter.completeLinkSelection(in: session.surfaceID, at: press, selected: .link) }
+        let request = try await session.nextRequest(HerdrScreenModel.paneLinkResolveMethod, as: SentResolve.self)
+        var replaced = session.pane
+        replaced.contentRevision = 4
+        let output = ["new output here     ", "and more of it      ", "and the last row    "]
+        try await session.serve(replaced, revision: 3, lines: output)
+        try await session.harness.waitUntil("the new output wasn't painted") {
+            guard let renderer = session.harness.model.paneSurface("w1:p1")?.renderer else { return false }
+            return RendererText.rows(of: renderer, columns: 20, rows: 3).first == "new output here"
+        }
+        await session.bridge.serve(HerdrConnectionTests.reply(
+            id: request.id,
+            json: #"{"type":"pane_link_resolved","regions":[{"row":0,"start_col":4,"end_col":19},{"row":1,"start_col":0,"end_col":6}]}"#
+        ))
+        let grew = await completion.value
+        XCTAssertFalse(grew, "a link found in the rows before the output was applied over it")
+        XCTAssertEqual(surface.historySelection, selection)
+    }
+
     /// Herdr's client doesn't ask about content Herdr is still changing, which has an odd revision.
     func testALinkInContentHerdrIsChangingAsksNothing() async throws {
         var session = try await shownSession(scroll: (1, 40, 3), lines: Self.linkLines, width: 20, contentRevision: 5)
@@ -537,8 +566,13 @@ final class HerdrSelectionTests: XCTestCase {
             return [snapshot.start, snapshot.end].compactMap { $0.flatMap(surface.controlSurface.viewportCell(of:)) }
         }
 
-        func serve(_ pane: HerdrServerScript.Pane, revision: UInt64) async throws {
-            await bridge.serve(try harness.shownSurface(projection: 1, revision: revision, lines: lines, panes: [pane]))
+        func serve(_ pane: HerdrServerScript.Pane, revision: UInt64, lines: [String]? = nil) async throws {
+            await bridge.serve(try harness.shownSurface(
+                projection: 1,
+                revision: revision,
+                lines: lines ?? self.lines,
+                panes: [pane]
+            ))
         }
 
         /// What the screen does on a long-press: selects the link there, else the word.
