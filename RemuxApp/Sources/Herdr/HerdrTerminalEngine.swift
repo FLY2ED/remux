@@ -24,6 +24,8 @@ struct HerdrPaneLayout: Equatable, Sendable {
     let columns: UInt16
     let rows: UInt16
     let panes: [Pane]
+    /// The lines Herdr draws around and between the panes, which the crop leaves out of the panes.
+    let borders: [HerdrBorderLine]
     /// Whether a popup is open over the tab. It takes the tab's input meanwhile.
     let hasPopup: Bool
 }
@@ -176,6 +178,11 @@ actor HerdrTerminalEngine {
     private var activation: Activation?
     private var layout: HerdrPaneLayout?
     private var paneScrolls: [String: HerdrPaneScroll] = [:]
+    /// Herdr's border lines in the frame painted last. A patch never changes them, since
+    /// `HerdrPresentation` takes only patches inside the panes' text areas and scrollbar columns, so
+    /// they are read again only once a surface or a snapshot may have changed what is presented.
+    private var borders: [HerdrBorderLine] = []
+    private var bordersMayHaveChanged = true
     private var cellWidthPx: UInt32
     private var cellHeightPx: UInt32
     private let makeProducer: ProducerFactory
@@ -253,6 +260,7 @@ actor HerdrTerminalEngine {
     fileprivate func receive(_ snapshot: HerdrSnapshot, connection: UInt64) {
         guard state == .running, connection == self.connection else { return }
         presentation.receive(snapshot)
+        bordersMayHaveChanged = true
         paintPresented()
     }
 
@@ -268,6 +276,7 @@ actor HerdrTerminalEngine {
                 continuation.yield(.failed(.wire(error), connection: connection))
                 return
             }
+            bordersMayHaveChanged = true
         case .patch(let patch):
             // A rejected patch leaves the current frame until the next full surface.
             _ = presentation.receive(patch)
@@ -334,6 +343,10 @@ actor HerdrTerminalEngine {
         let listed = Set(surface.panes.map(\.paneID))
         panes = panes.filter { listed.contains($0.key) }
         failedPaneIDs.formIntersection(listed)
+        if bordersMayHaveChanged {
+            borders = HerdrBorderLine.lines(in: surface)
+            bordersMayHaveChanged = false
+        }
         let frame = PresentedFrame(bootID: surface.bootID, projectionRevision: surface.projectionRevision, paneIDs: listed)
         if frame != presentedFrame {
             presentedFrame = frame
@@ -437,6 +450,7 @@ actor HerdrTerminalEngine {
                     path: Self.path(ofPane: $0.paneID, in: snapshot)
                 )
             },
+            borders: borders,
             hasPopup: surface.popup != nil
         )
         guard next != layout else { return }

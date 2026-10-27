@@ -223,6 +223,169 @@ final class HerdrLiveConnectionTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(gap, 150, "Enter came \(gap) ms after the paste on Herdr \(version)")
     }
 
+    // MARK: - Pane borders
+
+    /// Herdr's default palette: the focused pane's border in `accent`, the others' in `overlay0`
+    /// (`app/state.rs` `Palette::catppuccin`).
+    private static let accent = GhosttyPaneLine.Ink.color(red: 0x89, green: 0xB4, blue: 0xFA)
+    private static let grey = GhosttyPaneLine.Ink.color(red: 0x6C, green: 0x70, blue: 0x86)
+
+    /// With Herdr's defaults each pane has its own box (`pane_gaps`), around its text area and the
+    /// scrollbar's column right of it, and the focused pane's box is Herdr's accent (`ui/panes.rs`).
+    @MainActor
+    func testEachPaneHasHerdrsBoxWithHerdrsDefaults() async throws {
+        let viewport = try await threePaneViewport(ui: [], settled: { viewport in
+            Set(viewport.paneLines.map(Self.describe)) == Set(viewport.panes.flatMap { pane in
+                Self.box(around: pane.normalFrame, ink: pane.isFocused ? Self.accent : Self.grey)
+            }.map(Self.describe))
+        })
+        XCTAssertEqual(viewport.paneLines.count, 12)
+    }
+
+    /// `pane_gaps = false`: neighbours share one line, Herdr's accent along the focused pane's side and
+    /// its grey along the other's (`line_touches_pane`). The top line runs the window's width, under the
+    /// labels too.
+    @MainActor
+    func testNeighboursShareOneLineWithHerdrsGapsOff() async throws {
+        let viewport = try await threePaneViewport(ui: ["pane_gaps = false"], settled: Self.hasOneSharedDivider)
+        XCTAssertTrue(Self.hasOneSharedDivider(viewport))
+        let top = viewport.paneLines.filter { $0.orientation == .horizontal && $0.position == 0.5 }
+            .sorted { $0.start < $1.start }
+        XCTAssertEqual(top.first?.start, 0.5)
+        XCTAssertEqual(top.last?.end, CGFloat(viewport.windowGrid?.columns ?? 0) - 0.5)
+        XCTAssertTrue(zip(top, top.dropFirst()).allSatisfy { $0.end == $1.start }, "\(top)")
+    }
+
+    /// One line between the left pane and the two on the right, the window's height, in the accent
+    /// beside a right pane where it is the focused pane's side: that pane's, or the left pane's along
+    /// its whole height.
+    private static func hasOneSharedDivider(_ viewport: GhosttyTerminalViewportPresentationProjection) -> Bool {
+        guard case let (left, top, bottom)? = try? leftTopAndBottom(viewport),
+              let focused = viewport.panes.first(where: \.isFocused),
+              let rows = viewport.windowGrid?.rows
+        else { return false }
+        let divider = viewport.paneLines.filter {
+            $0.orientation == .vertical && $0.position > CGFloat(left.normalFrame.x + left.normalFrame.columns)
+                && $0.position < CGFloat(top.normalFrame.x)
+        }
+        guard Set(divider.map(\.position)).count == 1,
+              divider.map(\.start).min() == 0.5,
+              divider.map(\.end).max() == CGFloat(rows) - 0.5
+        else { return false }
+        return [top, bottom].allSatisfy { pane in
+            let middle = CGFloat(pane.normalFrame.y) + CGFloat(pane.normalFrame.rows) / 2
+            let ink = focused.id == pane.id || focused.id == left.id ? accent : grey
+            return divider.first { $0.start <= middle && $0.end >= middle }?.ink == ink
+        }
+    }
+
+    /// `pane_borders = "off"`: Herdr draws no lines and leaves a blank cell between panes; the picker
+    /// maps every pane.
+    @MainActor
+    func testNoLinesWithHerdrsBordersOff() async throws {
+        let viewport = try await threePaneViewport(ui: [#"pane_borders = "off""#], settled: { _ in true })
+        XCTAssertEqual(viewport.paneLines, [])
+        let (left, top, _) = try Self.leftTopAndBottom(viewport)
+        XCTAssertEqual(left.normalFrame.x + left.normalFrame.columns + 2, top.normalFrame.x, "the scrollbar's column and the gap")
+    }
+
+    /// `pane_borders = "off"` and `pane_gaps = false`: the panes' rectangles touch, with only the
+    /// scrollbar's column between the text areas, and no lines; the picker maps every pane.
+    @MainActor
+    func testTouchingPanesWithHerdrsBordersAndGapsOff() async throws {
+        let viewport = try await threePaneViewport(
+            ui: [#"pane_borders = "off""#, "pane_gaps = false"],
+            settled: { _ in true }
+        )
+        XCTAssertEqual(viewport.paneLines, [])
+        let (left, top, bottom) = try Self.leftTopAndBottom(viewport)
+        XCTAssertEqual(left.normalFrame.x + left.normalFrame.columns + 1, top.normalFrame.x, "only the scrollbar's column")
+        XCTAssertEqual(top.normalFrame.y + top.normalFrame.rows, bottom.normalFrame.y, "no row between")
+    }
+
+    /// A tab split into a pane on the left and two on the right on a fresh server with the `ui` settings,
+    /// the left and the top right pane labelled, once `settled` holds for the screen's projection (or
+    /// after 15 s). The pane picker's map has a tile for each pane.
+    @MainActor
+    private func threePaneViewport(
+        ui: [String],
+        settled: (GhosttyTerminalViewportPresentationProjection) -> Bool
+    ) async throws -> GhosttyTerminalViewportPresentationProjection {
+        let session = try await openShownSession(version: "0.9.3", ui: ui, through: { $0 })
+        let model = session.model
+        let adapter = model.terminalScreenAdapter
+        let trace = RemuxTransportStartupTrace(flowID: "herdr-live-borders")
+        let first = try XCTUnwrap(model.layout?.panes.first?.paneID)
+        // The first pane is split right, then the new pane down.
+        let splits: [(pane: String?, direction: String)] = [(first, "right"), (nil, "down")]
+        for (pane, direction) in splits {
+            let count = model.layout?.panes.count ?? 0
+            let target = try pane ?? XCTUnwrap(model.layout?.panes.first { $0.paneID != first }?.paneID)
+            let split = try await session.fixture.herdr(["pane", "split", target, "--direction", direction], trace: trace)
+            XCTAssertEqual(split.exitStatus, 0, String(decoding: split.stderr, as: UTF8.self))
+            try await waitUntil("the split didn't arrive", timeout: .seconds(15)) {
+                adapter.terminalScreenPresentationProjection.viewport.panes.count == count + 1
+            }
+        }
+        // Labels are written over the top borders of the left and the top right pane.
+        let topRight = try XCTUnwrap(model.layout?.panes.first { $0.paneID != first }?.paneID)
+        for (pane, label) in [(first, "editor"), (topRight, "notes")] {
+            let rename = try await session.fixture.herdr(["pane", "rename", pane, label], trace: trace)
+            XCTAssertEqual(rename.exitStatus, 0, String(decoding: rename.stderr, as: UTF8.self))
+        }
+        // The layout names its panes from the snapshot its frame was drawn against.
+        try await waitUntil("the labels didn't arrive", timeout: .seconds(15)) {
+            let names = model.layout?.panes.map(\.name) ?? []
+            return names.contains { $0.hasPrefix("editor") } && names.contains { $0.hasPrefix("notes") }
+        }
+        let deadline = ContinuousClock.now + .seconds(15)
+        var viewport = adapter.terminalScreenPresentationProjection.viewport
+        while !settled(viewport), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(100))
+            viewport = adapter.terminalScreenPresentationProjection.viewport
+        }
+        XCTAssertTrue(settled(viewport), "\(viewport.panes.map(\.normalFrame)) \(viewport.paneLines)")
+
+        let tab = try XCTUnwrap(adapter.selectedPaneSheetPresentationProjection()).topLevelID
+        let picker = adapter.paneSelectionSheetRenderProjection(topLevelID: tab)
+        let map = PaneTopologyLayout.frames(
+            panes: try picker.panes.map { PaneTopologyLayout.Pane(id: $0.id, frame: try XCTUnwrap($0.frame)) },
+            size: CGSize(width: 300, height: 200)
+        )
+        XCTAssertEqual(picker.panes.compactMap { map?.frame(for: $0.id) }.count, 3, "the picker's map lacks tiles")
+        return viewport
+    }
+
+    private static func leftTopAndBottom(
+        _ viewport: GhosttyTerminalViewportPresentationProjection
+    ) throws -> (left: GhosttyTerminalViewportPresentationProjection.Pane, top: GhosttyTerminalViewportPresentationProjection.Pane, bottom: GhosttyTerminalViewportPresentationProjection.Pane) {
+        let panes = viewport.panes.sorted { ($0.normalFrame.x, $0.normalFrame.y) < ($1.normalFrame.x, $1.normalFrame.y) }
+        guard panes.count == 3 else { throw HerdrLiveError(description: "not three panes: \(panes)") }
+        return (panes[0], panes[1], panes[2])
+    }
+
+    /// The four sides of the box Herdr draws around a pane whose text area is `area`, with the
+    /// scrollbar's column right of the text, through the middle of the border cells.
+    private static func box(around area: GhosttyTerminalGridRect, ink: GhosttyPaneLine.Ink) -> [GhosttyPaneLine] {
+        let left = CGFloat(area.x) - 0.5
+        let right = CGFloat(area.x + area.columns) + 1.5
+        let top = CGFloat(area.y) - 0.5
+        let bottom = CGFloat(area.y + area.rows) + 0.5
+        func line(_ orientation: GhosttyPaneLine.Orientation, _ position: CGFloat, _ start: CGFloat, _ end: CGFloat)
+            -> GhosttyPaneLine
+        {
+            GhosttyPaneLine(orientation: orientation, position: position, start: start, end: end, ink: ink, width: 1, cap: .square)
+        }
+        return [
+            line(.horizontal, top, left, right), line(.horizontal, bottom, left, right),
+            line(.vertical, left, top, bottom), line(.vertical, right, top, bottom),
+        ]
+    }
+
+    private static func describe(_ line: GhosttyPaneLine) -> String {
+        "\(line.orientation) \(line.position) \(line.start)-\(line.end) \(line.ink) \(line.width) \(line.cap)"
+    }
+
     // MARK: - Scrolling
 
     /// A scroll over a shell's output moves Herdr's history three lines a step, and the pane's scroll
@@ -340,15 +503,16 @@ final class HerdrLiveConnectionTests: XCTestCase {
         let model: HerdrScreenModel
     }
 
-    /// A Herdr session model on a fresh isolated server for Herdr `version`, shown, with its first pane
-    /// drawn in a window as on the screen. `through` can put a transport between the model's connection
-    /// and the bridge.
+    /// A Herdr session model on a fresh isolated server for Herdr `version` with the `ui` settings, shown,
+    /// with its first pane drawn in a window as on the screen. `through` can put a transport between the
+    /// model's connection and the bridge.
     @MainActor
     private func openShownSession(
         version: String,
+        ui: [String] = [],
         through wrap: @escaping @Sendable (any HerdrBridgeTransport) -> any HerdrBridgeTransport
     ) async throws -> ShownSession {
-        let fixture = try await HerdrLiveFixture.start(try HerdrLiveConfiguration.load(), version: version)
+        let fixture = try await HerdrLiveFixture.start(try HerdrLiveConfiguration.load(), version: version, ui: ui)
         addTeardownBlock {
             for problem in await fixture.tearDown() {
                 XCTFail(problem)

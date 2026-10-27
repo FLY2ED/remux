@@ -34,6 +34,8 @@ final class RemuxAppUITests: XCTestCase {
         let expectedHostKey: String
         /// Where each step's screenshot is written as well, when set.
         var captureDirectory: String?
+        /// The panes of the session's tab, when the pane picker should be checked for a tile each.
+        var paneCount: Int?
         /// Where the notification test asks the harness for each change on the server, by writing
         /// `<step>.request`; that test is skipped without it.
         var stepDirectory: String?
@@ -1684,6 +1686,14 @@ final class RemuxAppUITests: XCTestCase {
         waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
         assertLiveTerminalScreenshotContainsRenderedContent()
         captureLiveHerdrStep("1-session", in: configuration)
+
+        // The pane picker maps every pane, however close Herdr's border settings put them.
+        if let paneCount = configuration.paneCount {
+            openPanesSheet()
+            XCTAssertTrue(waitForPanePickerTileCount(paneCount, timeout: 10), "The pane picker should map every pane.")
+            captureLiveHerdrStep("1a-pane-picker", in: configuration)
+            dismissTopSheetIfPresent()
+        }
 
         // A long-press selects the word under the finger and offers Copy, as on a tmux pane.
         let terminal = app.otherElements["terminal.screen"].firstMatch

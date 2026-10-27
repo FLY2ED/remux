@@ -216,6 +216,58 @@ final class GhosttyTerminalPresentationProjectorTests: XCTestCase {
         )
     }
 
+    /// The screen draws a line over its cells, `width` points across; a square cap reaches half the
+    /// width past each end, so a box's corner closes.
+    func testALineIsDrawnOverItsCellsAndASquareCapClosesACorner() {
+        let origin = CGPoint(x: 3, y: 0)
+        let cell = CGSize(width: 10, height: 20)
+        let divider = GhosttyPaneLine(
+            orientation: .vertical, position: 39.5, start: -0.5, end: 24.5, ink: .separator, width: 1, cap: .butt
+        )
+        XCTAssertEqual(divider.frame(origin: origin, cellSize: cell), CGRect(x: 397.5, y: -10, width: 1, height: 500))
+
+        let top = GhosttyPaneLine(
+            orientation: .horizontal, position: 0.5, start: 0.5, end: 39.5, ink: .focus, width: 1, cap: .square
+        )
+        let left = GhosttyPaneLine(
+            orientation: .vertical, position: 0.5, start: 0.5, end: 21.5, ink: .focus, width: 1, cap: .square
+        )
+        let topFrame = top.frame(origin: origin, cellSize: cell)
+        let leftFrame = left.frame(origin: origin, cellSize: cell)
+        XCTAssertEqual(topFrame, CGRect(x: 7.5, y: 9.5, width: 391, height: 1))
+        XCTAssertEqual(leftFrame, CGRect(x: 7.5, y: 9.5, width: 1, height: 421))
+        XCTAssertEqual(topFrame.minX, leftFrame.minX, "the corner has no notch")
+        XCTAssertEqual(topFrame.minY, leftFrame.minY, "the corner has no notch")
+    }
+
+    /// tmux's lines for a window: each separator, then the accent along the focused pane's side, as the
+    /// screen has always drawn them; none for one pane or a zoomed window.
+    func testTmuxLinesAreItsSeparatorsThenTheFocusedPanesAccent() {
+        func pane(_ id: UUID, _ frame: GhosttyTerminalGridRect, visible: Bool = true, focused: Bool = false)
+            -> GhosttyTerminalViewportPresentationProjection.Pane
+        {
+            .init(
+                id: id, normalFrame: frame, visibleFrame: visible ? frame : nil, isFocused: focused,
+                currentCommand: "", currentPath: ""
+            )
+        }
+        let left = UUID()
+        let right = UUID()
+        let panes = [
+            pane(left, .init(x: 0, y: 0, columns: 39, rows: 24)),
+            pane(right, .init(x: 40, y: 0, columns: 40, rows: 24), focused: true),
+        ]
+        XCTAssertEqual(GhosttyPaneSeparatorLayout.lines(for: panes), [
+            GhosttyPaneLine(orientation: .vertical, position: 39.5, start: -0.5, end: 24.5, ink: .separator, width: 1, cap: .butt),
+            GhosttyPaneLine(orientation: .vertical, position: 39.5, start: 12, end: 24.5, ink: .focus, width: 2, cap: .butt),
+        ])
+        XCTAssertEqual(GhosttyPaneSeparatorLayout.lines(for: [panes[1]]), [])
+        XCTAssertEqual(GhosttyPaneSeparatorLayout.lines(for: [
+            pane(left, .init(x: 0, y: 0, columns: 39, rows: 24), visible: false),
+            pane(right, .init(x: 0, y: 0, columns: 80, rows: 24), focused: true),
+        ]), [])
+    }
+
     func testSinglePaneHasNoSeparatorOrFocusMarker() {
         let paneID = UUID()
         XCTAssertTrue(
@@ -572,6 +624,7 @@ final class GhosttyTerminalPresentationProjectorTests: XCTestCase {
                     windowGrid: nil,
                     cellMetrics: nil,
                     panes: [],
+                    paneLines: [],
                     focusedSurfaceID: surfaceInstanceID,
                     isServerZoomed: false,
                     windowCount: 1

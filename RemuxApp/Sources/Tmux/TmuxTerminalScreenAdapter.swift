@@ -230,6 +230,7 @@ final class TmuxTerminalScreenAdapter: ObservableObject {
                 windowGrid: nil,
                 cellMetrics: latestViewportMeasurement?.cellMetrics,
                 panes: [],
+                paneLines: [],
                 focusedSurfaceID: activeManagedSurface?.id,
                 isServerZoomed: false,
                 windowCount: latestTopology?.windows.count ?? 0
@@ -276,6 +277,7 @@ final class TmuxTerminalScreenAdapter: ObservableObject {
             ),
             cellMetrics: latestViewportMeasurement?.cellMetrics,
             panes: panes,
+            paneLines: GhosttyPaneSeparatorLayout.lines(for: panes),
             focusedSurfaceID: activeManagedSurface?.id,
             isServerZoomed: window.zoomed,
             windowCount: topology.windows.count

@@ -65,6 +65,7 @@ enum HerdrServerScript {
     struct Pane {
         let id: String
         let x: UInt16
+        var y: UInt16 = 0
         let width: UInt16
         let height: UInt16
         var focused = false
@@ -72,6 +73,8 @@ enum HerdrServerScript {
         var scroll: (fromBottom: UInt64, max: UInt64, rows: UInt64)?
         var mouseReporting = false
         var alternateScreen = false
+        /// The pane with Herdr's borders around its text area, when it has any.
+        var rect: (x: UInt16, y: UInt16, width: UInt16, height: UInt16)?
     }
 
     /// A recorded v0.9.3 welcome.
@@ -203,30 +206,32 @@ enum HerdrServerScript {
         value.map { #""\#($0)""# } ?? "null"
     }
 
-    /// A full surface of the given lines, all of one width, with every pane's text area on row 0 down,
-    /// and a one-cell popup for the terminal `popup` names, if any.
+    /// A full surface of the given lines, all of one width, and a one-cell popup for the terminal
+    /// `popup` names, if any. A cell whose symbol `foreground` lists has that colour.
     static func surface(
         boot: String = "boot",
         projection: UInt64,
         revision: UInt64,
         lines: [String],
         panes: [Pane],
-        popup: String? = nil
+        popup: String? = nil,
+        foreground: [Character: UInt32] = [:]
     ) -> [UInt8] {
         var writer = HerdrWireWriter()
         writer.variant(13)
         writer.string(boot)
         writer.u64(projection)
         writer.u64(revision)
-        frame(lines, to: &writer)
+        frame(lines, foreground: foreground, to: &writer)
         writer.array(panes) { writer, pane in
             writer.string(pane.id)
             writer.u64(1)
-            for _ in 0..<2 {
-                writer.u16(pane.x)
-                writer.u16(0)
-                writer.u16(pane.width)
-                writer.u16(pane.height)
+            let textArea = (x: pane.x, y: pane.y, width: pane.width, height: pane.height)
+            for rect in [pane.rect ?? textArea, textArea] {
+                writer.u16(rect.x)
+                writer.u16(rect.y)
+                writer.u16(rect.width)
+                writer.u16(rect.height)
             }
             writer.optional(nil as UInt8?) { $0.u8($1) }
             if let scroll = pane.scroll {
@@ -262,12 +267,16 @@ enum HerdrServerScript {
         return HerdrWire.frame(writer.bytes)
     }
 
-    private static func frame(_ lines: [String], to writer: inout HerdrWireWriter) {
+    private static func frame(
+        _ lines: [String],
+        foreground: [Character: UInt32] = [:],
+        to writer: inout HerdrWireWriter
+    ) {
         let width = lines.first?.count ?? 0
         precondition(lines.allSatisfy { $0.count == width })
         writer.array(Array(lines.joined())) { writer, character in
             writer.string(String(character))
-            writer.u32(0)
+            writer.u32(foreground[character] ?? 0)
             writer.u32(0)
             writer.u16(0)
             writer.bool(false)

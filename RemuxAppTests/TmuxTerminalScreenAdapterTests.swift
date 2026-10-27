@@ -347,6 +347,10 @@ final class TmuxTerminalScreenAdapterTests: XCTestCase {
         )
         XCTAssertEqual(viewport.panes.map(\.visibleFrame), viewport.panes.map(\.normalFrame))
         XCTAssertEqual(viewport.panes.map(\.isFocused), [false, true])
+        XCTAssertEqual(viewport.paneLines, [
+            GhosttyPaneLine(orientation: .vertical, position: 39.5, start: -0.5, end: 24.5, ink: .separator, width: 1, cap: .butt),
+            GhosttyPaneLine(orientation: .vertical, position: 39.5, start: 12, end: 24.5, ink: .focus, width: 2, cap: .butt),
+        ], "the divider in tmux's border, and the focused pane's half of it")
 
         await session.shutdown()
     }
@@ -397,6 +401,7 @@ final class TmuxTerminalScreenAdapterTests: XCTestCase {
         let viewport = adapter.terminalScreenPresentationProjection.viewport
         XCTAssertTrue(viewport.isServerZoomed)
         XCTAssertEqual(viewport.panes[0].visibleFrame, nil)
+        XCTAssertEqual(viewport.paneLines, [], "a zoomed pane has no divider")
         XCTAssertEqual(
             viewport.panes[1].visibleFrame,
             .init(x: 0, y: 0, columns: 80, rows: 24)
