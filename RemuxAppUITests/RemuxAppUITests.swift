@@ -753,6 +753,23 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertEqual(legacyRSAHostKeys.label, "Allow older RSA host keys")
     }
 
+    func testSettingsShowHapticsSwitchesOnByDefault() {
+        launchSimulatorApp()
+        XCTAssertTrue(app.buttons["library.settings"].waitForExistence(timeout: 5))
+        app.buttons["library.settings"].tap()
+
+        let bellsAndAgents = app.switches["settings.haptics.bells-and-agents"]
+        let keysAndButtons = app.switches["settings.haptics.keys-and-buttons"]
+        for _ in 0..<3 where !keysAndButtons.isHittable {
+            settingsForm.swipeUp()
+        }
+        XCTAssertTrue(bellsAndAgents.waitForExistence(timeout: 2))
+        XCTAssertTrue(keysAndButtons.waitForExistence(timeout: 2))
+        XCTAssertEqual(bellsAndAgents.value as? String, "1")
+        XCTAssertEqual(keysAndButtons.value as? String, "1")
+        attachScreenshot(named: "settings-haptics")
+    }
+
     func testFreshPhoneInstallShowsMultipaneZoomDefaultEnabled() {
         launchSimulatorApp()
         XCTAssertTrue(app.buttons["library.settings"].waitForExistence(timeout: 5))
@@ -1731,9 +1748,9 @@ final class RemuxAppUITests: XCTestCase {
     /// open Sessions sheet; tapping it closes the sheet and takes the phone to that tab. An agent finishing
     /// while Home is on screen shows a banner naming the server and session over Home; tapping it opens
     /// the session at that agent's pane. A banner above the Panes sheet closes it too, and both sheets open
-    /// again afterwards. A bell rings the session on screen. A banner over a server form being filled in
-    /// only goes away when tapped, keeping the typing. The harness makes each change on the server when the
-    /// test asks: `attention`, `finished`, `attention-again`, `bell`, `attention-form`.
+    /// again afterwards. A bell in the session on screen vibrates and draws nothing. A banner over a server
+    /// form being filled in only goes away when tapped, keeping the typing. The harness makes each change on
+    /// the server when the test asks: `attention`, `finished`, `attention-again`, `bell`, `attention-form`.
     func testLiveHerdrNotificationsWhenConfigured() throws {
         let configuration = try launchLiveHerdrApp(requiringSteps: true)
         let banner = app.descendants(matching: .any)["herdr.notification.banner"].firstMatch

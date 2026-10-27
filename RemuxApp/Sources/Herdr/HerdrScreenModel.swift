@@ -52,6 +52,8 @@ final class HerdrScreenModel {
         case received(HerdrSemanticNotification, bootID: String?, place: HerdrNotificationPlace)
         /// The server restarted, so earlier notifications point at panes that are gone.
         case serverRestarted
+        /// A program in the session on screen rang the bell.
+        case bell
     }
 
     /// What the model asks of the connection and the engine, in the order it asks.
@@ -231,9 +233,6 @@ final class HerdrScreenModel {
     private var agents = HerdrAgentPresentation()
     /// A pane to go to once the session is shown, and the server boot its id belongs to.
     private var pendingReveal: (paneID: String, bootID: String?)?
-    /// Rung by the session on screen, until the user next types or the session is shown again, as a
-    /// Ghostty surface keeps its bell.
-    private(set) var isBellRinging = false
     /// The pane keys go to and the screen highlights: the newest snapshot's focused pane, as in
     /// Herdr's client. A pane can be focused before its first frame arrives.
     private(set) var focusedPaneID: String?
@@ -309,13 +308,8 @@ final class HerdrScreenModel {
     func setSelected(_ selected: Bool) {
         guard !stopped, selected != isSelected else { return }
         isSelected = selected
-        if selected {
-            // Shown again, the session has the user's eyes, as a refocused Ghostty surface drops its bell.
-            isBellRinging = false
-        } else {
-            // A pane asked for applies to the show it was asked for.
-            pendingReveal = nil
-        }
+        // A pane asked for applies to the show it was asked for.
+        if !selected { pendingReveal = nil }
         reconcilePresentationActivity()
         reconcileVisibility()
     }
@@ -572,7 +566,6 @@ final class HerdrScreenModel {
     func sendText(_ text: String) -> FocusedTerminalInputSubmissionResult {
         guard !text.isEmpty else { return .empty }
         guard let target = inputTarget else { return .transportUnavailable }
-        silenceBell()
         return send(
             HerdrInputTranslator.events(forText: text, reportsAllKeys: target.attempt.reportsAllKeys),
             to: target
@@ -582,7 +575,6 @@ final class HerdrScreenModel {
     func sendPaste(_ text: String) -> FocusedTerminalInputSubmissionResult {
         guard !text.isEmpty else { return .empty }
         guard let target = inputTarget else { return .transportUnavailable }
-        silenceBell()
         return send([.paste(text)], to: target)
     }
 
@@ -592,15 +584,7 @@ final class HerdrScreenModel {
         guard let event = HerdrInputTranslator.event(for: key) else {
             return key.action == .release ? .accepted : .surfaceRejected
         }
-        silenceBell()
         return send([event], to: target)
-    }
-
-    /// Typing answers the bell, as a key press does on a Ghostty surface.
-    private func silenceBell() {
-        guard isBellRinging else { return }
-        isBellRinging = false
-        didChange()
     }
 
     /// Input is accepted once queued behind the session's earlier operations; Herdr doesn't
@@ -641,7 +625,6 @@ final class HerdrScreenModel {
         guard let attempt = shownAttempt, presentation(ofPane: paneID) == .ready, layout?.hasPopup == false,
               (try? HerdrConnection.checkLimits(events)) != nil
         else { return false }
-        silenceBell()
         return await withCheckedContinuation { delivered in
             attempt.ask(.input(paneID: paneID, events: events, delivered: delivered))
         }
@@ -1056,9 +1039,8 @@ final class HerdrScreenModel {
     /// Herdr rings only the session in front, which the connection checks; a bell that comes after the
     /// session left the screen has no one to ring for.
     private func bellRang(_ attemptID: UInt64) {
-        guard let attempt, attempt.id == attemptID, isCurrent(attempt), isSelected, !isBellRinging else { return }
-        isBellRinging = true
-        didChange()
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt), isSelected else { return }
+        onNotification(.bell)
     }
 
     /// The panes on screen show their agents as they are now, as Herdr's client counts a pane it

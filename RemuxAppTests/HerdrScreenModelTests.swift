@@ -2208,28 +2208,22 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(harness.model.notificationState?.agentStatuses["w1:p2"], .idle)
     }
 
-    /// A bell rings the session on screen, as Ghostty's bell border, until the user types or the session
-    /// is shown again.
-    func testABellRingsUntilTheUserTypesOrTheSessionIsShownAgain() async throws {
+    /// Each bell Herdr rings in the session on screen is handed on; one that comes after the session left
+    /// the screen isn't.
+    func testABellInTheSessionOnScreenIsHandedOn() async throws {
         let harness = await makeHarness()
         let session = try await shownSession(harness)
-        let adapter = harness.model.terminalScreenAdapter
-        XCTAssertFalse(adapter.terminalScreenPresentationProjection.isBellRinging)
+        let bells = { harness.stateLog.notifications.filter { $0 == .bell }.count }
 
         await session.bridge.serve(HerdrServerScript.bell())
-        try await harness.waitUntil("the bell didn't ring") {
-            adapter.terminalScreenPresentationProjection.isBellRinging
-        }
-        XCTAssertEqual(adapter.sendInputToFocusedSurface("x"), .accepted)
-        XCTAssertFalse(adapter.terminalScreenPresentationProjection.isBellRinging)
-
+        try await harness.waitUntil("the bell wasn't handed on") { bells() == 1 }
         await session.bridge.serve(HerdrServerScript.bell(count: 2))
-        try await harness.waitUntil("the bell didn't ring again") {
-            adapter.terminalScreenPresentationProjection.isBellRinging
-        }
+        try await harness.waitUntil("the second bell wasn't handed on") { bells() == 2 }
+
         harness.model.setSelected(false)
-        harness.model.setSelected(true)
-        XCTAssertFalse(adapter.terminalScreenPresentationProjection.isBellRinging)
+        await session.bridge.serve(HerdrServerScript.bell())
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(bells(), 2, "a hidden session handed on a bell")
     }
 
     /// A hidden session asked to go to a pane in another tab asks Herdr to focus it right after the show,

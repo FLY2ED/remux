@@ -213,8 +213,6 @@ struct GhosttyTerminalScreenPresentationProjection: Equatable {
     let interaction: GhosttyTerminalInteractionProjection
     let viewport: GhosttyTerminalViewportPresentationProjection
     let statusOverlay: GhosttyTerminalStatusOverlayProjection
-    /// A program rang the bell and the user hasn't typed since.
-    let isBellRinging: Bool
 }
 
 struct GhosttyTerminalGridSize: Equatable, Sendable {
@@ -531,8 +529,7 @@ enum GhosttyTerminalPresentationProjector {
         snapshot: GhosttyRuntimeSurfaceTopologySnapshot,
         viewportProjection: GhosttyTerminalViewportPresentationProjection,
         selectedPanePresentation: TerminalPanePresentation = .pending,
-        isShown: Bool = true,
-        isBellRinging: Bool = false
+        isShown: Bool = true
     ) -> GhosttyTerminalScreenPresentationProjection {
         let readiness = TerminalReadinessProjector.snapshot(
             phase: phase,
@@ -557,8 +554,7 @@ enum GhosttyTerminalPresentationProjector {
                 commandFailureMessage: commandFailureMessage,
                 debugStatus: debugStatus,
                 registryDebugSummary: registryDebugSummary
-            ),
-            isBellRinging: isBellRinging
+            )
         )
     }
 

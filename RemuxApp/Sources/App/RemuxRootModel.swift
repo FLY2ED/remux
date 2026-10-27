@@ -485,7 +485,9 @@ final class RemuxRootModel: ObservableObject {
     @Published private(set) var connectionSetup: ConnectionSetupState?
     @Published private(set) var library: ConnectionLibrarySnapshot = .empty
     @Published private(set) var serverOrderSaveFailed = false
-    @Published private(set) var terminalSettings: TerminalSettings = .default
+    @Published private(set) var terminalSettings: TerminalSettings = .default {
+        didSet { Haptic.follow(terminalSettings) }
+    }
     @Published private(set) var terminalSettingsSaveFailed = false
     @Published private(set) var activeSessions: [ActiveTerminalSession] = []
     @Published private(set) var isSetupActionInProgress = false
@@ -1712,6 +1714,8 @@ final class RemuxRootModel: ObservableObject {
             ))
         case .serverRestarted:
             herdrNotifications.retire(key.workspaceID)
+        case .bell:
+            herdrNotifications.ringBell()
         }
     }
 

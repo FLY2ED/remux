@@ -4935,6 +4935,54 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertNil(harness.model.herdrNotifications.banner)
     }
 
+    /// A bell in the Herdr session on screen vibrates at once; an agent's banner from the session behind
+    /// Home vibrates when it shows.
+    func testAHerdrBellAndAnAgentsBannerVibrate() async throws {
+        let (harness, _, bridge) = try await connectedHerdrSession(agentStatus: .blocked)
+        let recorder = VibrationRecorder()
+        harness.model.herdrNotifications.vibrate = { recorder.alerts.append($0) }
+
+        await bridge.serve(HerdrServerScript.bell())
+        let rang = await waitUntil(timeout: 3) { recorder.alerts == [.bell] }
+        XCTAssertTrue(rang, "the bell didn't vibrate: \(recorder.alerts)")
+
+        await harness.model.showLibrary()
+        await bridge.serve(HerdrServerScript.notification(
+            .needsAttention,
+            title: "claude needs attention",
+            workspace: "w1",
+            tab: "t2",
+            pane: "w1:p3"
+        ))
+        let shown = await waitUntil(timeout: 3) { harness.model.herdrNotifications.banner != nil }
+        XCTAssertTrue(shown, "no banner")
+        let banner = try XCTUnwrap(harness.model.herdrNotifications.banner)
+        XCTAssertEqual(recorder.alerts, [.bell, .agentNeedsYou(arrived: banner.arrived)])
+    }
+
+    /// The Haptics switches apply as loaded at launch and as soon as they change.
+    func testHapticsFollowTheSettings() async throws {
+        addTeardownBlock { @MainActor in Haptic.follow(.default) }
+        var saved = TerminalSettings.default
+        saved.vibratesForBellsAndAgents = false
+        let harness = makeHarness(settings: saved)
+        await harness.model.load()
+        XCTAssertFalse(Haptic.rules.allows(.bellsAndAgents))
+        XCTAssertTrue(Haptic.rules.allows(.keysAndButtons))
+
+        await harness.model.updateTerminalSettings { settings in
+            settings.vibratesForBellsAndAgents = true
+            settings.vibratesForKeysAndButtons = false
+        }
+        XCTAssertTrue(Haptic.rules.allows(.bellsAndAgents))
+        XCTAssertFalse(Haptic.rules.allows(.keysAndButtons))
+    }
+
+    @MainActor
+    private final class VibrationRecorder {
+        var alerts: [HapticAlert] = []
+    }
+
     /// A Herdr session shown and connected, its snapshot with tab `t1` in front, a second tab `t2`, and
     /// an agent in pane `w1:p3` of `agentTab`.
     private func connectedHerdrSession(

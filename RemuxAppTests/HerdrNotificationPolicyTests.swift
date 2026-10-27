@@ -266,3 +266,99 @@ final class HerdrNotificationPolicyTests: XCTestCase {
         XCTAssertEqual(policy.visible?.until, at(13))
     }
 }
+
+/// A banner vibrates when it shows, by its kind, including one whose turn comes after waiting; nothing
+/// vibrates on a notification's arrival or when no agent's banner shows. A bell vibrates at once.
+@MainActor
+final class HerdrNotificationCenterTests: XCTestCase {
+    /// A center over one shown session with tab `t1` in front, recording what it vibrates.
+    @MainActor
+    private final class Harness {
+        let center = HerdrNotificationCenter()
+        var state = HerdrNotificationSessionState(
+            isShown: true,
+            focusedWorkspaceID: "w1",
+            focusedTabID: "t1",
+            agentStatuses: [:]
+        )
+        var vibrations: [HapticAlert] = []
+        private let origin = HerdrNotificationPolicy.Origin(
+            workspaceID: SavedWorkspace.ID(),
+            sessionName: "agents",
+            serverName: "mini",
+            bootID: "boot",
+            place: HerdrNotificationPlace(workspace: "web", tab: "review")
+        )
+
+        init() {
+            center.sessions = { [unowned self] _ in state }
+            center.vibrate = { [unowned self] in vibrations.append($0) }
+        }
+
+        func receive(
+            _ kind: HerdrSemanticNotification.Kind,
+            _ title: String,
+            pane: String? = nil,
+            tab: String? = nil
+        ) throws {
+            let frame = HerdrServerScript.notification(kind, title: title, tab: tab, pane: pane)
+            guard case .semanticNotification(let notification) = try HerdrServerMessage.decode(Array(frame.dropFirst(4)))
+            else { return XCTFail("not a notification") }
+            center.receive(notification, from: origin)
+        }
+
+        func waitForBanner() async throws -> HerdrNotificationPolicy.Banner {
+            let deadline = ContinuousClock.now + .seconds(3)
+            while center.banner == nil, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            return try XCTUnwrap(center.banner, "no banner")
+        }
+    }
+
+    func testAnAgentsBannerVibratesWhenItShowsAndWhenItsTurnComes() async throws {
+        let harness = Harness()
+        harness.state.agentStatuses = ["w1:p2": .blocked, "w1:p3": .done]
+        try harness.receive(.needsAttention, "claude needs attention", pane: "w1:p2", tab: "t2")
+        try harness.receive(.finished, "codex finished", pane: "w1:p3", tab: "t2")
+        XCTAssertEqual(harness.vibrations, [], "a notification vibrated on arrival")
+
+        let attention = try await harness.waitForBanner()
+        XCTAssertEqual(attention.notification.kind, .needsAttention)
+        XCTAssertEqual(harness.vibrations, [.agentNeedsYou(arrived: attention.arrived)])
+
+        harness.center.dismiss(attention.id)
+        let finished = try XCTUnwrap(harness.center.banner)
+        XCTAssertEqual(finished.notification.kind, .finished)
+        XCTAssertEqual(harness.vibrations, [
+            .agentNeedsYou(arrived: attention.arrived),
+            .agentFinished(arrived: finished.arrived),
+        ])
+    }
+
+    /// Nothing vibrates for the tab on screen, for an agent that moved on before its turn, or for a
+    /// custom or update banner.
+    func testOnlyAnAgentsBannerThatShowsVibrates() async throws {
+        let harness = Harness()
+        harness.state.agentStatuses = ["w1:p2": .blocked, "w1:p3": .blocked]
+        try harness.receive(.custom, "build passed")
+        try harness.receive(.needsAttention, "claude needs attention", pane: "w1:p3", tab: "t2")
+        try harness.receive(.needsAttention, "on screen", pane: "w1:p2", tab: "t1")
+        try harness.receive(.updateInstalled, "herdr updated")
+        let custom = try await harness.waitForBanner()
+        XCTAssertEqual(custom.notification.kind, .custom)
+
+        try await Task.sleep(for: .milliseconds(1200))
+        XCTAssertEqual(harness.center.banner, custom)
+        harness.state.agentStatuses["w1:p3"] = .working
+        harness.center.dismiss(custom.id)
+        XCTAssertEqual(harness.center.banner?.notification.kind, .updateInstalled)
+        XCTAssertEqual(harness.vibrations, [])
+    }
+
+    func testABellVibratesAtOnce() {
+        let harness = Harness()
+        harness.center.ringBell()
+        XCTAssertEqual(harness.vibrations, [.bell])
+    }
+}

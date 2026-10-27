@@ -25,7 +25,8 @@ final class HerdrNotificationBannerContentTests: XCTestCase {
                 bootID: "boot",
                 place: place
             ),
-            notification: notification
+            notification: notification,
+            arrived: .now
         )
     }
 

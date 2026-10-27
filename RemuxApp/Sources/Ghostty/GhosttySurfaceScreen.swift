@@ -339,9 +339,6 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .overlay {
-                        GhosttyBellBorder(isRinging: screenProjection.isBellRinging)
-                    }
-                    .overlay {
                         GhosttySurfaceStatusOverlay(
                             projection: screenProjection.statusOverlay,
                             loadingTitle: presentation.loadingTitle,

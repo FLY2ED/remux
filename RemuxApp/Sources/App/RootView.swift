@@ -2048,6 +2048,26 @@ private struct TerminalSettingsView: View {
             }
             .libraryHomeListRowSurface()
 
+            // Only a phone vibrates.
+            if UIDevice.current.userInterfaceIdiom == .phone {
+                Section("Haptics") {
+                    Toggle(isOn: vibratesForBellsAndAgentsBinding) {
+                        Text("Bells and agents")
+                        Text("Vibrate when a program rings the bell, or an agent needs you or finishes.")
+                    }
+                    .tint(LibraryHomePalette.controlAccent)
+                    .accessibilityIdentifier("settings.haptics.bells-and-agents")
+
+                    Toggle(isOn: vibratesForKeysAndButtonsBinding) {
+                        Text("Keys and buttons")
+                        Text("Vibrate when you press toolbar keys and buttons in Remux.")
+                    }
+                    .tint(LibraryHomePalette.controlAccent)
+                    .accessibilityIdentifier("settings.haptics.keys-and-buttons")
+                }
+                .libraryHomeListRowSurface()
+            }
+
             Section {
                 Toggle("Allow older RSA host keys", isOn: allowInsecureRSAHostKeysBinding)
                     .tint(LibraryHomePalette.controlAccent)
@@ -2124,6 +2144,26 @@ private struct TerminalSettingsView: View {
             get: { settings.zoomMultipaneWindowsByDefault },
             set: { value in
                 settings.zoomMultipaneWindowsByDefault = value
+                sourceSettings = settings
+            }
+        )
+    }
+
+    private var vibratesForBellsAndAgentsBinding: Binding<Bool> {
+        Binding(
+            get: { settings.vibratesForBellsAndAgents },
+            set: { value in
+                settings.vibratesForBellsAndAgents = value
+                sourceSettings = settings
+            }
+        )
+    }
+
+    private var vibratesForKeysAndButtonsBinding: Binding<Bool> {
+        Binding(
+            get: { settings.vibratesForKeysAndButtons },
+            set: { value in
+                settings.vibratesForKeysAndButtons = value
                 sourceSettings = settings
             }
         )

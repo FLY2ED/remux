@@ -55,6 +55,17 @@ struct HerdrNotificationPolicy {
         let id: UInt64
         let origin: Origin
         let notification: HerdrSemanticNotification
+        /// When the notification came, which can be well before the banner shows.
+        let arrived: ContinuousClock.Instant
+
+        /// The vibration the banner plays when it shows: only an agent that needs the user or finished.
+        var alert: HapticAlert? {
+            switch notification.kind {
+            case .needsAttention: .agentNeedsYou(arrived: arrived)
+            case .finished: .agentFinished(arrived: arrived)
+            case .updateInstalled, .custom: nil
+            }
+        }
     }
 
     typealias Sessions = (SavedWorkspace.ID) -> HerdrNotificationSessionState?
@@ -117,7 +128,7 @@ struct HerdrNotificationPolicy {
         }
         nextID += 1
         pending.append(Pending(
-            banner: Banner(id: nextID, origin: origin, notification: notification),
+            banner: Banner(id: nextID, origin: origin, notification: notification, arrived: now),
             due: now + delay,
             expires: now + Self.completionEvidenceGrace
         ))
@@ -235,17 +246,25 @@ struct HerdrNotificationPolicy {
     }
 }
 
-/// Runs `HerdrNotificationPolicy` for the app: Herdr sessions hand it their notifications, and the
-/// banner on screen is published for the view that draws it. A timer runs only while something is due.
+/// Runs `HerdrNotificationPolicy` for the app: Herdr sessions hand it their notifications and bells, the
+/// banner on screen is published for the view that draws it, and a banner vibrates when it shows. A timer
+/// runs only while something is due.
 @MainActor
 final class HerdrNotificationCenter: ObservableObject {
     @Published private(set) var banner: HerdrNotificationPolicy.Banner?
 
     /// Reads an open Herdr session's state; set by whoever owns the sessions.
     var sessions: @MainActor (SavedWorkspace.ID) -> HerdrNotificationSessionState? = { _ in nil }
+    /// Plays an alert's vibration, as the user's Haptics settings allow.
+    var vibrate: @MainActor (HapticAlert) -> Void = { Haptic.alert($0) }
 
     private var policy = HerdrNotificationPolicy()
     private var timer: Task<Void, Never>?
+
+    /// A program in the session on screen rang the bell.
+    func ringBell() {
+        vibrate(.bell)
+    }
 
     func receive(_ notification: HerdrSemanticNotification, from origin: HerdrNotificationPolicy.Origin) {
         policy.receive(notification, from: origin, at: .now) { self.sessions($0) }
@@ -269,7 +288,10 @@ final class HerdrNotificationCenter: ObservableObject {
 
     private func update() {
         let shown = policy.visible?.banner
-        if banner != shown { banner = shown }
+        if banner != shown {
+            banner = shown
+            if let alert = shown?.alert { vibrate(alert) }
+        }
         timer?.cancel()
         timer = nil
         guard let due = policy.nextDeadline else { return }
