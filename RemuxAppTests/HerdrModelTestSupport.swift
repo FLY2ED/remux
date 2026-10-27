@@ -192,16 +192,19 @@ enum HerdrServerScript {
         terminalTitleStripped: String? = nil,
         agent: String? = nil,
         displayAgent: String? = nil,
+        workspace: String = "w1",
         tab: String = "t1",
         status: HerdrAgentStatus = .working,
-        stateChange: UInt64 = 1
+        stateChange: UInt64 = 1,
+        stateLabels: [(state: String, word: String)] = []
     ) -> String {
-        """
-        {"pane_id":"\(paneID)","workspace_id":"w1","tab_id":"\(tab)","name":\(json(name)),
+        let labels = stateLabels.map { "[\(json($0.state)),\(json($0.word))]" }.joined(separator: ",")
+        return """
+        {"pane_id":"\(paneID)","workspace_id":"\(workspace)","tab_id":"\(tab)","name":\(json(name)),
          "display_agent":\(json(displayAgent)),"agent":\(json(agent)),"title":\(json(title)),
          "terminal_title":null,"terminal_title_stripped":\(json(terminalTitleStripped)),
          "agent_status":"\(status.rawValue)","state_change_seq":\(stateChange),
-         "state_labels":[],"tokens":[],"focused":false}
+         "state_labels":[\(labels)],"tokens":[],"focused":false}
         """
     }
 
@@ -544,6 +547,7 @@ final class HerdrModelHarness {
     final class StateLog {
         var updates: [TerminalRuntimeStateUpdate] = []
         var notifications: [HerdrScreenModel.NotificationEvent] = []
+        var agents: [HerdrSessionAgents] = []
     }
 
     let bridges: Bridges
@@ -583,6 +587,7 @@ final class HerdrModelHarness {
             openBridge: { try await bridges.open() },
             onRuntimeStateChange: { stateLog.updates.append($0) },
             onNotification: { stateLog.notifications.append($0) },
+            onAgentsChange: { stateLog.agents.append($0) },
             connectionTiming: timing,
             recoveryTiming: recovery,
             engine: producerFailure.map {

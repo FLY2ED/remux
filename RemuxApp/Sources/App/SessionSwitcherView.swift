@@ -156,6 +156,11 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
         case newSession
     }
 
+    private enum Mode: Hashable {
+        case sessions
+        case agents
+    }
+
     @Environment(\.dismiss) private var dismiss
     @Environment(\.ghosttyTerminalChromeStyle) private var chromeStyle
 
@@ -172,13 +177,18 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
     let newSessionContent: () -> NewSessionContent
     let onRefresh: () -> Void
     let discoveries: [SavedServer.ID: ServerSessionDiscovery]
+    @ObservedObject var herdrAgents: HerdrAgentDirectory
+    /// Opens a Herdr session at an agent's pane: the session, the pane and the server boot its id is from.
+    let onOpenHerdrAgent: (SavedWorkspace.ID, String, String) -> Void
 
     @State private var path: [Route] = []
     @State private var showsAllRecentSessions = false
+    @State private var mode = Mode.sessions
+    @State private var agentFilter = SessionAgentsFilter.all
 
     var body: some View {
         NavigationStack(path: $path) {
-            sessionList
+            sheetContent
                 .navigationDestination(for: Route.self) { route in
                     switch route {
                     case .chooseServer:
@@ -215,6 +225,62 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
         .presentationContentInteraction(.resizes)
         .presentationDragIndicator(.visible)
         .accessibilityIdentifier("terminal.sessions.sheet")
+    }
+
+    /// Agents are listed only for Herdr sessions, so the switch to them shows while one is open.
+    private var showsAgentsSwitch: Bool {
+        projection.activeSessions.contains { $0.backend == .herdr }
+    }
+
+    private var sheetContent: some View {
+        VStack(spacing: 0) {
+            if showsAgentsSwitch {
+                Picker("Show", selection: $mode) {
+                    Text("Sessions").tag(Mode.sessions)
+                    Text("Agents").tag(Mode.agents)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.horizontal, 16)
+                .padding(.top, 4)
+                .padding(.bottom, 4)
+                .accessibilityIdentifier("terminal.sessions.mode")
+            }
+
+            if showsAgentsSwitch, mode == .agents {
+                SessionAgentsList(
+                    projection: SessionAgentsProjection(
+                        activeSessions: projection.activeSessions,
+                        agents: herdrAgents.sessions
+                    ),
+                    filter: $agentFilter,
+                    onOpen: openAgent
+                )
+            } else {
+                sessionList
+            }
+        }
+        .navigationTitle("Sessions")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button {
+                    Haptic.tap()
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .accessibilityLabel("Close Sessions")
+                .accessibilityIdentifier("terminal.sessions.close")
+            }
+        }
+    }
+
+    private func openAgent(_ session: SessionAgentsProjection.Session, _ agent: HerdrSessionAgents.Agent) {
+        Haptic.selection()
+        onOpenHerdrAgent(session.id, agent.paneID, session.bootID)
+        dismiss()
     }
 
     private var sessionList: some View {
@@ -290,21 +356,6 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
             .padding(.top, TerminalSelectionSheetLayout.contentToActionsSpacing)
             .padding(.bottom, TerminalSelectionSheetLayout.actionsBottomPadding)
         }
-        .navigationTitle("Sessions")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.visible, for: .navigationBar)
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button {
-                    Haptic.tap()
-                    dismiss()
-                } label: {
-                    Image(systemName: "xmark")
-                }
-                .accessibilityLabel("Close Sessions")
-                .accessibilityIdentifier("terminal.sessions.close")
-            }
-        }
     }
 
     private var availableSessionsHeader: some View {
@@ -349,6 +400,7 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
         } label: {
             ActiveSessionSwitcherRow(
                 session: session,
+                agentStatus: herdrAgents.sessions[session.id]?.status,
                 chromeStyle: chromeStyle
             )
         }
@@ -516,7 +568,7 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
     }
 }
 
-private struct SessionSwitcherSectionHeader: View {
+struct SessionSwitcherSectionHeader: View {
     let title: String
 
     var body: some View {
@@ -529,6 +581,8 @@ private struct SessionSwitcherSectionHeader: View {
 
 private struct ActiveSessionSwitcherRow: View {
     let session: ActiveSessionSwitcherItem
+    /// The session's most urgent agent, for a session that reports agents.
+    let agentStatus: TerminalAgentStatus?
     let chromeStyle: GhosttyTerminalChromeStyle
 
     var body: some View {
@@ -536,11 +590,21 @@ private struct ActiveSessionSwitcherRow: View {
             SessionBackendLogo(backend: session.backend, size: 28)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(session.sessionName)
-                    .font(.headline)
-                    .foregroundStyle(TerminalSelectionSheetPalette.primary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                HStack(spacing: 7) {
+                    Text(session.sessionName)
+                        .font(.headline)
+                        .foregroundStyle(TerminalSelectionSheetPalette.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    if let agentStatus {
+                        TerminalAgentDot(
+                            status: agentStatus,
+                            size: 9,
+                            isStale: session.runtimeState != .connected
+                        )
+                    }
+                }
 
                 HStack(spacing: 6) {
                     Text(session.serverName)
@@ -574,8 +638,9 @@ private struct ActiveSessionSwitcherRow: View {
 
     private var accessibilityLabel: String {
         let status = TerminalRuntimeStatusPresentation.projection(for: session.runtimeState).label
+        let agent = agentStatus.map { ", agent \($0.word)" } ?? ""
         let current = session.isSelected ? ", current session" : ""
-        return "\(session.sessionName), \(session.serverName), \(status)\(current)"
+        return "\(session.sessionName), \(session.serverName), \(status)\(agent)\(current)"
     }
 }
 
@@ -872,7 +937,7 @@ private struct NewSessionServerPickerView: View {
     }
 }
 
-private extension View {
+extension View {
     func sessionSwitcherListRow(accessibilityIdentifier: String) -> some View {
         self
             .accessibilityIdentifier(accessibilityIdentifier)

@@ -242,6 +242,81 @@ final class HerdrLiveConnectionTests: XCTestCase {
         throw HerdrLiveError(description: "Herdr reported the tab zoomed \(String(describing: last)), not \(zoomed)")
     }
 
+    // MARK: - Agents
+
+    /// Herdr's agent states reach the sheets as the phone shows them: an agent in another tab working, then
+    /// waiting, in its own word once its labels give one, then done, which it stays until its pane is on
+    /// screen, and the tab shows its state throughout.
+    @MainActor
+    func testAgentsReachTheSheetsAsThePhoneShowsThemOnHerdr093() async throws {
+        try await checkAgentsReachTheSheets(version: "0.9.3")
+    }
+
+    @MainActor
+    func testAgentsReachTheSheetsAsThePhoneShowsThemOnHerdr095() async throws {
+        try await checkAgentsReachTheSheets(version: "0.9.5")
+    }
+
+    @MainActor
+    private func checkAgentsReachTheSheets(version: String) async throws {
+        struct CreatedTab: Decodable {
+            struct Result: Decodable {
+                struct Pane: Decodable {
+                    let paneID: String
+
+                    private enum CodingKeys: String, CodingKey { case paneID = "pane_id" }
+                }
+
+                let rootPane: Pane
+
+                private enum CodingKeys: String, CodingKey { case rootPane = "root_pane" }
+            }
+
+            let result: Result
+        }
+        let session = try await openShownSession(version: version, through: { $0 })
+        let trace = RemuxTransportStartupTrace(flowID: "herdr-live-agents")
+        func herdr(_ arguments: [String]) async throws -> Data {
+            let result = try await session.fixture.herdr(arguments, trace: trace)
+            XCTAssertEqual(result.exitStatus, 0, String(decoding: result.stderr, as: UTF8.self))
+            return result.stdout
+        }
+        let created = try await herdr(["tab", "create", "--label", "build", "--no-focus"])
+        let agent = try JSONDecoder().decode(CreatedTab.self, from: created).result.rootPane.paneID
+        func report(_ state: String) async throws {
+            _ = try await herdr(["pane", "report-agent", agent, "--source", "remux-live", "--agent", "claude", "--state", state])
+        }
+        func state(is expected: TerminalAgentState, _ failure: String) async throws {
+            try await waitUntil(failure, timeout: .seconds(15)) {
+                session.model.sessionAgents?.state(ofPane: agent) == expected
+            }
+        }
+
+        try await report("working")
+        try await state(is: TerminalAgentState(.working), "the agent didn't show working")
+        let tab = try XCTUnwrap(session.model.sessionAgents?.agents.first { $0.paneID == agent }?.tabID)
+        XCTAssertEqual(session.model.sessionAgents?.status(ofTab: tab), .working)
+
+        try await report("blocked")
+        try await state(is: TerminalAgentState(.waiting), "the agent didn't show waiting")
+        _ = try await herdr([
+            "pane", "report-metadata", agent, "--source", "remux-live", "--agent", "claude",
+            "--state-label", "blocked=needs review",
+        ])
+        try await state(is: TerminalAgentState(.waiting, word: "needs review"), "the agent's own word didn't show")
+        XCTAssertEqual(session.model.sessionAgents?.status(ofTab: tab), .waiting)
+
+        try await report("working")
+        try await state(is: TerminalAgentState(.working), "the agent didn't show working again")
+        try await report("idle")
+        try await state(is: TerminalAgentState(.done), "the agent that finished off screen didn't show done")
+        XCTAssertEqual(session.model.sessionAgents?.status(ofTab: tab), .done)
+
+        XCTAssertTrue(session.model.focusPane(agent))
+        try await state(is: TerminalAgentState(.idle), "the agent's pane on screen didn't count as seen")
+        XCTAssertEqual(session.model.sessionAgents?.status(ofTab: tab), .idle)
+    }
+
     // MARK: - Health
 
     /// Herdr's health rule against a real server, with short limits: a quiet connection is pinged after

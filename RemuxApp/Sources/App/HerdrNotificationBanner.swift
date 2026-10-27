@@ -5,7 +5,7 @@ import UIKit
 /// (`client/shell/notifications.rs`): the agent and its state, then where it is, by name.
 struct HerdrNotificationBannerContent: Equatable {
     enum Dot: Equatable {
-        case status(HerdrAgentStatus)
+        case status(TerminalAgentStatus)
         case accent
     }
 
@@ -25,7 +25,7 @@ struct HerdrNotificationBannerContent: Equatable {
         switch notification.kind {
         case .needsAttention:
             title = Self.title(notification.title, replacing: " needs attention", with: " waiting")
-            dot = .status(.blocked)
+            dot = .status(.waiting)
             message = nil
         case .finished:
             title = Self.title(notification.title, replacing: " finished", with: " done")
@@ -57,20 +57,9 @@ struct HerdrNotificationBannerContent: Equatable {
     }
 }
 
-/// Herdr's colours, from its default theme (`app/state.rs` `Palette::catppuccin`): an agent's state as
-/// Herdr's client colours it (`client/shell.rs` `status_color`), and its accent.
+/// Herdr's accent, from its default theme (`app/state.rs` `Palette::catppuccin`).
 enum HerdrPalette {
     static let accent = Color(red: 137 / 255, green: 180 / 255, blue: 250 / 255)
-
-    static func color(of status: HerdrAgentStatus) -> Color {
-        switch status {
-        case .working: Color(red: 249 / 255, green: 226 / 255, blue: 175 / 255)
-        case .blocked: Color(red: 243 / 255, green: 139 / 255, blue: 168 / 255)
-        case .done: Color(red: 148 / 255, green: 226 / 255, blue: 213 / 255)
-        case .idle: Color(red: 166 / 255, green: 227 / 255, blue: 161 / 255)
-        case .unknown: Color(red: 108 / 255, green: 112 / 255, blue: 134 / 255)
-        }
-    }
 }
 
 /// One banner: Herdr's mark, the agent's state dot and title over the place, and "now".
@@ -91,6 +80,8 @@ struct HerdrNotificationBanner: View {
                         Circle()
                             .fill(dotColor)
                             .frame(width: 9, height: 9)
+                            // The banner is dark in either appearance.
+                            .environment(\.colorScheme, .dark)
                         Text(content.title)
                             .font(.system(size: 15, weight: .semibold))
                             .foregroundStyle(.white)
@@ -123,7 +114,7 @@ struct HerdrNotificationBanner: View {
 
     private var dotColor: Color {
         switch content.dot {
-        case .status(let status): HerdrPalette.color(of: status)
+        case .status(let status): status.color
         case .accent: HerdrPalette.accent
         }
     }

@@ -205,6 +205,7 @@ final class HerdrScreenModel {
     private let recoveryTiming: RecoveryTiming
     private let onRuntimeStateChange: (TerminalRuntimeStateUpdate) -> Void
     private let onNotification: (NotificationEvent) -> Void
+    private let onAgentsChange: (HerdrSessionAgents) -> Void
     private let engine: HerdrTerminalEngine
     private let makeRendererFence: RendererFenceFactory
     private var runtime: GhosttyKitRuntime?
@@ -249,6 +250,8 @@ final class HerdrScreenModel {
     /// The frame on screen: the connection and snapshot revision it was drawn against, and its panes.
     private var presentedFrame: (connection: UInt64, bootID: String, projectionRevision: UInt64, paneIDs: Set<String>)?
     private var agents = HerdrAgentPresentation()
+    /// The session's agents as the sheets show them, once a snapshot has arrived.
+    private(set) var sessionAgents: HerdrSessionAgents?
     /// A pane to go to once the session is shown, and the server boot its id belongs to.
     private var pendingReveal: (paneID: String, bootID: String?)?
     /// The pane keys go to and the screen highlights: the newest snapshot's focused pane, as in
@@ -284,6 +287,7 @@ final class HerdrScreenModel {
         openBridge: @escaping BridgeOpener,
         onRuntimeStateChange: @escaping (TerminalRuntimeStateUpdate) -> Void,
         onNotification: @escaping (NotificationEvent) -> Void,
+        onAgentsChange: @escaping (HerdrSessionAgents) -> Void = { _ in },
         connectionTiming: HerdrConnection.Timing = HerdrConnection.Timing(),
         recoveryTiming: RecoveryTiming = RecoveryTiming(),
         engine: HerdrTerminalEngine = HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1),
@@ -296,6 +300,7 @@ final class HerdrScreenModel {
         self.openBridge = openBridge
         self.onRuntimeStateChange = onRuntimeStateChange
         self.onNotification = onNotification
+        self.onAgentsChange = onAgentsChange
         self.connectionTiming = connectionTiming
         self.recoveryTiming = recoveryTiming
         self.engine = engine
@@ -1287,6 +1292,7 @@ final class HerdrScreenModel {
         zoomTabMovedTo(attempt)
         agents.project(snapshot, completions: completions)
         acknowledgeShownAgents()
+        publishAgents()
         if snapshot.focusedPaneID != focusedPaneID {
             focusedPaneID = snapshot.focusedPaneID
             reconcilePresentationActivity()
@@ -1328,7 +1334,17 @@ final class HerdrScreenModel {
               frame.connection == attempt.feed?.connection, let snapshot,
               frame.bootID == snapshot.bootID, frame.projectionRevision == snapshot.revision
         else { return }
-        agents.acknowledge(panes: frame.paneIDs)
+        if agents.acknowledge(panes: frame.paneIDs) { publishAgents() }
+    }
+
+    /// The sheets get the session's agents when what they show of them changes.
+    private func publishAgents() {
+        guard let snapshot else { return }
+        let next = HerdrSessionAgents(snapshot, statuses: agents.statuses)
+        guard next != sessionAgents else { return }
+        sessionAgents = next
+        onAgentsChange(next)
+        didChange()
     }
 
     /// A reconnect reads as one until the new connection is ready.

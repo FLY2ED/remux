@@ -496,6 +496,8 @@ struct GhosttyTerminalViewportPresentationProjection: Equatable {
         let isFocused: Bool
         let currentCommand: String
         let currentPath: String
+        /// The pane's agent, when the backend reports one.
+        var agent: TerminalAgentState?
     }
 
     static let empty = GhosttyTerminalViewportPresentationProjection(
@@ -563,6 +565,8 @@ struct GhosttyWindowSelectionSheetRenderProjection: Equatable, Sendable {
         let paneCount: Int
         let isSelected: Bool
         let focusedPreviewPaneID: UUID?
+        /// The window's most urgent agent, when the backend reports agents.
+        var agentStatus: TerminalAgentStatus?
     }
 
     let windows: [Window]
@@ -576,6 +580,7 @@ struct GhosttyPaneSelectionSheetRenderProjection: Equatable, Sendable {
         let frame: GhosttyTerminalGridRect?
         let currentCommand: String
         let currentPath: String
+        var agent: TerminalAgentState?
     }
 
     let panes: [Pane]
@@ -774,7 +779,8 @@ enum GhosttyTerminalPresentationProjector {
                 totalCount: totalCount,
                 paneCount: topLevel.leafIDs.count,
                 isSelected: topLevel.id == selectedWindowID,
-                focusedPreviewPaneID: topLevel.resolvedFocusedLeafID
+                focusedPreviewPaneID: topLevel.resolvedFocusedLeafID,
+                agentStatus: topLevel.agentStatus
             )
         }
 
@@ -827,7 +833,8 @@ enum GhosttyTerminalPresentationProjector {
                 id: paneID,
                 frame: viewportPanesByID[paneID]?.normalFrame,
                 currentCommand: viewportPanesByID[paneID]?.currentCommand ?? "",
-                currentPath: viewportPanesByID[paneID]?.currentPath ?? ""
+                currentPath: viewportPanesByID[paneID]?.currentPath ?? "",
+                agent: viewportPanesByID[paneID]?.agent
             )
         }
 

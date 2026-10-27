@@ -496,6 +496,8 @@ final class RemuxRootModel: ObservableObject {
 
     /// The notifications of every open Herdr session, shown one at a time over whatever is on screen.
     let herdrNotifications = HerdrNotificationCenter()
+    /// The agents of every open Herdr session.
+    let herdrAgents = HerdrAgentDirectory()
 
     var setupSessionID: UUID? {
         currentSetupID
@@ -1680,11 +1682,15 @@ final class RemuxRootModel: ObservableObject {
     /// goes to a notification's pane on its machine. The banner goes either way.
     func openHerdrNotification(_ banner: HerdrNotificationPolicy.Banner) {
         herdrNotifications.dismiss(banner.id)
-        let workspaceID = banner.origin.workspaceID
+        openHerdrSession(banner.origin.workspaceID, atPane: banner.notification.paneID, bootID: banner.origin.bootID)
+    }
+
+    /// Shows an open Herdr session, at `paneID` when given: the session goes there once it is on screen,
+    /// if the pane is still there on the server boot `bootID` names.
+    func openHerdrSession(_ workspaceID: SavedWorkspace.ID, atPane paneID: String?, bootID: String?) {
         guard let session = RemuxActiveSessionCollection.session(workspaceID, in: activeSessions) else { return }
-        if let paneID = banner.notification.paneID,
-           case .herdr(let model)? = terminalRuntimes[TerminalRuntimeAttemptKey(session: session)] {
-            model.reveal(paneID: paneID, bootID: banner.origin.bootID)
+        if let paneID, case .herdr(let model)? = terminalRuntimes[TerminalRuntimeAttemptKey(session: session)] {
+            model.reveal(paneID: paneID, bootID: bootID)
         }
         showActiveSession(workspaceID)
     }
@@ -2456,6 +2462,11 @@ final class RemuxRootModel: ObservableObject {
                 onRuntimeStateChange: onRuntimeStateChange,
                 onNotification: { [weak self] event in
                     self?.handleHerdrNotification(event, from: key)
+                },
+                onAgentsChange: { [weak self] agents in
+                    // A replaced model's late report isn't the session's.
+                    guard let self, terminalRuntimes[key] != nil else { return }
+                    herdrAgents.update(agents, of: key.workspaceID)
                 }
             ))
         }
@@ -2508,7 +2519,10 @@ final class RemuxRootModel: ObservableObject {
         for (key, runtime) in removed {
             terminalRuntimes[key] = nil
             // As Herdr's client drops a machine's notifications when it lets the machine go.
-            if case .herdr = runtime { herdrNotifications.retire(key.workspaceID) }
+            if case .herdr = runtime {
+                herdrNotifications.retire(key.workspaceID)
+                herdrAgents.update(nil, of: key.workspaceID)
+            }
         }
         for runtime in removed.values {
             // Teardown ordering (surface unregister/free before terminal

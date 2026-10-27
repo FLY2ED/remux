@@ -214,7 +214,11 @@ private struct RemuxWorkspaceShell: View {
                     }
                 },
                 onRefresh: model.refreshSessions,
-                discoveries: model.sessionDiscoveries
+                discoveries: model.sessionDiscoveries,
+                herdrAgents: model.herdrAgents,
+                onOpenHerdrAgent: { workspaceID, paneID, bootID in
+                    model.openHerdrSession(workspaceID, atPane: paneID, bootID: bootID)
+                }
             )
             .remuxSheetPresentationBackground()
             .ghosttyTerminalChromePresentation(
