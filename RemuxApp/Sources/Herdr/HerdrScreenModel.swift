@@ -1548,13 +1548,14 @@ extension HerdrPaneScroll {
         return .remoteHistory
     }
 
-    /// The server's numbers aren't trusted to fit: a history at the top of the range caps the total.
+    /// The server's numbers aren't trusted to fit: a history too long to add the rows to is capped first,
+    /// so the total, the position and the rows stay consistent.
     var scrollState: GhosttySurfaceScrollState {
-        let fromBottom = min(linesFromBottom, maxLinesFromBottom)
-        let (total, overflowed) = maxLinesFromBottom.addingReportingOverflow(rows)
+        let history = min(maxLinesFromBottom, UInt64.max - rows)
+        let fromBottom = min(linesFromBottom, history)
         return GhosttySurfaceScrollState(
-            total: overflowed ? .max : total,
-            offset: maxLinesFromBottom - fromBottom,
+            total: history + rows,
+            offset: history - fromBottom,
             len: rows,
             cellOffset: 0
         )
