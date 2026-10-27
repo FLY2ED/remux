@@ -61,8 +61,9 @@ final class HerdrPipelineTests: XCTestCase {
         try await assertPanesShowHerdrsCells(harness, recording: recording)
     }
 
-    /// A hide sent while a show is being answered wins, and surfaces that arrive while hidden still go
-    /// through the decoder and the engine, so the deltas after them apply.
+    /// A hide sent while a show is being answered wins. Surfaces that arrive after it aren't drawn, so the
+    /// panes keep what they showed, but they still go through the decoder and the presentation: shown
+    /// again, the deltas built on them apply.
     func testAHideDuringAShowWinsAndHiddenSurfacesStillDecode() async throws {
         let recording = "herdr-04-patch-and-delta-A"
         let frames = try HerdrConnectionTests.frames(HerdrConnectionTests.recording(recording))
@@ -79,7 +80,16 @@ final class HerdrPipelineTests: XCTestCase {
         XCTAssertEqual([show.active, hide.active], [true, false])
         await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
         await bridge.serve(HerdrServerScript.surfaceSetReply(id: hide.id, active: false))
-        await bridge.serve(frames[4...].flatMap(HerdrWire.frame))
+        // The full surface, a patch, and a delta on them, all while hidden.
+        await bridge.serve(frames[4...11].flatMap(HerdrWire.frame))
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertNil(harness.model.layout, "a surface that came after the hide was drawn")
+
+        harness.model.setSelected(true)
+        let again = try await harness.nextSurfaceSet(bridge, from: &index)
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: again.id, active: true))
+        // A delta built on the hidden one, and a patch.
+        await bridge.serve(frames[12...].flatMap(HerdrWire.frame))
         await bridge.finishServing()
 
         try await assertPanesShowHerdrsCells(harness, recording: recording)

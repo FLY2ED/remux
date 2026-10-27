@@ -1550,18 +1550,15 @@ final class HerdrScreenModelTests: XCTestCase {
     // MARK: - Zoom
 
     /// With "Zoom multipane windows" on, showing the session zooms the tab on screen on its focused pane,
-    /// behind the show. Herdr says it made the zoom, so leaving the screen undoes it, while Herdr still
-    /// takes commands from the phone: the unzoom, then focus off, then the hide.
+    /// right behind the show. Herdr says it made the zoom, so leaving the screen undoes it, while Herdr
+    /// still takes commands from the phone: the unzoom, then focus off, then the hide.
     func testATabIsZoomedWhenShownAndUnzoomedWhenTheSessionLeaves() async throws {
         let harness = await makeHarness(settings: Self.zooming)
-        let session = try await shownTab(harness)
-        var index = session.next
-        let show = try await harness.writes(session.bridge, from: index - 2, count: 3)
-        guard case .surfaceSet(_, true) = show[0], show[1] == .focus(true), case .paneZoom(let zoomID, "w1:p1", "on") = show[2]
+        let session = try await shownTab(harness, zoomingOnShow: true)
+        let index = session.next
+        let show = try await harness.writes(session.bridge, from: index - 3, count: 3)
+        guard case .surfaceSet(_, true) = show[0], show[1] == .focus(true), case .paneZoom(_, "w1:p1", "on") = show[2]
         else { return XCTFail("the zoom didn't follow the show: \(show)") }
-        index += 1
-        let zoom = (id: zoomID, paneID: "w1:p1")
-        try await zoomTab(harness, session.bridge, answering: zoom.id, changed: true)
 
         harness.model.setSelected(false)
         let leave = try await harness.writes(session.bridge, from: index, count: 3)
@@ -1582,20 +1579,88 @@ final class HerdrScreenModelTests: XCTestCase {
         }
     }
 
+    /// Back on screen after a zoom it made was undone, the session shows the frame from before it left
+    /// until Herdr's zoomed frame: neither the frame showing the unzoom, which Herdr sends before it takes
+    /// the hide, nor Herdr's frame for the show from before the zoom is drawn, and the tab's other pane
+    /// never gets a renderer. Input comes back with the zoomed frame.
+    func testAReturnShowsTheZoomedTabWithoutItsUnzoomedFrames() async throws {
+        let harness = await makeHarness(settings: Self.zooming)
+        let session = try await shownTab(harness, zoomingOnShow: true)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let zoomedPane = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
+
+        harness.model.setSelected(false)
+        let unzoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        let hide = try await harness.nextSurfaceSet(session.bridge, from: &index)
+        await session.bridge.serve(HerdrServerScript.snapshot(revision: 3, panes: Self.tabPanes(["w1:p1", "w1:p2"])))
+        await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 3, lines: ["one two"], panes: Self.twoPanes))
+        await session.bridge.serve(
+            HerdrServerScript.zoomReply(id: unzoom.id, changed: true, zoomed: false, panes: Self.places(2))
+        )
+        await session.bridge.serve(HerdrServerScript.surfaceSetReply(id: hide.id, active: false))
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(drawnPanes(harness), ["w1:p1"], "the frame showing the unzoom was drawn")
+
+        harness.model.setSelected(true)
+        let show = try await harness.nextSurfaceSet(session.bridge, from: &index)
+        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        await session.bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        await session.bridge.serve(HerdrServerScript.snapshot(revision: 4, panes: Self.tabPanes(["w1:p1", "w1:p2"])))
+        await session.bridge.serve(try harness.shownSurface(projection: 4, revision: 4, lines: ["one two"], panes: Self.twoPanes))
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(drawnPanes(harness), ["w1:p1"], "the show's frame from before the zoom was drawn")
+        XCTAssertFalse(harness.model.isInputAvailable)
+
+        await session.bridge.serve(HerdrServerScript.snapshot(revision: 5, zoomed: true, panes: Self.tabPanes(["w1:p1", "w1:p2"])))
+        await session.bridge.serve(try harness.shownSurface(projection: 5, revision: 5, lines: ["one"], panes: [Self.zoomedPane]))
+        await session.bridge.serve(HerdrServerScript.zoomReply(id: zoom.id, changed: true, zoomed: true, panes: Self.places(2)))
+        try await harness.waitUntil("input didn't come back with the zoomed frame") { harness.model.isInputAvailable }
+        XCTAssertEqual(drawnPanes(harness), ["w1:p1"])
+        XCTAssertEqual(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID, zoomedPane)
+        XCTAssertNil(harness.model.paneSurface("w1:p2"), "the undrawn pane got a renderer")
+        // Leaving undoes the zoom without waiting, so the test's stop doesn't wait for Herdr's answer.
+        harness.model.setSelected(false)
+        _ = try await nextWrite(session.bridge, from: &index, paneZoom)
+    }
+
+    /// Herdr's answer to the show's zoom can come before the zoomed frame; the show then completes on that
+    /// frame, not on the one from before the zoom.
+    func testAZoomAnsweredBeforeItsFrameCompletesTheShowOnThatFrame() async throws {
+        let harness = await makeHarness(settings: Self.zooming)
+        let bridge = try await harness.bridge()
+        await bridge.serve(
+            try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1, panes: Self.tabPanes(["w1:p1", "w1:p2"]))
+        )
+        harness.setScreenSize()
+        harness.model.setSelected(true)
+        var index = 0
+        let show = try await harness.nextSurfaceSet(bridge, from: &index)
+        let zoom = try await nextWrite(bridge, from: &index, paneZoom)
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        await bridge.serve(try harness.shownSurface(projection: 1, revision: 1, lines: ["one two"], panes: Self.twoPanes))
+        await bridge.serve(HerdrServerScript.zoomReply(id: zoom.id, changed: true, zoomed: true, panes: Self.places(2)))
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertNil(harness.model.layout, "the show's frame from before the zoom was drawn")
+        XCTAssertNotEqual(harness.model.stateTraceLabel, "shown")
+
+        await bridge.serve(HerdrServerScript.snapshot(revision: 2, zoomed: true, panes: Self.tabPanes(["w1:p1", "w1:p2"])))
+        await bridge.serve(try harness.shownSurface(projection: 2, revision: 2, lines: ["one"], panes: [Self.zoomedPane]))
+        try await harness.waitUntil("the zoomed frame didn't complete the show") { harness.model.stateTraceLabel == "shown" }
+        XCTAssertEqual(drawnPanes(harness), ["w1:p1"])
+        XCTAssertNil(harness.model.paneSurface("w1:p2"))
+        harness.model.setSelected(false)
+        _ = try await nextWrite(bridge, from: &index, paneZoom)
+    }
+
     /// A tab zoomed already, by another client, stays zoomed when the session leaves: Herdr answers the
     /// show's zoom as no change, so the zoom isn't Remux's.
     func testAZoomRemuxDidNotMakeStaysWhenTheSessionLeaves() async throws {
         let harness = await makeHarness(settings: Self.zooming)
-        let session = try await shownTab(harness, zoomed: true)
-        var index = session.next
-        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
-        await session.bridge.serve(
-            HerdrServerScript.zoomReply(id: zoom.id, changed: false, zoomed: true, panes: Self.zoomedPlaces)
-        )
-        try await waitForMap(harness)
+        let session = try await shownTab(harness, zoomed: true, zoomingOnShow: true)
 
         harness.model.setSelected(false)
-        let leave = try await harness.writes(session.bridge, from: index, count: 2)
+        let leave = try await harness.writes(session.bridge, from: session.next, count: 2)
         XCTAssertEqual(leave[0], .focus(false), "\(leave)")
         guard case .surfaceSet(_, false) = leave[1] else { return XCTFail("expected the hide, got \(leave)") }
     }
@@ -1604,10 +1669,8 @@ final class HerdrScreenModelTests: XCTestCase {
     /// unzoom while the command runs, and one that waited would hold the hide back.
     func testLeavingWhileACommandIsInFlightHidesAtOnceAndLeavesTheZoom() async throws {
         let harness = await makeHarness(settings: Self.zooming)
-        let session = try await shownTab(harness)
+        let session = try await shownTab(harness, zoomingOnShow: true)
         var index = session.next
-        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
-        try await zoomTab(harness, session.bridge, answering: zoom.id, changed: true)
         let adapter = harness.model.terminalScreenAdapter
         let other = try XCTUnwrap(adapter.paneSelectionSheetRenderProjection(topLevelID: try topLevel(harness)).panes.last)
         XCTAssertEqual(adapter.focusPane(other.id), .queued)
@@ -1626,17 +1689,14 @@ final class HerdrScreenModelTests: XCTestCase {
     /// A zoom that ended without Remux, as when someone unzooms the tab or splits a pane, isn't undone.
     func testAZoomThatEndedElsewhereIsNotUndone() async throws {
         let harness = await makeHarness(settings: Self.zooming)
-        let session = try await shownTab(harness)
-        var index = session.next
-        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
-        try await zoomTab(harness, session.bridge, answering: zoom.id, changed: true)
+        let session = try await shownTab(harness, zoomingOnShow: true)
 
         await session.bridge.serve(HerdrServerScript.snapshot(revision: 3, panes: Self.tabPanes(["w1:p1", "w1:p2"])))
         await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 3, lines: ["one two"], panes: Self.twoPanes))
         try await harness.waitUntil("the tab didn't read as unzoomed") { (try? isZoomed(harness)) == false }
 
         harness.model.setSelected(false)
-        let leave = try await harness.writes(session.bridge, from: index, count: 1)
+        let leave = try await harness.writes(session.bridge, from: session.next, count: 1)
         XCTAssertEqual(leave[0], .focus(false), "the zoom was undone")
     }
 
@@ -1644,10 +1704,8 @@ final class HerdrScreenModelTests: XCTestCase {
     /// unzoom goes on the pane focused then, since an unzoom focuses its target.
     func testTheUnzoomGoesOnThePaneFocusedWhenTheSessionLeaves() async throws {
         let harness = await makeHarness(settings: Self.zooming)
-        let session = try await shownTab(harness)
+        let session = try await shownTab(harness, zoomingOnShow: true)
         var index = session.next
-        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
-        try await zoomTab(harness, session.bridge, answering: zoom.id, changed: true)
         let adapter = harness.model.terminalScreenAdapter
         let sheet = adapter.paneSelectionSheetRenderProjection(topLevelID: try topLevel(harness))
         XCTAssertEqual(adapter.focusPane(try XCTUnwrap(sheet.panes.last).id), .queued)
@@ -1681,53 +1739,58 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(harness.model.terminalScreenAdapter.setFocusedPaneZoomed(true), .queued)
         let on = try await nextWrite(session.bridge, from: &index, paneZoom)
         XCTAssertEqual([on.paneID, on.mode], ["w1:p1", "on"])
-        try await zoomTab(harness, session.bridge, answering: on.id, changed: true)
+        try await zoomTab(harness, session.bridge, answering: on.id)
 
         harness.model.setSelected(false)
         let undo = try await nextWrite(session.bridge, from: &index, paneZoom)
         XCTAssertEqual([undo.paneID, undo.mode], ["w1:p1", "off"])
     }
 
-    /// The zoom button unzooms the tab the setting zoomed; leaving then doesn't take it off again.
-    func testAZoomTheUserTookOffIsNotTakenOffAgain() async throws {
+    /// A tab the user unzooms with the zoom button stays as the user left it, as tmux keeps a user's
+    /// choice for a window: leaving doesn't take the zoom off again, and coming back doesn't zoom it.
+    func testATabTheUserUnzoomedStaysUnzoomed() async throws {
         let harness = await makeHarness(settings: Self.zooming)
-        let session = try await shownTab(harness)
+        let session = try await shownTab(harness, zoomingOnShow: true)
         var index = session.next
-        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
-        try await zoomTab(harness, session.bridge, answering: zoom.id, changed: true)
 
         XCTAssertEqual(harness.model.terminalScreenAdapter.setFocusedPaneZoomed(false), .queued)
         let off = try await nextWrite(session.bridge, from: &index, paneZoom)
         XCTAssertEqual([off.paneID, off.mode], ["w1:p1", "off"])
         await session.bridge.serve(HerdrServerScript.snapshot(revision: 3, panes: Self.tabPanes(["w1:p1", "w1:p2"])))
         await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 3, lines: ["one two"], panes: Self.twoPanes))
-        await session.bridge.serve(
-            HerdrServerScript.zoomReply(id: off.id, changed: true, zoomed: false, panes: Self.zoomedPlaces)
-        )
+        await session.bridge.serve(HerdrServerScript.zoomReply(id: off.id, changed: true, zoomed: false, panes: Self.places(2)))
         try await harness.waitUntil("the tab didn't read as unzoomed") { (try? isZoomed(harness)) == false }
         try await Task.sleep(for: .milliseconds(100))
 
         harness.model.setSelected(false)
         let leave = try await harness.writes(session.bridge, from: index, count: 1)
         XCTAssertEqual(leave[0], .focus(false), "the zoom the user took off was taken off again")
+        _ = try await harness.nextSurfaceSet(session.bridge, from: &index)
+
+        harness.model.setSelected(true)
+        let show = try await harness.nextSurfaceSet(session.bridge, from: &index)
+        let focus = try await harness.writes(session.bridge, from: index, count: 1)
+        XCTAssertEqual(focus, [.focus(true)])
+        await session.bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        await session.bridge.serve(HerdrServerScript.snapshot(revision: 4, panes: Self.tabPanes(["w1:p1", "w1:p2"])))
+        await session.bridge.serve(try harness.shownSurface(projection: 4, revision: 4, lines: ["one two"], panes: Self.twoPanes))
+        try await harness.waitUntil("the session wasn't shown again") { harness.model.stateTraceLabel == "shown" }
+        try await Task.sleep(for: .milliseconds(100))
+        let written = await session.bridge.writtenCount
+        XCTAssertEqual(written, index + 1, "the tab the user unzoomed was zoomed again")
     }
 
     /// While the tab is zoomed, the screen draws the zoomed pane alone, and the pane sheet maps every
     /// pane of the tab from Herdr's answer to the zoom, the focused one selected, with the zoom on.
     func testThePaneSheetMapsEveryPaneOfAZoomedTab() async throws {
         let harness = await makeHarness(settings: Self.zooming)
-        let session = try await shownTab(harness, panes: ["w1:p1", "w1:p2", "w1:p3"])
+        let session = try await shownTab(harness, panes: ["w1:p1", "w1:p2", "w1:p3"], zoomingOnShow: true)
         var index = session.next
-        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
-        let places: [(id: String, x: UInt16, y: UInt16, width: UInt16, height: UInt16)] = [
-            ("w1:p1", 0, 0, 40, 24), ("w1:p2", 40, 0, 40, 12), ("w1:p3", 40, 12, 40, 12),
-        ]
-        try await zoomTab(harness, session.bridge, answering: zoom.id, changed: true, panes: ["w1:p1", "w1:p2", "w1:p3"], places: places)
 
         let adapter = harness.model.terminalScreenAdapter
         let sheet = adapter.paneSelectionSheetRenderProjection(topLevelID: try topLevel(harness))
         XCTAssertTrue(sheet.isServerZoomed)
-        XCTAssertEqual(sheet.panes.map(\.frame), places.map {
+        XCTAssertEqual(sheet.panes.map(\.frame), Self.places(3).map {
             Optional(GhosttyTerminalGridRect(x: UInt32($0.x), y: UInt32($0.y), columns: UInt32($0.width), rows: UInt32($0.height)))
         })
         XCTAssertEqual(sheet.selectedPaneID, sheet.panes.first?.id)
@@ -1752,10 +1815,8 @@ final class HerdrScreenModelTests: XCTestCase {
     /// Herdr has answered, so the unzoom isn't lost with it.
     func testEndingTheSessionUndoesTheZoomBeforeClosing() async throws {
         let harness = await makeHarness(settings: Self.zooming)
-        let session = try await shownTab(harness)
+        let session = try await shownTab(harness, zoomingOnShow: true)
         var index = session.next
-        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
-        try await zoomTab(harness, session.bridge, answering: zoom.id, changed: true)
 
         let stopping = Task { await harness.model.stop() }
         let unzoom = try await nextWrite(session.bridge, from: &index, paneZoom)
@@ -1764,7 +1825,7 @@ final class HerdrScreenModelTests: XCTestCase {
         let closedEarly = await session.bridge.isClosed
         XCTAssertFalse(closedEarly, "the connection closed before Herdr answered the unzoom")
         await session.bridge.serve(
-            HerdrServerScript.zoomReply(id: unzoom.id, changed: true, zoomed: false, panes: Self.zoomedPlaces)
+            HerdrServerScript.zoomReply(id: unzoom.id, changed: true, zoomed: false, panes: Self.places(2))
         )
         await stopping.value
         let closed = await session.bridge.isClosed
@@ -1778,10 +1839,7 @@ final class HerdrScreenModelTests: XCTestCase {
             var recovery = HerdrScreenModel.RecoveryTiming()
             recovery.firstRetry = .milliseconds(50)
             let harness = await makeHarness(settings: Self.zooming, recovery: recovery)
-            let session = try await shownTab(harness)
-            var index = session.next
-            let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
-            try await zoomTab(harness, session.bridge, answering: zoom.id, changed: true)
+            let session = try await shownTab(harness, zoomingOnShow: true)
             await session.bridge.finishServing()
 
             let second = try await harness.bridge(1)
@@ -1792,10 +1850,8 @@ final class HerdrScreenModelTests: XCTestCase {
             let show = try await harness.nextSurfaceSet(second, from: &next)
             let again = try await nextWrite(second, from: &next, paneZoom)
             XCTAssertEqual([again.paneID, again.mode], ["w1:p1", "on"])
-            // Herdr's answers come before the frame that completes the show, so they are read once the
-            // show completes.
             await second.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
-            await second.serve(HerdrServerScript.zoomReply(id: again.id, changed: false, zoomed: true, panes: Self.zoomedPlaces))
+            await second.serve(HerdrServerScript.zoomReply(id: again.id, changed: false, zoomed: true, panes: Self.places(2)))
             await second.serve(try harness.shownSurface(
                 boot: boot, projection: 1, revision: 1, lines: ["one"], panes: [Self.zoomedPane]
             ))
@@ -1829,18 +1885,24 @@ final class HerdrScreenModelTests: XCTestCase {
     /// `w1:p1` drawn alone across the tab, as a zoomed tab draws its focused pane.
     private static let zoomedPane = HerdrServerScript.Pane(id: "w1:p1", x: 0, width: 7, height: 1, focused: true)
 
-    /// Where Herdr's zoom answer puts `w1:p1` and `w1:p2`: side by side, touching, as its layout does.
-    private static let zoomedPlaces: [(id: String, x: UInt16, y: UInt16, width: UInt16, height: UInt16)] = [
-        ("w1:p1", 0, 0, 40, 24), ("w1:p2", 40, 0, 40, 24),
-    ]
+    /// Where Herdr's zoom answer puts `count` panes `w1:p1`...: the first on the left half, the others
+    /// stacked on the right, touching, as its layout gives them.
+    private static func places(_ count: Int) -> [(id: String, x: UInt16, y: UInt16, width: UInt16, height: UInt16)] {
+        let rest = UInt16(max(count - 1, 1))
+        return [("w1:p1", 0, 0, 40, 24)]
+            + (1..<count).map { ("w1:p\($0 + 1)", 40, UInt16($0 - 1) * 24 / rest, 40, 24 / rest) }
+    }
 
     /// A session on tab `t1` with `panes`, the first focused, shown and taking input, its snapshot saying
-    /// whether the tab is `zoomed`, and its frame drawing every pane, or only the first while zoomed.
-    /// Returns its bridge and the index of the first write after the show's.
+    /// whether the tab is `zoomed`, and its frame drawing every pane, or only the first while zoomed. With
+    /// `zoomingOnShow`, Herdr zooms the tab behind the show as it does: the zoomed snapshot and frame, then
+    /// its answer, which changed the zoom unless the tab was zoomed already. Returns its bridge and the
+    /// index of the first write after the show's.
     private func shownTab(
         _ harness: HerdrModelHarness,
         panes: [String] = ["w1:p1", "w1:p2"],
-        zoomed: Bool = false
+        zoomed: Bool = false,
+        zoomingOnShow: Bool = false
     ) async throws -> (bridge: FakeBridgeTransport, next: Int) {
         let bridge = try await harness.bridge()
         await bridge.serve(
@@ -1851,34 +1913,39 @@ final class HerdrScreenModelTests: XCTestCase {
         harness.model.setSelected(true)
         var index = 0
         let show = try await harness.nextSurfaceSet(bridge, from: &index)
+        index += 1
         await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
-        let drawn = zoomed || panes.count == 1
+        var drawn = zoomed || panes.count == 1
             ? [Self.zoomedPane]
             : panes.enumerated().map { HerdrServerScript.Pane(id: $1, x: UInt16($0 * 4), width: 3, height: 1, focused: $0 == 0) }
-        await bridge.serve(try harness.shownSurface(projection: 1, revision: 1, lines: ["one two"], panes: drawn))
+        if zoomingOnShow {
+            let zoom = try await nextWrite(bridge, from: &index, paneZoom)
+            drawn = [Self.zoomedPane]
+            await bridge.serve(HerdrServerScript.snapshot(revision: 2, zoomed: true, panes: Self.tabPanes(panes)))
+            await bridge.serve(try harness.shownSurface(projection: 2, revision: 1, lines: ["one"], panes: drawn))
+            await bridge.serve(
+                HerdrServerScript.zoomReply(id: zoom.id, changed: !zoomed, zoomed: true, panes: Self.places(panes.count))
+            )
+        } else {
+            await bridge.serve(try harness.shownSurface(projection: 1, revision: 1, lines: ["one two"], panes: drawn))
+        }
         let drawnIDs = drawn.map(\.id)
         try await harness.waitUntil("the panes' renderers weren't created") {
             drawnIDs.allSatisfy { harness.model.paneSurface($0) != nil }
         }
         showInWindow(harness, panes: drawnIDs)
         try await harness.waitUntil("input wasn't offered") { harness.model.isInputAvailable }
-        return (bridge, index + 1)
+        if zoomingOnShow { try await waitForMap(harness, panes: panes.count) }
+        return (bridge, index)
     }
 
     /// Herdr zooms the tab on `w1:p1`, as it does: the snapshot and the frame drawing `w1:p1` alone, then
     /// its answer to the zoom `id`, which the model has taken once the pane sheet maps every pane.
-    private func zoomTab(
-        _ harness: HerdrModelHarness,
-        _ bridge: FakeBridgeTransport,
-        answering id: String,
-        changed: Bool,
-        panes: [String] = ["w1:p1", "w1:p2"],
-        places: [(id: String, x: UInt16, y: UInt16, width: UInt16, height: UInt16)] = zoomedPlaces
-    ) async throws {
-        await bridge.serve(HerdrServerScript.snapshot(revision: 2, zoomed: true, panes: Self.tabPanes(panes)))
+    private func zoomTab(_ harness: HerdrModelHarness, _ bridge: FakeBridgeTransport, answering id: String) async throws {
+        await bridge.serve(HerdrServerScript.snapshot(revision: 2, zoomed: true, panes: Self.tabPanes(["w1:p1", "w1:p2"])))
         await bridge.serve(try harness.shownSurface(projection: 2, revision: 2, lines: ["one"], panes: [Self.zoomedPane]))
-        await bridge.serve(HerdrServerScript.zoomReply(id: id, changed: changed, zoomed: true, panes: places))
-        try await waitForMap(harness, panes: panes.count)
+        await bridge.serve(HerdrServerScript.zoomReply(id: id, changed: true, zoomed: true, panes: Self.places(2)))
+        try await waitForMap(harness)
     }
 
     /// Waits until the pane sheet maps `panes` panes of the zoomed tab.
@@ -1888,6 +1955,11 @@ final class HerdrScreenModelTests: XCTestCase {
             let sheet = harness.model.terminalScreenAdapter.paneSelectionSheetRenderProjection(topLevelID: topLevel)
             return sheet.isServerZoomed && sheet.panes.count == panes && sheet.panes.allSatisfy { $0.frame != nil }
         }
+    }
+
+    /// The panes the screen draws, by the model's newest drawn layout.
+    private func drawnPanes(_ harness: HerdrModelHarness) -> [String] {
+        harness.model.layout?.panes.filter(\.hasTextArea).map(\.paneID) ?? []
     }
 
     private func topLevel(_ harness: HerdrModelHarness) throws -> UUID {

@@ -64,16 +64,11 @@ struct HerdrPaneZoomResult: Equatable, Sendable {
 /// Remux zooms only the tab on screen, and the tab on screen changes only when Remux asks or when the
 /// tab goes, so it records one tab.
 struct HerdrOwnedZoom: Equatable {
-    private struct Tab: Equatable {
-        let bootID: String
-        let tabID: String
-    }
-
-    private var tab: Tab?
+    private var tab: HerdrTabKey?
 
     mutating func record(_ answer: HerdrPaneZoomResult, bootID: String) {
         guard answer.zoomChanged else { return }
-        let answered = Tab(bootID: bootID, tabID: answer.layout.tabID)
+        let answered = HerdrTabKey(bootID: bootID, tabID: answer.layout.tabID)
         if answer.zoomed {
             tab = answered
         } else if tab == answered {
@@ -94,6 +89,12 @@ struct HerdrOwnedZoom: Equatable {
         guard let tab, tab.bootID == snapshot.bootID, tab.tabID == snapshot.focusedTabID else { return nil }
         return snapshot.focusedPaneID
     }
+}
+
+/// A tab of a Herdr server; tab ids belong to one server boot.
+struct HerdrTabKey: Hashable {
+    let bootID: String
+    let tabID: String
 }
 
 /// Where each pane of a tab sits, from the newest full layout Herdr reported for it: a frame that drew

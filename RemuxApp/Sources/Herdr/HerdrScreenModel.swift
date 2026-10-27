@@ -219,6 +219,8 @@ final class HerdrScreenModel {
     /// Herdr's client. A pane can be focused before its first frame arrives.
     private(set) var focusedPaneID: String?
     private var ownedZoom = HerdrOwnedZoom()
+    /// Tabs the user unzoomed with the pane sheet's button, which the setting leaves alone after.
+    private var tabsUnzoomedByUser: Set<HerdrTabKey> = []
     private var tabMap: HerdrTabMap?
     private var terminals: [String: HerdrRetainedTerminal] = [:]
     private var surfaces: [String: HerdrPaneSurface] = [:]
@@ -641,27 +643,21 @@ final class HerdrScreenModel {
 
     // MARK: - Zoom
 
-    /// The pane sheet's zoom button: Herdr zooms or unzooms the focused pane's tab. Returns false when the
-    /// session can't take it.
+    /// The pane sheet's zoom button: Herdr zooms or unzooms the focused pane's tab, after the commands
+    /// already asked for. Every `pane.zoom` focuses its target first, so this is the focused pane. A tab
+    /// the user unzooms isn't zoomed again as the session comes back on screen, as tmux keeps a user's
+    /// choice for a window. Returns false when the session can't take it.
     func setFocusedPaneZoomed(_ zoomed: Bool) -> Bool {
         guard let attempt, isCurrent(attempt), let connection = attempt.connection, attempt.isActivated,
-              let paneID = focusedPaneID
+              let paneID = focusedPaneID, let snapshot, let tabID = snapshot.focusedTabID
         else { return false }
-        requestZoom(paneID, zoomed: zoomed, connection: connection, reportingFailure: true)
-        return true
-    }
-
-    /// Asks Herdr to zoom or unzoom `paneID`'s tab, after the commands already asked for. Every
-    /// `pane.zoom` focuses its target first, so this is the focused pane. A failure is shown only for the
-    /// user's own zoom.
-    private func requestZoom(
-        _ paneID: String,
-        zoomed: Bool,
-        connection: HerdrConnection,
-        reportingFailure: Bool
-    ) {
-        guard let bootID = snapshot?.bootID else { return }
-        Task { [weak self] in
+        let tab = HerdrTabKey(bootID: snapshot.bootID, tabID: tabID)
+        if zoomed {
+            tabsUnzoomedByUser.remove(tab)
+        } else {
+            tabsUnzoomedByUser.insert(tab)
+        }
+        Task { [weak self, bootID = snapshot.bootID] in
             let answer: Result<Data, Error>
             do {
                 answer = .success(try await connection.command(
@@ -671,17 +667,44 @@ final class HerdrScreenModel {
             } catch {
                 answer = .failure(error)
             }
-            self?.zoomAnswered(answer, bootID: bootID, reportingFailure: reportingFailure)
+            self?.zoomAnswered(answer, bootID: bootID, reportingFailure: true)
         }
+        return true
+    }
+
+    /// The zoom behind a show goes out right after it, so Herdr takes it from a client on screen, and only
+    /// if no command is in flight, so it never holds the show back. The show completes once Herdr has
+    /// answered it, on a frame showing the zoom; one that didn't go doesn't hold the show.
+    private func sendZoom(
+        _ paneID: String,
+        behindShow request: UInt64,
+        on connection: HerdrConnection,
+        feed: HerdrEngineFeed
+    ) async {
+        guard let bootID = snapshot?.bootID else {
+            await feed.settleZoom(request: request, tab: nil)
+            return
+        }
+        let sent = await connection.sendCommandIfIdle(
+            Self.paneZoomMethod,
+            params: Self.zoomParams(paneID, zoomed: true)
+        ) { [weak self] answer in
+            let result = try? HerdrPaneZoomResult(reply: answer.get())
+            Task { await feed.settleZoom(request: request, tab: result.map { ($0.layout.tabID, $0.zoomed) }) }
+            Task { @MainActor [weak self] in self?.zoomAnswered(answer, bootID: bootID, reportingFailure: false) }
+        }
+        if !sent { await feed.settleZoom(request: request, tab: nil) }
     }
 
     /// The setting zooms the tab on screen as the session is shown: the focused pane, when the tab has
-    /// more than one pane. It is asked even when the tab is zoomed already: Herdr's answer says whether
-    /// Remux changed anything, and where the tab's panes sit for the pane sheet's map.
+    /// more than one pane and the user hasn't unzoomed it. It is asked even when the tab is zoomed
+    /// already: Herdr's answer says whether Remux changed anything, and where the tab's panes sit for the
+    /// pane sheet's map.
     private var paneToZoomOnShow: String? {
         guard currentTerminalSettings.zoomMultipaneWindowsByDefault, let snapshot,
               let tabID = snapshot.focusedTabID, let paneID = snapshot.focusedPaneID,
-              snapshot.panes.count(where: { $0.tabID == tabID }) > 1
+              snapshot.panes.count(where: { $0.tabID == tabID }) > 1,
+              !tabsUnzoomedByUser.contains(HerdrTabKey(bootID: snapshot.bootID, tabID: tabID))
         else { return nil }
         return paneID
     }
@@ -923,7 +946,7 @@ final class HerdrScreenModel {
     ) async {
         switch operation {
         case .show(let geometry, let request, let zoom):
-            await feed.beginActivation(request: request, columns: geometry.cols, rows: geometry.rows)
+            await feed.beginActivation(request: request, columns: geometry.cols, rows: geometry.rows, zoomed: zoom != nil)
             await connection.sendShow(geometry) { [weak self] result in
                 switch result {
                 case .success(let floor):
@@ -932,8 +955,7 @@ final class HerdrScreenModel {
                     Task { @MainActor [weak self] in self?.showFailed(attemptID, request: request, error: error) }
                 }
             }
-            // Behind the show, so Herdr takes it from a client on screen.
-            if let zoom { requestZoom(zoom, zoomed: true, connection: connection, reportingFailure: false) }
+            if let zoom { await sendZoom(zoom, behindShow: request, on: connection, feed: feed) }
         case .hide:
             // The zoom Remux made comes off first, while Herdr still takes commands from this client. It
             // goes only if no command is in flight: one that waited for the lane would hold the hide back,

@@ -62,7 +62,8 @@ enum HerdrEngineUpdate: Sendable {
     /// ends that connection.
     case failed(HerdrConnectionError, connection: UInt64)
     /// The show `request` on `connection` completed: a frame that arrived after it, at or after the floor
-    /// Herdr acknowledged and at the requested size, is painted. Follows that frame's layout.
+    /// Herdr acknowledged, at the requested size and showing the zoom the show carried, is painted.
+    /// Follows that frame's layout.
     case activated(request: UInt64, connection: UInt64)
 }
 
@@ -80,8 +81,18 @@ struct HerdrEngineFeed: Sendable {
         await engine.receive(output, connection: connection)
     }
 
-    func beginActivation(request: UInt64, columns: UInt16, rows: UInt16) async {
-        await engine.beginActivation(request: request, columns: columns, rows: rows, connection: connection)
+    func beginActivation(request: UInt64, columns: UInt16, rows: UInt16, zoomed: Bool = false) async {
+        await engine.beginActivation(
+            request: request,
+            columns: columns,
+            rows: rows,
+            zoomed: zoomed,
+            connection: connection
+        )
+    }
+
+    func settleZoom(request: UInt64, tab: (tabID: String, zoomed: Bool)?) async {
+        await engine.settleZoom(request: request, tab: tab, connection: connection)
     }
 
     func acknowledgeActivation(request: UInt64, floor: UInt64) async {
@@ -126,9 +137,15 @@ actor HerdrTerminalEngine {
         let bootID: String
         let projectionRevision: UInt64
         let surfaceRevision: UInt64
+
+        init(of surface: HerdrPaneSurfaceFrame) {
+            bootID = surface.bootID
+            projectionRevision = surface.projectionRevision
+            surfaceRevision = surface.surfaceRevision
+        }
     }
 
-    /// A show in progress, as Herdr's client tracks one (`activation/model.rs`): only frames painted
+    /// A show in progress, as Herdr's client tracks one (`activation/model.rs`): only frames that arrive
     /// after it began count, so the last frame from before a hide never completes it.
     private struct Activation {
         let request: UInt64
@@ -136,8 +153,30 @@ actor HerdrTerminalEngine {
         var rows: UInt16
         /// The projection revision Herdr's acknowledgement returned, once it arrives.
         var floor: UInt64?
-        /// The newest frame painted since the activation began, or since the size last changed.
-        var painted: (projectionRevision: UInt64, columns: UInt16, rows: UInt16)?
+        /// The zoom the show carries, which the completing frame must show.
+        var zoom: ShowZoom
+        /// The newest frame since the activation began, or since the size last changed.
+        var received: (projectionRevision: UInt64, columns: UInt16, rows: UInt16)?
+    }
+
+    /// A zoom sent behind a show. Herdr can draw the show's frame before it applies the zoom, and its
+    /// answer can come before or after the zoomed frame, so the show completes once Herdr has answered,
+    /// on a frame whose snapshot shows the tab as the answer left it.
+    enum ShowZoom: Sendable {
+        case none
+        case pending
+        case answered(tabID: String, zoomed: Bool)
+
+        func isShown(in snapshot: HerdrSnapshot) -> Bool {
+            switch self {
+            case .none:
+                true
+            case .pending:
+                false
+            case .answered(let tabID, let zoomed):
+                snapshot.tabs.first { $0.tabID == tabID }.map { $0.zoomed == zoomed } ?? true
+            }
+        }
     }
 
     /// Makes a pane's producer for a terminal of the given columns and rows.
@@ -163,6 +202,11 @@ actor HerdrTerminalEngine {
     private var bootID: String?
     private var paintedSurface: PaintedSurface?
     private var activation: Activation?
+    /// Frames are drawn as they come, except after a hide and during a show carrying Remux's zoom. Frames
+    /// Herdr sends as a hide goes out show what leaving did, such as undoing the zoom, so the frame from
+    /// before the hide stays until the next show; and a show's frame from before its zoom would flash the
+    /// unzoomed tab, so that show draws only the frame that completes it.
+    private var holdsFrames = false
     private var layout: HerdrPaneLayout?
     private var paneScrolls: [String: HerdrPaneScroll] = [:]
     private var cellWidthPx: UInt32
@@ -192,24 +236,50 @@ actor HerdrTerminalEngine {
         presentation = HerdrPresentation()
         paintedSurface = nil
         activation = nil
+        holdsFrames = false
         failedPaneIDs.removeAll()
         return HerdrEngineFeed(engine: self, connection: connection)
     }
 
     // MARK: - Showing
 
-    /// A show for `columns` x `rows` is about to go out. Herdr sends no frames to a hidden session, so
-    /// every frame painted from here on answers this show or a later one.
-    fileprivate func beginActivation(request: UInt64, columns: UInt16, rows: UInt16, connection: UInt64) {
+    /// A show for `columns` x `rows` is about to go out, with Remux's zoom behind it when `zoomed`.
+    /// Herdr sends no frames to a hidden session, so every frame from here on answers this show or a
+    /// later one.
+    fileprivate func beginActivation(
+        request: UInt64,
+        columns: UInt16,
+        rows: UInt16,
+        zoomed: Bool,
+        connection: UInt64
+    ) {
         guard state == .running, connection == self.connection else { return }
-        activation = Activation(request: request, columns: max(columns, 1), rows: max(rows, 1))
+        activation = Activation(
+            request: request,
+            columns: max(columns, 1),
+            rows: max(rows, 1),
+            zoom: zoomed ? .pending : .none
+        )
+        holdsFrames = zoomed
     }
 
     /// Herdr's answer to the show: its projection revision, which a frame completing it must reach.
     fileprivate func acknowledgeActivation(request: UInt64, floor: UInt64, connection: UInt64) {
         guard state == .running, connection == self.connection, activation?.request == request else { return }
         activation?.floor = floor
-        completeActivationIfPainted()
+        completeActivationIfReady()
+    }
+
+    /// Herdr's answer to the zoom behind the show: the tab and its zoom after it, or nil when the zoom
+    /// didn't go or failed, and the show then completes as one without a zoom.
+    fileprivate func settleZoom(
+        request: UInt64,
+        tab: (tabID: String, zoomed: Bool)?,
+        connection: UInt64
+    ) {
+        guard state == .running, connection == self.connection, activation?.request == request else { return }
+        activation?.zoom = tab.map { .answered(tabID: $0.tabID, zoomed: $0.zoomed) } ?? .none
+        completeActivationIfReady()
     }
 
     /// The screen's size changed while the show is in progress: only a frame at the new size completes
@@ -218,23 +288,32 @@ actor HerdrTerminalEngine {
         guard connection == self.connection, activation != nil else { return }
         activation?.columns = max(columns, 1)
         activation?.rows = max(rows, 1)
-        activation?.painted = nil
+        activation?.received = nil
     }
 
+    /// The session is hidden: frames are held until the next show.
     fileprivate func endActivation(connection: UInt64) {
         guard connection == self.connection else { return }
         activation = nil
+        holdsFrames = true
     }
 
-    /// Herdr's client checks the pair again at completion: a snapshot that arrived after the painted
-    /// frame waits for its own frame.
-    private func completeActivationIfPainted() {
-        guard let activation, let floor = activation.floor, let painted = activation.painted,
-              presentation.presented?.surface.projectionRevision == painted.projectionRevision,
-              painted.projectionRevision >= floor,
-              painted.columns == activation.columns, painted.rows == activation.rows
+    /// Herdr's client checks the pair again at completion: a snapshot that arrived after the received
+    /// frame waits for its own frame. A held completing frame is drawn now, and frames are drawn as they
+    /// come from then on.
+    private func completeActivationIfReady() {
+        guard let activation, let floor = activation.floor, let received = activation.received,
+              let (snapshot, surface) = presentation.presented,
+              surface.projectionRevision == received.projectionRevision,
+              received.projectionRevision >= floor,
+              received.columns == activation.columns, received.rows == activation.rows,
+              activation.zoom.isShown(in: snapshot)
         else { return }
         self.activation = nil
+        if holdsFrames {
+            holdsFrames = false
+            draw(surface, snapshot: snapshot)
+        }
         continuation.yield(.activated(request: activation.request, connection: connection))
     }
 
@@ -295,15 +374,21 @@ actor HerdrTerminalEngine {
         continuation.finish()
     }
 
+    /// Draws the presented frame unless frames are held; a show in progress takes it as its newest frame,
+    /// counted even when no cell changed, since it is the screen Herdr shows now.
     private func paintPresented() {
-        guard let (snapshot, surface) = presentation.presented else { return }
-        let presented = PaintedSurface(
-            bootID: surface.bootID,
-            projectionRevision: surface.projectionRevision,
-            surfaceRevision: surface.surfaceRevision
-        )
-        guard presented != paintedSurface else { return }
-        paintedSurface = presented
+        guard let (snapshot, surface) = presentation.presented,
+              PaintedSurface(of: surface) != paintedSurface
+        else { return }
+        if !holdsFrames { draw(surface, snapshot: snapshot) }
+        if activation != nil {
+            activation?.received = (surface.projectionRevision, surface.frame.width, surface.frame.height)
+            completeActivationIfReady()
+        }
+    }
+
+    private func draw(_ surface: HerdrPaneSurfaceFrame, snapshot: HerdrSnapshot) {
+        paintedSurface = PaintedSurface(of: surface)
         if surface.bootID != bootID {
             // Pane ids belong to one server boot.
             panes.removeAll()
@@ -322,11 +407,6 @@ actor HerdrTerminalEngine {
         failedPaneIDs.formIntersection(listed)
         publishLayout(of: surface, snapshot: snapshot)
         publishScroll(of: surface)
-        if activation != nil {
-            // Counted even when no cell changed: the frame is the screen Herdr shows now.
-            activation?.painted = (surface.projectionRevision, surface.frame.width, surface.frame.height)
-            completeActivationIfPainted()
-        }
     }
 
     private func paint(_ next: HerdrPanePainter.Painted, paneID: String) {
