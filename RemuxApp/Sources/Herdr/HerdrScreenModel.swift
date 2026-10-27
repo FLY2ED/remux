@@ -96,6 +96,10 @@ final class HerdrScreenModel {
         var activatedRequest: UInt64?
         var activationDeadline: Task<Void, Never>?
         var ended = false
+        /// Whether its SSH connection may serve the next opening, as its retirement decided. A bridge or
+        /// connection that opens after the retirement closes the same way, so a path the retirement
+        /// doubted isn't offered again.
+        var reusable = true
         /// Whether the focused pane asks for every key as an escape code.
         var reportsAllKeys = false
         /// A `pane.focus` waits for Herdr's answer. Taps meanwhile wait for it, and only the newest is
@@ -465,9 +469,9 @@ final class HerdrScreenModel {
             attempt.finishOperations()
             attempt.task?.cancel()
             if let connection = attempt.connection {
-                await connection.close()
+                await connection.close(reusable: attempt.reusable)
             } else if let transport = attempt.transport {
-                await transport.close(reusable: true)
+                await transport.close(reusable: attempt.reusable)
             }
             // An opening still under way closes what it opened once it sees the stop.
             await attempt.task?.value
@@ -809,7 +813,7 @@ final class HerdrScreenModel {
             return
         }
         guard isCurrent(attempt) else {
-            await connection.close()
+            await connection.close(reusable: attempt.reusable)
             return
         }
         attempt.transport = nil
@@ -860,7 +864,7 @@ final class HerdrScreenModel {
             return nil
         }
         guard isCurrent(attempt) else {
-            await transport.close(reusable: true)
+            await transport.close(reusable: attempt.reusable)
             return nil
         }
         attempt.transport = transport
@@ -1145,9 +1149,12 @@ final class HerdrScreenModel {
     }
 
     /// A connection Herdr didn't answer in time may be on a dead path, so it isn't `reusable`: its SSH
-    /// connection isn't offered to the next one, which would wait on it.
+    /// connection isn't offered to the next one, which would wait on it. Only the first retire counts, so
+    /// a later one can't offer a path an earlier one doubted.
     private func retire(_ attempt: Attempt, reusable: Bool = true) {
+        guard !attempt.ended else { return }
         attempt.ended = true
+        attempt.reusable = reusable
         attempt.finishOperations()
         attempt.task?.cancel()
         attempt.activationDeadline?.cancel()
@@ -1655,13 +1662,14 @@ extension HerdrPaneScroll {
         return .remoteHistory
     }
 
-    /// The server's numbers aren't trusted to fit: a history at the top of the range caps the total.
+    /// The server's numbers aren't trusted to fit: a history too long to add the rows to is capped first,
+    /// so the total, the position and the rows stay consistent.
     var scrollState: GhosttySurfaceScrollState {
-        let fromBottom = min(linesFromBottom, maxLinesFromBottom)
-        let (total, overflowed) = maxLinesFromBottom.addingReportingOverflow(rows)
+        let history = min(maxLinesFromBottom, UInt64.max - rows)
+        let fromBottom = min(linesFromBottom, history)
         return GhosttySurfaceScrollState(
-            total: overflowed ? .max : total,
-            offset: maxLinesFromBottom - fromBottom,
+            total: history + rows,
+            offset: history - fromBottom,
             len: rows,
             cellOffset: 0
         )

@@ -270,8 +270,9 @@ actor HerdrConnection {
             if case .success = await timer.result {
                 throw HerdrConnectionError.handshakeTimedOut
             }
-            await transport.close(reusable: true)
-            throw Task.isCancelled ? CancellationError() : Self.connectionError(error)
+            let cancelled = Task.isCancelled
+            await transport.close(reusable: !cancelled)
+            throw cancelled ? CancellationError() : Self.connectionError(error)
         }
         let connection = HerdrConnection(
             transport: transport,
