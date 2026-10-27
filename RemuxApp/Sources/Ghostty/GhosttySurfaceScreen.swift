@@ -270,6 +270,9 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
                             },
                             submitMouseScroll: { surfaceID, event in
                                 model.sendMouseScroll(to: surfaceID, event)
+                            },
+                            readSelectedText: { surfaceID in
+                                await model.selectedText(in: surfaceID)
                             }
                         )
                             .frame(

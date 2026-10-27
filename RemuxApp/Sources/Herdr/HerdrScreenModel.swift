@@ -1011,6 +1011,34 @@ final class HerdrScreenModel {
         managed.setRemoteScroll(scroll.scrollState, route: scroll.route)
     }
 
+    // MARK: - Selection
+
+    /// The text of a selection in `paneID`, read by Herdr, which keeps the pane's history and joins its
+    /// wrapped lines. The read waits in line behind the commands asked before it and for Herdr's answer as
+    /// long as Herdr's client waits for a command. A read that can't go or fails says so, as Herdr's client
+    /// does, and returns nil.
+    func readSelection(_ selection: GhosttyHistorySelection, inPane paneID: String) async -> String? {
+        guard let attempt = shownAttempt, let connection = attempt.connection else {
+            notices.replaced()
+            terminalScreenAdapter.presentFailure(Self.copyFailureLabel)
+            return nil
+        }
+        do {
+            let reply = try await connection.command(
+                Self.paneSelectionReadMethod,
+                params: HerdrSelectionRead(paneID: paneID, selection: selection)
+            )
+            let text = try HerdrSelectionRead.text(fromReply: reply)
+            notices.succeeded(Self.paneSelectionReadMethod, bootID: layout?.bootID)
+            return text
+        } catch {
+            if isCurrent(attempt) {
+                presentFailure(of: Self.paneSelectionReadMethod, label: Self.copyFailureLabel, error)
+            }
+            return nil
+        }
+    }
+
     private func inputFailed(_ attemptID: UInt64) {
         guard let attempt, attempt.id == attemptID, isCurrent(attempt) else { return }
         presentInputFailure()
@@ -1790,7 +1818,9 @@ final class HerdrScreenModel {
 
     nonisolated static let paneFocusMethod = "pane.focus"
     nonisolated static let paneZoomMethod = "pane.zoom"
+    nonisolated static let paneSelectionReadMethod = "pane.selection.read"
     private static let inputFailureLabel = "input"
+    private static let copyFailureLabel = "copy"
     private static let focusFailureLabel = "select pane"
     private static let zoomFailureLabel = "zoom pane"
 

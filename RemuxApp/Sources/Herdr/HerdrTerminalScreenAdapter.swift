@@ -261,7 +261,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     var holdsTmuxPrefixKey: Bool { false }
 
     func sendInputToFocusedSurface(_ text: String) -> FocusedTerminalInputSubmissionResult {
-        model?.sendText(text) ?? .transportUnavailable
+        typed(model?.sendText(text) ?? .transportUnavailable)
     }
 
     func sendPasteToFocusedSurface(_ text: String) -> FocusedTerminalInputSubmissionResult {
@@ -292,7 +292,19 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func sendKeyEventToFocusedSurface(_ event: GhosttySurfaceKeyEvent) -> FocusedTerminalInputSubmissionResult {
-        model?.sendKey(event) ?? .transportUnavailable
+        let result = model?.sendKey(event) ?? .transportUnavailable
+        return event.action == .release ? result : typed(result)
+    }
+
+    /// Typing ends the focused pane's selection, as Ghostty ends a tmux pane's (`selection-clear-on-typing`)
+    /// and Herdr's client its own on a key. A Herdr pane's input goes to Herdr, not through its terminal,
+    /// so the terminal doesn't end it itself.
+    private func typed(_ result: FocusedTerminalInputSubmissionResult) -> FocusedTerminalInputSubmissionResult {
+        if result == .accepted, let id = presentedSurfaceID, let surface = managedSurface(for: id) {
+            _ = surface.clearSelection()
+            surface.notifyLocalSelectionGeometryChanged()
+        }
+        return result
     }
 
     private func isFocusedPane(_ surfaceID: UUID) -> Bool {
@@ -328,6 +340,14 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     ) -> GhosttyMouseInputSubmissionOutcome {
         guard let model, let paneID = paneID(for: surfaceID) else { return .missingTarget(surfaceID) }
         return model.scroll(event, inPane: paneID) ? .sent : .surfaceRejected
+    }
+
+    /// Herdr keeps the pane's history and knows where its lines wrap, so it reads the selection.
+    func selectedText(in surfaceID: UUID) async -> String? {
+        guard let model, let paneID = paneID(for: surfaceID),
+              let selection = managedSurface(for: surfaceID)?.historySelection
+        else { return nil }
+        return await model.readSelection(selection, inPane: paneID)
     }
 
     // MARK: Topology actions

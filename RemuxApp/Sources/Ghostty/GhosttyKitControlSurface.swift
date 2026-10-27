@@ -180,6 +180,7 @@ struct GhosttyLocalSelectionSnapshot: Equatable {
         scaleFactor: 1
     )
 
+    /// Each endpoint's cell, nil while it isn't on screen.
     let start: CGRect?
     let end: CGRect?
     let isActive: Bool
@@ -188,6 +189,28 @@ struct GhosttyLocalSelectionSnapshot: Equatable {
         start = ghosttyTerminalCellFrame(cValue.start, scaleFactor: scaleFactor)
         end = ghosttyTerminalCellFrame(cValue.end, scaleFactor: scaleFactor)
         isActive = cValue.active
+    }
+
+    private init(start: CGRect?, end: CGRect?, isActive: Bool) {
+        self.start = start
+        self.end = end
+        self.isActive = isActive
+    }
+
+    /// The same selection with the endpoints that aren't on screen hidden.
+    func showing(start showsStart: Bool, end showsEnd: Bool) -> Self {
+        Self(start: showsStart ? start : nil, end: showsEnd ? end : nil, isActive: isActive)
+    }
+}
+
+/// A cell of a pane's text: its row, counted from the top of the viewport or of the pane's history, and
+/// its column.
+struct GhosttyTerminalCell: Hashable, Comparable, Sendable {
+    let row: UInt64
+    let column: UInt16
+
+    static func < (lhs: Self, rhs: Self) -> Bool {
+        (lhs.row, lhs.column) < (rhs.row, rhs.column)
     }
 }
 
@@ -430,6 +453,44 @@ final class GhosttyKitControlSurface {
                 snapshot
             )
         }
+    }
+
+    /// Moves one endpoint to a cell of the viewport.
+    func setSelectionEndpoint(
+        _ endpoint: ghostty_terminal_surface_selection_endpoint_e,
+        toViewportCell cell: GhosttyTerminalCell
+    ) -> GhosttyLocalSelectionOutcome {
+        guard let size = cellSize else { return .unavailable }
+        return setSelectionEndpoint(endpoint, at: CGPoint(
+            x: (CGFloat(cell.column) + 0.5) * size.width,
+            y: (CGFloat(cell.row) + 0.5) * size.height
+        ))
+    }
+
+    /// The viewport cell at `frame`, the geometry a selection snapshot gives an endpoint. The surface has
+    /// no padding, so its cells start at its origin.
+    func viewportCell(of frame: CGRect) -> GhosttyTerminalCell? {
+        guard let size = cellSize else { return nil }
+        let column = ((frame.minX + size.width / 2) / size.width).rounded(.down)
+        let row = ((frame.minY + size.height / 2) / size.height).rounded(.down)
+        guard column >= 0, row >= 0, column <= CGFloat(UInt16.max) else { return nil }
+        return GhosttyTerminalCell(row: UInt64(row), column: UInt16(column))
+    }
+
+    /// The viewport's rows and columns.
+    var viewportSize: (rows: UInt64, columns: UInt16) {
+        let size = currentSize()
+        return (UInt64(size.rows), size.columns)
+    }
+
+    /// One cell, in points.
+    private var cellSize: CGSize? {
+        let size = currentSize()
+        guard size.cell_width_px > 0, size.cell_height_px > 0 else { return nil }
+        return CGSize(
+            width: CGFloat(Double(size.cell_width_px) / scaleFactor),
+            height: CGFloat(Double(size.cell_height_px) / scaleFactor)
+        )
     }
 
     func clearSelection() -> GhosttyLocalSelectionOutcome {

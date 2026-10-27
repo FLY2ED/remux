@@ -142,6 +142,9 @@ protocol GhosttyTerminalInputModeling: ObservableObject {
         _ event: GhosttySurfaceMouseScrollEvent
     ) -> GhosttyMouseInputSubmissionOutcome
 
+    /// The text the pane's selection copies, from wherever the backend keeps the pane's history; nil
+    /// when there is none to copy.
+    func selectedText(in surfaceID: UUID) async -> String?
 }
 
 @MainActor

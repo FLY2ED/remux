@@ -1,4 +1,5 @@
 import Foundation
+import GhosttyKit
 import UIKit
 import XCTest
 @testable import Remux
@@ -584,16 +585,235 @@ final class HerdrLiveConnectionTests: XCTestCase {
         XCTAssertEqual(reads.flatMap(\.bytes), expected, "Herdr \(version)")
     }
 
-    /// A gesture at the pane's top-left cell whose travel makes `steps` wheel steps up.
+    // MARK: - Selection
+
+    /// A line longer than the pane copies as one line, as Herdr keeps it: the pane's own terminal holds
+    /// only the painted rows, and would break it where the pane wraps it.
+    @MainActor
+    func testAWrappedLineCopiesAsOneLineOnHerdr093() async throws {
+        try await checkWrappedLineCopiesAsOneLine(version: "0.9.3")
+    }
+
+    @MainActor
+    func testAWrappedLineCopiesAsOneLineOnHerdr095() async throws {
+        try await checkWrappedLineCopiesAsOneLine(version: "0.9.5")
+    }
+
+    /// A selection keeps its lines while Herdr scrolls the history under it, and an endpoint moved into the
+    /// history reaches lines the first frame never showed: scrolled back to the bottom, that endpoint is
+    /// off screen without a handle, and the copy still starts there.
+    @MainActor
+    func testASelectionReachesHistoryOnHerdr093() async throws {
+        try await checkASelectionReachesHistory(version: "0.9.3")
+    }
+
+    @MainActor
+    func testASelectionReachesHistoryOnHerdr095() async throws {
+        try await checkASelectionReachesHistory(version: "0.9.5")
+    }
+
+    /// A long-press on a link the pane wraps selects all of it, and its copy is the link on one line.
+    @MainActor
+    func testAWrappedLinkCopiesWholeOnHerdr093() async throws {
+        let session = try await openShownSession(version: "0.9.3", through: { $0 })
+        let pane = try selectionPane(of: session)
+        let token = UUID().uuidString.prefix(8).lowercased()
+        let url = "https://example.com/\(token)/" + String(repeating: "p", count: Int(pane.area.width))
+        XCTAssertEqual(
+            session.model.sendText(#"clear; printf '\033]8;;"# + url + #"\033\\"# + url + #"\033]8;;\033\\\n'"# + "\r"),
+            .accepted
+        )
+        let row = try await waitForWrappedRows(of: url, in: session, pane: pane)
+
+        guard case .match(_, let target) = pane.surface.selectLink(at: cellPoint(row: row, column: 2, in: session)) else {
+            return XCTFail("the link wasn't selected")
+        }
+        XCTAssertEqual(target, url)
+        let copied = await session.model.terminalScreenAdapter.selectedText(in: pane.id)
+        XCTAssertEqual(copied, url)
+    }
+
+    /// How long a copy waits for Herdr: `pane.selection.read`'s round trip through Remux's connection,
+    /// over SSH to the fixture.
+    @MainActor
+    func testSelectionReadRoundTrip() async throws {
+        let session = try await openShownSession(version: "0.9.5", through: { $0 })
+        let pane = try selectionPane(of: session)
+        let token = "copy-\(UUID().uuidString.prefix(8).lowercased())"
+        XCTAssertEqual(session.model.sendText("clear; printf '%s\\n' \(token)\r"), .accepted)
+        let rows = try await waitForRows(in: session, pane: pane, "the token wasn't shown") {
+            $0.contains(token)
+        }
+        let row = try XCTUnwrap(rows.firstIndex(of: token))
+        guard case .snapshot(let selected) = pane.surface.selectWord(at: cellPoint(row: row, column: 0, in: session)),
+              selected.isActive
+        else { return XCTFail("the token wasn't selected") }
+
+        var samples: [Duration] = []
+        for _ in 0..<30 {
+            let started = ContinuousClock.now
+            let copied = await session.model.terminalScreenAdapter.selectedText(in: pane.id)
+            samples.append(ContinuousClock.now - started)
+            XCTAssertEqual(copied, token)
+        }
+        samples.sort()
+        let summary = "pane.selection.read round trip over \(samples.count) reads: "
+            + "median \(samples[samples.count / 2]), p95 \(samples[samples.count * 95 / 100]), max \(samples.last!)"
+        print(summary)
+        let attachment = XCTAttachment(string: summary)
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    @MainActor
+    private func checkWrappedLineCopiesAsOneLine(version: String) async throws {
+        let session = try await openShownSession(version: version, through: { $0 })
+        let pane = try selectionPane(of: session)
+        let token = UUID().uuidString.prefix(8).lowercased()
+        let line = "wrap-\(token)-" + String(repeating: "x", count: Int(pane.area.width))
+        XCTAssertEqual(session.model.sendText("clear; printf '%s\\n' \(line)\r"), .accepted)
+        let row = try await waitForWrappedRows(of: line, in: session, pane: pane)
+        let rest = line.count - Int(pane.area.width)
+
+        XCTAssertTrue(isActive(pane.surface.selectWord(at: cellPoint(row: row, column: 0, in: session))))
+        XCTAssertTrue(isActive(pane.surface.setSelectionEndpoint(
+            GHOSTTY_TERMINAL_SURFACE_SELECTION_ENDPOINT_END,
+            at: cellPoint(row: row + 1, column: rest - 1, in: session)
+        )))
+        XCTAssertEqual(
+            pane.surface.controlSurface.readSelection(),
+            String(line.prefix(Int(pane.area.width))) + "\n" + String(line.suffix(rest)),
+            "the pane's own terminal should break the line where it wraps"
+        )
+        let copied = await session.model.terminalScreenAdapter.selectedText(in: pane.id)
+        XCTAssertEqual(copied, line, "Herdr \(version)")
+    }
+
+    @MainActor
+    private func checkASelectionReachesHistory(version: String) async throws {
+        let session = try await openShownSession(version: version, through: { $0 })
+        let pane = try selectionPane(of: session)
+        XCTAssertEqual(session.model.sendText("clear; seq -f 'history line %g' 1 300\r"), .accepted)
+        let rows = try await waitForRows(in: session, pane: pane, "the history wasn't printed") {
+            $0.contains("history line 300")
+        }
+        try await waitUntil("Herdr's history didn't reach the pane", timeout: .seconds(15)) {
+            pane.surface.scrollRoute == .remoteHistory && pane.surface.scrollState.maxRow >= 200
+                && pane.surface.scrollState.offset == pane.surface.scrollState.maxRow
+        }
+        // The line on the second row, and the seven lines above it, which the first frame doesn't show.
+        let line = try XCTUnwrap(rows[1].split(separator: " ").last.flatMap { Int($0) }, "row 1: \(rows[1])")
+        XCTAssertEqual(rows[0], "history line \(line - 1)")
+        XCTAssertTrue(isActive(pane.surface.selectWord(at: cellPoint(row: 1, column: 0, in: session))))
+        XCTAssertTrue(isActive(pane.surface.setSelectionEndpoint(
+            GHOSTTY_TERMINAL_SURFACE_SELECTION_ENDPOINT_END,
+            at: cellPoint(row: 1, column: rows[1].count - 1, in: session)
+        )))
+
+        try scroll(session, pane: pane.id, steps: 2)
+        try await waitUntil("Herdr didn't scroll the history", timeout: .seconds(15)) {
+            pane.surface.scrollState.maxRow - pane.surface.scrollState.offset == 6
+        }
+        guard case .snapshot(let scrolled) = pane.surface.selectionSnapshot(), let start = scrolled.start else {
+            return XCTFail("the selection didn't stay on screen")
+        }
+        XCTAssertEqual(pane.surface.controlSurface.viewportCell(of: start)?.row, 7, "the highlight didn't follow its line")
+        XCTAssertTrue(isActive(pane.surface.setSelectionEndpoint(
+            GHOSTTY_TERMINAL_SURFACE_SELECTION_ENDPOINT_START,
+            at: cellPoint(row: 0, column: 0, in: session)
+        )))
+
+        try scroll(session, pane: pane.id, steps: -2)
+        try await waitUntil("Herdr didn't scroll back to the bottom", timeout: .seconds(15)) {
+            pane.surface.scrollState.offset == pane.surface.scrollState.maxRow
+        }
+        guard case .snapshot(let back) = pane.surface.selectionSnapshot(), back.isActive else {
+            return XCTFail("the selection ended")
+        }
+        XCTAssertNil(back.start, "the endpoint in the history kept its handle off screen")
+        XCTAssertNotNil(back.end)
+        let copied = await session.model.terminalScreenAdapter.selectedText(in: pane.id)
+        XCTAssertEqual(
+            copied,
+            ((line - 7)...line).map { "history line \($0)" }.joined(separator: "\n"),
+            "Herdr \(version)"
+        )
+    }
+
+    private struct SelectionPane {
+        let id: UUID
+        let surface: GhosttyManagedSurface
+        let paneID: String
+        let area: HerdrSurfaceRect
+    }
+
+    /// The session's selected pane, which has a text area.
+    @MainActor
+    private func selectionPane(of session: ShownSession) throws -> SelectionPane {
+        let adapter = session.model.terminalScreenAdapter
+        let id = try XCTUnwrap(adapter.terminalInteractionProjection.selectedActiveLeafID)
+        let paneID = try XCTUnwrap(session.model.focusedPaneID)
+        return SelectionPane(
+            id: id,
+            surface: try XCTUnwrap(adapter.terminalManagedSurfaceLookup.managedSurface(for: id)),
+            paneID: paneID,
+            area: try XCTUnwrap(session.model.layout?.panes.first { $0.paneID == paneID }?.innerRect)
+        )
+    }
+
+    /// The middle of a cell of a pane, in the pane's points.
+    @MainActor
+    private func cellPoint(row: Int, column: Int, in session: ShownSession) -> CGPoint {
+        let metrics = session.model.measurement!.cellMetrics
+        return CGPoint(x: (CGFloat(column) + 0.5) * metrics.pointWidth, y: (CGFloat(row) + 0.5) * metrics.pointHeight)
+    }
+
+    /// The pane's rows as its renderer shows them, once `condition` holds. Reading them selects, so it
+    /// comes before a test's own selection.
+    @MainActor
+    private func waitForRows(
+        in session: ShownSession,
+        pane: SelectionPane,
+        _ failure: String,
+        until condition: ([String]) -> Bool
+    ) async throws -> [String] {
+        var rows: [String] = []
+        try await waitUntil(failure, timeout: .seconds(15)) {
+            guard let renderer = session.model.paneSurface(pane.paneID)?.renderer else { return false }
+            rows = RendererText.rows(of: renderer, columns: Int(pane.area.width), rows: Int(pane.area.height))
+            return condition(rows)
+        }
+        return rows
+    }
+
+    /// The row where `text`, longer than the pane is wide, starts, once the pane shows it wrapped onto
+    /// the next row.
+    @MainActor
+    private func waitForWrappedRows(of text: String, in session: ShownSession, pane: SelectionPane) async throws -> Int {
+        let width = Int(pane.area.width)
+        let rows = try await waitForRows(in: session, pane: pane, "the pane didn't wrap the text") { rows in
+            rows.indices.dropLast().contains { rows[$0] == String(text.prefix(width)) && rows[$0 + 1] == String(text.dropFirst(width)) }
+        }
+        return rows.indices.dropLast().first { rows[$0] == String(text.prefix(width)) }!
+    }
+
+    @MainActor
+    private func isActive(_ outcome: GhosttyLocalSelectionOutcome) -> Bool {
+        if case .snapshot(let snapshot) = outcome { snapshot.isActive } else { false }
+    }
+
+    /// A gesture at the pane's top-left cell whose travel makes `steps` wheel steps, up, or down when
+    /// negative.
     @MainActor
     private func scroll(_ session: ShownSession, pane: UUID, steps: Int) throws {
         let adapter = session.model.terminalScreenAdapter
         let cellHeight = Double(try XCTUnwrap(session.model.measurement).cellMetrics.pixelHeight)
         XCTAssertEqual(adapter.sendMousePosition(to: pane, CGPoint(x: 2, y: 2), mods: []), .sent)
         for momentum in [GhosttySurfaceMouseScrollMods.Momentum.began, .ended] {
+            let travel = (Double(steps.magnitude) + 0.5) * cellHeight * (steps < 0 ? -1 : 1)
             let event = GhosttySurfaceMouseScrollEvent(
                 deltaX: 0,
-                deltaY: momentum == .began ? (Double(steps) + 0.5) * cellHeight : 0,
+                deltaY: momentum == .began ? travel : 0,
                 mods: .init(precision: true, momentum: momentum)
             )
             XCTAssertEqual(adapter.sendMouseScroll(to: pane, event), .sent)
