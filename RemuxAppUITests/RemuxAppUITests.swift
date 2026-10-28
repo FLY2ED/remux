@@ -2322,7 +2322,8 @@ final class RemuxAppUITests: XCTestCase {
     /// Herdr's workspaces on a live server, each showing its most urgent agent: the fixture's `remux`, with
     /// agent `claude` working, then `api`, whose agent works and finishes when the test asks (`finish`),
     /// `web`, with none, `notes`, whose agent is idle, and `infra`, whose agent is blocked. Sessions shows
-    /// each workspace's agent on its row, and Tabs on its capsule; the workspaces behind More show theirs in
+    /// each workspace's agent on its row, and collapses the session to one row that says it's current; Tabs
+    /// shows each workspace's agent on its capsule; the workspaces behind More show theirs in
     /// its menu, top to bottom in Herdr's order then New Workspace, and on More once picked. Once `notes` and
     /// `infra` close (`trim`), the three left fit as capsules, so there's no More and New Workspace ends the
     /// capsules.
@@ -2368,6 +2369,20 @@ final class RemuxAppUITests: XCTestCase {
             "Workspace infra, 1 tab, agent blocked",
         ], "The workspace rows didn't show their agents.")
         captureLiveHerdrStep("w1b-sessions-scrolled", in: configuration)
+        // Collapsed, the session the user is in is marked on its own row; VoiceOver reads it as before.
+        let sessionRow = app.descendants(matching: .any).matching(identifier: "terminal.sessions.active-session").firstMatch
+        let sessionList = app.descendants(matching: .any)["terminal.sessions.list"]
+        for _ in 0..<4 where !sessionRow.isHittable {
+            sessionList.swipeDown()
+        }
+        XCTAssertEqual(sessionRow.value as? String, "Expanded")
+        sessionRow.tap()
+        XCTAssertTrue(waitForValue("Collapsed", of: sessionRow, timeout: 5), "The session didn't collapse.")
+        XCTAssertTrue(workspaceRows.firstMatch.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(sessionRow.label.hasSuffix(", current session"), sessionRow.label)
+        captureLiveHerdrStep("w1c-sessions-collapsed", in: configuration)
+        sessionRow.tap()
+        XCTAssertTrue(waitForValue("Expanded", of: sessionRow, timeout: 5), "The session didn't expand again.")
         app.buttons["terminal.sessions.close"].tap()
         XCTAssertTrue(sessionsSheet.waitForNonExistence(timeout: 5))
 
