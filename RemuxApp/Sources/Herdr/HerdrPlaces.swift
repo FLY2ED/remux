@@ -34,25 +34,37 @@ enum HerdrPlace: Hashable, Sendable {
     }
 }
 
-/// A tab or workspace Remux asks Herdr to make, focused as Herdr's client makes them (`tab.create`,
-/// `workspace.create`). Each starts with one pane.
+/// A pane Remux asks Herdr to make, in a new tab, a new workspace or beside a pane, focused as Herdr's
+/// client makes them (`tab.create`, `workspace.create`, `pane.split`). Herdr's answer names the pane.
 enum HerdrCreation: Equatable, Sendable {
     /// A tab in the workspace.
     case tab(workspaceID: String)
     /// A workspace whose pane starts in a directory Herdr's settings take from `source`'s focused pane.
     case workspace(source: String?)
+    /// A pane beside `pane` in its tab, as Herdr's client splits the focused pane of its workspace.
+    case split(pane: String, workspaceID: String?, direction: SplitDirection)
+
+    enum SplitDirection: String, Encodable, Sendable {
+        case right
+        case down
+    }
 
     var method: String {
         switch self {
         case .tab: "tab.create"
         case .workspace: "workspace.create"
+        case .split: "pane.split"
         }
     }
 
     var params: Params {
         switch self {
-        case .tab(let workspaceID): Params(workspaceID: workspaceID, sourceWorkspaceID: nil)
-        case .workspace(let source): Params(workspaceID: nil, sourceWorkspaceID: source)
+        case .tab(let workspaceID):
+            Params(workspaceID: workspaceID)
+        case .workspace(let source):
+            Params(sourceWorkspaceID: source)
+        case .split(let pane, let workspaceID, let direction):
+            Params(workspaceID: workspaceID, targetPaneID: pane, direction: direction)
         }
     }
 
@@ -60,17 +72,57 @@ enum HerdrCreation: Equatable, Sendable {
         switch self {
         case .tab: "new tab"
         case .workspace: "new workspace"
+        case .split: "split pane"
         }
     }
 
+    /// The place on the tab the new pane goes in, when that tab is there already: a split's pane. New
+    /// Tab and New Workspace make their tab.
+    var tabPlace: HerdrPlace? {
+        guard case .split(let pane, _, _) = self else { return nil }
+        return .pane(pane)
+    }
+
+    /// The pane Herdr made, from its answer (`api/schema/response.rs`): the first pane of a new tab or
+    /// workspace (`root_pane`), or a split's (`pane`).
+    static func pane(madeIn reply: Data) -> String? {
+        struct Reply: Decodable {
+            struct Result: Decodable {
+                let rootPane: Pane?
+                let pane: Pane?
+
+                private enum CodingKeys: String, CodingKey {
+                    case rootPane = "root_pane"
+                    case pane
+                }
+            }
+
+            struct Pane: Decodable {
+                let paneID: String
+
+                private enum CodingKeys: String, CodingKey {
+                    case paneID = "pane_id"
+                }
+            }
+
+            let result: Result
+        }
+        guard let result = try? JSONDecoder().decode(Reply.self, from: reply).result else { return nil }
+        return (result.rootPane ?? result.pane)?.paneID
+    }
+
     struct Params: Encodable, Sendable {
-        let workspaceID: String?
-        let sourceWorkspaceID: String?
+        var workspaceID: String?
+        var sourceWorkspaceID: String?
+        var targetPaneID: String?
+        var direction: SplitDirection?
         let focus = true
 
         private enum CodingKeys: String, CodingKey {
             case workspaceID = "workspace_id"
             case sourceWorkspaceID = "source_workspace_id"
+            case targetPaneID = "target_pane_id"
+            case direction
             case focus
         }
     }
@@ -92,6 +144,15 @@ extension HerdrSnapshot {
         case .pane(let id): focusedPaneID == id
         case .tab(let id): focusedTabID == id
         case .workspace(let id): focusedWorkspaceID == id
+        }
+    }
+
+    /// Whether `place` is still on the server.
+    func contains(_ place: HerdrPlace) -> Bool {
+        switch place {
+        case .pane(let id): panes.contains { $0.paneID == id }
+        case .tab(let id): tabs.contains { $0.tabID == id }
+        case .workspace(let id): workspaces.contains { $0.workspaceID == id }
         }
     }
 }

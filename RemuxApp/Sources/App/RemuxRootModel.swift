@@ -1690,12 +1690,17 @@ final class RemuxRootModel: ObservableObject {
         openHerdrSession(banner.origin.workspaceID, atPane: banner.notification.paneID, bootID: banner.origin.bootID)
     }
 
-    /// Shows an open Herdr session, at `paneID` when given: the session goes there once it is on screen,
-    /// if the pane is still there on the server boot `bootID` names.
+    /// Shows an open Herdr session, at `paneID` when given.
     func openHerdrSession(_ workspaceID: SavedWorkspace.ID, atPane paneID: String?, bootID: String?) {
+        openHerdrSession(workspaceID, at: paneID.map(HerdrPlace.pane), bootID: bootID)
+    }
+
+    /// Shows an open Herdr session, at `place` when given: the session goes there once it is on screen, if
+    /// the place is still there on the server boot `bootID` names. The session on screen goes there at once.
+    private func openHerdrSession(_ workspaceID: SavedWorkspace.ID, at place: HerdrPlace?, bootID: String?) {
         guard RemuxActiveSessionCollection.containsWorkspace(workspaceID, in: activeSessions) else { return }
-        if let paneID {
-            herdrModel(of: workspaceID)?.reveal(.pane(paneID), bootID: bootID)
+        if let place {
+            herdrModel(of: workspaceID)?.reveal(place, bootID: bootID)
         }
         showActiveSession(workspaceID)
     }
@@ -1705,17 +1710,10 @@ final class RemuxRootModel: ObservableObject {
         herdrModel(of: workspaceID)?.places
     }
 
-    /// A Herdr workspace picked in the Sessions sheet. In the session on screen it is a move there; another
-    /// session is shown with the workspace as its show's move, as Herdr's client opens a machine at a
-    /// workspace. `bootID` is the server boot the sheet listed it from.
+    /// A Herdr workspace picked in the Sessions sheet, as Herdr's client opens a machine at a workspace.
+    /// `bootID` is the server boot the sheet listed it from.
     func openHerdrWorkspace(_ herdrWorkspaceID: String, bootID: String, in workspaceID: SavedWorkspace.ID) {
-        guard let model = herdrModel(of: workspaceID) else { return }
-        if state == .terminal(workspaceID) {
-            _ = model.focusWorkspace(herdrWorkspaceID, bootID: bootID)
-        } else {
-            model.reveal(.workspace(herdrWorkspaceID), bootID: bootID)
-            showActiveSession(workspaceID)
-        }
+        openHerdrSession(workspaceID, at: .workspace(herdrWorkspaceID), bootID: bootID)
     }
 
     /// New Workspace in the Sessions sheet, beside the session's workspace on screen.

@@ -79,13 +79,18 @@ enum HerdrServerScript {
         var rect: (x: UInt16, y: UInt16, width: UInt16, height: UInt16)?
     }
 
+    /// The scripted session's panes by tab: `t1` holds `w1:p1` and `w1:p2`, `t2` holds `w1:p3` and
+    /// `w1:p4`, and `t3` holds `w1:p5`.
+    static let sessionPanes: [String: [String]] = ["t1": ["w1:p1", "w1:p2"], "t2": ["w1:p3", "w1:p4"], "t3": ["w1:p5"]]
+
     /// A recorded v0.9.3 welcome.
     static func welcome() throws -> [UInt8] {
         HerdrWire.frame(try HerdrConnectionTests.frames(HerdrConnectionTests.recording("herdr-01-handshake-all-caps-A"))[0])
     }
 
     /// `panes` and `agents` are the snapshot's JSON entries, made with `snapshotPane` and
-    /// `snapshotAgent`.
+    /// `snapshotAgent`. Without `panes` it lists the panes of its tabs in the scripted session
+    /// (`sessionPanes`), as Herdr lists every pane, but those `closed` names.
     /// The focused tab is labelled `tabLabel` and is `zoomed` or not; `otherTabs` are further tabs of
     /// workspace `w1`, by id, each named after its id, and zoomed when in `zoomedOtherTabs`. Workspace `w1`
     /// is listed when it has a label.
@@ -99,9 +104,13 @@ enum HerdrServerScript {
         otherTabs: [String] = [],
         zoomedOtherTabs: [String] = [],
         focusedPane: String? = "w1:p1",
-        panes: [String] = [],
+        panes: [String]? = nil,
+        closed: Set<String> = [],
         agents: [String] = []
     ) -> [UInt8] {
+        let panes = panes ?? ([focusedTab] + otherTabs).flatMap { tab in
+            (sessionPanes[tab] ?? []).filter { !closed.contains($0) }.map { snapshotPane($0, tab: tab) }
+        }
         let tabs = ([(focusedTab, tabLabel, true)] + otherTabs.map { ($0, $0, false) }).enumerated().map { index, tab in
             """
             {"tab_id":"\(tab.0)","workspace_id":"w1","number":\(index + 1),"label":"\(tab.1)","custom_label":true,
@@ -679,8 +688,32 @@ final class HerdrModelHarness {
         return await bridges.opened[index]
     }
 
-    func setScreenSize() {
-        model.terminalScreenAdapter.prepareInitialViewport(size: CGSize(width: 390, height: 844), scale: 3)
+    func setScreenSize(_ size: CGSize = CGSize(width: 390, height: 844)) {
+        model.terminalScreenAdapter.prepareInitialViewport(size: size, scale: 3)
+    }
+
+    private static var screenSizes: [[UInt16]: CGSize] = [:]
+
+    /// The screen that gives `columns` x `rows` cells, as a recording made at that size needs: Herdr draws
+    /// at the size the show asks for, and only such a frame completes the show. Measured once per size, and
+    /// by a test before its model opens a bridge: the search holds the main actor, and on a slow machine
+    /// long enough to pass the model's hello deadline, after which the model opens another bridge.
+    static func screenSize(columns: UInt16, rows: UInt16) throws -> CGSize {
+        if let size = screenSizes[[columns, rows]] { return size }
+        let runtime = try GhosttyKitRuntime(terminalSettings: .default)
+        let lengths = stride(from: CGFloat(40), through: 4000, by: 1)
+        let width = try lengths.first {
+            try runtime.measureTmuxViewportLayout(size: CGSize(width: $0, height: 844), scale: 3)?.controlViewport.columns == columns
+        }
+        let height = try lengths.first {
+            try runtime.measureTmuxViewportLayout(size: CGSize(width: 390, height: $0), scale: 3)?.controlViewport.rows == rows
+        }
+        let size = CGSize(
+            width: try XCTUnwrap(width, "no screen width gives \(columns) columns"),
+            height: try XCTUnwrap(height, "no screen height gives \(rows) rows")
+        )
+        screenSizes[[columns, rows]] = size
+        return size
     }
 
     /// A frame of `lines` at the size a show asks for, padded with blanks: Herdr answers a show with a

@@ -467,8 +467,19 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         group.flatMap { workspaceIDsByGroupID[$0] }.flatMap { model?.places.outline?.workspace($0) } ?? workspaceOnScreen
     }
 
+    /// The Panes sheet's Split → and Split ↓ split the focused pane, in the workspace on screen, as Herdr's
+    /// client splits; Herdr splits only to the right and down.
     func splitFocusedPane(_ direction: ghostty_action_split_direction_e) -> GhosttyTerminalActionOutcome {
-        .missingTarget(.focusedPane)
+        let herdrDirection: HerdrCreation.SplitDirection
+        switch direction {
+        case GHOSTTY_SPLIT_DIRECTION_RIGHT: herdrDirection = .right
+        case GHOSTTY_SPLIT_DIRECTION_DOWN: herdrDirection = .down
+        default: return .missingTarget(.focusedPane)
+        }
+        guard let model, let paneID = model.focusedPaneID,
+              model.create(.split(pane: paneID, workspaceID: workspaceOnScreen?.id, direction: herdrDirection))
+        else { return .missingTarget(.focusedPane) }
+        return .queued
     }
 
     func setFocusedPaneZoomed(_ zoomed: Bool) -> GhosttyTerminalActionOutcome {
@@ -492,7 +503,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func splitFocusedPaneInteractionEffect() -> GhosttyTopologyActionInteractionEffect {
-        .none
+        GhosttyTerminalPresentationProjector.splitFocusedPaneInteractionEffect()
     }
 
     func closeTopLevelInteractionEffect(_ id: UUID) -> GhosttyTopologyActionInteractionEffect {

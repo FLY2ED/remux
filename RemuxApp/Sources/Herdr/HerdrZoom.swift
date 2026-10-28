@@ -67,6 +67,9 @@ struct HerdrPaneZoomResult: Equatable, Sendable {
 struct HerdrOwnedZoom: Equatable {
     private var tab: HerdrTabKey?
 
+    /// The tab Remux zoomed, if any.
+    var tabID: String? { tab?.tabID }
+
     mutating func record(_ answer: HerdrPaneZoomResult, bootID: String) {
         guard answer.zoomChanged else { return }
         let answered = HerdrTabKey(bootID: bootID, tabID: answer.layout.tabID)
@@ -84,8 +87,9 @@ struct HerdrOwnedZoom: Equatable {
         }
     }
 
-    /// The pane to unzoom the tab with when the session leaves the screen: the tab's focused pane, since an
-    /// unzoom focuses its target. Nil unless the tab Remux zoomed is the one on screen.
+    /// The pane to unzoom the tab with as the session leaves it: the tab's focused pane, since an unzoom
+    /// focuses its target. Nil unless the newest snapshot has the tab Remux zoomed on screen: unzooming
+    /// another would take the session there.
     func paneToUnzoom(in snapshot: HerdrSnapshot) -> String? {
         guard let tab, tab.bootID == snapshot.bootID, tab.tabID == snapshot.focusedTabID else { return nil }
         return snapshot.focusedPaneID

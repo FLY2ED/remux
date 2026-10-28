@@ -88,6 +88,11 @@ final class HerdrPlacesTests: XCTestCase {
         XCTAssertEqual(try encoded(.tab(workspaceID: "w2")), ["workspace_id": "w2", "focus": true])
         XCTAssertEqual(HerdrCreation.workspace(source: "w1").method, "workspace.create")
         XCTAssertEqual(try encoded(.workspace(source: "w1")), ["source_workspace_id": "w1", "focus": true])
+        XCTAssertEqual(HerdrCreation.split(pane: "w1:p1", workspaceID: "w1", direction: .down).method, "pane.split")
+        XCTAssertEqual(
+            try encoded(.split(pane: "w1:p1", workspaceID: "w1", direction: .down)),
+            ["workspace_id": "w1", "target_pane_id": "w1:p1", "direction": "down", "focus": true]
+        )
     }
 
     /// Workspaces named by `workspaces`, each with tabs `<name>-t1` (one pane) and `<name>-t2` (two

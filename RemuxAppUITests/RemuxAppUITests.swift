@@ -1780,7 +1780,8 @@ final class RemuxAppUITests: XCTestCase {
     /// `infra`, with a session `locked` Herdr can't reach. The Tabs sheet lists the tabs of the workspace
     /// on screen, and offers the three most recent workspaces as capsules and the rest behind More; picking
     /// one only changes the tiles, a tile goes there, and the capsules follow recency. The Sessions sheet
-    /// lists the workspaces under the session with New Workspace, and lists `locked` as unavailable.
+    /// lists the workspaces under the session with New Workspace, and lists `locked` as unavailable. New
+    /// Tab goes to its tab, and the Panes sheet's Split → goes to the pane it makes, zoomed by the setting.
     func testLiveHerdrTabsAndWorkspacesWhenConfigured() throws {
         let configuration = try launchLiveHerdrApp()
         let tabs = app.buttons.matching(identifier: "terminal.windows").firstMatch
@@ -1817,6 +1818,11 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertTrue(waitForLabel(of: more, "Workspace infra, more workspaces", timeout: 5))
         XCTAssertTrue(tile(1).exists && !tile(2).exists, "The sheet should list infra's one tab.")
         captureLiveHerdrStep("w3b-more-picked", in: configuration)
+        more.tap()
+        XCTAssertTrue(infra.waitForExistence(timeout: 5))
+        captureLiveHerdrStep("w3c-more-marks-shown", in: configuration)
+        infra.tap()
+        XCTAssertTrue(waitForLabel(of: more, "Workspace infra, more workspaces", timeout: 5))
 
         capsule(2).tap()
         XCTAssertTrue(waitForLabel(of: tile(1), "Tab 1 of 2, server, 2 panes", timeout: 5))
@@ -1905,6 +1911,17 @@ final class RemuxAppUITests: XCTestCase {
         sendTerminalCommand("echo REMUX_NEW_TAB_TYPED")
         XCTAssertEqual(app.state, .runningForeground)
         captureLiveHerdrStep("w10-new-tab", in: configuration)
+
+        // Split → makes a pane beside the one on screen and goes to it; the setting zooms the new pane.
+        openPanesSheet()
+        tapPickerButton(identifier: "terminal.pane.split.right", fallbackLabel: "Split right")
+        XCTAssertTrue(waitForLabel(of: panes, "Panes, 2 panes", timeout: 10), "Split didn't make a pane.")
+        let splitZoom = openHerdrPanesZoomSwitch(paneCount: 2)
+        XCTAssertTrue(waitForValue("1", of: splitZoom, timeout: 8), "The pane the split made wasn't zoomed.")
+        captureLiveHerdrStep("w11-split", in: configuration)
+        app.buttons["terminal.panes.close"].tap()
+        sendTerminalCommand("echo REMUX_SPLIT_TYPED")
+        XCTAssertEqual(app.state, .runningForeground)
     }
 
     /// The session `locked` that Herdr can't reach, on the tabs test's server, saved as the server's latest

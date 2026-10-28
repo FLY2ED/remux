@@ -60,7 +60,7 @@ final class HerdrWireTests: XCTestCase {
         XCTAssertEqual(checked, 58)
         // Six hellos with options Remux doesn't use (no or only some encodings, generation 2, a missing
         // codec, zero columns, invalid JSON), the presentation fence, an unknown control, and Detach (a
-        // closed stream ends the client the same way; `HerdrConnection.close()`).
+        // closed stream ends the client the same way; `HerdrConnection.close(_:)`).
         XCTAssertEqual(notSentByRemux, 9)
     }
 

@@ -31,9 +31,10 @@ final class HerdrLiveConnectionTests: XCTestCase {
             onEvent: { await log.append($0) }
         )
         // Teardown blocks run last first, so the connection closes before the fixture stops Herdr.
-        addTeardownBlock { await connection.close() }
-        XCTAssertTrue(connection.negotiated.delta)
-        XCTAssertTrue(connection.negotiated.scroll)
+        addTeardownBlock { await connection.close(.finished) }
+        let negotiated = await connection.negotiated
+        XCTAssertEqual(negotiated?.delta, true)
+        XCTAssertEqual(negotiated?.scroll, true)
 
         // The server opens its first workspace when the bridge starts it.
         let paneID = try await log.snapshot(timeout: .seconds(15)) { !$0.panes.isEmpty }.panes[0].paneID
@@ -99,7 +100,15 @@ final class HerdrLiveConnectionTests: XCTestCase {
         XCTAssertEqual(snapshot.focusedPaneID, live.paneID)
         let other = try XCTUnwrap(snapshot.panes.first { $0.paneID != live.paneID }).paneID
 
-        _ = try await live.connection.command(HerdrScreenModel.paneFocusMethod, params: ["pane_id": other])
+        let request = try HerdrClientMessage.endpointRequest(
+            bootID: snapshot.bootID,
+            id: "focus",
+            method: HerdrScreenModel.paneFocusMethod,
+            params: ["pane_id": other]
+        )
+        live.connection.outbox.send([request])
+        let reply = try await live.log.reply(to: "focus", timeout: .seconds(15))
+        if case .failure(let failure) = HerdrCommandLane.result(of: reply) { XCTFail("\(failure)") }
         _ = try await live.log.snapshot(timeout: .seconds(15)) { $0.focusedPaneID == other }
     }
 
@@ -291,7 +300,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
         let grouping = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).grouping)
         XCTAssertEqual(grouping.groups.last?.name, first.label, "the workspace left isn't the most recent")
 
-        XCTAssertTrue(model.focusWorkspace(first.id, bootID: try XCTUnwrap(model.places.outline).bootID))
+        model.reveal(.workspace(first.id), bootID: try XCTUnwrap(model.places.outline).bootID)
         try await waitUntil("the workspace didn't go back to the tab this phone had there", timeout: .seconds(15)) {
             onScreen() == firstTab
         }
@@ -339,8 +348,63 @@ final class HerdrLiveConnectionTests: XCTestCase {
             guard let tab = onScreen() else { return false }
             return model.places.outline?.workspace(containingTab: tab)?.id != first.id
         }
-        XCTAssertTrue(model.focusWorkspace(first.id, bootID: try XCTUnwrap(model.places.outline).bootID))
+        model.reveal(.workspace(first.id), bootID: try XCTUnwrap(model.places.outline).bootID)
         try await zoomState(session, pane: panes.focused, is: true)
+    }
+
+    /// The Panes sheet's Split → and Split ↓ make the pane Herdr's client makes and go to it, as the frame
+    /// Herdr then sends shows. Herdr unzooms the tab it splits; with "Zoom multipane windows" on, the new
+    /// pane is zoomed, as Herdr itself reports.
+    @MainActor
+    func testThePanesSheetSplitsAsHerdrsClientDoesOnHerdr093() async throws {
+        try await checkSplits(version: "0.9.3")
+    }
+
+    @MainActor
+    func testThePanesSheetSplitsAsHerdrsClientDoesOnHerdr095() async throws {
+        try await checkSplits(version: "0.9.5")
+    }
+
+    @MainActor
+    private func checkSplits(version: String) async throws {
+        let session = try await openShownSession(version: version, through: { $0 })
+        let model = session.model
+        let adapter = model.terminalScreenAdapter
+        let first = try XCTUnwrap(model.focusedPaneID)
+        func panes() -> [String] {
+            model.places.outline?.workspaces.lazy.flatMap(\.tabs).first { $0.paneIDs.contains(first) }?.paneIDs ?? []
+        }
+
+        XCTAssertEqual(adapter.splitFocusedPane(GHOSTTY_SPLIT_DIRECTION_RIGHT), .queued)
+        try await waitUntil("Split → didn't go to the pane it made", timeout: .seconds(15)) {
+            panes().count == 2 && model.focusedPaneID != first && model.stateTraceLabel == "shown"
+        }
+        let right = try XCTUnwrap(model.focusedPaneID)
+        try await waitUntil("both panes weren't drawn", timeout: .seconds(10)) {
+            (model.layout?.panes.filter(\.hasTextArea).count ?? 0) == 2
+        }
+        try await zoomState(session, pane: right, is: false)
+
+        try model.applyTerminalSettings(Self.zooming)
+        XCTAssertEqual(adapter.splitFocusedPane(GHOSTTY_SPLIT_DIRECTION_DOWN), .queued)
+        try await waitUntil("Split ↓ didn't go to the pane it made", timeout: .seconds(15)) {
+            panes().count == 3 && model.focusedPaneID.map { $0 != first && $0 != right } == true
+                && model.stateTraceLabel == "shown"
+        }
+        try await zoomState(session, pane: try XCTUnwrap(model.focusedPaneID), is: true)
+
+        // Herdr's own answers to a new tab and a split name the pane each made, as Remux reads them.
+        func made(_ arguments: [String]) async throws -> String {
+            let created = try await session.fixture.herdr(arguments, trace: RemuxTransportStartupTrace(flowID: "herdr-live-split"))
+            XCTAssertEqual(created.exitStatus, 0, String(decoding: created.stderr, as: UTF8.self))
+            let pane = try XCTUnwrap(HerdrCreation.pane(madeIn: created.stdout), String(decoding: created.stdout, as: UTF8.self))
+            try await waitUntil("the pane Herdr's answer names isn't in the session", timeout: .seconds(10)) {
+                model.places.outline?.workspaces.contains { $0.tabs.contains { $0.paneIDs.contains(pane) } } == true
+            }
+            return pane
+        }
+        let root = try await made(["tab", "create", "--no-focus"])
+        _ = try await made(["pane", "split", root, "--direction", "right", "--no-focus"])
     }
 
     // MARK: - Agents
@@ -443,10 +507,10 @@ final class HerdrLiveConnectionTests: XCTestCase {
 
     // MARK: - Composer
 
-    /// Remux's composer sends a message to a Herdr pane as one paste, then Enter in a read of its own at
-    /// least the composer's pause later, so a program sees the paste settle before Enter. The program
-    /// asks for bracketed paste, as agents' prompts do; the message starts with a slash, which opens a
-    /// command menu in some agents.
+    /// Remux's composer sends a message to a Herdr pane as one paste, then Enter at least the composer's
+    /// pause after Herdr has the paste, and the program reads Enter on its own after the whole paste. The
+    /// program asks for bracketed paste, as agents' prompts do; the message starts with a slash, which
+    /// opens a command menu in some agents.
     @MainActor
     func testAComposedMessageArrivesAsAPasteThenEnterAfterThePauseOnHerdr093() async throws {
         try await checkComposedMessage(version: "0.9.3", message: Self.composedMessage)
@@ -458,7 +522,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
     }
 
     /// Over a slow uplink a long paste is still arriving well after the phone wrote it. The pause before
-    /// Enter runs once Herdr has the paste, so Enter still comes on its own, the pause after the paste.
+    /// Enter runs once Herdr has the whole paste, so Enter still comes on its own, after the paste.
     @MainActor
     func testAComposedMessageKeepsItsPauseOverASlowUplink() async throws {
         // The program's log of a longer message is more than a command's output may be.
@@ -483,6 +547,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
         let composer = GhosttyComposerModel()
         composer.draft = message
         let surfaceID = try XCTUnwrap(adapter.terminalInteractionProjection.selectedActiveLeafID)
+        let times = ComposerTimes()
         // As the screen sends a composed message.
         composer.submit(to: GhosttyComposerSubmissionDestination(
             workspaceID: session.model.target.workspace.id,
@@ -490,8 +555,13 @@ final class HerdrLiveConnectionTests: XCTestCase {
             destinationLabel: nil,
             makeAttachmentTransferService: { FailingComposerAttachmentTransferService() },
             prepareTerminalInput: {},
-            sendPaste: { await adapter.sendPasteAwaitingCommandCompletion($0, to: surfaceID) },
+            sendPaste: {
+                let delivered = await adapter.sendPasteAwaitingCommandCompletion($0, to: surfaceID)
+                times.pasteDelivered = .now
+                return delivered
+            },
             sendEnter: {
+                times.enterSent = .now
                 let enter = GhosttySurfaceKeyEvent(action: .press, keyCode: .enter)
                 guard await adapter.sendKeyEventAwaitingCommandCompletion(enter, to: surfaceID) else { return false }
                 _ = adapter.sendKeyEvent(GhosttySurfaceKeyEvent(action: .release, keyCode: .enter), to: surfaceID)
@@ -508,8 +578,10 @@ final class HerdrLiveConnectionTests: XCTestCase {
         guard let enter = reads.last, enter.bytes == [0x0d], reads.count >= 2 else {
             return XCTFail("Enter came in the paste's read on Herdr \(version): \(reads.map(\.bytes.count))")
         }
-        let gap = enter.milliseconds - reads[reads.count - 2].milliseconds
-        XCTAssertGreaterThanOrEqual(gap, 150, "Enter came \(gap) ms after the paste on Herdr \(version)")
+        // The pause runs from Herdr's answer that it has the paste; Herdr can still be writing the paste to
+        // the program then, so the gap the program sees isn't Remux's to keep.
+        let pause = try XCTUnwrap(times.enterSent) - (try XCTUnwrap(times.pasteDelivered))
+        XCTAssertGreaterThanOrEqual(pause, .milliseconds(150), "Enter went \(pause) after Herdr had the paste on Herdr \(version)")
     }
 
     // MARK: - Pane borders
@@ -1328,7 +1400,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
             onEvent: { await log.append($0) }
         )
         // Teardown blocks run last first, so the connection closes before the fixture stops Herdr.
-        addTeardownBlock { await connection.close() }
+        addTeardownBlock { await connection.close(.finished) }
         let paneID = try await log.snapshot(timeout: .seconds(15)) { !$0.panes.isEmpty }.panes[0].paneID
         return Live(fixture: fixture, trace: trace, log: log, connection: connection, paneID: paneID)
     }
@@ -1459,8 +1531,8 @@ actor HerdrLiveSlowUplink: HerdrBridgeTransport {
         isSending = false
     }
 
-    func close(reusable: Bool) async {
-        await bridge.close(reusable: reusable)
+    func close(_ cause: HerdrBridgeCloseCause) async {
+        await bridge.close(cause)
     }
 }
 
@@ -1485,22 +1557,35 @@ actor HerdrLivePingCounter: HerdrBridgeTransport {
         try await bridge.write(bytes)
     }
 
-    func close(reusable: Bool) async {
-        await bridge.close(reusable: reusable)
+    func close(_ cause: HerdrBridgeCloseCause) async {
+        await bridge.close(cause)
     }
 }
 
 /// Records a live connection's events for the test to wait on.
+/// When the composer's paste was delivered and its Enter sent, as the test's own closures see them.
+@MainActor
+private final class ComposerTimes {
+    var pasteDelivered: ContinuousClock.Instant?
+    var enterSent: ContinuousClock.Instant?
+}
+
 actor HerdrLiveEventLog {
     private var snapshots: [HerdrSnapshot] = []
     private(set) var surfaceCount = 0
     private(set) var reportsAllKeys = false
     private(set) var endReason: HerdrConnectionError?
+    /// Each request's reply, once its last chunk is in, and the chunks of those still coming.
+    private var replies: [String: [UInt8]] = [:]
+    private var partialReplies: [String: [UInt8]] = [:]
 
     func append(_ event: HerdrConnectionEvent) {
         switch event {
         case .snapshot(let snapshot, _):
             snapshots.append(snapshot)
+        case .response(let chunk):
+            partialReplies[chunk.requestID, default: []] += chunk.data
+            if chunk.isFinal { replies[chunk.requestID] = partialReplies.removeValue(forKey: chunk.requestID) }
         case .surface:
             surfaceCount += 1
         case .ended(let reason):
@@ -1521,6 +1606,17 @@ actor HerdrLiveEventLog {
         guard reportsAllKeys else {
             throw HerdrLiveError(description: "Herdr didn't report that the pane asks for every key")
         }
+    }
+
+    /// Herdr's whole reply to the request `id`, waiting up to `timeout` for it.
+    func reply(to id: String, timeout: Duration) async throws -> [UInt8] {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if let reply = replies[id] { return reply }
+            if let endReason { throw endReason }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw HerdrLiveError(description: "Herdr didn't answer \(id) within \(timeout)")
     }
 
     /// The newest snapshot that satisfies `condition`, waiting up to `timeout` for one.
