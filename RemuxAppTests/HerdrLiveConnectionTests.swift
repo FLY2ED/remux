@@ -77,6 +77,16 @@ final class HerdrLiveConnectionTests: XCTestCase {
         try await checkTypedInputReachesTheProgram(version: "0.9.5")
     }
 
+    /// A hardware keyboard's F1 to F12 and Insert, translated as Remux translates them, reach a raw-mode
+    /// program as the bytes xterm sends for them.
+    func testFunctionKeysAndInsertReachTheProgramOnHerdr093() async throws {
+        try await checkFunctionKeysReachTheProgram(version: "0.9.3")
+    }
+
+    func testFunctionKeysAndInsertReachTheProgramOnHerdr095() async throws {
+        try await checkFunctionKeysReachTheProgram(version: "0.9.5")
+    }
+
     /// A program that asks for every key as an escape code makes Herdr report it, and non-ASCII text
     /// then reaches the program as typed. A letter comes as its key code from v0.9.4 on; v0.9.3 writes a
     /// key's text as it is.
@@ -1292,6 +1302,38 @@ final class HerdrLiveConnectionTests: XCTestCase {
             ("Backspace key", key(.backspace), "\u{7f}"),
             ("Escape key", key(.escape), "\u{1b}"),
             ("paste", [.paste("p1\np2")], "p1\np2"),
+        ]
+        var offset = 1
+        for (name, input, bytes) in cases {
+            XCTAssertFalse(input.isEmpty, name)
+            try await live.connection.send(input, toPane: live.paneID)
+            let expected = Array(bytes.utf8)
+            let received = try await dump.read(after: offset, count: expected.count)
+            guard received == expected else {
+                return XCTFail("\(name) on Herdr \(version): got \(hex(received)), want \(hex(expected))")
+            }
+            offset += expected.count
+        }
+    }
+
+    private func checkFunctionKeysReachTheProgram(version: String) async throws {
+        let live = try await openLive(version: version)
+        let dump = try await startDump(in: live)
+        func key(_ code: GhosttySurfaceKeyEvent.KeyCode, _ mods: GhosttySurfaceKeyEvent.Mods = []) -> [HerdrInputEvent] {
+            HerdrInputTranslator.event(for: GhosttySurfaceKeyEvent(keyCode: code, mods: mods)).map { [$0] } ?? []
+        }
+        let plain = ["\u{1b}OP", "\u{1b}OQ", "\u{1b}OR", "\u{1b}OS", "\u{1b}[15~", "\u{1b}[17~", "\u{1b}[18~",
+                     "\u{1b}[19~", "\u{1b}[20~", "\u{1b}[21~", "\u{1b}[23~", "\u{1b}[24~"]
+        var cases: [(name: String, input: [HerdrInputEvent], bytes: String)] = zip(
+            GhosttySurfaceKeyEvent.KeyCode.functionKeys.indices,
+            plain
+        ).map { index, bytes in
+            ("F\(index + 1)", key(GhosttySurfaceKeyEvent.KeyCode.functionKeys[index]), bytes)
+        }
+        cases += [
+            ("Shift+F1", key(.f1, [.shift]), "\u{1b}[1;2P"),
+            ("Ctrl+F5", key(.f5, [.ctrl]), "\u{1b}[15;5~"),
+            ("Insert", key(.insert), "\u{1b}[2~"),
         ]
         var offset = 1
         for (name, input, bytes) in cases {

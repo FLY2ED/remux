@@ -592,6 +592,19 @@ enum GhosttyTerminalHardwareCommandMapping {
         .keyboardEnd: .end,
         .keyboardPageUp: .pageUp,
         .keyboardPageDown: .pageDown,
+        .keyboardInsert: .insert,
+        .keyboardF1: .f1,
+        .keyboardF2: .f2,
+        .keyboardF3: .f3,
+        .keyboardF4: .f4,
+        .keyboardF5: .f5,
+        .keyboardF6: .f6,
+        .keyboardF7: .f7,
+        .keyboardF8: .f8,
+        .keyboardF9: .f9,
+        .keyboardF10: .f10,
+        .keyboardF11: .f11,
+        .keyboardF12: .f12,
     ]
 
     static func resolveHardwareKey(

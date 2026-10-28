@@ -63,6 +63,17 @@ final class HerdrInputTranslatorTests: XCTestCase {
         XCTAssertNil(key(GhosttySurfaceKeyEvent.KeyCode(rawValue: 0x00)))
     }
 
+    /// As Herdr reads a plain terminal's F1 to F12 and Insert (`input/parse.rs`, `parse_legacy_key_sequence`):
+    /// keys without text, so Herdr tracks their release.
+    func testFunctionKeysAndInsertBecomeHerdrsKeys() {
+        for (index, code) in GhosttySurfaceKeyEvent.KeyCode.functionKeys.enumerated() {
+            XCTAssertEqual(key(code), chord(.function(UInt8(index + 1))), "F\(index + 1)")
+        }
+        XCTAssertEqual(key(.f5, [.shift, .ctrl]), chord(.function(5), [.shift, .control]))
+        XCTAssertEqual(key(.insert), chord(.insert))
+        XCTAssertNil(HerdrInputTranslator.event(for: GhosttySurfaceKeyEvent(action: .release, keyCode: .f1)))
+    }
+
     func testMessagesStayWithinHerdrsEventLimit() {
         let events = Array(repeating: typed("a"), count: HerdrConnection.maxInputEvents + 1)
         let messages = HerdrInputTranslator.messages(events)

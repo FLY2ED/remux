@@ -45,6 +45,7 @@ enum HerdrInputTranslator {
         case .end: code = .end
         case .pageUp: code = .pageUp
         case .pageDown: code = .pageDown
+        case .insert: code = .insert
         // Shift+Tab stays Tab with Shift: as BackTab its release would be lost under kitty event types.
         case .tab: code = .tab
         case .space:
@@ -53,7 +54,10 @@ enum HerdrInputTranslator {
             }
             return .key(HerdrKeyEvent(code: .character(" "), generatedText: " "))
         default:
-            return nil
+            guard let index = GhosttySurfaceKeyEvent.KeyCode.functionKeys.firstIndex(of: key.keyCode) else {
+                return nil
+            }
+            code = .function(UInt8(index + 1))
         }
         return .key(HerdrKeyEvent(code: code, modifiers: modifiers, tracksRelease: true))
     }
