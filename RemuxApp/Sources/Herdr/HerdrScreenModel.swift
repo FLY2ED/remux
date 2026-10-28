@@ -628,7 +628,7 @@ final class HerdrScreenModel {
             isShown: isSelected,
             focusedWorkspaceID: snapshot.focusedWorkspaceID,
             focusedTabID: snapshot.focusedTabID,
-            agentStatuses: agents.statuses
+            agentStatuses: Dictionary(agents.agents.map { ($0.paneID, $0.state.status) }) { $1 }
         )
     }
 

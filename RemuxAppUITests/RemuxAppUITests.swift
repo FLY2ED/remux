@@ -2299,6 +2299,79 @@ final class RemuxAppUITests: XCTestCase {
         app.buttons["terminal.sessions.close"].tap()
     }
 
+    /// Herdr's workspaces on a live server, each showing its most urgent agent: the fixture's `remux`, with
+    /// agent `claude` working, then `api`, whose agent works and finishes when the test asks (`finish`),
+    /// `web`, with none, `notes`, whose agent is idle, and `infra`, whose agent is blocked. Sessions shows
+    /// each workspace's agent on its row, and Tabs on its capsule; the workspaces behind More show theirs in
+    /// its menu, and on More once picked.
+    func testLiveHerdrWorkspaceAgentsWhenConfigured() throws {
+        let configuration = try launchLiveHerdrApp(requiringSteps: true)
+        let banner = app.descendants(matching: .any)["herdr.notification.banner"].firstMatch
+        let sessionsSheet = app.otherElements["terminal.sessions.sheet"]
+        let workspaceRows = app.buttons.matching(identifier: "terminal.sessions.herdr-workspace")
+        let more = app.buttons["terminal.windows.group.more"]
+        // The list makes only the rows it shows, so the workspaces are read as it scrolls, in order.
+        func listedWorkspaceRows() -> [String] {
+            let sessionList = app.descendants(matching: .any)["terminal.sessions.list"]
+            let newWorkspace = app.buttons["terminal.sessions.herdr-workspace.new"]
+            var listed: [String] = []
+            func read() {
+                for label in workspaceRows.allElementsBoundByIndex.map({ $0.label }) where !listed.contains(label) {
+                    listed.append(label)
+                }
+            }
+            read()
+            for _ in 0..<4 where !newWorkspace.exists || !newWorkspace.isHittable {
+                sessionList.swipeUp()
+                read()
+            }
+            return listed
+        }
+
+        openFirstSavedSession()
+        waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
+        try requestLiveHerdrStep("finish", in: configuration)
+        XCTAssertTrue(banner.waitForExistence(timeout: 20), "No banner for the agent that finished in api.")
+        XCTAssertTrue(banner.waitForNonExistence(timeout: 20))
+
+        openSessionSwitcherFromTerminal()
+        XCTAssertTrue(sessionsSheet.waitForExistence(timeout: 5))
+        XCTAssertTrue(workspaceRows.firstMatch.waitForExistence(timeout: 5), "The session didn't list its workspaces.")
+        captureLiveHerdrStep("w1-sessions", in: configuration)
+        XCTAssertEqual(listedWorkspaceRows(), [
+            "Workspace remux, 1 tab, agent working, current workspace",
+            "Workspace api, 1 tab, agent done",
+            "Workspace web, 1 tab",
+            "Workspace notes, 1 tab, agent idle",
+            "Workspace infra, 1 tab, agent blocked",
+        ], "The workspace rows didn't show their agents.")
+        captureLiveHerdrStep("w1b-sessions-scrolled", in: configuration)
+        app.buttons["terminal.sessions.close"].tap()
+        XCTAssertTrue(sessionsSheet.waitForNonExistence(timeout: 5))
+
+        openWindowsSheet()
+        XCTAssertTrue(
+            waitForLabel(of: app.buttons["terminal.windows.group.1"], "Workspace remux, agent working", timeout: 10),
+            "The capsule of the workspace on screen didn't show its agent."
+        )
+        XCTAssertEqual(app.buttons["terminal.windows.group.2"].label, "Workspace api, agent done")
+        XCTAssertEqual(app.buttons["terminal.windows.group.3"].label, "Workspace web")
+        XCTAssertEqual(more.label, "More workspaces")
+        captureLiveHerdrStep("w2-tabs", in: configuration)
+
+        more.tap()
+        let infra = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "infra")).firstMatch
+        XCTAssertTrue(infra.waitForExistence(timeout: 5), "More didn't list infra.")
+        captureLiveHerdrStep("w3-more-menu", in: configuration)
+        infra.tap()
+        XCTAssertTrue(
+            waitForLabel(of: more, "Workspace infra, agent blocked, more workspaces", timeout: 10),
+            "More didn't show the picked workspace's agent."
+        )
+        captureLiveHerdrStep("w4-more-picked", in: configuration)
+        app.buttons["terminal.windows.close"].tap()
+    }
+
     private func waitForLabel(of element: XCUIElement, _ label: String, timeout: TimeInterval) -> Bool {
         let expectation = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "label == %@", label),

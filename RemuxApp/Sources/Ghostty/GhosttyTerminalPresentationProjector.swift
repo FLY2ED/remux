@@ -576,6 +576,8 @@ struct GhosttyWindowSelectionSheetRenderProjection: Equatable, Sendable {
         struct Group: Identifiable, Equatable, Sendable {
             let id: UUID
             let name: String
+            /// The group's most urgent agent, when the backend reports agents.
+            var agentStatus: TerminalAgentStatus?
         }
 
         let noun: GhosttyTopLevelNoun

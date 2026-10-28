@@ -399,9 +399,12 @@ struct GhosttyPaneSelectionSheet: View {
 
 /// A backend's groups of windows, as Herdr's workspaces: the three most recent as capsules, and the rest
 /// and a new group behind More, which shows the group it lists when that one is picked. The order follows
-/// the backend's recency, so it holds as groups are added.
+/// the backend's recency, so it holds as groups are added. Each group shows its most urgent agent's dot
+/// before its name.
 private struct GhosttyWindowGroupPicker: View {
     private static let capsuleCount = 3
+
+    @Environment(\.colorScheme) private var colorScheme
 
     let grouping: GhosttyWindowSelectionSheetRenderProjection.Grouping
     let onShow: (UUID) -> Void
@@ -419,10 +422,10 @@ private struct GhosttyWindowGroupPicker: View {
                     Haptic.selection()
                     onShow(group.id)
                 } label: {
-                    GhosttyWindowGroupCapsule(title: group.name, isShown: isShown)
+                    GhosttyWindowGroupCapsule(title: group.name, agentStatus: group.agentStatus, isShown: isShown)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("\(grouping.noun.singular) \(group.name)")
+                .accessibilityLabel(accessibilityName(of: group))
                 .accessibilityAddTraits(isShown ? [.isSelected, .isButton] : .isButton)
                 .accessibilityIdentifier("terminal.windows.group.\(index + 1)")
             }
@@ -433,12 +436,22 @@ private struct GhosttyWindowGroupPicker: View {
                 Section {
                     ForEach(rest) { group in
                         Toggle(
-                            group.name,
                             isOn: Binding(
                                 get: { group.id == grouping.shownGroupID },
                                 set: { isOn in if isOn { onShow(group.id) } }
                             )
-                        )
+                        ) {
+                            if let status = group.agentStatus {
+                                Label {
+                                    Text(group.name)
+                                } icon: {
+                                    Image(uiImage: status.dotImage(for: colorScheme))
+                                }
+                                .accessibilityLabel("\(group.name), agent \(status.word)")
+                            } else {
+                                Text(group.name)
+                            }
+                        }
                     }
                 }
 
@@ -451,12 +464,13 @@ private struct GhosttyWindowGroupPicker: View {
             } label: {
                 GhosttyWindowGroupCapsule(
                     title: shownInMore?.name ?? "More",
+                    agentStatus: shownInMore?.agentStatus,
                     isShown: shownInMore != nil,
                     showsMenuIndicator: true
                 )
             }
             .accessibilityLabel(
-                shownInMore.map { "\(grouping.noun.singular) \($0.name), more \(grouping.noun.plural.lowercased())" }
+                shownInMore.map { "\(accessibilityName(of: $0)), more \(grouping.noun.plural.lowercased())" }
                     ?? "More \(grouping.noun.plural.lowercased())"
             )
             .accessibilityIdentifier("terminal.windows.group.more")
@@ -465,15 +479,29 @@ private struct GhosttyWindowGroupPicker: View {
         }
         .frame(height: TerminalSelectionSheetLayout.groupPickerHeight)
     }
+
+    private func accessibilityName(of group: GhosttyWindowSelectionSheetRenderProjection.Grouping.Group) -> String {
+        let agent = group.agentStatus.map { ", agent \($0.word)" } ?? ""
+        return "\(grouping.noun.singular) \(group.name)\(agent)"
+    }
 }
 
 private struct GhosttyWindowGroupCapsule: View {
+    @Environment(\.colorScheme) private var colorScheme
+
     let title: String
+    let agentStatus: TerminalAgentStatus?
     let isShown: Bool
     var showsMenuIndicator = false
 
     var body: some View {
         HStack(spacing: 5) {
+            if let agentStatus {
+                TerminalAgentDot(status: agentStatus)
+                    // A shown capsule is filled in the opposite appearance's colours.
+                    .environment(\.colorScheme, isShown ? (colorScheme == .dark ? .light : .dark) : colorScheme)
+            }
+
             Text(title)
                 .lineLimit(1)
                 .truncationMode(.tail)

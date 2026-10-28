@@ -7,6 +7,23 @@ extension TerminalAgentStatus {
     /// (`app/state.rs`). An unknown state takes the themes' muted grey, as do agents whose session isn't
     /// connected, since their state may be out of date.
     var color: Color {
+        Color(uiColor: uiColor)
+    }
+
+    /// The dot as an image in the state's colour for `colorScheme`, for a menu's items, which show an image
+    /// in its own colours only when it is drawn as given.
+    func dotImage(for colorScheme: ColorScheme, diameter: CGFloat = 10) -> UIImage {
+        let style: UIUserInterfaceStyle = colorScheme == .dark ? .dark : .light
+        let color = uiColor.resolvedColor(with: UITraitCollection(userInterfaceStyle: style))
+        let bounds = CGRect(x: 0, y: 0, width: diameter, height: diameter)
+        return UIGraphicsImageRenderer(bounds: bounds).image { _ in
+            color.setFill()
+            UIBezierPath(ovalIn: bounds).fill()
+        }
+        .withRenderingMode(.alwaysOriginal)
+    }
+
+    private var uiColor: UIColor {
         let (dark, light): (UIColor, UIColor) = switch self {
         case .working: (Self.rgb(249, 226, 175), Self.rgb(223, 142, 29))
         case .blocked: (Self.rgb(243, 139, 168), Self.rgb(210, 15, 57))
@@ -14,7 +31,7 @@ extension TerminalAgentStatus {
         case .idle: (Self.rgb(166, 227, 161), Self.rgb(64, 160, 43))
         case .unknown: (Self.rgb(108, 112, 134), Self.rgb(156, 160, 176))
         }
-        return Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? dark : light })
+        return UIColor { $0.userInterfaceStyle == .dark ? dark : light }
     }
 
     private static func rgb(_ red: CGFloat, _ green: CGFloat, _ blue: CGFloat) -> UIColor {
