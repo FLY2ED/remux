@@ -14,6 +14,15 @@ final class GhosttySurfaceKeyEventTests: XCTestCase {
         XCTAssertEqual(GhosttySurfaceKeyEvent.KeyCode.arrowUp.rawValue, 0x7E)
     }
 
+    /// Ghostty's macOS keycodes for F1 to F12 and Help/Insert (`src/input/keycodes.zig`).
+    func testFunctionKeyAndInsertCodesUseGhosttyDarwinNativeKeycodes() {
+        XCTAssertEqual(
+            GhosttySurfaceKeyEvent.KeyCode.functionKeys.map(\.rawValue),
+            [0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D, 0x67, 0x6F]
+        )
+        XCTAssertEqual(GhosttySurfaceKeyEvent.KeyCode.insert.rawValue, 0x72)
+    }
+
     func testWithCValuePreservesCoreFields() {
         let event = GhosttySurfaceKeyEvent(
             action: .repeat,

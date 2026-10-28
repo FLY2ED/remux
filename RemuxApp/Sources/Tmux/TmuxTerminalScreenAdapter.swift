@@ -89,7 +89,7 @@ final class TmuxTerminalScreenAdapter: ObservableObject {
     private var didAdoptZoomMarks = false
     private var multipaneZoomDefault = TmuxMultipaneZoomDefaultPolicy()
 
-    private lazy var commandFailure = GhosttyTerminalCommandFailureNotice { [weak self] in
+    private lazy var commandFailure = GhosttyTerminalNotice { [weak self] in
         self?.objectWillChange.send()
     }
 
@@ -462,7 +462,7 @@ final class TmuxTerminalScreenAdapter: ObservableObject {
     // MARK: Command failures
 
     private func presentCommandFailure(for request: TmuxSessionController.Request) {
-        commandFailure.present("tmux: \(Self.failureLabel(for: request)) failed")
+        commandFailure.presentFailure("tmux: \(Self.failureLabel(for: request)) failed")
     }
 
     private static func failureLabel(for request: TmuxSessionController.Request) -> String {
@@ -496,7 +496,7 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         GhosttyTerminalPresentationProjector.terminalScreenPresentationProjection(
             phase: runtimePhase,
             transportWritable: isTransportWritable,
-            commandFailureMessage: commandFailure.message,
+            commandFailureMessage: commandFailure.failureMessage,
             debugStatus: stateTraceLabel,
             registryDebugSummary: "tmux session stack",
             presentedSurfaceID: activeManagedSurface?.id,

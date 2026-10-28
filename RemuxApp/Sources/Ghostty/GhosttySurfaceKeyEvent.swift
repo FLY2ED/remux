@@ -65,6 +65,23 @@ struct GhosttySurfaceKeyEvent: Equatable {
         static let pageUp = Self(rawValue: 0x74)
         static let pageDown = Self(rawValue: 0x79)
         static let space = Self(rawValue: 0x31)
+        /// The Mac's Help key, at the place of a PC keyboard's Insert.
+        static let insert = Self(rawValue: 0x72)
+        static let f1 = Self(rawValue: 0x7A)
+        static let f2 = Self(rawValue: 0x78)
+        static let f3 = Self(rawValue: 0x63)
+        static let f4 = Self(rawValue: 0x76)
+        static let f5 = Self(rawValue: 0x60)
+        static let f6 = Self(rawValue: 0x61)
+        static let f7 = Self(rawValue: 0x62)
+        static let f8 = Self(rawValue: 0x64)
+        static let f9 = Self(rawValue: 0x65)
+        static let f10 = Self(rawValue: 0x6D)
+        static let f11 = Self(rawValue: 0x67)
+        static let f12 = Self(rawValue: 0x6F)
+
+        /// F1 to F12, in order.
+        static let functionKeys: [Self] = [.f1, .f2, .f3, .f4, .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12]
     }
 
     let action: Action

@@ -77,6 +77,16 @@ final class HerdrLiveConnectionTests: XCTestCase {
         try await checkTypedInputReachesTheProgram(version: "0.9.5")
     }
 
+    /// A hardware keyboard's F1 to F12 and Insert, translated as Remux translates them, reach a raw-mode
+    /// program as the bytes xterm sends for them.
+    func testFunctionKeysAndInsertReachTheProgramOnHerdr093() async throws {
+        try await checkFunctionKeysReachTheProgram(version: "0.9.3")
+    }
+
+    func testFunctionKeysAndInsertReachTheProgramOnHerdr095() async throws {
+        try await checkFunctionKeysReachTheProgram(version: "0.9.5")
+    }
+
     /// A program that asks for every key as an escape code makes Herdr report it, and non-ASCII text
     /// then reaches the program as typed. A letter comes as its key code from v0.9.4 on; v0.9.3 writes a
     /// key's text as it is.
@@ -677,6 +687,118 @@ final class HerdrLiveConnectionTests: XCTestCase {
         XCTAssertEqual(reads.flatMap(\.bytes), expected, "Herdr \(version)")
     }
 
+    // MARK: - Mouse
+
+    /// As the screen sends a tap and a drag, a program that reads the mouse gets them at the cells under the
+    /// finger, relative to its pane: the pointer's move there, which it asked for with every motion, the
+    /// press, the held button's drag and the release.
+    @MainActor
+    func testATapAndADragReachAProgramThatReadsTheMouseOnHerdr093() async throws {
+        try await checkMouseReachesTheProgram(version: "0.9.3")
+    }
+
+    @MainActor
+    func testATapAndADragReachAProgramThatReadsTheMouseOnHerdr095() async throws {
+        try await checkMouseReachesTheProgram(version: "0.9.5")
+    }
+
+    /// A right-click reaches the program once Herdr is told to send the pane its right-clicks
+    /// (`herdr pane input --right-click pane`); until then it's Herdr's.
+    @MainActor
+    func testARightClickReachesAProgramOnlyInAPaneThatTakesThemOnHerdr095() async throws {
+        let session = try await openShownSession(version: "0.9.5", through: { $0 })
+        let adapter = session.model.terminalScreenAdapter
+        let pane = try XCTUnwrap(adapter.terminalInteractionProjection.selectedActiveLeafID)
+        let paneID = try XCTUnwrap(session.model.focusedPaneID)
+        let log = try await startReadLog(in: session, modes: #"\033[?1000h\033[?1006h"#)
+        try await waitUntil("the pane didn't say its program reads the mouse", timeout: .seconds(15)) {
+            adapter.isMouseCaptured(for: pane)
+        }
+        let rightPress = GhosttySurfaceMouseButtonEvent(state: .press, button: .right)
+        XCTAssertEqual(adapter.sendMousePosition(to: pane, try cellCentre(session, column: 1, row: 0), mods: []), .sent)
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, rightPress), .surfaceRejected)
+
+        let set = try await session.fixture.herdr(
+            ["pane", "input", paneID, "--right-click", "pane"],
+            trace: RemuxTransportStartupTrace(flowID: "herdr-live-mouse")
+        )
+        XCTAssertEqual(set.exitStatus, 0, String(decoding: set.stderr, as: UTF8.self))
+        let deadline = ContinuousClock.now + .seconds(10)
+        while adapter.sendMouseButton(to: pane, rightPress) != .sent {
+            guard ContinuousClock.now < deadline else { throw HerdrLiveError(description: "the pane never took a right-click") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .release, button: .right)), .sent)
+        let expected = Array("\u{1b}[<2;2;1M\u{1b}[<2;2;1m".utf8)
+        let reads = try await log.reads(until: { $0.flatMap(\.bytes).count >= expected.count })
+        XCTAssertEqual(reads.flatMap(\.bytes), expected)
+    }
+
+    @MainActor
+    private func checkMouseReachesTheProgram(version: String) async throws {
+        let session = try await openShownSession(version: version, through: { $0 })
+        let adapter = session.model.terminalScreenAdapter
+        let pane = try XCTUnwrap(adapter.terminalInteractionProjection.selectedActiveLeafID)
+        let log = try await startReadLog(in: session, modes: #"\033[?1003h\033[?1006h"#)
+        try await waitUntil("the pane didn't say its program reads the mouse", timeout: .seconds(15)) {
+            adapter.isMouseCaptured(for: pane)
+        }
+
+        XCTAssertEqual(adapter.sendMousePosition(to: pane, try cellCentre(session, column: 2, row: 1), mods: []), .sent)
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .press, button: .left)), .sent)
+        XCTAssertEqual(adapter.sendMousePosition(to: pane, try cellCentre(session, column: 4, row: 1), mods: []), .sent)
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .release, button: .left)), .sent)
+
+        let expected = Array("\u{1b}[<35;3;2M\u{1b}[<0;3;2M\u{1b}[<32;5;2M\u{1b}[<0;5;2m".utf8)
+        let reads = try await log.reads(until: { $0.flatMap(\.bytes).count >= expected.count })
+        XCTAssertEqual(reads.flatMap(\.bytes), expected, "Herdr \(version)")
+    }
+
+    /// The middle of a cell of the pane, in the pane's points, as a tap there gives it.
+    @MainActor
+    private func cellCentre(_ session: ShownSession, column: Double, row: Double) throws -> CGPoint {
+        let metrics = try XCTUnwrap(session.model.measurement).cellMetrics
+        return CGPoint(
+            x: (column + 0.5) * Double(metrics.pixelWidth) / metrics.contentScale,
+            y: (row + 0.5) * Double(metrics.pixelHeight) / metrics.contentScale
+        )
+    }
+
+    // MARK: - Clipboard
+
+    /// A program's OSC 52 copy in the session on screen lands on the iPhone clipboard, and the screen says
+    /// so.
+    @MainActor
+    func testAProgramsCopyReachesTheClipboardOnHerdr093() async throws {
+        try await checkAProgramsCopyReachesTheClipboard(version: "0.9.3")
+    }
+
+    @MainActor
+    func testAProgramsCopyReachesTheClipboardOnHerdr095() async throws {
+        try await checkAProgramsCopyReachesTheClipboard(version: "0.9.5")
+    }
+
+    @MainActor
+    private func checkAProgramsCopyReachesTheClipboard(version: String) async throws {
+        let session = try await openShownSession(version: version, through: { $0 })
+        let text = "copied on Herdr \(version) \(UUID().uuidString.prefix(8))"
+        let before = UIPasteboard.general.changeCount
+        XCTAssertEqual(
+            session.model.sendText("printf '\\033]52;c;%s\\a' \"$(printf '%s' '\(text)' | base64)\"\r"),
+            .accepted
+        )
+        // Reading what another process put on the clipboard makes iOS ask the user, so the test reads it
+        // only once this process has written it.
+        try await waitUntil("the copy didn't reach the clipboard", timeout: .seconds(15)) {
+            UIPasteboard.general.changeCount != before
+        }
+        XCTAssertEqual(UIPasteboard.general.string, text)
+        XCTAssertEqual(
+            session.model.terminalScreenAdapter.terminalScreenPresentationProjection.statusOverlay,
+            .notice(HerdrScreenModel.copiedNotice)
+        )
+    }
+
     // MARK: - Selection
 
     /// A line longer than the pane copies as one line, as Herdr keeps it: the pane's own terminal holds
@@ -1180,6 +1302,38 @@ final class HerdrLiveConnectionTests: XCTestCase {
             ("Backspace key", key(.backspace), "\u{7f}"),
             ("Escape key", key(.escape), "\u{1b}"),
             ("paste", [.paste("p1\np2")], "p1\np2"),
+        ]
+        var offset = 1
+        for (name, input, bytes) in cases {
+            XCTAssertFalse(input.isEmpty, name)
+            try await live.connection.send(input, toPane: live.paneID)
+            let expected = Array(bytes.utf8)
+            let received = try await dump.read(after: offset, count: expected.count)
+            guard received == expected else {
+                return XCTFail("\(name) on Herdr \(version): got \(hex(received)), want \(hex(expected))")
+            }
+            offset += expected.count
+        }
+    }
+
+    private func checkFunctionKeysReachTheProgram(version: String) async throws {
+        let live = try await openLive(version: version)
+        let dump = try await startDump(in: live)
+        func key(_ code: GhosttySurfaceKeyEvent.KeyCode, _ mods: GhosttySurfaceKeyEvent.Mods = []) -> [HerdrInputEvent] {
+            HerdrInputTranslator.event(for: GhosttySurfaceKeyEvent(keyCode: code, mods: mods)).map { [$0] } ?? []
+        }
+        let plain = ["\u{1b}OP", "\u{1b}OQ", "\u{1b}OR", "\u{1b}OS", "\u{1b}[15~", "\u{1b}[17~", "\u{1b}[18~",
+                     "\u{1b}[19~", "\u{1b}[20~", "\u{1b}[21~", "\u{1b}[23~", "\u{1b}[24~"]
+        var cases: [(name: String, input: [HerdrInputEvent], bytes: String)] = zip(
+            GhosttySurfaceKeyEvent.KeyCode.functionKeys.indices,
+            plain
+        ).map { index, bytes in
+            ("F\(index + 1)", key(GhosttySurfaceKeyEvent.KeyCode.functionKeys[index]), bytes)
+        }
+        cases += [
+            ("Shift+F1", key(.f1, [.shift]), "\u{1b}[1;2P"),
+            ("Ctrl+F5", key(.f5, [.ctrl]), "\u{1b}[15;5~"),
+            ("Insert", key(.insert), "\u{1b}[2~"),
         ]
         var offset = 1
         for (name, input, bytes) in cases {
