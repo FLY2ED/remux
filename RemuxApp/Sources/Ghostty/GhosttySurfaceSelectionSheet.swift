@@ -27,8 +27,7 @@ struct GhosttyWindowSelectionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.ghosttyTerminalChromeStyle) private var chromeStyle
     @ObservedObject var session: GhosttyPanePreviewSession
-    @State private var pendingRemoval: GhosttyWindowRemovalRequest?
-    @State private var pendingContextAction: GhosttyWindowRemovalRequest?
+    @State private var removal = GhosttyTileRemoval<GhosttyWindowSelectionSheetRenderProjection.Window>()
 
     let projection: GhosttyWindowSelectionSheetRenderProjection
     let topLevelNoun: GhosttyTopLevelNoun
@@ -111,9 +110,7 @@ struct GhosttyWindowSelectionSheet: View {
             session.reconcile(leafIDs: newValue)
         }
         .onChange(of: projection.windows.map(\.id)) { _, newValue in
-            if let pendingContextAction, !newValue.contains(pendingContextAction.id) {
-                self.pendingContextAction = nil
-            }
+            removal.keepBubble(among: newValue)
         }
         .ghosttyCloseConfirmationDialog(closeQuestion)
         .overlay(alignment: .bottom) {
@@ -142,15 +139,9 @@ struct GhosttyWindowSelectionSheet: View {
             spacing: layout.gridSpacing
         ) {
             ForEach(windows) { window in
-                let request = GhosttyWindowRemovalRequest(
-                    id: window.id,
-                    displayIndex: window.displayIndex,
-                    confirmation: window.closeConfirmation
-                )
-
                 ZStack(alignment: .topTrailing) {
                     Button {
-                        pendingContextAction = nil
+                        removal.end()
                         Haptic.selection()
                         onSelect(window.id)
                     } label: {
@@ -176,27 +167,32 @@ struct GhosttyWindowSelectionSheet: View {
                         LongPressGesture(minimumDuration: 0.42, maximumDistance: 18)
                             .onEnded { _ in
                                 Haptic.warning()
-                                pendingContextAction = request
+                                removal.showBubble(on: window)
                             }
                     )
-                    .allowsHitTesting(pendingContextAction?.id != window.id)
+                    .allowsHitTesting(removal.bubbleTileID != window.id)
 
-                    if pendingContextAction?.id == window.id {
+                    if removal.bubbleTileID == window.id {
                         GhosttySelectionContextActionButton(
                             title: "Remove \(topLevelNoun.singular) \(window.displayIndex)",
-                            accessibilityIdentifier: "terminal.window.remove.\(window.displayIndex)",
-                            action: confirmPendingContextAction
-                        )
+                            accessibilityIdentifier: "terminal.window.remove.\(window.displayIndex)"
+                        ) {
+                            if let window = removal.bubbleTapped(among: projection.windows) {
+                                onRemoveWindow(window.id)
+                            }
+                        }
                         .padding(4)
                         .transition(.scale(scale: 0.92).combined(with: .opacity))
                         .zIndex(1)
                     }
                 }
                 .frame(width: layout.tilePointSize.width, height: layout.tilePointSize.height)
-                .animation(.spring(response: 0.24, dampingFraction: 0.82), value: pendingContextAction?.id)
+                .animation(.spring(response: 0.24, dampingFraction: 0.82), value: removal.bubbleTileID)
                 .accessibilityAction(named: Text("Remove \(topLevelNoun.singular) \(window.displayIndex)")) {
                     Haptic.warning()
-                    requestRemoval(request)
+                    if let window = removal.remove(window) {
+                        onRemoveWindow(window.id)
+                    }
                 }
             }
 
@@ -206,28 +202,13 @@ struct GhosttyWindowSelectionSheet: View {
 
     /// The window's removal asked about, else the close the backend's server asked about.
     private var closeQuestion: GhosttyCloseQuestion? {
-        guard let request = pendingRemoval, let confirmation = request.confirmation else { return askedCloseQuestion }
+        guard let window = removal.asked, let confirmation = window.closeConfirmation else { return askedCloseQuestion }
         return GhosttyCloseQuestion(
             confirmation: confirmation,
-            confirmIdentifier: "terminal.window.remove.confirm.\(request.displayIndex)"
+            confirmIdentifier: "terminal.window.remove.confirm.\(window.displayIndex)"
         ) { agreed in
-            if agreed { onRemoveWindow(request.id) }
-            pendingRemoval = nil
-            pendingContextAction = nil
-        }
-    }
-
-    private func confirmPendingContextAction() {
-        pendingContextAction.map(requestRemoval)
-    }
-
-    /// Removes the window, after asking when its backend asks first.
-    private func requestRemoval(_ request: GhosttyWindowRemovalRequest) {
-        pendingContextAction = nil
-        if request.confirmation == nil {
-            onRemoveWindow(request.id)
-        } else {
-            pendingRemoval = request
+            if agreed { onRemoveWindow(window.id) }
+            removal.end()
         }
     }
 }
@@ -235,8 +216,7 @@ struct GhosttyWindowSelectionSheet: View {
 struct GhosttyPaneSelectionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.ghosttyTerminalChromeStyle) private var chromeStyle
-    @State private var pendingRemoval: GhosttyPaneRemovalRequest?
-    @State private var pendingContextAction: GhosttyPaneRemovalRequest?
+    @State private var removal = GhosttyTileRemoval<GhosttyPaneSelectionSheetRenderProjection.Pane>()
 
     let projection: GhosttyPaneSelectionSheetRenderProjection
     let topologySize: CGSize
@@ -310,9 +290,7 @@ struct GhosttyPaneSelectionSheet: View {
             }
         }
         .onChange(of: projection.panes.map(\.id)) { _, newValue in
-            if let pendingContextAction, !newValue.contains(pendingContextAction.id) {
-                self.pendingContextAction = nil
-            }
+            removal.keepBubble(among: newValue)
         }
         .ghosttyCloseConfirmationDialog(closeQuestion)
         .overlay(alignment: .bottom) {
@@ -334,50 +312,84 @@ struct GhosttyPaneSelectionSheet: View {
             selectedPaneID: projection.selectedPaneID,
             size: topologySize,
             accent: chromeStyle.selectedStroke,
-            pendingRemovalPaneID: pendingContextAction?.id,
+            pendingRemovalPaneID: removal.bubbleTileID,
             onSelect: { paneID in
                 Haptic.selection()
-                pendingContextAction = nil
+                removal.end()
                 onSelect(paneID)
             },
             onLongPress: { pane in
                 Haptic.warning()
-                pendingContextAction = removalRequest(for: pane)
+                removal.showBubble(on: pane)
             },
-            onRemove: { pane in
-                performRemoval(removalRequest(for: pane))
+            onRemove: { _ in
+                if let pane = removal.bubbleTapped(among: projection.panes) {
+                    onRemovePane(pane.id)
+                }
             }
         )
         .frame(height: topologySize.height, alignment: .top)
     }
 
-    private func removalRequest(
-        for pane: GhosttyPaneSelectionSheetRenderProjection.Pane
-    ) -> GhosttyPaneRemovalRequest {
-        GhosttyPaneRemovalRequest(
-            id: pane.id,
-            confirmation: pane.closeConfirmation
-        )
-    }
-
     /// The pane's removal asked about, else the close the backend's server asked about.
     private var closeQuestion: GhosttyCloseQuestion? {
-        guard let request = pendingRemoval, let confirmation = request.confirmation else { return askedCloseQuestion }
+        guard let pane = removal.asked, let confirmation = pane.closeConfirmation else { return askedCloseQuestion }
         return GhosttyCloseQuestion(confirmation: confirmation, confirmIdentifier: "terminal.pane.remove.confirm") { agreed in
-            if agreed { onRemovePane(request.id) }
-            pendingRemoval = nil
-            pendingContextAction = nil
+            if agreed { onRemovePane(pane.id) }
+            removal.end()
         }
     }
+}
 
-    /// Removes the pane, after asking when its backend asks first.
-    private func performRemoval(_ request: GhosttyPaneRemovalRequest) {
-        if request.confirmation == nil {
-            onRemovePane(request.id)
-            pendingContextAction = nil
-        } else {
-            pendingRemoval = request
+/// A tile that a selection sheet's long-press can remove.
+protocol GhosttyRemovableTile: Identifiable where ID == UUID {
+    /// What closing the tile asks the user first; nil when it closes at once.
+    var closeConfirmation: GhosttyCloseConfirmation? { get }
+}
+
+extension GhosttyWindowSelectionSheetRenderProjection.Window: GhosttyRemovableTile {}
+extension GhosttyPaneSelectionSheetRenderProjection.Pane: GhosttyRemovableTile {}
+
+/// A selection sheet's removal of a tile: the long-press bubble on it, then the question its backend asks
+/// first, if any. What closing the tile asks is read from the sheet's tiles when the bubble is tapped, not at
+/// the long-press, since it can change meanwhile, as when another client closes the tile's last sibling.
+struct GhosttyTileRemoval<Tile: GhosttyRemovableTile> {
+    /// The tile the bubble is on.
+    private(set) var bubbleTileID: UUID?
+    /// The tile whose removal the dialog asks about, as the sheet listed it then.
+    private(set) var asked: Tile?
+
+    mutating func showBubble(on tile: Tile) {
+        bubbleTileID = tile.id
+    }
+
+    /// The bubble was tapped: removes its tile as `tiles`, the sheet's tiles now, list it. Returns the tile
+    /// when it goes at once; nil when its backend asks first, or when the sheet no longer lists it.
+    mutating func bubbleTapped(among tiles: [Tile]) -> Tile? {
+        guard let tile = tiles.first(where: { $0.id == bubbleTileID }) else {
+            bubbleTileID = nil
+            return nil
         }
+        return remove(tile)
+    }
+
+    /// Removes `tile`, after asking when its backend asks first. Returns the tile when it goes at once.
+    mutating func remove(_ tile: Tile) -> Tile? {
+        bubbleTileID = nil
+        guard tile.closeConfirmation != nil else { return tile }
+        asked = tile
+        return nil
+    }
+
+    /// The tiles the sheet lists changed: a bubble on one no longer listed goes.
+    mutating func keepBubble(among ids: [UUID]) {
+        if let id = bubbleTileID, !ids.contains(id) { bubbleTileID = nil }
+    }
+
+    /// The question was answered, or the bubble set aside.
+    mutating func end() {
+        bubbleTileID = nil
+        asked = nil
     }
 }
 
@@ -530,17 +542,6 @@ private struct GhosttyWindowGroupCapsule: View {
         )
         .contentShape(Capsule())
     }
-}
-
-private struct GhosttyWindowRemovalRequest: Identifiable {
-    let id: UUID
-    let displayIndex: Int
-    let confirmation: GhosttyCloseConfirmation?
-}
-
-private struct GhosttyPaneRemovalRequest: Identifiable {
-    let id: UUID
-    let confirmation: GhosttyCloseConfirmation?
 }
 
 private struct GhosttySelectionSheetFailureBanner: View {

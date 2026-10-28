@@ -743,6 +743,41 @@ final class GhosttyTerminalPresentationProjectorTests: XCTestCase {
         }
     }
 
+    /// The long-press bubble's tap reads what closing its tile asks from the sheet's tiles then: a tab that
+    /// became its workspace's only one since the long-press, as when another client closed its sibling, asks
+    /// first instead of closing its workspace at once.
+    func testATileRemovalAsksWhatClosingItAsksWhenTheBubbleIsTapped() {
+        func tab(_ id: UUID, asking confirmation: GhosttyCloseConfirmation?) -> GhosttyWindowSelectionSheetRenderProjection.Window {
+            GhosttyWindowSelectionSheetRenderProjection.Window(
+                id: id, displayName: "build", displayIndex: 1, totalCount: 1, paneCount: 1, isSelected: false,
+                focusedPreviewPaneID: nil, closeConfirmation: confirmation
+            )
+        }
+        let id = UUID()
+        let lastTab = GhosttyCloseConfirmation(
+            title: "Close Workspace?",
+            message: "“web” and its 1 tab and 1 pane will close.",
+            action: "Close Workspace"
+        )
+        var removal = GhosttyTileRemoval<GhosttyWindowSelectionSheetRenderProjection.Window>()
+
+        removal.showBubble(on: tab(id, asking: nil))
+        XCTAssertEqual(removal.bubbleTileID, id)
+        XCTAssertNil(removal.bubbleTapped(among: [tab(id, asking: lastTab)]), "The tab closed without asking.")
+        XCTAssertEqual(removal.asked?.closeConfirmation, lastTab)
+        XCTAssertNil(removal.bubbleTileID)
+        removal.end()
+
+        removal.showBubble(on: tab(id, asking: lastTab))
+        XCTAssertEqual(removal.bubbleTapped(among: [tab(id, asking: nil)])?.id, id, "A tab with a sibling again asked.")
+        XCTAssertNil(removal.asked)
+
+        removal.showBubble(on: tab(id, asking: nil))
+        XCTAssertNil(removal.bubbleTapped(among: []), "A tab the sheet no longer lists was removed.")
+        XCTAssertNil(removal.bubbleTileID)
+        XCTAssertNil(removal.asked)
+    }
+
     func testTerminalReadyTraceFieldsPreserveExistingKeysAndAddRawReadinessFacts() throws {
         let workspaceID = try XCTUnwrap(UUID(uuidString: "11111111-2222-3333-4444-555555555555"))
         let selectedLeafID = try XCTUnwrap(UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"))
