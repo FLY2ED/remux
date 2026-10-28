@@ -6,14 +6,11 @@ final class FakePasteboard: TerminalPasteboard {
     private(set) var changeCount = 0
     /// Every string the pasteboard took, in order.
     private(set) var writes: [String] = []
-    /// Whether a write goes in.
-    var takesWrites = true
     private var stored: String?
 
     var string: String? {
         get { stored }
         set {
-            guard takesWrites else { return }
             stored = newValue
             if let newValue { writes.append(newValue) }
             changeCount += 1
@@ -42,16 +39,6 @@ final class TerminalClipboardTests: XCTestCase {
         pasteboard.changeElsewhere()
         XCTAssertTrue(clipboard.write("one"), "another app changed the clipboard since")
         XCTAssertEqual(pasteboard.writes, ["one", "two", "one", "one"])
-    }
-
-    func testAWriteThePasteboardDoesntTakeIsntOne() {
-        let pasteboard = FakePasteboard()
-        pasteboard.takesWrites = false
-        let clipboard = TerminalClipboard(pasteboard: pasteboard)
-
-        XCTAssertFalse(clipboard.write("one"))
-        pasteboard.takesWrites = true
-        XCTAssertTrue(clipboard.write("one"), "a write that didn't go in left nothing to repeat")
     }
 }
 

@@ -23,15 +23,13 @@ final class TerminalClipboard {
         self.pasteboard = pasteboard
     }
 
-    /// Puts `text` on the clipboard. False when the clipboard already held it from the last write, or
-    /// the pasteboard didn't take it.
+    /// Puts `text` on the clipboard. False when the clipboard already held it from the last write. Setting
+    /// the pasteboard's string has no failure to report.
     func write(_ text: String) -> Bool {
         if let lastWrite, lastWrite.text == text, lastWrite.changeCount == pasteboard.changeCount {
             return false
         }
-        let before = pasteboard.changeCount
         pasteboard.string = text
-        guard pasteboard.changeCount != before else { return false }
         lastWrite = (text, pasteboard.changeCount)
         return true
     }

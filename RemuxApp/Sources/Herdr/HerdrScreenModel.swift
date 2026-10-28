@@ -1412,7 +1412,7 @@ final class HerdrScreenModel {
 
     /// A program in the session on screen wrote the clipboard (OSC 52); a write that comes after the session
     /// left the screen has no one to write for. As in Herdr's client, a payload that isn't base64 is
-    /// dropped, and the copy notice shows only after a write that went in and wasn't a duplicate
+    /// dropped, and the copy notice shows only after a write that wasn't a duplicate
     /// (`client/clipboard_forwarding.rs`, `selection.rs` `write_osc52_bytes`). The iPhone clipboard holds
     /// text, so bytes that aren't UTF-8 are dropped too.
     private func clipboardWritten(_ attemptID: UInt64, base64: String) {
