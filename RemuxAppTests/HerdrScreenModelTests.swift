@@ -3108,10 +3108,11 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(focus.paneID, "w1:p2")
     }
 
-    /// Keys go to the pane Herdr has focused, as Herdr's client sends them, also while a move to another
-    /// tab holds the frames: the keyboard stays available throughout, and once Herdr reports the pane
+    /// A move to another tab takes the keys from the moment it is asked: until Herdr reports the pane
+    /// reached, Herdr takes no input for it, so keys are dropped, never sent to the pane left, while the
+    /// keyboard stays available throughout as the move holds the frames; once Herdr reports the pane
     /// reached, keys go there while the move's focus is still on its way.
-    func testKeysGoToHerdrsFocusedPaneWhileAMoveIsHeld() async throws {
+    func testKeysWaitForThePaneAMoveToAnotherTabGoesTo() async throws {
         let harness = await makeHarness(settings: Self.zooming)
         let session = try await shownTab(harness, zoomingOnShow: true, secondTab: Self.secondTab)
         var index = session.next
@@ -3120,9 +3121,7 @@ final class HerdrScreenModelTests: XCTestCase {
         harness.model.reveal(.pane("w1:p3"), bootID: "boot")
         let unzoom = try await nextWrite(session.bridge, from: &index, paneZoom)
         XCTAssertTrue(adapter.terminalInteractionProjection.isInputAvailable, "the move froze the keyboard")
-        XCTAssertEqual(adapter.sendInputToFocusedSurface("a"), .accepted)
-        let left = try await nextWrite(session.bridge, from: &index, paneInput)
-        XCTAssertEqual(left, frame("w1:p1", [typed("a")]))
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("a"), .transportUnavailable, "a key went before the pane was reached")
 
         await session.bridge.serve(HerdrServerScript.zoomReply(id: unzoom.id, changed: true, zoomed: false, panes: Self.places(2)))
         let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
@@ -3137,6 +3136,8 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(adapter.sendInputToFocusedSurface("b"), .accepted)
         let reached = try await nextWrite(session.bridge, from: &index, paneInput)
         XCTAssertEqual(reached, frame("w1:p3", [typed("b")]))
+        let inputs = try await harness.writes(session.bridge, from: session.next, count: index - session.next).compactMap(paneInput)
+        XCTAssertEqual(inputs, [frame("w1:p3", [typed("b")])], "a key went to the pane left")
     }
 
     /// A move a newer one replaced says nothing of how it ended: its focus's refusal, answered after the
@@ -4091,6 +4092,258 @@ final class HerdrScreenModelTests: XCTestCase {
             let write = try ClientWrite.decode(try await bridge.written(position))
             XCTAssertNil(paneInput(write), message)
         }
+    }
+
+    // MARK: - Keys follow the tap
+
+    /// Keys typed right after a tap on another pane of the tab go to that pane, before Herdr's snapshot says
+    /// it is focused, as Herdr's client sends keys to the pane it has just focused; the screen draws it as
+    /// the pane typed into and gives the composer its pane at once, and a scroll over it doesn't focus it
+    /// again. Once Herdr shows the move, the user is in the pane Herdr has focused, as another client may
+    /// move it.
+    func testKeysTypedRightAfterATapGoToThePaneTapped() async throws {
+        let harness = await makeHarness()
+        let session = try await shownTab(harness, panes: Self.threePanes)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let ids = adapter.terminalScreenPresentationProjection.viewport.panes.map(\.id)
+
+        XCTAssertEqual(adapter.focusPane(ids[1]), .queued)
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("x"), .accepted)
+        XCTAssertEqual(adapter.terminalInteractionProjection.selectedActiveLeafID, ids[1])
+        XCTAssertEqual(adapter.sendMouseScroll(to: ids[1], Self.scrollBegan(harness)), .sent)
+        let focus = try await nextWrite(session.bridge, from: &index, paneFocus)
+        XCTAssertEqual(focus.paneID, "w1:p2")
+        let sent1 = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(sent1, frame("w1:p2", [typed("x")]))
+
+        try await showFocus(of: "w1:p2", answering: focus.id, in: session.bridge, of: harness, revision: 2)
+        try await harness.waitUntil("Herdr didn't show the move") {
+            harness.model.focusedPaneID == "w1:p2" && harness.model.stateTraceLabel == "shown"
+        }
+        await session.bridge.serve(HerdrServerScript.snapshot(revision: 4, focusedPane: "w1:p3", panes: Self.tabPanes(Self.threePanes)))
+        try await harness.waitUntil("the user didn't follow Herdr's focus after the move") {
+            harness.model.userPaneID == "w1:p3"
+        }
+        try await assertNoPaneFocus(session.bridge, from: index, "a scroll over the pane tapped focused it again")
+    }
+
+    /// A second tap before Herdr answered the first takes the keys at once.
+    func testKeysAfterASecondQuickTapGoToTheSecondPane() async throws {
+        let harness = await makeHarness()
+        let session = try await shownTab(harness, panes: Self.threePanes)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let ids = adapter.terminalScreenPresentationProjection.viewport.panes.map(\.id)
+
+        XCTAssertEqual(adapter.focusPane(ids[1]), .queued)
+        XCTAssertEqual(adapter.focusPane(ids[2]), .queued)
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("y"), .accepted)
+        // The first focus is in flight; the second waits for its answer, and the key goes meanwhile.
+        let first = try await nextWrite(session.bridge, from: &index, paneFocus)
+        XCTAssertEqual(first.paneID, "w1:p2")
+        let typedY = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(typedY, frame("w1:p3", [typed("y")]))
+
+        await session.bridge.serve(HerdrConnectionTests.reply(id: first.id, json: #"{"type":"ok"}"#))
+        await session.bridge.serve(HerdrServerScript.snapshot(revision: 2, focusedPane: "w1:p2", panes: Self.tabPanes(Self.threePanes)))
+        let second = try await nextWrite(session.bridge, from: &index, paneFocus)
+        XCTAssertEqual(second.paneID, "w1:p3")
+        XCTAssertEqual(harness.model.userPaneID, "w1:p3", "Herdr's answer to the first focus took the keys back")
+        try await showFocus(of: "w1:p3", answering: second.id, in: session.bridge, of: harness, revision: 3)
+        try await harness.waitUntil("Herdr didn't show the second move") {
+            harness.model.focusedPaneID == "w1:p3" && harness.model.stateTraceLabel == "shown"
+        }
+        XCTAssertEqual(harness.model.userPaneID, "w1:p3")
+    }
+
+    /// A pane that closes while the move to it is under way takes no keys, and none go to the pane left;
+    /// once the move ends, keys follow the pane Herdr has focused.
+    func testKeysForAPaneThatClosedMidMoveAreDropped() async throws {
+        let harness = await makeHarness()
+        let session = try await shownTab(harness, panes: Self.threePanes)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let ids = adapter.terminalScreenPresentationProjection.viewport.panes.map(\.id)
+
+        XCTAssertEqual(adapter.focusPane(ids[1]), .queued)
+        let focus = try await nextWrite(session.bridge, from: &index, paneFocus)
+        await session.bridge.serve(HerdrServerScript.snapshot(revision: 2, panes: Self.tabPanes(["w1:p1", "w1:p3"])))
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(harness.model.userPaneID, "w1:p2")
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("z"), .transportUnavailable)
+        XCTAssertTrue(harness.model.isInputAvailable)
+
+        await session.bridge.serve(HerdrConnectionTests.reply(id: focus.id, error: (code: "pane_not_found", message: "pane not found")))
+        await session.bridge.serve(try harness.shownSurface(projection: 2, revision: 2, lines: ["one two"], panes: [
+            .init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true),
+            .init(id: "w1:p3", x: 4, width: 3, height: 1),
+        ]))
+        try await harness.waitUntil("the move didn't end") { harness.model.userPaneID == "w1:p1" }
+        try await assertNoPaneInput(session.bridge, from: session.next, "a key for the closed pane went somewhere")
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("a"), .accepted)
+        let sent3 = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(sent3, frame("w1:p1", [typed("a")]))
+    }
+
+    /// Another client moving the focus after Remux's move ends the move: keys go to the pane tapped until
+    /// then, and to the pane Herdr has focused after.
+    func testAnotherClientsFocusAfterTheMoveTakesTheKeys() async throws {
+        let harness = await makeHarness()
+        let session = try await shownTab(harness, panes: Self.threePanes)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let ids = adapter.terminalScreenPresentationProjection.viewport.panes.map(\.id)
+
+        XCTAssertEqual(adapter.focusPane(ids[1]), .queued)
+        let focus = try await nextWrite(session.bridge, from: &index, paneFocus)
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("b"), .accepted)
+        let sent4 = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(sent4, frame("w1:p2", [typed("b")]))
+
+        await session.bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
+        await session.bridge.serve(HerdrServerScript.snapshot(revision: 2, focusedPane: "w1:p2", panes: Self.tabPanes(Self.threePanes)))
+        await session.bridge.serve(HerdrServerScript.snapshot(revision: 3, focusedPane: "w1:p3", panes: Self.tabPanes(Self.threePanes)))
+        await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 3, lines: ["one two"], panes: Self.drawn(Self.threePanes, focused: "w1:p3")))
+        try await harness.waitUntil("the overtaken move didn't end") {
+            harness.model.userPaneID == "w1:p3" && harness.model.stateTraceLabel == "shown"
+        }
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("c"), .accepted)
+        let sent5 = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(sent5, frame("w1:p3", [typed("c")]))
+    }
+
+    /// A pick from Panes of a pane a zoomed tab doesn't draw: Herdr takes input only for the zoomed tab's
+    /// focused pane, so keys are dropped quietly until Herdr shows the pane, never sent to the pane left;
+    /// the session stays ready to type into and the screen keeps the frame's pane, so nothing flickers.
+    func testAZoomedTabPickDropsKeysUntilThePaneShowsAndKeepsInputAvailable() async throws {
+        let harness = await makeHarness()
+        let session = try await shownTab(harness, zoomed: true)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        try await harness.waitUntil("the zoomed pane didn't draw") {
+            harness.model.presentation(ofPane: "w1:p1") == .ready
+        }
+        XCTAssertEqual(adapter.terminalScreenPresentationProjection.statusOverlay, .ready)
+        let shown = try XCTUnwrap(adapter.terminalInteractionProjection.selectedActiveLeafID)
+        let other = try XCTUnwrap(adapter.paneSelectionSheetRenderProjection(topLevelID: try topLevel(harness)).panes.last)
+
+        XCTAssertEqual(adapter.focusPane(other.id), .queued)
+        let focus = try await nextWrite(session.bridge, from: &index, paneFocus)
+        XCTAssertEqual(focus.paneID, "w1:p2")
+        XCTAssertEqual(harness.model.userPaneID, "w1:p2")
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("q"), .transportUnavailable)
+        XCTAssertEqual(adapter.sendKeyEventToFocusedSurface(GhosttySurfaceKeyEvent(keyCode: .enter)), .transportUnavailable)
+        XCTAssertTrue(harness.model.isInputAvailable)
+        XCTAssertTrue(adapter.terminalInteractionProjection.isInputAvailable)
+        XCTAssertEqual(adapter.terminalInteractionProjection.selectedActiveLeafID, shown)
+        XCTAssertEqual(adapter.terminalScreenPresentationProjection.statusOverlay, .ready)
+        XCTAssertNil(adapter.commandFailureEvent, "a dropped key said so")
+
+        await session.bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
+        await session.bridge.serve(HerdrServerScript.snapshot(revision: 2, zoomed: true, focusedPane: "w1:p2", panes: Self.tabPanes(["w1:p1", "w1:p2"])))
+        await session.bridge.serve(try harness.shownSurface(projection: 2, revision: 2, lines: ["two"], panes: [
+            .init(id: "w1:p2", x: 0, width: 7, height: 1, focused: true),
+        ]))
+        try await harness.waitUntil("Herdr didn't show the pane picked") {
+            harness.model.screenPaneID == "w1:p2" && harness.model.stateTraceLabel == "shown"
+        }
+        try await assertNoPaneInput(session.bridge, from: session.next, "a key went while the pane picked wasn't shown")
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("r"), .accepted)
+        let sent6 = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(sent6, frame("w1:p2", [typed("r")]))
+    }
+
+    /// A pick of a pane or a tab on another tab: keys are dropped until Herdr shows that tab, then go to the
+    /// pane it has focused, and the session stays ready to type into meanwhile.
+    func testACrossTabPickDropsKeysUntilTheTabShows() async throws {
+        for place in [HerdrPlace.pane("w1:p4"), .tab("t2")] {
+            let harness = await makeHarness()
+            let session = try await shownTab(harness, secondTab: Self.secondTab)
+            var index = session.next
+            let adapter = harness.model.terminalScreenAdapter
+
+            XCTAssertTrue(harness.model.reveal(place, bootID: "boot"))
+            XCTAssertEqual(adapter.sendInputToFocusedSurface("s"), .transportUnavailable, "\(place)")
+            XCTAssertTrue(adapter.terminalInteractionProjection.isInputAvailable, "\(place)")
+            let focused = place == .tab("t2") ? "w1:p3" : "w1:p4"
+            let step = try await nextWrite(session.bridge, from: &index) { write -> String? in
+                if let focus = self.paneFocus(write) { return focus.id }
+                if case .command(let id, "tab.focus", _) = write { return id }
+                return nil
+            }
+            await session.bridge.serve(HerdrConnectionTests.reply(id: step, json: #"{"type":"ok"}"#))
+            await session.bridge.serve(Self.secondTabOnScreen(revision: 2, focusedPane: focused))
+            await session.bridge.serve(try harness.shownSurface(projection: 2, revision: 2, lines: ["three four"], panes: Self.drawn(Self.secondTab, focused: focused)))
+            try await harness.waitUntil("Herdr didn't show the other tab for \(place)") {
+                harness.model.screenPaneID == focused && harness.model.stateTraceLabel == "shown"
+            }
+            try await assertNoPaneInput(session.bridge, from: session.next, "a key went before the other tab showed for \(place)")
+            XCTAssertEqual(adapter.sendInputToFocusedSurface("t"), .accepted)
+            let sent7 = try await nextWrite(session.bridge, from: &index, paneInput)
+            XCTAssertEqual(sent7, frame(focused, [typed("t")]))
+        }
+    }
+
+    /// A tap on another pane whose program reads the mouse focuses it and clicks there, and the keys typed
+    /// next go to it.
+    func testKeysAfterATapClickGoToThePaneClicked() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness, mouseReporting: true)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let other = try paneSurfaceID(harness, "w1:p2")
+
+        for action in GhosttySurfaceTapGesture.actions(
+            forLocalPoint: try point(harness, column: 1),
+            mouseCaptured: adapter.isMouseCaptured(for: other),
+            showsKeyboard: false
+        ) {
+            switch action {
+            case .activateInput, .focusPane: XCTAssertEqual(adapter.focusPane(other), .queued)
+            case .mousePosition(let position): _ = adapter.sendMousePosition(to: other, position, mods: [])
+            case .mouseButton(let event): XCTAssertEqual(adapter.sendMouseButton(to: other, event), .sent)
+            }
+        }
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("k"), .accepted)
+        var inputs: [[UInt8]] = []
+        for _ in 0..<4 {
+            inputs.append(try await nextWrite(session.bridge, from: &index, paneInput))
+        }
+        XCTAssertEqual(inputs, [
+            frame("w1:p2", [mouse(.moved, column: 1)]),
+            frame("w1:p2", [mouse(.down(.left), column: 1)]),
+            frame("w1:p2", [mouse(.up(.left), column: 1)]),
+            frame("w1:p2", [typed("k")]),
+        ])
+    }
+
+    private static let threePanes = ["w1:p1", "w1:p2", "w1:p3"]
+
+    /// `panes` drawn side by side as `shownTab` draws them, `focused` focused.
+    private static func drawn(_ panes: [String], focused: String) -> [HerdrServerScript.Pane] {
+        panes.enumerated().map { HerdrServerScript.Pane(id: $1, x: UInt16($0 * 4), width: 3, height: 1, focused: $1 == focused) }
+    }
+
+    /// Herdr's answer to the focus `id`, then the snapshot and the frame showing `pane` focused in the tab
+    /// of `threePanes`, which complete the move.
+    private func showFocus(
+        of pane: String,
+        answering id: String,
+        in bridge: FakeBridgeTransport,
+        of harness: HerdrModelHarness,
+        revision: UInt64
+    ) async throws {
+        await bridge.serve(HerdrConnectionTests.reply(id: id, json: #"{"type":"ok"}"#))
+        await bridge.serve(HerdrServerScript.snapshot(revision: revision, focusedPane: pane, panes: Self.tabPanes(Self.threePanes)))
+        await bridge.serve(try harness.shownSurface(
+            projection: revision, revision: revision, lines: ["one two three"], panes: Self.drawn(Self.threePanes, focused: pane)
+        ))
+    }
+
+    private static func scrollBegan(_ harness: HerdrModelHarness) -> GhosttySurfaceMouseScrollEvent {
+        let cellHeight = Double(harness.model.measurement?.cellMetrics.pixelHeight ?? 1)
+        return GhosttySurfaceMouseScrollEvent(deltaX: 0, deltaY: 0.2 * cellHeight, mods: .init(precision: true, momentum: .began))
     }
 
     /// A session shown with panes `w1:p1` and `w1:p2`, both drawn, its snapshot focusing `focusedPane`;
