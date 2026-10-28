@@ -98,9 +98,9 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
         return layout.tab?.zoomed == true ? layout.panes : layout.panes.filter(\.hasTextArea)
     }
 
-    /// The model's focused pane, once it is laid out.
+    /// The pane the screen shows as the user's (`HerdrScreenModel.screenPaneID`), once it is laid out.
     private var focusedPaneID: String? {
-        guard let paneID = model?.focusedPaneID, listedPanes.contains(where: { $0.paneID == paneID }) else {
+        guard let paneID = model?.screenPaneID, listedPanes.contains(where: { $0.paneID == paneID }) else {
             return nil
         }
         return paneID

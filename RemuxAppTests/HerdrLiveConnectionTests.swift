@@ -928,6 +928,56 @@ final class HerdrLiveConnectionTests: XCTestCase {
         )
     }
 
+    // MARK: - Keys follow the tap
+
+    /// Over a link with 25 ms and then 100 ms each way, a key typed right after a tap on another pane of
+    /// the tab reaches the program in that pane, and nothing reaches the pane left.
+    @MainActor
+    func testKeysTypedRightAfterATapReachThePaneTappedOnHerdr093() async throws {
+        for delay in [25, 100] {
+            try await checkKeysFollowTheTap(version: "0.9.3", delay: .milliseconds(delay))
+        }
+    }
+
+    @MainActor
+    func testKeysTypedRightAfterATapReachThePaneTappedOnHerdr095() async throws {
+        for delay in [25, 100] {
+            try await checkKeysFollowTheTap(version: "0.9.5", delay: .milliseconds(delay))
+        }
+    }
+
+    @MainActor
+    private func checkKeysFollowTheTap(version: String, delay: Duration) async throws {
+        let session = try await openShownSession(version: version, through: { HerdrLiveDelayedLink($0, delay: delay) })
+        let panes = try await split(session)
+        let left = try await startReadLog(inPane: panes.focused, of: session, named: "left")
+        let tapped = try await startReadLog(inPane: panes.other, of: session, named: "tapped")
+
+        XCTAssertTrue(session.model.focusPane(panes.other))
+        XCTAssertEqual(session.model.sendText("x"), .accepted)
+
+        let reads = try await tapped.reads(until: { !$0.isEmpty })
+        XCTAssertEqual(reads.flatMap(\.bytes), Array("x".utf8), "Herdr \(version), \(delay) each way")
+        let leftReads = try await left.reads(timeout: .milliseconds(500), until: { !$0.isEmpty })
+        XCTAssertEqual(leftReads.flatMap(\.bytes), [], "Herdr \(version), \(delay) each way: a key reached the pane left")
+    }
+
+    /// Starts the logging program of `startReadLog` in `pane` through Herdr's own CLI, which leaves the
+    /// focus where it is.
+    @MainActor
+    private func startReadLog(inPane pane: String, of session: ShownSession, named name: String) async throws -> HerdrLiveReadLog {
+        let log = HerdrLiveReadLog(fixture: session.fixture, path: session.fixture.root + "/\(name).log")
+        let program = #"stty raw -echo; exec perl -MTime::HiRes=time -e 'open(my $f, ">>", shift) or die; $f->autoflush(1); print $f "R\n"; while (sysread(STDIN, my $b, 65536)) { printf $f "%.1f %s\n", time * 1000, unpack("H*", $b) }' "#
+        let sent = try await session.fixture.herdr(
+            // A carriage return: the fixture's `$(…)` would drop a trailing newline.
+            ["pane", "send-text", pane, program + log.path + "\r"],
+            trace: RemuxTransportStartupTrace(flowID: "herdr-live-keys-follow-tap")
+        )
+        XCTAssertEqual(sent.exitStatus, 0, String(decoding: sent.stderr, as: UTF8.self))
+        try await log.waitForStart()
+        return log
+    }
+
     // MARK: - Clipboard
 
     /// A program's OSC 52 copy in the session on screen lands on the iPhone clipboard, and the screen says
@@ -1690,6 +1740,68 @@ actor HerdrLiveSlowUplink: HerdrBridgeTransport {
             let bytes = queued.removeFirst()
             try? await Task.sleep(for: .seconds(Double(bytes.count) / Double(bytesPerSecond)))
             try? await bridge.write(bytes)
+        }
+        isSending = false
+    }
+
+    func close(_ cause: HerdrBridgeCloseCause) async {
+        await bridge.close(cause)
+    }
+}
+
+/// Passes a bridge through as a link with `delay` each way: each write reaches the bridge, and each read
+/// reaches the connection, `delay` after it was made, in order.
+actor HerdrLiveDelayedLink: HerdrBridgeTransport {
+    private let bridge: any HerdrBridgeTransport
+    private let delay: Duration
+    /// What the bridge gave, and when, in order: bytes, the end (nil), or why it failed.
+    private var arrived: [(result: Result<[UInt8]?, Error>, at: ContinuousClock.Instant)] = []
+    private var reader: CheckedContinuation<Void, Never>?
+    private var queued: [(bytes: [UInt8], due: ContinuousClock.Instant)] = []
+    private var isSending = false
+
+    init(_ bridge: any HerdrBridgeTransport, delay: Duration) {
+        self.bridge = bridge
+        self.delay = delay
+        Task { await self.receive() }
+    }
+
+    private func receive() async {
+        while true {
+            let result: Result<[UInt8]?, Error>
+            do {
+                result = .success(try await bridge.read())
+            } catch {
+                result = .failure(error)
+            }
+            arrived.append((result, .now))
+            reader?.resume()
+            reader = nil
+            guard case .success(.some) = result else { return }
+        }
+    }
+
+    func read() async throws -> [UInt8]? {
+        while arrived.isEmpty {
+            await withCheckedContinuation { reader = $0 }
+        }
+        let next = arrived.removeFirst()
+        try? await Task.sleep(until: next.at + delay, clock: .continuous)
+        return try next.result.get()
+    }
+
+    func write(_ bytes: [UInt8]) async throws {
+        queued.append((bytes, .now + delay))
+        guard !isSending else { return }
+        isSending = true
+        Task { await sendQueued() }
+    }
+
+    private func sendQueued() async {
+        while !queued.isEmpty {
+            let next = queued.removeFirst()
+            try? await Task.sleep(until: next.due, clock: .continuous)
+            try? await bridge.write(next.bytes)
         }
         isSending = false
     }

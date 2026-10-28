@@ -70,8 +70,8 @@ final class HerdrScreenModel {
         /// `delivered`, when given, learns whether Herdr has the input.
         case input(paneID: String, events: [HerdrInputEvent], delivered: CheckedContinuation<Bool, Never>?)
         /// Remux's move to a place or creation (`move(_:to:)`); `fromAnotherTab` when another tab was on
-        /// screen as it was asked for.
-        case move(HerdrDestination, fromAnotherTab: Bool)
+        /// screen as it was asked for. `ask` names it among the attempt's moves (`Attempt.move`).
+        case move(HerdrDestination, fromAnotherTab: Bool, ask: UInt64)
         /// The zoom button's zoom of the focused pane's tab.
         case zoom(String, zoomed: Bool)
         /// The pane sheet's question for a zoomed tab's layout, through a zoom of `paneID` that changes
@@ -95,6 +95,16 @@ final class HerdrScreenModel {
                 break
             }
         }
+    }
+
+    /// A move Remux asked for that hasn't ended. The engine decides what the move does; the model learns
+    /// which of its view requests carries it, then that the request ended (`moveEnded`).
+    private struct PendingMove {
+        let ask: UInt64
+        /// The pane it goes to; nil for a tab, a workspace or a creation, whose pane Herdr names once there.
+        let pane: String?
+        /// The engine's request that takes the session there, once the engine has the move.
+        var request: UInt64?
     }
 
     /// One connection to the server, from opening its bridge to its end. A reconnect replaces it, and
@@ -127,6 +137,10 @@ final class HerdrScreenModel {
         var request: (id: UInt64, kind: HerdrViewKind, showing: Bool)?
         /// The newest request the engine completed.
         var activatedRequest: UInt64?
+        /// Remux's newest move, from the moment it is asked until it ends (`userPaneID`).
+        var move: PendingMove?
+        /// The moves asked so far, which name each one.
+        var moveAsks: UInt64 = 0
         /// How the attempt's bridge closes, set once it is given up; nil while it is under way.
         var closeCause: HerdrBridgeCloseCause?
         /// The give-up's close of the connection.
@@ -293,8 +307,8 @@ final class HerdrScreenModel {
     let agents = HerdrAgentPresentation()
     /// Where to go once the session is shown, and the server boot its ids belong to.
     private var pendingReveal: (destination: HerdrDestination, bootID: String?)?
-    /// The pane keys go to and the screen highlights: the newest snapshot's focused pane, as in
-    /// Herdr's client. A pane can be focused before its first frame arrives.
+    /// The pane Herdr has focused, as the newest snapshot says. A pane can be focused before its first
+    /// frame arrives. The user may be in another while Remux's move is under way (`userPaneID`).
     private(set) var focusedPaneID: String?
     /// Tabs the user unzoomed with the pane sheet's button, which the setting leaves alone after.
     private var tabsUnzoomedByUser: Set<HerdrTabKey> = []
@@ -640,17 +654,38 @@ final class HerdrScreenModel {
 
     // MARK: - Input
 
-    /// Input goes out while the session is shown on an open connection with no show in progress, to the
-    /// newest snapshot's focused pane, as Herdr's client sends it (`shell/input.rs`): Herdr's client drops
-    /// input before its first snapshot and while a show is in progress, and the server drops input on a
-    /// hidden surface. What the screen draws doesn't matter to Herdr, which takes keys for the pane it has
-    /// focused.
+    /// The session takes input: it is shown on an open connection with no show in progress, and Herdr has a
+    /// pane focused, as Herdr's client sends input (`shell/input.rs`): Herdr's client drops input before its
+    /// first snapshot and while a show is in progress, and the server drops input on a hidden surface. It
+    /// holds while Remux's move is under way, whichever pane the user is in (`userPaneID`).
     var isInputAvailable: Bool {
-        inputTarget != nil
+        focusedPaneID.flatMap(inputTarget(forPane:)) != nil
+    }
+
+    /// The pane the user is in: the pane of Remux's move from the moment it is asked until it ends, else
+    /// the pane Herdr has focused. A move to a tab, a workspace or a new pane is in no pane until it ends,
+    /// as Herdr names that pane only once there.
+    ///
+    /// Keys follow it, as Herdr's client sends every key to its own focused pane, through
+    /// `inputTarget(forPane:)`: while Herdr doesn't take input for it yet, as for another pane of a zoomed
+    /// tab or a pane on another tab, keys are dropped, one by one, as Herdr's client drops input during an
+    /// activation, and never go to the pane left. The screen's drawing, readiness and the composer's pane
+    /// follow it only once it is drawn (`screenPaneID`); until then they keep the focus of the frame on
+    /// screen, which the engine holds until the move completes, so the session stays ready to type into.
+    var userPaneID: String? {
+        guard let attempt, isCurrent(attempt), let move = attempt.move else { return focusedPaneID }
+        return move.pane
+    }
+
+    /// The pane the screen shows as the user's: `userPaneID` once it is drawn, else Herdr's focused pane.
+    var screenPaneID: String? {
+        guard let pane = userPaneID, layout?.panes.contains(where: { $0.paneID == pane && $0.hasTextArea }) == true
+        else { return focusedPaneID }
+        return pane
     }
 
     private var inputTarget: (attempt: Attempt, paneID: String)? {
-        focusedPaneID.flatMap(inputTarget(forPane:))
+        userPaneID.flatMap(inputTarget(forPane:))
     }
 
     /// Where input for `paneID` goes, the one rule for every input: the session is shown with no show in
@@ -762,12 +797,43 @@ final class HerdrScreenModel {
     /// and a pane's `pane.focus` marks the tab's agents seen. The engine holds the frames meanwhile, so only
     /// the tab reached shows, as it ends up. A tab another client moves the session to stays as it is:
     /// unzooming a tab off screen would focus it and take the session back.
+    ///
+    /// The user is in the move's pane from this moment (`userPaneID`), so keys typed right after a tap go
+    /// to the pane tapped.
     private func move(_ attempt: Attempt, to destination: HerdrDestination) {
         var fromAnotherTab = false
+        var pane: String?
         if case .place(let place) = destination {
             fromAnotherTab = tab(reachedBy: place).map { $0 != onScreenTab } == true
+            if case .pane(let id) = place { pane = id }
         }
-        attempt.ask(.move(destination, fromAnotherTab: fromAnotherTab))
+        attempt.moveAsks += 1
+        attempt.move = PendingMove(ask: attempt.moveAsks, pane: pane)
+        attempt.ask(.move(destination, fromAnotherTab: fromAnotherTab, ask: attempt.moveAsks))
+        reconcilePresentationActivity()
+        didChange()
+    }
+
+    /// The engine took move `ask`: `request` carries it, or nothing does, as when Herdr has the session
+    /// there already. A newer move has replaced it if the attempt's isn't this one. The engine's updates
+    /// come on their own, so the request may already have completed, as one to a pane gone by then does at
+    /// once, or a later one replaced it.
+    private func moveTaken(_ ask: UInt64, by request: UInt64?, on attempt: Attempt) {
+        guard attempt.move?.ask == ask else { return }
+        guard let request, attempt.activatedRequest.map({ $0 < request }) ?? true,
+              attempt.request.map({ $0.id <= request }) ?? true
+        else { return moveEnded(on: attempt) }
+        attempt.move?.request = request
+    }
+
+    /// Remux's move ended, as Herdr showed where it went, another client took the session elsewhere, its
+    /// pane closed, its focus failed, or a later request replaced it: the user is in the pane Herdr has
+    /// focused from here on.
+    private func moveEnded(on attempt: Attempt) {
+        guard attempt.move != nil else { return }
+        attempt.move = nil
+        reconcilePresentationActivity()
+        didChange()
     }
 
     /// Which tabs the setting zooms as the session comes to them.
@@ -922,7 +988,7 @@ final class HerdrScreenModel {
         guard let target = inputTarget(forPane: paneID), let measurement,
               let cell = paneCell(at: pointers[paneID] ?? .zero, inPane: paneID)
         else { return false }
-        if momentum == .began, paneID != focusedPaneID { _ = focusPane(paneID) }
+        if momentum == .began, paneID != userPaneID { _ = focusPane(paneID) }
 
         let cellHeight = Double(measurement.cellMetrics.pixelHeight)
         let travel = (wheelRemainders[paneID] ?? 0) + event.deltaY
@@ -1297,12 +1363,13 @@ final class HerdrScreenModel {
             // Herdr acknowledges no input, but answers a ping only after reading everything sent before
             // it. Later operations don't wait for the answer.
             Task { delivered.resume(returning: await connection.confirmAlive()) }
-        case .move(let destination, let fromAnotherTab):
-            guard let geometry else { return }
-            await feed.start(
+        case .move(let destination, let fromAnotherTab, let ask):
+            guard let geometry else { return moveTaken(ask, by: nil, on: attempt) }
+            let request = await feed.start(
                 .moved(destination, fromAnotherTab: fromAnotherTab, columns: geometry.cols, rows: geometry.rows, zoom: zoomPolicy),
                 within: connectionTiming.activation
             )
+            moveTaken(ask, by: request, on: attempt)
         case .zoom(let paneID, let zoomed):
             await feed.setZoom(zoomed, ofPane: paneID)
         case .askLayout(let paneID):
@@ -1587,9 +1654,14 @@ final class HerdrScreenModel {
             guard let attempt, attempt.id == connection, isCurrent(attempt) else { return }
             attempt.request = (request, kind, showing)
             if kind != .move, (kind == .show) == attempt.wantsShown { attempt.visibilityPending = false }
+            // A later request replaced the one carrying Remux's move.
+            if let moving = attempt.move?.request, request > moving { moveEnded(on: attempt) }
         case .activated(let request, let connection):
             guard let attempt, attempt.id == connection, isCurrent(attempt) else { return }
             attempt.activatedRequest = request
+            // The engine completes a move once Herdr shows where it went, or where Herdr has the session
+            // since it was overtaken, its pane closed or its focus failed.
+            if attempt.move?.request == request { moveEnded(on: attempt) }
             acknowledgeShownAgents()
         case .answered(_, let step, let failure, let connection):
             guard let attempt, attempt.id == connection, isCurrent(attempt) else { return }
@@ -1823,7 +1895,7 @@ final class HerdrScreenModel {
             let inLayout = layout?.panes.contains { $0.paneID == paneID } == true
             surface.renderer.setSceneActive(sceneActive)
             surface.renderer.setPresented(isSelected && inLayout)
-            surface.renderer.setFocused(isSelected && live && inLayout && paneID == focusedPaneID)
+            surface.renderer.setFocused(isSelected && live && inLayout && paneID == screenPaneID)
         }
     }
 
