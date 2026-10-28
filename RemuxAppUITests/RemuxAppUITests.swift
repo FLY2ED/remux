@@ -1820,6 +1820,8 @@ final class RemuxAppUITests: XCTestCase {
         captureLiveHerdrStep("w3b-more-picked", in: configuration)
         more.tap()
         XCTAssertTrue(infra.waitForExistence(timeout: 5))
+        XCTAssertTrue(infra.isSelected, "More didn't mark the workspace it shows.")
+        XCTAssertFalse(app.buttons["notes"].isSelected)
         captureLiveHerdrStep("w3c-more-marks-shown", in: configuration)
         infra.tap()
         XCTAssertTrue(waitForLabel(of: more, "Workspace infra, more workspaces", timeout: 5))

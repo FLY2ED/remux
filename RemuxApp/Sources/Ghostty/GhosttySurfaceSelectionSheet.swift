@@ -426,15 +426,19 @@ private struct GhosttyWindowGroupPicker: View {
             }
 
             Menu {
-                Picker(
-                    grouping.noun.plural,
-                    selection: Binding(get: { grouping.shownGroupID }, set: { onShow($0) })
-                ) {
+                // A toggle for each group, which a menu draws as a checkmark, not a picker: the group shown
+                // may be a capsule, which the menu doesn't list.
+                Section {
                     ForEach(rest) { group in
-                        Text(group.name).tag(group.id)
+                        Toggle(
+                            group.name,
+                            isOn: Binding(
+                                get: { group.id == grouping.shownGroupID },
+                                set: { isOn in if isOn { onShow(group.id) } }
+                            )
+                        )
                     }
                 }
-                .pickerStyle(.inline)
 
                 Button {
                     onCreate()
