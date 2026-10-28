@@ -5130,7 +5130,8 @@ extension HerdrScreenModelTests {
         boot: String = "boot",
         focusedTab: String = "t1",
         focusedPane: String = "w1:p1",
-        zoomedTabs: Set<String> = []
+        zoomedTabs: Set<String> = [],
+        customTabLabels: Bool = true
     ) -> [UInt8] {
         HerdrServerScript.snapshot(
             revision: revision,
@@ -5141,7 +5142,8 @@ extension HerdrScreenModelTests {
             ],
             focusedTab: focusedTab,
             focusedPane: focusedPane,
-            zoomedTabs: zoomedTabs
+            zoomedTabs: zoomedTabs,
+            customTabLabels: customTabLabels
         )
     }
 
@@ -5193,3 +5195,188 @@ extension HerdrScreenModelTests {
         }
     }
 }
+
+// MARK: - Close and rename
+
+extension HerdrScreenModelTests {
+    /// Closing a tab that isn't on screen moves nothing: it goes through the lane as Herdr's client's
+    /// `tab.close`, and the session stays shown, its frames not held.
+    func testClosingATabNotOnScreenIsAPlainCommand() async throws {
+        let harness = await makeHarness()
+        let session = try await shownWorkspaces(harness, zoomingOnShow: false)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let tile = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).windows.first { $0.displayName == "t2" })
+
+        XCTAssertNil(adapter.closeConfirmation(forTopLevel: tile.id), "a tab that leaves its workspace another asked")
+        XCTAssertEqual(adapter.closeTopLevel(tile.id), .queued)
+        let close = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(close.method, "tab.close")
+        XCTAssertEqual(close.params, ["tab_id": "t2"])
+        XCTAssertEqual(harness.model.stateTraceLabel, "shown", "a close off screen held the frames")
+    }
+
+    /// Closing the tab on screen takes the session wherever Herdr shows it then, and the setting zooms that
+    /// tab as it zooms any tab the session comes to. The closed tab takes Remux's zoom with it, so nothing is
+    /// unzoomed first.
+    func testClosingTheTabOnScreenZoomsTheTabHerdrShowsThen() async throws {
+        let harness = await makeHarness(settings: Self.zooming)
+        let session = try await shownWorkspaces(harness, zoomingOnShow: true)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let tile = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).windows.first { $0.displayName == "t1" })
+
+        XCTAssertEqual(adapter.closeTopLevel(tile.id), .queued)
+        let close = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(close.method, "tab.close")
+        XCTAssertEqual(close.params, ["tab_id": "t1"])
+        for write in try await harness.writes(session.bridge, from: session.next, count: index - session.next) {
+            XCTAssertNil(paneZoom(write), "Remux's zoom came off a tab that was closing")
+        }
+        await session.bridge.serve(HerdrConnectionTests.reply(id: close.id, json: #"{"type":"ok"}"#))
+        await session.bridge.serve(HerdrServerScript.snapshot(
+            revision: 3,
+            workspaces: [
+                .init(id: "w1", label: "alpha", tabs: [("t2", ["w1:p3", "w1:p4"])]),
+                .init(id: "w2", label: "beta", tabs: [("t3", ["w2:p5"]), ("t4", ["w2:p6", "w2:p7"])], activeTab: "t4"),
+            ],
+            focusedTab: "t2",
+            focusedPane: "w1:p3"
+        ))
+        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        XCTAssertEqual([zoom.paneID, zoom.mode], ["w1:p3", "on"])
+    }
+
+    /// A close or rename goes only on the server boot its ids came from, while its target is still there;
+    /// one that changed sends nothing and says it didn't go, as Herdr's client says a close target changed.
+    func testACloseOrRenameOfAChangedTargetIsRefused() async throws {
+        let harness = await makeHarness()
+        let session = try await shownWorkspaces(harness, zoomingOnShow: false)
+        let index = session.next
+
+        XCTAssertFalse(harness.model.ask(.close(.tab("t9"), group: false), bootID: "boot"))
+        XCTAssertFalse(harness.model.ask(.rename(.tab("t2"), name: "build"), bootID: "old-boot"))
+        XCTAssertFalse(harness.model.ask(.close(.workspace("w2"), group: false), bootID: "old-boot"))
+        guard case .commandFailure = harness.model.terminalScreenAdapter.terminalScreenPresentationProjection.statusOverlay else {
+            return XCTFail("a refused close didn't say so")
+        }
+        try await Task.sleep(for: .milliseconds(150))
+        let written = await session.bridge.writtenCount
+        for write in try await harness.writes(session.bridge, from: index, count: written - index) {
+            XCTAssertFalse(isCommand(write), "a stale close or rename went: \(write)")
+        }
+    }
+
+    /// A session that isn't on screen takes no close or rename: Herdr refuses commands from a hidden one.
+    func testAHiddenSessionTakesNoCloseOrRename() async throws {
+        let harness = await makeHarness()
+        let bridge = try await hiddenWorkspaces(harness)
+        let index = await bridge.writtenCount
+
+        XCTAssertFalse(harness.model.ask(.close(.tab("t2"), group: false), bootID: "boot"))
+        XCTAssertFalse(harness.model.ask(.rename(.workspace("w2"), name: "docs"), bootID: "boot"))
+        try await Task.sleep(for: .milliseconds(150))
+        let written = await bridge.writtenCount
+        for write in try await harness.writes(bridge, from: index, count: written - index) {
+            XCTAssertFalse(isCommand(write), "a hidden session sent a close or rename: \(write)")
+        }
+    }
+
+    /// Renames go as Herdr's client sends them: trimmed; never an empty tab or workspace name, which Herdr
+    /// would keep as the name; an empty pane name clears the manual one; and an auto-named tab given its own
+    /// name back sends nothing.
+    func testRenamesGoAsHerdrsClientSendsThem() async throws {
+        let harness = await makeHarness()
+        let bridge = try await harness.bridge()
+        await bridge.serve(try HerdrServerScript.welcome() + Self.twoWorkspaces(revision: 1, customTabLabels: false))
+        harness.setScreenSize()
+        try await harness.waitUntil("the session didn't connect") { harness.model.stateTraceLabel == "hidden" }
+        harness.model.setSelected(true)
+        var index = 0
+        let show = try await harness.nextSurfaceSet(bridge, from: &index)
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        await bridge.serve(try harness.shownSurface(projection: 1, revision: 1, lines: ["one two"], panes: Self.twoPanes))
+        try await harness.waitUntil("the session wasn't shown") { harness.model.stateTraceLabel == "shown" }
+
+        XCTAssertFalse(harness.model.ask(.rename(.tab("t2"), name: "   "), bootID: "boot"))
+        XCTAssertFalse(harness.model.ask(.rename(.workspace("w2"), name: ""), bootID: "boot"))
+        XCTAssertTrue(harness.model.ask(.rename(.tab("t2"), name: " t2 "), bootID: "boot"), "an unchanged automatic name was refused")
+        XCTAssertTrue(harness.model.ask(.rename(.tab("t2"), name: "  build "), bootID: "boot"))
+        let tab = try await nextWrite(bridge, from: &index, command)
+        XCTAssertEqual(tab.method, "tab.rename")
+        XCTAssertEqual(tab.params, ["tab_id": "t2", "label": "build"])
+        await bridge.serve(HerdrConnectionTests.reply(id: tab.id, json: #"{"type":"tab_info"}"#))
+
+        XCTAssertTrue(harness.model.ask(.rename(.pane("w1:p2"), name: "  "), bootID: "boot"))
+        let pane = try await nextWrite(bridge, from: &index, command)
+        XCTAssertEqual(pane.method, "pane.rename")
+        XCTAssertEqual(pane.params, ["pane_id": "w1:p2", "label": ""])
+        await bridge.serve(HerdrConnectionTests.reply(id: pane.id, json: #"{"type":"pane_info"}"#))
+
+        XCTAssertTrue(harness.model.ask(.rename(.workspace("w2"), name: "docs"), bootID: "boot"))
+        let workspace = try await nextWrite(bridge, from: &index, command)
+        XCTAssertEqual(workspace.method, "workspace.rename")
+        XCTAssertEqual(workspace.params, ["workspace_id": "w2", "label": "docs"])
+    }
+
+    /// Herdr's server asking to confirm a tab's close, as when it would close a worktree group, asks the
+    /// user about its workspace's close instead of failing; agreeing closes the workspace.
+    func testHerdrAskingToConfirmACloseAsksAboutItsWorkspace() async throws {
+        let harness = await makeHarness()
+        let session = try await shownWorkspaces(harness, zoomingOnShow: false)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+
+        XCTAssertTrue(harness.model.ask(.close(.tab("t3"), group: false), bootID: "boot"))
+        let close = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(close.method, "tab.close")
+        await session.bridge.serve(HerdrConnectionTests.reply(
+            id: close.id,
+            error: ("confirmation_required", "closing this tab closes the worktree group")
+        ))
+        try await harness.waitUntil("Herdr's question didn't reach the user") { adapter.askedCloseConfirmation != nil }
+        let asked = try XCTUnwrap(adapter.askedCloseConfirmation)
+        XCTAssertEqual([asked.label, "\(asked.tabCount)", "\(asked.paneCount)"], ["beta", "2", "3"])
+        XCTAssertEqual(asked.request, .close(.workspace("w2"), group: false))
+        if case .commandFailure = adapter.terminalScreenPresentationProjection.statusOverlay {
+            XCTFail("Herdr's question was shown as a failure")
+        }
+
+        adapter.answerAskedCloseConfirmation(agreed: true)
+        XCTAssertNil(adapter.askedCloseConfirmation)
+        let workspace = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(workspace.method, "workspace.close")
+        XCTAssertEqual(workspace.params, ["workspace_id": "w2", "close_group": "false"])
+    }
+
+    /// The workspace's only tab, or the only pane of its only tab, asks before it closes, since that closes
+    /// the workspace; agreeing closes the tab or pane itself.
+    func testClosingAWorkspacesLastTabAsksFirst() async throws {
+        let harness = await makeHarness()
+        let session = try await shownWorkspaces(harness, zoomingOnShow: false)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let grouping = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).grouping)
+        let beta = try XCTUnwrap(grouping.groups.first { $0.name == "beta" }).id
+        let lastTab = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: beta).windows.first { $0.displayName == "t3" })
+
+        XCTAssertNil(adapter.closeConfirmation(forTopLevel: lastTab.id), "t3 isn't beta's only tab")
+        await session.bridge.serve(HerdrServerScript.snapshot(
+            revision: 2,
+            workspaces: [
+                .init(id: "w1", label: "alpha", tabs: [("t1", ["w1:p1", "w1:p2"]), ("t2", ["w1:p3", "w1:p4"])]),
+                .init(id: "w2", label: "beta", tabs: [("t3", ["w2:p5"])]),
+            ],
+            focusedTab: "t1",
+            focusedPane: "w1:p1"
+        ))
+        try await harness.waitUntil("beta's other tab didn't close") { harness.model.places.outline?.workspace("w2")?.tabs.count == 1 }
+        let confirmation = try XCTUnwrap(adapter.closeConfirmation(forTopLevel: lastTab.id))
+        XCTAssertEqual([confirmation.label, "\(confirmation.tabCount)", "\(confirmation.paneCount)"], ["beta", "1", "1"])
+        XCTAssertTrue(adapter.close(confirmed: confirmation))
+        let close = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(close.method, "tab.close")
+        XCTAssertEqual(close.params, ["tab_id": "t3"])
+    }
+}
+

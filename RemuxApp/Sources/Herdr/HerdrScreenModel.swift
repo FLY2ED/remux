@@ -293,6 +293,9 @@ final class HerdrScreenModel {
     let agents = HerdrAgentPresentation()
     /// Where to go once the session is shown, and the server boot its ids belong to.
     private var pendingReveal: (destination: HerdrDestination, bootID: String?)?
+    /// The workspace close Herdr's server asked the user to confirm, until the user answers
+    /// (`answerAskedCloseConfirmation(agreed:)`).
+    private(set) var askedCloseConfirmation: HerdrCloseConfirmation?
     /// The pane keys go to and the screen highlights: the newest snapshot's focused pane, as in
     /// Herdr's client. A pane can be focused before its first frame arrives.
     private(set) var focusedPaneID: String?
@@ -384,19 +387,19 @@ final class HerdrScreenModel {
         reconcileVisibility()
     }
 
-    /// Goes to `place`, a pick from what the screen or a list shows of the session (`go(to:bootID:)`).
+    /// Goes to `place`, a pick from what the screen or a list shows of the session (`ask(_:bootID:)`).
     @discardableResult
     func reveal(_ place: HerdrPlace, bootID: String?) -> Bool {
-        go(to: .place(place), bootID: bootID)
+        ask(.go(.place(place)), bootID: bootID)
     }
 
     /// New Tab, New Workspace or a split of a pane, with the command Herdr's client sends, focused, which
-    /// goes to the pane Herdr makes (`go(to:bootID:)`). Remux's zoom comes off a tab the session leaves for
+    /// goes to the pane Herdr makes (`ask(_:bootID:)`). Remux's zoom comes off a tab the session leaves for
     /// a new one. Herdr's split unzooms the tab it splits (`workspace/tab.rs`), so the setting zooms the
     /// new pane, as tmux keeps a window zoomed through a split; a tab the user unzoomed stays unzoomed.
     @discardableResult
     func create(_ creation: HerdrCreation, bootID: String?) -> Bool {
-        go(to: .creation(creation), bootID: bootID)
+        ask(.go(.creation(creation)), bootID: bootID)
     }
 
     /// A pane of the tab on screen, as a scroll over it picks it: a pick from the layout drawn.
@@ -404,19 +407,67 @@ final class HerdrScreenModel {
         reveal(.pane(paneID), bootID: layout?.bootID)
     }
 
-    /// The one way the session goes somewhere, as Herdr's client goes to a notification's pane or a
-    /// workspace on its machine: on the session on screen it is a move there (`move(_:to:)`); a session not
-    /// on screen goes there right after its show, as part of it. It goes only on the server boot its ids
-    /// came from, while what it names is still there. Returns false when it won't go: the model has stopped,
-    /// or the session on screen has another boot or no longer has what it names.
+    /// The one way Remux asks something of the session. It goes only on the server boot its ids came from,
+    /// while what it names is still there; one whose target changed is refused, as Herdr's client refuses a
+    /// stale close (`overlay_input.rs` `accept_close_confirmation`).
+    /// - Going somewhere, as Herdr's client goes to a notification's pane or a workspace on its machine, is
+    ///   a move there on the session on screen (`move(_:to:)`); a session not on screen goes there right
+    ///   after its show, as part of it.
+    /// - A close or a rename goes only on the session on screen, since Herdr refuses commands from a hidden
+    ///   one. A close of what is on screen, the workspace, the tab or one of its panes, takes the session
+    ///   wherever Herdr shows it then, so it is a view request as a move is (`.closing`). Any other close,
+    ///   and a rename, moves nothing: they go through the lane after the commands asked before them.
+    /// Returns false when it won't go: the model has stopped, the session can't take it, or what it names
+    /// changed.
     @discardableResult
-    func go(to destination: HerdrDestination, bootID: String?) -> Bool {
+    func ask(_ request: HerdrRequest, bootID: String?) -> Bool {
         guard !stopped else { return false }
+        guard case .go(let destination) = request else { return change(request, bootID: bootID) }
         pendingReveal = (destination, bootID)
-        guard let attempt, isCurrent(attempt), attempt.isOpen, attempt.requestedShown else { return true }
+        guard let attempt = shownOpenAttempt else { return true }
         guard let destination = takePendingReveal() else { return false }
         move(attempt, to: destination)
         return true
+    }
+
+    /// A close or rename on the session on screen (`ask(_:bootID:)`). A tab or workspace name is trimmed
+    /// and never empty, since Herdr would keep an empty one as the name; a pane's empty name clears its
+    /// manual one, as Herdr's client sends it (`overlay_input.rs` `save_rename_overlay`). An auto-named tab
+    /// given its own name back sends nothing, which would only pin the name.
+    private func change(_ request: HerdrRequest, bootID: String?) -> Bool {
+        guard let attempt = shownOpenAttempt, let snapshot, Self.holds(request.origin, bootID: bootID, in: snapshot) else {
+            if !stopped { refused(request) }
+            return false
+        }
+        switch request {
+        case .go:
+            return false
+        case .close(let place, let group) where snapshot.isOnScreen(place):
+            move(attempt, to: .closing(place, group: group))
+        case .close(let place, let group):
+            send(request, method: place.closeMethod, params: place.closeParams(group: group), on: attempt)
+        case .rename(let place, let typed):
+            let name = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+            switch place {
+            case .pane:
+                break
+            case .tab(let id):
+                guard !name.isEmpty else { return false }
+                if let tab = snapshot.tabs.first(where: { $0.tabID == id }), !tab.customLabel, tab.label == name {
+                    return true
+                }
+            case .workspace:
+                guard !name.isEmpty else { return false }
+            }
+            send(request, method: place.renameMethod, params: place.renameParams(name), on: attempt)
+        }
+        return true
+    }
+
+    /// The current attempt, while it is open and the session is on screen.
+    private var shownOpenAttempt: Attempt? {
+        guard let attempt, isCurrent(attempt), attempt.isOpen, attempt.requestedShown else { return nil }
+        return attempt
     }
 
     /// Where to go, once a snapshot is in, if what it names is still there on the server boot its ids came
@@ -424,10 +475,80 @@ final class HerdrScreenModel {
     private func takePendingReveal() -> HerdrDestination? {
         guard let reveal = pendingReveal, let snapshot else { return nil }
         pendingReveal = nil
-        guard reveal.bootID.map({ $0 == snapshot.bootID }) ?? true,
-              reveal.destination.origin.map(snapshot.contains) ?? true
-        else { return nil }
+        guard Self.holds(reveal.destination.origin, bootID: reveal.bootID, in: snapshot) else { return nil }
         return reveal.destination
+    }
+
+    /// Whether `origin`, named on server boot `bootID`, is still there in `snapshot`.
+    private static func holds(_ origin: HerdrPlace?, bootID: String?, in snapshot: HerdrSnapshot) -> Bool {
+        (bootID.map { $0 == snapshot.bootID } ?? true) && (origin.map(snapshot.contains) ?? true)
+    }
+
+    /// A close or rename that moves nothing, through the engine's lane after the operations asked before it.
+    private func send(
+        _ request: HerdrRequest,
+        method: String,
+        params: some Encodable & Sendable,
+        on attempt: Attempt
+    ) {
+        Task { [weak self] in
+            guard let self else { return }
+            let result = await command(method, params: params, on: attempt)
+            guard isCurrent(attempt) else { return }
+            if case .failure(let failure) = result { return changeAnswered(request, failure: failure) }
+            changeAnswered(request, failure: nil)
+        }
+    }
+
+    /// Herdr answered a close or rename. A close Herdr's server wants confirmed, as one that would close a
+    /// worktree group, asks the user about its workspace's close instead of failing, as Herdr's client does
+    /// (`client/shell/actions.rs`); any other failure says so.
+    private func changeAnswered(_ request: HerdrRequest, failure: HerdrCommandError?) {
+        let method: String
+        let label: String
+        switch request {
+        case .go: return
+        case .close(let place, _):
+            method = place.closeMethod
+            label = place.closeFailureLabel
+        case .rename(let place, _):
+            method = place.renameMethod
+            label = place.renameFailureLabel
+        }
+        guard let failure else { return notices.succeeded(method, bootID: layout?.bootID) }
+        if case .failed("confirmation_required", _) = failure, case .close(let place, _) = request,
+           let outline = places.outline, let workspace = outline.workspace(containing: place) {
+            askedCloseConfirmation = outline.closeConfirmation(ofWorkspace: workspace.id)
+            didChange()
+            return
+        }
+        presentFailure(of: method, label: label, failure)
+    }
+
+    /// A close or rename that won't go, whose target or server boot changed, says so, as Herdr's client
+    /// says a close target changed.
+    private func refused(_ request: HerdrRequest) {
+        let label: String
+        switch request {
+        case .go: return
+        case .close(let place, _): label = place.closeFailureLabel
+        case .rename(let place, _): label = place.renameFailureLabel
+        }
+        notices.replaced()
+        terminalScreenAdapter.presentFailure(label)
+    }
+
+    /// What the rename alert for `place` starts with (`HerdrSnapshot.renameField(for:)`).
+    func renameField(for place: HerdrPlace) -> HerdrRenameField? {
+        snapshot?.renameField(for: place)
+    }
+
+    /// The user answered the asked confirmation; agreeing asks for its close as any close goes.
+    func answerAskedCloseConfirmation(agreed: Bool) {
+        guard let confirmation = askedCloseConfirmation else { return }
+        askedCloseConfirmation = nil
+        if agreed { ask(confirmation.request, bootID: confirmation.bootID) }
+        didChange()
     }
 
     /// The background hides the session; the app's other phases leave it on screen.
@@ -796,6 +917,7 @@ final class HerdrScreenModel {
         switch step {
         case .focus(let place): label = place.focusFailureLabel
         case .create(let creation): label = creation.failureLabel
+        case .close(let place, let group): return changeAnswered(.close(place, group: group), failure: failure)
         case .leave, .zoom, .zoomReached: return
         }
         if let failure {

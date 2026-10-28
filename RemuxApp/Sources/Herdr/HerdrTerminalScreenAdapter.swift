@@ -426,21 +426,21 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func focusPane(_ id: UUID) -> GhosttyTerminalActionOutcome {
-        guard let paneID = paneID(for: id), go(to: .place(.pane(paneID))) else { return .missingTarget(.pane(id)) }
+        guard let paneID = paneID(for: id), ask(.go(.place(.pane(paneID)))) else { return .missingTarget(.pane(id)) }
         return .queued
     }
 
     func focusTopLevel(_ id: UUID) -> GhosttyTerminalActionOutcome {
-        guard let tabID = tabIDsBySurfaceID[id], go(to: .place(.tab(tabID))) else { return .missingTarget(.topLevel(id)) }
+        guard let tabID = tabIDsBySurfaceID[id], ask(.go(.place(.tab(tabID)))) else { return .missingTarget(.topLevel(id)) }
         return .queued
     }
 
     /// The screen's tiles, swipes and sheet buttons pick from what it draws: the layout on screen, and the
     /// session's outline only while it has the layout's server boot (`workspaceOnScreen`). So each pick goes
-    /// only on that boot, through the model's one way to go somewhere.
-    private func go(to destination: HerdrDestination) -> Bool {
+    /// only on that boot, through the model's one way to ask something of the session.
+    private func ask(_ request: HerdrRequest) -> Bool {
         guard let model, let layout = model.layout else { return false }
-        return model.go(to: destination, bootID: layout.bootID)
+        return model.ask(request, bootID: layout.bootID)
     }
 
     func focusAdjacentTopLevel(
@@ -455,7 +455,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
 
     /// New Tab goes in the workspace the Tabs sheet shows.
     func createTopLevel(inGroup group: UUID?) -> GhosttyTerminalActionOutcome {
-        guard let workspaceID = workspaceID(shownFor: group), go(to: .creation(.tab(workspaceID: workspaceID))) else {
+        guard let workspaceID = workspaceID(shownFor: group), ask(.go(.creation(.tab(workspaceID: workspaceID)))) else {
             return .missingTarget(.host)
         }
         return .queued
@@ -464,7 +464,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     /// New Workspace starts from the workspace the Tabs sheet shows, as Herdr's client starts one from the
     /// workspace it has picked.
     func createTopLevelGroup(from group: UUID?) -> GhosttyTerminalActionOutcome {
-        go(to: .creation(.workspace(source: workspaceID(shownFor: group)))) ? .queued : .missingTarget(.host)
+        ask(.go(.creation(.workspace(source: workspaceID(shownFor: group))))) ? .queued : .missingTarget(.host)
     }
 
     private func workspaceID(shownFor group: UUID?) -> String? {
@@ -487,7 +487,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         default: return .missingTarget(.focusedPane)
         }
         guard let paneID = focusedPaneID,
-              go(to: .creation(.split(pane: paneID, workspaceID: workspaceOnScreen?.id, direction: herdrDirection)))
+              ask(.go(.creation(.split(pane: paneID, workspaceID: workspaceOnScreen?.id, direction: herdrDirection))))
         else { return .missingTarget(.focusedPane) }
         return .queued
     }
@@ -497,11 +497,72 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func closePane(_ id: UUID) -> GhosttyTerminalActionOutcome {
-        .missingTarget(.pane(id))
+        guard let paneID = paneID(for: id), ask(.close(.pane(paneID), group: false)) else { return .missingTarget(.pane(id)) }
+        return .queued
     }
 
     func closeTopLevel(_ id: UUID) -> GhosttyTerminalActionOutcome {
-        .missingTarget(.topLevel(id))
+        guard let tabID = tabIDsBySurfaceID[id], ask(.close(.tab(tabID), group: false)) else {
+            return .missingTarget(.topLevel(id))
+        }
+        return .queued
+    }
+
+    // MARK: Close and rename
+
+    /// What closing a tab tile asks first, if anything, as Herdr's client asks: closing a workspace's only
+    /// tab closes the workspace.
+    func closeConfirmation(forTopLevel id: UUID) -> HerdrCloseConfirmation? {
+        tabIDsBySurfaceID[id].flatMap { drawnOutline?.closeConfirmation(before: .tab($0)) }
+    }
+
+    /// What closing a pane tile asks first, if anything: the only pane of a workspace's only tab closes the
+    /// workspace.
+    func closeConfirmation(forPane id: UUID) -> HerdrCloseConfirmation? {
+        paneID(for: id).flatMap { drawnOutline?.closeConfirmation(before: .pane($0)) }
+    }
+
+    /// The close the user agreed to, checked as any close is when it goes.
+    @discardableResult
+    func close(confirmed confirmation: HerdrCloseConfirmation) -> Bool {
+        model?.ask(confirmation.request, bootID: confirmation.bootID) == true
+    }
+
+    /// The workspace close Herdr's server asked to confirm, as for a tab or pane whose close would close a
+    /// worktree group, until the user answers (`answerAskedCloseConfirmation(agreed:)`).
+    var askedCloseConfirmation: HerdrCloseConfirmation? {
+        model?.askedCloseConfirmation
+    }
+
+    func answerAskedCloseConfirmation(agreed: Bool) {
+        model?.answerAskedCloseConfirmation(agreed: agreed)
+    }
+
+    func renameField(forTopLevel id: UUID) -> HerdrRenameField? {
+        tabIDsBySurfaceID[id].flatMap { model?.renameField(for: .tab($0)) }
+    }
+
+    func renameField(forPane id: UUID) -> HerdrRenameField? {
+        paneID(for: id).flatMap { model?.renameField(for: .pane($0)) }
+    }
+
+    @discardableResult
+    func renameTopLevel(_ id: UUID, to name: String) -> Bool {
+        guard let tabID = tabIDsBySurfaceID[id] else { return false }
+        return ask(.rename(.tab(tabID), name: name))
+    }
+
+    @discardableResult
+    func renamePane(_ id: UUID, to name: String) -> Bool {
+        guard let paneID = paneID(for: id) else { return false }
+        return ask(.rename(.pane(paneID), name: name))
+    }
+
+    /// The session's outline while it has the server boot of the layout on screen, which the tiles are
+    /// drawn from.
+    private var drawnOutline: HerdrSessionOutline? {
+        guard let outline = model?.places.outline, outline.bootID == model?.layout?.bootID else { return nil }
+        return outline
     }
 
     func enterFocusedTmuxCopyMode() -> GhosttyTerminalActionOutcome {

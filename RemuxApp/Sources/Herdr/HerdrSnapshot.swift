@@ -22,6 +22,19 @@ struct HerdrSnapshot: Equatable, Sendable, Decodable {
         let customLabel: Bool
         let focused: Bool
         let agentStatus: HerdrAgentStatus
+        /// The git repository the workspace is a checkout of, when it is in one.
+        let worktree: Worktree?
+
+        /// A repository's root checkout and its linked worktrees share `key`.
+        struct Worktree: Equatable, Sendable, Decodable {
+            let key: String
+            let isLinkedWorktree: Bool
+
+            private enum CodingKeys: String, CodingKey {
+                case key
+                case isLinkedWorktree = "is_linked_worktree"
+            }
+        }
 
         private enum CodingKeys: String, CodingKey {
             case workspaceID = "workspace_id"
@@ -30,6 +43,7 @@ struct HerdrSnapshot: Equatable, Sendable, Decodable {
             case customLabel = "custom_label"
             case focused
             case agentStatus = "agent_status"
+            case worktree
         }
     }
 

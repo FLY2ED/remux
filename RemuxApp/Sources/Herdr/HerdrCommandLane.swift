@@ -32,12 +32,16 @@ struct HerdrCommandLane {
         case focus(HerdrPlace)
         /// A new tab, workspace or split pane, which Herdr focuses.
         case create(HerdrCreation)
+        /// The close of the workspace on screen, the tab on screen or one of its panes; Herdr shows the
+        /// session where it is then. `group` closes a worktree group's root with its linked worktrees.
+        case close(HerdrPlace, group: Bool)
 
         var method: String {
             switch self {
             case .leave, .zoom, .zoomReached: HerdrScreenModel.paneZoomMethod
             case .focus(let place): place.focusMethod
             case .create(let creation): creation.method
+            case .close(let place, _): place.closeMethod
             }
         }
     }

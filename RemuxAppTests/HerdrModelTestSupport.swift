@@ -148,7 +148,8 @@ enum HerdrServerScript {
         workspaces: [Workspace],
         focusedTab: String,
         focusedPane: String?,
-        zoomedTabs: Set<String> = []
+        zoomedTabs: Set<String> = [],
+        customTabLabels: Bool = true
     ) -> [UInt8] {
         let focusedWorkspace = workspaces.first { $0.tabs.contains { $0.id == focusedTab } }?.id
         let workspaceEntries = workspaces.enumerated().map { index, workspace in
@@ -163,7 +164,7 @@ enum HerdrServerScript {
             workspace.tabs.enumerated().map { index, tab in
                 """
                 {"tab_id":"\(tab.id)","workspace_id":"\(workspace.id)","number":\(index + 1),"label":"\(tab.id)",
-                 "custom_label":true,"zoomed":\(zoomedTabs.contains(tab.id)),"focused":\(tab.id == focusedTab),
+                 "custom_label":\(customTabLabels),"zoomed":\(zoomedTabs.contains(tab.id)),"focused":\(tab.id == focusedTab),
                  "agent_status":"idle"}
                 """
             }

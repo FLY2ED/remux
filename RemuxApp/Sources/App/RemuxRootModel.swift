@@ -1701,7 +1701,7 @@ final class RemuxRootModel: ObservableObject {
     private func openHerdrSession(_ workspaceID: SavedWorkspace.ID, to destination: HerdrDestination?, bootID: String?) {
         guard RemuxActiveSessionCollection.containsWorkspace(workspaceID, in: activeSessions) else { return }
         if let destination {
-            herdrModel(of: workspaceID)?.go(to: destination, bootID: bootID)
+            herdrModel(of: workspaceID)?.ask(.go(destination), bootID: bootID)
         }
         showActiveSession(workspaceID)
     }
@@ -1726,6 +1726,40 @@ final class RemuxRootModel: ObservableObject {
             to: .creation(.workspace(source: outline.focusedWorkspaceID)),
             bootID: outline.bootID
         )
+    }
+
+    /// What closing a workspace from its row in the Sessions sheet asks: always, as Herdr's client asks. Only
+    /// the session on screen offers it, since Herdr refuses commands from a hidden session.
+    func herdrWorkspaceCloseConfirmation(
+        _ herdrWorkspaceID: String,
+        in workspaceID: SavedWorkspace.ID
+    ) -> HerdrCloseConfirmation? {
+        herdrModelOnScreen(workspaceID)?.places.outline?.closeConfirmation(ofWorkspace: herdrWorkspaceID)
+    }
+
+    /// The close the user agreed to, checked as any close is when it goes.
+    func closeHerdrWorkspace(confirmed confirmation: HerdrCloseConfirmation, in workspaceID: SavedWorkspace.ID) {
+        herdrModelOnScreen(workspaceID)?.ask(confirmation.request, bootID: confirmation.bootID)
+    }
+
+    /// What renaming a workspace from its row starts with; only the session on screen offers it.
+    func herdrWorkspaceRenameField(_ herdrWorkspaceID: String, in workspaceID: SavedWorkspace.ID) -> HerdrRenameField? {
+        herdrModelOnScreen(workspaceID)?.renameField(for: .workspace(herdrWorkspaceID))
+    }
+
+    /// A workspace renamed from its row, which the Sessions sheet listed from server boot `bootID`.
+    func renameHerdrWorkspace(
+        _ herdrWorkspaceID: String,
+        to name: String,
+        bootID: String,
+        in workspaceID: SavedWorkspace.ID
+    ) {
+        herdrModelOnScreen(workspaceID)?.ask(.rename(.workspace(herdrWorkspaceID), name: name), bootID: bootID)
+    }
+
+    private func herdrModelOnScreen(_ workspaceID: SavedWorkspace.ID) -> HerdrScreenModel? {
+        guard state == .terminal(workspaceID) else { return nil }
+        return herdrModel(of: workspaceID)
     }
 
     /// An open Herdr session's agents.

@@ -4944,6 +4944,34 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertLessThan(show, created)
     }
 
+    /// A workspace row offers its close and rename only for the session on screen, since Herdr refuses
+    /// commands from a hidden session. Its close always asks first, saying what closes, and agreeing closes
+    /// it with Herdr's client's `workspace.close`.
+    func testAHerdrWorkspaceRowClosesOnlyInTheSessionOnScreen() async throws {
+        let (harness, workspace, bridge) = try await connectedHerdrSession(agentStatus: .working)
+        let listed = await waitUntil(timeout: 3) { harness.model.herdrPlaces(of: workspace.id)?.outline != nil }
+        XCTAssertTrue(listed, "the session's workspaces weren't listed")
+
+        let confirmation = try XCTUnwrap(harness.model.herdrWorkspaceCloseConfirmation("w1", in: workspace.id))
+        XCTAssertEqual([confirmation.label, "\(confirmation.tabCount)", "\(confirmation.paneCount)"], ["remux", "2", "2"])
+        XCTAssertEqual(harness.model.herdrWorkspaceRenameField("w1", in: workspace.id)?.name, "remux")
+        let before = await bridge.writtenCount
+        harness.model.closeHerdrWorkspace(confirmed: confirmation, in: workspace.id)
+        var close: (method: String, params: [String: String])?
+        for position in before..<(before + 6) {
+            if case .command(_, let method, let params) = try ClientWrite.decode(try await bridge.written(position)) {
+                close = (method, params)
+                break
+            }
+        }
+        XCTAssertEqual(close?.method, "workspace.close")
+        XCTAssertEqual(close?.params, ["workspace_id": "w1", "close_group": "false"])
+
+        await harness.model.showLibrary()
+        XCTAssertNil(harness.model.herdrWorkspaceCloseConfirmation("w1", in: workspace.id))
+        XCTAssertNil(harness.model.herdrWorkspaceRenameField("w1", in: workspace.id))
+    }
+
     /// An open Herdr session's agents are listed, as the phone shows them, until the session closes; an
     /// agent's row opens the session and asks Herdr to focus the agent's pane right after the show, as a
     /// banner does.

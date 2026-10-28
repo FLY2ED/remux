@@ -1977,6 +1977,52 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// Closing the tab on screen holds the frames until a snapshot no longer lists it, then the setting zooms
+    /// the tab Herdr shows: the tab left isn't drawn again, nor the tab reached unzoomed. The closed tab
+    /// takes Remux's zoom with it, so nothing is unzoomed first.
+    func testClosingTheTabOnScreenShowsOnlyTheTabHerdrShowsThen() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shownZoomed(feed, updates, outbox)
+
+        let close = try await start(
+            feed, updates, .moved(.closing(.tab("t1"), group: false), fromAnotherTab: false, columns: 4, rows: 2, zoom: Self.zooming)
+        )
+        XCTAssertEqual(try outbox.commands().last, "tab.close")
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t1"])
+        await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["old ", "tab "], panes: Self.atP)))
+        try await answer(feed, outbox)
+        XCTAssertEqual(try outbox.commands().last, "tab.close", "the zoom went before the tab was gone")
+        await feed.receive(try Self.places(revision: 3, focusedPane: "R", gone: ["t1"]))
+        await feed.receive(.surface(try Self.surface(
+            projection: 3,
+            revision: 3,
+            lines: ["o t ", "w o "],
+            panes: [Self.pane("R", x: 0, width: 2, height: 2, focused: true), Self.pane("S", x: 2, width: 2, height: 2)]
+        )))
+        XCTAssertEqual(try outbox.commands().last, "zoom R on")
+        try await answerZoom(feed, outbox, zoomed: true, tab: "t2", panes: ["R", "S"])
+        await feed.receive(try Self.places(revision: 4, focusedPane: "R", zoomed: ["t2"], gone: ["t1"]))
+        await feed.receive(.surface(try Self.surface(
+            projection: 4,
+            revision: 4,
+            lines: ["new ", "tab "],
+            panes: [Self.pane("R", x: 0, width: 4, height: 2, focused: true)]
+        )))
+        guard case .paneTerminal("R", _) = try await updates.next(),
+              case .layout(let reached) = try await updates.next()
+        else { return XCTFail("a frame from before the close's zoom was drawn") }
+        XCTAssertEqual(reached.tab?.tabID, "t2")
+        XCTAssertEqual(reached.tab?.zoomed, true)
+        _ = try await updates.nextPaneScroll()
+        try await activation(close, updates)
+        XCTAssertEqual(try outbox.commands().suffix(2), ["tab.close", "zoom R on"])
+        XCTAssertEqual(updates.closeAnswers.map(\.request), [close])
+        XCTAssertNil(updates.closeAnswers.first?.failure)
+        await engine.stop()
+    }
+
     /// A connection whose requests go to an outbox the test reads, opened as the model opens one.
     private func connect(
         _ engine: HerdrTerminalEngine,
@@ -1987,7 +2033,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await feed.opened(
             methods: [
                 HerdrScreenModel.paneFocusMethod, HerdrScreenModel.paneZoomMethod, "worktree.list", "tab.focus",
-                "pane.split",
+                "pane.split", "tab.close",
             ],
             commandTimeout: commandTimeout
         )
@@ -2219,6 +2265,8 @@ private final class UpdateLog {
     private(set) var focusAnswers: [(request: UInt64, failure: HerdrCommandError?)] = []
     /// The creation answers the engine reported, in order.
     private(set) var creationAnswers: [(request: UInt64, creation: HerdrCreation, failure: HerdrCommandError?)] = []
+    /// The close answers the engine reported, in order.
+    private(set) var closeAnswers: [(request: UInt64, place: HerdrPlace, failure: HerdrCommandError?)] = []
     /// The zoom answers the engine reported, in order.
     private(set) var zoomAnswers: [(zoom: HerdrPaneZoomResult?, failure: HerdrCommandError?, reportsFailure: Bool)] = []
 
@@ -2304,6 +2352,8 @@ private final class UpdateLog {
             focusAnswers.append((request, failure))
         case .answered(let request, .create(let creation), let failure, _):
             creationAnswers.append((request, creation, failure))
+        case .answered(let request, .close(let place, _), let failure, _):
+            closeAnswers.append((request, place, failure))
         case .zoomAnswered(let zoom, _, let failure, let reportsFailure, _):
             zoomAnswers.append((zoom, failure, reportsFailure))
         default:
