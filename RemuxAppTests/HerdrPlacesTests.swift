@@ -95,6 +95,147 @@ final class HerdrPlacesTests: XCTestCase {
         )
     }
 
+    /// A workspace's close always asks, saying what closes with it; a tab's or a pane's asks only when it
+    /// would close its workspace, as Herdr's client asks, and agreeing closes the tab or pane itself.
+    func testACloseAsksWhereHerdrsClientAsks() throws {
+        let outline = HerdrSessionOutline(try closingSnapshot([
+            ("api", [["api-p1"], ["api-p2", "api-p3"]], nil),
+            ("web", [["web-p1"]], nil),
+        ]), after: nil)
+
+        let workspace = try XCTUnwrap(outline.closeConfirmation(before: .workspace("api")))
+        XCTAssertEqual([workspace.label, "\(workspace.tabCount)", "\(workspace.paneCount)"], ["api", "2", "3"])
+        XCTAssertFalse(workspace.closesGroup)
+        XCTAssertEqual(workspace.request, .close(.workspace("api"), group: false))
+        XCTAssertEqual(workspace.bootID, "boot")
+        XCTAssertEqual(workspace.dialog, GhosttyCloseConfirmation(
+            title: "Close Workspace?",
+            message: "“api” and its 2 tabs and 3 panes will close.",
+            action: "Close Workspace"
+        ))
+
+        XCTAssertNil(outline.closeConfirmation(before: .tab("api-t1")), "a tab that leaves its workspace another asked")
+        XCTAssertNil(outline.closeConfirmation(before: .pane("api-p2")), "a pane that leaves its tab another asked")
+        XCTAssertNil(outline.closeConfirmation(before: .pane("api-p1")), "the only pane of one of two tabs asked")
+
+        let lastTab = try XCTUnwrap(outline.closeConfirmation(before: .tab("web-t1")))
+        XCTAssertEqual([lastTab.label, "\(lastTab.tabCount)", "\(lastTab.paneCount)"], ["web", "1", "1"])
+        XCTAssertEqual(lastTab.dialog.message, "“web” and its 1 tab and 1 pane will close.")
+        XCTAssertEqual(lastTab.request, .close(.tab("web-t1"), group: false))
+        let onlyPane = try XCTUnwrap(outline.closeConfirmation(before: .pane("web-p1")))
+        XCTAssertEqual(onlyPane.request, .close(.pane("web-p1"), group: false))
+    }
+
+    /// A worktree group's root, whose repository's other workspaces are all linked worktrees, closes with
+    /// them, and its confirmation says so; a linked worktree closes alone. A tab or pane whose close would
+    /// close the group isn't asked about here: Herdr's server asks for that.
+    func testAWorktreeGroupsRootClosesWithItsLinkedWorktrees() throws {
+        let outline = HerdrSessionOutline(try closingSnapshot([
+            ("app", [["app-p1"]], ("repo", false)),
+            ("feature", [["feature-p1", "feature-p2"]], ("repo", true)),
+            ("fix", [["fix-p1"], ["fix-p2"]], ("repo", true)),
+            ("notes", [["notes-p1"]], nil),
+        ]), after: nil)
+
+        let root = try XCTUnwrap(outline.closeConfirmation(ofWorkspace: "app"))
+        XCTAssertTrue(root.closesGroup)
+        XCTAssertEqual([root.otherWorkspaceCount, root.tabCount, root.paneCount], [2, 4, 5])
+        XCTAssertEqual(root.request, .close(.workspace("app"), group: true))
+        XCTAssertEqual(root.dialog, GhosttyCloseConfirmation(
+            title: "Close Worktree Group?",
+            message: "“app” and its 2 other workspaces will close, with 4 tabs and 5 panes.",
+            action: "Close Worktree Group"
+        ))
+        let linked = try XCTUnwrap(outline.closeConfirmation(ofWorkspace: "feature"))
+        XCTAssertFalse(linked.closesGroup)
+        XCTAssertEqual(linked.request, .close(.workspace("feature"), group: false))
+        XCTAssertNil(outline.closeConfirmation(before: .tab("app-t1")), "the group's close was asked before Herdr's server")
+        XCTAssertNotNil(outline.closeConfirmation(before: .pane("notes-p1")))
+
+        let twoRoots = HerdrSessionOutline(try closingSnapshot([
+            ("app", [["app-p1"]], ("repo", false)),
+            ("clone", [["clone-p1"]], ("repo", false)),
+        ]), after: nil)
+        XCTAssertEqual(twoRoots.closeConfirmation(ofWorkspace: "app")?.closesGroup, false, "a second checkout made a group")
+    }
+
+    /// A rename starts with the place's name and Herdr's automatic name as the placeholder: a tab's number,
+    /// a pane's name without its manual label, and a workspace's label while it is Herdr's.
+    func testARenameStartsWithTheNameAndHerdrsAutomaticOne() throws {
+        let json = """
+        {"boot_id":"boot","revision":1,"focused_workspace_id":"w1","focused_tab_id":"t2","focused_pane_id":"p1",
+         "workspaces":[{"workspace_id":"w1","active_tab_id":"t2","number":1,"label":"api","custom_label":false,"focused":true,"agent_status":"idle"},
+                       {"workspace_id":"w2","active_tab_id":"t3","number":2,"label":"docs","custom_label":true,"focused":false,"agent_status":"idle"}],
+         "tabs":[{"tab_id":"t1","workspace_id":"w1","number":1,"label":"1","custom_label":false,"zoomed":false,"focused":false,"agent_status":"idle"},
+                 {"tab_id":"t2","workspace_id":"w1","number":2,"label":"build","custom_label":true,"zoomed":false,"focused":true,"agent_status":"idle"},
+                 {"tab_id":"t3","workspace_id":"w2","number":1,"label":"1","custom_label":false,"zoomed":false,"focused":false,"agent_status":"idle"}],
+         "panes":[\(HerdrServerScript.snapshotPane("p1", tab: "t2", label: "server")),\(HerdrServerScript.snapshotPane("p2", tab: "t2"))],
+         "agents":[\(HerdrServerScript.snapshotAgent("p2", agent: "claude", tab: "t2", status: .working, stateChange: 1))]}
+        """
+        let snapshot = try JSONDecoder().decode(HerdrSnapshot.self, from: Data(json.utf8))
+
+        XCTAssertEqual(snapshot.renameField(for: .tab("t2")), HerdrRenameField(name: "build", placeholder: "2"))
+        XCTAssertEqual(snapshot.renameField(for: .tab("t3")), HerdrRenameField(name: "1", placeholder: "1"))
+        XCTAssertEqual(snapshot.renameField(for: .pane("p1")), HerdrRenameField(name: "server", placeholder: "terminal"))
+        XCTAssertEqual(snapshot.renameField(for: .pane("p2")), HerdrRenameField(name: "", placeholder: "claude"))
+        XCTAssertEqual(snapshot.renameField(for: .workspace("w1")), HerdrRenameField(name: "api", placeholder: "api"))
+        XCTAssertEqual(snapshot.renameField(for: .workspace("w2")), HerdrRenameField(name: "docs", placeholder: "Name"))
+        XCTAssertNil(snapshot.renameField(for: .tab("gone")))
+        XCTAssertTrue(snapshot.isOnScreen(.pane("p2")))
+        XCTAssertTrue(snapshot.isOnScreen(.workspace("w1")))
+        XCTAssertFalse(snapshot.isOnScreen(.tab("t1")))
+    }
+
+    /// Closes and renames carry the place's id under its own key, as Herdr's client sends them; only a
+    /// workspace's close says whether it closes its worktree group.
+    func testClosesAndRenamesSendHerdrsClientsParams() throws {
+        func encoded(_ params: HerdrPlaceParams) throws -> [String: AnyHashable] {
+            let data = try JSONEncoder().encode(params)
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: AnyHashable])
+        }
+        XCTAssertEqual(HerdrPlace.pane("p1").closeMethod, "pane.close")
+        XCTAssertEqual(try encoded(HerdrPlace.pane("p1").closeParams(group: true)), ["pane_id": "p1"])
+        XCTAssertEqual(HerdrPlace.tab("t1").closeMethod, "tab.close")
+        XCTAssertEqual(try encoded(HerdrPlace.tab("t1").closeParams(group: false)), ["tab_id": "t1"])
+        XCTAssertEqual(HerdrPlace.workspace("w1").closeMethod, "workspace.close")
+        XCTAssertEqual(try encoded(HerdrPlace.workspace("w1").closeParams(group: true)), ["workspace_id": "w1", "close_group": true])
+        XCTAssertEqual(HerdrPlace.tab("t1").renameMethod, "tab.rename")
+        XCTAssertEqual(try encoded(HerdrPlace.tab("t1").renameParams("build")), ["tab_id": "t1", "label": "build"])
+        XCTAssertEqual(HerdrPlace.pane("p1").renameMethod, "pane.rename")
+        XCTAssertEqual(try encoded(HerdrPlace.pane("p1").renameParams("")), ["pane_id": "p1", "label": ""])
+        XCTAssertEqual(HerdrPlace.workspace("w1").renameMethod, "workspace.rename")
+    }
+
+    /// Workspaces in Herdr's order, each with its tabs' panes and, when in a repository, its worktree key
+    /// and whether it is a linked worktree. This phone is in the first workspace's first tab.
+    private func closingSnapshot(
+        _ workspaces: [(name: String, tabs: [[String]], worktree: (key: String, linked: Bool)?)]
+    ) throws -> HerdrSnapshot {
+        let first = workspaces[0]
+        let entries = workspaces.enumerated().map { index, workspace in
+            let worktree = workspace.worktree.map {
+                #"{"key":"\#($0.key)","label":"repo","is_linked_worktree":\#($0.linked)}"#
+            } ?? "null"
+            return #"{"workspace_id":"\#(workspace.name)","active_tab_id":"\#(workspace.name)-t1","number":\#(index + 1),"label":"\#(workspace.name)","custom_label":true,"focused":\#(index == 0),"agent_status":"idle","worktree":\#(worktree)}"#
+        }
+        let tabs = workspaces.flatMap { workspace in
+            workspace.tabs.indices.map { index in
+                #"{"tab_id":"\#(workspace.name)-t\#(index + 1)","workspace_id":"\#(workspace.name)","number":\#(index + 1),"label":"\#(index + 1)","custom_label":false,"zoomed":false,"focused":\#(workspace.name == first.name && index == 0),"agent_status":"idle"}"#
+            }
+        }
+        let panes = workspaces.flatMap { workspace in
+            workspace.tabs.enumerated().flatMap { index, panes in
+                panes.map { HerdrServerScript.snapshotPane($0, workspace: workspace.name, tab: "\(workspace.name)-t\(index + 1)") }
+            }
+        }
+        let json = """
+        {"boot_id":"boot","revision":1,"focused_workspace_id":"\(first.name)","focused_tab_id":"\(first.name)-t1",
+         "focused_pane_id":"\(first.tabs[0][0])","workspaces":[\(entries.joined(separator: ","))],
+         "tabs":[\(tabs.joined(separator: ","))],"panes":[\(panes.joined(separator: ","))],"agents":[]}
+        """
+        return try JSONDecoder().decode(HerdrSnapshot.self, from: Data(json.utf8))
+    }
+
     /// Workspaces named by `workspaces`, each with tabs `<name>-t1` (one pane) and `<name>-t2` (two
     /// panes), this phone in `focusedWorkspace` at its tab from `activeTabs`, else its first.
     private func snapshot(

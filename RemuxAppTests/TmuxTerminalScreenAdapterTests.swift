@@ -430,6 +430,61 @@ final class TmuxTerminalScreenAdapterTests: XCTestCase {
         await session.shutdown()
     }
 
+    /// Removing a window asks first, saying how many panes close with it; removing a pane asks only when it
+    /// is its window's only pane, since that can close the window.
+    func testRemovalsAskWhereTmuxSessionsAskFirst() async throws {
+        let runtime = try GhosttyKitRuntime()
+        let session = makeSession(runtime: runtime)
+        let adapter = TmuxTerminalScreenAdapter()
+        adapter.activate(
+            session: session,
+            initialViewportHandler: { _, _, _ in },
+            viewportStabilityHandler: { _ in }
+        )
+        session.handleTopology(TmuxSessionController.TopologySnapshot(
+            sessionName: "removal-test",
+            windows: [
+                window(id: 1, active: true, paneID: 10, name: "editor", zoomed: false),
+                window(id: 2, active: false, paneID: 20, name: "logs", zoomed: false)
+            ],
+            panes: [
+                pane(id: 10, windowID: 1, width: 40),
+                pane(id: 11, windowID: 1, x: 41, width: 39),
+                pane(id: 20, windowID: 2)
+            ],
+            activeWindowID: 1
+        ))
+
+        let windows = adapter.windowSelectionSheetRenderProjection(group: nil).windows
+        XCTAssertEqual(windows.map(\.closeConfirmation), [
+            GhosttyCloseConfirmation(
+                title: "Remove Window?",
+                message: "This will close Window 1 and 2 panes.",
+                action: "Remove Window 1"
+            ),
+            GhosttyCloseConfirmation(
+                title: "Remove Window?",
+                message: "This will close Window 2 and 1 pane.",
+                action: "Remove Window 2"
+            ),
+        ])
+        XCTAssertEqual(
+            adapter.paneSelectionSheetRenderProjection(topLevelID: windows[0].id).panes.map(\.closeConfirmation),
+            [nil, nil]
+        )
+        XCTAssertEqual(
+            adapter.paneSelectionSheetRenderProjection(topLevelID: windows[1].id).panes.map(\.closeConfirmation),
+            [GhosttyCloseConfirmation(
+                title: "Remove Pane?",
+                message: "This is the only pane in the window, so removing it can close the window too.",
+                action: "Remove Pane"
+            )]
+        )
+        XCTAssertNil(adapter.askedCloseConfirmation)
+
+        await session.shutdown()
+    }
+
     func testWindowProjectionReflectsEmittedTopologyImmediately() async throws {
         let runtime = try GhosttyKitRuntime()
         let session = makeSession(runtime: runtime)

@@ -577,6 +577,7 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
                         chromeStyle: presentation.terminalTheme.terminalChromeStyle
                     )
             }
+            .ghosttyCloseConfirmationDialog(selectionSheet == nil ? askedCloseQuestion : nil)
             .sheet(isPresented: $isShortcutsSettingsPresented) {
                 ShortcutsSettingsSheet(store: shortcutStore)
                     .presentationDetents([.large])
@@ -2191,6 +2192,7 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
                     layout: windowLayout,
                     contentHeight: contentHeight,
                     commandFailureMessage: selectionSheetCommandFailureMessage,
+                    askedCloseQuestion: askedCloseQuestion,
                     onCreateWindow: createTopLevelFromSelectionSheet,
                     onSelect: selectTopLevelFromSelectionSheet,
                     onRemoveWindow: closeTopLevelFromSelectionSheet,
@@ -2202,9 +2204,9 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
         case .panes(let topLevelID):
             GhosttyPaneSelectionSheet(
                 projection: model.paneSelectionSheetRenderProjection(topLevelID: topLevelID),
-                topLevelNoun: model.topLevelNoun,
                 topologySize: paneTopologySize,
                 commandFailureMessage: selectionSheetCommandFailureMessage,
+                askedCloseQuestion: askedCloseQuestion,
                 onSplitPane: {
                     splitFocusedPaneFromSelectionSheet(
                         topLevelID: topLevelID,
@@ -2224,6 +2226,17 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
                 onRemovePane: { id in
                     closePaneFromSelectionSheet(id, topLevelID: topLevelID)
                 }
+            )
+        }
+    }
+
+    /// The close the backend's server asked about: the open selection sheet asks it, else the screen.
+    private var askedCloseQuestion: GhosttyCloseQuestion? {
+        model.askedCloseConfirmation.map {
+            GhosttyCloseQuestion(
+                confirmation: $0,
+                confirmIdentifier: "terminal.close.asked.confirm",
+                answer: model.answerAskedCloseConfirmation(agreed:)
             )
         }
     }

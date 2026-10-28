@@ -12,7 +12,7 @@ extension GhosttyTopLevelNoun {
 /// for each pane of the tab on screen that has a text area, laid out on the tab's cell grid, and while
 /// the tab is zoomed a leaf for each of its panes. The Tabs sheet offers the other workspaces as groups.
 /// The model owns all state; this maps it to the screen's projections and stable ids, and passes typing,
-/// moves, zoom and New Tab and New Workspace to it. Other topology actions aren't offered.
+/// moves, zoom, New Tab and New Workspace, splits and closes to it, with Herdr's questions before a close.
 @MainActor
 final class HerdrTerminalScreenAdapter: ObservableObject {
     private weak var model: HerdrScreenModel?
@@ -426,21 +426,21 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func focusPane(_ id: UUID) -> GhosttyTerminalActionOutcome {
-        guard let paneID = paneID(for: id), go(to: .place(.pane(paneID))) else { return .missingTarget(.pane(id)) }
+        guard let paneID = paneID(for: id), ask(.go(.place(.pane(paneID)))) else { return .missingTarget(.pane(id)) }
         return .queued
     }
 
     func focusTopLevel(_ id: UUID) -> GhosttyTerminalActionOutcome {
-        guard let tabID = tabIDsBySurfaceID[id], go(to: .place(.tab(tabID))) else { return .missingTarget(.topLevel(id)) }
+        guard let tabID = tabIDsBySurfaceID[id], ask(.go(.place(.tab(tabID)))) else { return .missingTarget(.topLevel(id)) }
         return .queued
     }
 
     /// The screen's tiles, swipes and sheet buttons pick from what it draws: the layout on screen, and the
     /// session's outline only while it has the layout's server boot (`workspaceOnScreen`). So each pick goes
-    /// only on that boot, through the model's one way to go somewhere.
-    private func go(to destination: HerdrDestination) -> Bool {
+    /// only on that boot, through the model's one way to ask something of the session.
+    private func ask(_ request: HerdrRequest) -> Bool {
         guard let model, let layout = model.layout else { return false }
-        return model.go(to: destination, bootID: layout.bootID)
+        return model.ask(request, bootID: layout.bootID)
     }
 
     func focusAdjacentTopLevel(
@@ -455,7 +455,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
 
     /// New Tab goes in the workspace the Tabs sheet shows.
     func createTopLevel(inGroup group: UUID?) -> GhosttyTerminalActionOutcome {
-        guard let workspaceID = workspaceID(shownFor: group), go(to: .creation(.tab(workspaceID: workspaceID))) else {
+        guard let workspaceID = workspaceID(shownFor: group), ask(.go(.creation(.tab(workspaceID: workspaceID)))) else {
             return .missingTarget(.host)
         }
         return .queued
@@ -464,7 +464,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     /// New Workspace starts from the workspace the Tabs sheet shows, as Herdr's client starts one from the
     /// workspace it has picked.
     func createTopLevelGroup(from group: UUID?) -> GhosttyTerminalActionOutcome {
-        go(to: .creation(.workspace(source: workspaceID(shownFor: group)))) ? .queued : .missingTarget(.host)
+        ask(.go(.creation(.workspace(source: workspaceID(shownFor: group))))) ? .queued : .missingTarget(.host)
     }
 
     private func workspaceID(shownFor group: UUID?) -> String? {
@@ -487,7 +487,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         default: return .missingTarget(.focusedPane)
         }
         guard let paneID = focusedPaneID,
-              go(to: .creation(.split(pane: paneID, workspaceID: workspaceOnScreen?.id, direction: herdrDirection)))
+              ask(.go(.creation(.split(pane: paneID, workspaceID: workspaceOnScreen?.id, direction: herdrDirection))))
         else { return .missingTarget(.focusedPane) }
         return .queued
     }
@@ -497,11 +497,54 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func closePane(_ id: UUID) -> GhosttyTerminalActionOutcome {
-        .missingTarget(.pane(id))
+        guard let paneID = paneID(for: id), ask(.close(.pane(paneID), group: false)) else { return .missingTarget(.pane(id)) }
+        return .queued
     }
 
     func closeTopLevel(_ id: UUID) -> GhosttyTerminalActionOutcome {
-        .missingTarget(.topLevel(id))
+        guard let tabID = tabIDsBySurfaceID[id], ask(.close(.tab(tabID), group: false)) else {
+            return .missingTarget(.topLevel(id))
+        }
+        return .queued
+    }
+
+    // MARK: Close and rename
+
+    /// The workspace close Herdr's server asked to confirm, as for a tab or pane whose close would close a
+    /// worktree group, until the user answers.
+    var askedCloseConfirmation: GhosttyCloseConfirmation? {
+        model?.askedCloseConfirmation?.dialog
+    }
+
+    func answerAskedCloseConfirmation(agreed: Bool) {
+        model?.answerAskedCloseConfirmation(agreed: agreed)
+    }
+
+    func renameField(forTopLevel id: UUID) -> HerdrRenameField? {
+        tabIDsBySurfaceID[id].flatMap { model?.renameField(for: .tab($0)) }
+    }
+
+    func renameField(forPane id: UUID) -> HerdrRenameField? {
+        paneID(for: id).flatMap { model?.renameField(for: .pane($0)) }
+    }
+
+    @discardableResult
+    func renameTopLevel(_ id: UUID, to name: String) -> Bool {
+        guard let tabID = tabIDsBySurfaceID[id] else { return false }
+        return ask(.rename(.tab(tabID), name: name))
+    }
+
+    @discardableResult
+    func renamePane(_ id: UUID, to name: String) -> Bool {
+        guard let paneID = paneID(for: id) else { return false }
+        return ask(.rename(.pane(paneID), name: name))
+    }
+
+    /// The session's outline while it has the server boot of the layout on screen, which the tiles are
+    /// drawn from.
+    private var drawnOutline: HerdrSessionOutline? {
+        guard let outline = model?.places.outline, outline.bootID == model?.layout?.bootID else { return nil }
+        return outline
     }
 
     func enterFocusedTmuxCopyMode() -> GhosttyTerminalActionOutcome {
@@ -607,7 +650,11 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
                 )
             ).windows
         return GhosttyWindowSelectionSheetRenderProjection(
-            windows: windows,
+            windows: windows.map { window in
+                var window = window
+                window.closeConfirmation = tabIDsBySurfaceID[window.id].flatMap { closeConfirmation(before: .tab($0)) }
+                return window
+            },
             selectedWindowID: onScreen.selectedWindowID,
             previewLeafIDs: previewLeafIDs,
             grouping: GhosttyWindowSelectionSheetRenderProjection.Grouping(
@@ -626,11 +673,27 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func paneSelectionSheetRenderProjection(topLevelID: UUID) -> GhosttyPaneSelectionSheetRenderProjection {
-        GhosttyTerminalPresentationProjector.paneSelectionSheetRenderProjection(
+        let projection = GhosttyTerminalPresentationProjector.paneSelectionSheetRenderProjection(
             topLevelID: topLevelID,
             snapshot: topologySnapshot,
             viewport: topologySnapshot.selectedTopLevelID == topLevelID ? viewportProjection : nil
         )
+        return GhosttyPaneSelectionSheetRenderProjection(
+            panes: projection.panes.map { pane in
+                var pane = pane
+                pane.closeConfirmation = paneID(for: pane.id).flatMap { closeConfirmation(before: .pane($0)) }
+                return pane
+            },
+            selectedPaneID: projection.selectedPaneID,
+            isServerZoomed: projection.isServerZoomed
+        )
+    }
+
+    /// What closing a tab or pane tile asks first, as Herdr's client asks: a workspace's only tab, or the only
+    /// pane of its only tab, closes the workspace. Agreeing closes the tab or pane, which goes as any close
+    /// does.
+    private func closeConfirmation(before place: HerdrPlace) -> GhosttyCloseConfirmation? {
+        drawnOutline?.closeConfirmation(before: place)?.dialog
     }
 
     private func capturablePreviewLeafIDs(_ prioritizedLeafIDs: [UUID]) -> [UUID] {
@@ -638,5 +701,28 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
             guard let paneID = paneID(for: leafID) else { return false }
             return model?.paneSurface(paneID) != nil
         }
+    }
+}
+
+extension HerdrCloseConfirmation {
+    /// The question the selection sheets ask: the workspace closes with its tabs and panes, or a worktree
+    /// group's root with its other workspaces.
+    var dialog: GhosttyCloseConfirmation {
+        func counted(_ count: Int, _ noun: String) -> String {
+            count == 1 ? "1 \(noun)" : "\(count) \(noun)s"
+        }
+        let contents = "\(counted(tabCount, "tab")) and \(counted(paneCount, "pane"))"
+        guard closesGroup else {
+            return GhosttyCloseConfirmation(
+                title: "Close Workspace?",
+                message: "“\(label)” and its \(contents) will close.",
+                action: "Close Workspace"
+            )
+        }
+        return GhosttyCloseConfirmation(
+            title: "Close Worktree Group?",
+            message: "“\(label)” and its \(counted(otherWorkspaceCount, "other workspace")) will close, with \(contents).",
+            action: "Close Worktree Group"
+        )
     }
 }

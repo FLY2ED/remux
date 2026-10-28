@@ -991,6 +991,11 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         return .queued
     }
 
+    /// tmux's server asks nothing before a close.
+    var askedCloseConfirmation: GhosttyCloseConfirmation? { nil }
+
+    func answerAskedCloseConfirmation(agreed: Bool) {}
+
     func enterFocusedTmuxCopyMode() -> GhosttyTerminalActionOutcome {
         guard let controller, let activeManagedPaneID else {
             return .missingTarget(.focusedPane)
@@ -1060,12 +1065,22 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
 
     var topLevelNoun: GhosttyTopLevelNoun { .window }
 
+    /// The windows, each asking before it closes with its panes.
     func windowSelectionSheetRenderProjection(group: UUID?) -> GhosttyWindowSelectionSheetRenderProjection {
         let projection = GhosttyTerminalPresentationProjector.windowSelectionSheetRenderProjection(
             snapshot: topologySnapshot
         )
         return GhosttyWindowSelectionSheetRenderProjection(
-            windows: projection.windows,
+            windows: projection.windows.map { window in
+                var window = window
+                let panes = window.paneCount == 1 ? "1 pane" : "\(window.paneCount) panes"
+                window.closeConfirmation = GhosttyCloseConfirmation(
+                    title: "Remove Window?",
+                    message: "This will close Window \(window.displayIndex) and \(panes).",
+                    action: "Remove Window \(window.displayIndex)"
+                )
+                return window
+            },
             selectedWindowID: projection.selectedWindowID,
             previewLeafIDs: capturablePreviewLeafIDs(projection.previewLeafIDs)
         )
@@ -1079,16 +1094,28 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         }
     }
 
+    /// The window's panes; its only pane asks before it closes, since that can close the window.
     func paneSelectionSheetRenderProjection(
         topLevelID: UUID
     ) -> GhosttyPaneSelectionSheetRenderProjection {
         let selectedTopLevelID = topologySnapshot.selectedTopLevelID
-        return GhosttyTerminalPresentationProjector.paneSelectionSheetRenderProjection(
+        let projection = GhosttyTerminalPresentationProjector.paneSelectionSheetRenderProjection(
             topLevelID: topLevelID,
             snapshot: topologySnapshot,
             viewport: selectedTopLevelID == topLevelID
                 ? terminalViewportPresentationProjection
                 : nil
+        )
+        guard projection.paneCount == 1, var pane = projection.panes.first else { return projection }
+        pane.closeConfirmation = GhosttyCloseConfirmation(
+            title: "Remove Pane?",
+            message: "This is the only pane in the window, so removing it can close the window too.",
+            action: "Remove Pane"
+        )
+        return GhosttyPaneSelectionSheetRenderProjection(
+            panes: [pane],
+            selectedPaneID: projection.selectedPaneID,
+            isServerZoomed: projection.isServerZoomed
         )
     }
 }

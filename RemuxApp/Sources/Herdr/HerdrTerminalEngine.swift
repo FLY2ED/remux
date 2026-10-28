@@ -363,11 +363,15 @@ actor HerdrTerminalEngine {
         case made(pane: String, listed: Bool)
         /// The pane, on its tab zoomed or not, as a `pane.zoom` focuses its target.
         case zoom(pane: String, tabID: String, zoomed: Bool)
+        /// Where Herdr shows the session once `place` has closed: anywhere a snapshot no longer lists it.
+        case closed(HerdrPlace)
 
         func isShown(in snapshot: HerdrSnapshot) -> Bool {
             switch self {
             case .place(let place):
                 return snapshot.isAt(place)
+            case .closed(let place):
+                return !snapshot.contains(place)
             case .made(let pane, _):
                 return snapshot.focusedPaneID == pane
             case .zoom(let pane, let tabID, let zoomed):
@@ -380,7 +384,7 @@ actor HerdrTerminalEngine {
             let pane: String
             switch self {
             case .place(.pane(let id)), .made(let id, _), .zoom(let id, _, _): pane = id
-            case .place(.tab), .place(.workspace): return true
+            case .place(.tab), .place(.workspace), .closed: return true
             }
             return surface.panes.contains { $0.paneID == pane && $0.focused }
         }
@@ -396,6 +400,8 @@ actor HerdrTerminalEngine {
                 return listed && !snapshot.contains(.pane(pane))
             case .zoom(let pane, let tabID, _):
                 return !snapshot.contains(.pane(pane)) || !snapshot.contains(.tab(tabID))
+            case .closed:
+                return false
             }
         }
 
@@ -669,16 +675,19 @@ actor HerdrTerminalEngine {
         dispatch()
     }
 
-    /// What a request to `destination` waits to see: the place; a creation's pane is known only from
-    /// Herdr's answer.
+    /// What a request to `destination` waits to see: the place, or the place a close closes gone; a
+    /// creation's pane is known only from Herdr's answer.
     private static func target(of destination: HerdrDestination) -> Target? {
-        guard case .place(let place) = destination else { return nil }
-        return .place(place)
+        switch destination {
+        case .place(let place): .place(place)
+        case .closing(let place, _): .closed(place)
+        case .creation: nil
+        }
     }
 
     /// Whether the request in progress already takes the session to `destination` or, with none or with a
-    /// show that stays where Herdr has the session, whether Herdr has it there. A creation goes somewhere
-    /// new.
+    /// show that stays where Herdr has the session, whether Herdr has it there. A creation or a close goes
+    /// somewhere new.
     private static func goes(to destination: HerdrDestination, taking taken: ViewRequest?, in snapshot: HerdrSnapshot?) -> Bool {
         guard case .place(let place) = destination else { return false }
         if let going = taken?.destination { return going == destination }
@@ -691,7 +700,10 @@ actor HerdrTerminalEngine {
     /// pane. A tab or workspace shows a pane the snapshot doesn't name before the session is there, so its
     /// focus goes first and the setting's zoom follows on the pane it shows. A creation's command goes, and
     /// the setting's zoom follows on the pane it made whether or not the request zooms, since Herdr gives its
-    /// tab a new pane. A place the session is at already still gets its focus.
+    /// tab a new pane. A close of what is on screen goes, and the setting's zoom follows on the tab Herdr shows
+    /// then: Herdr unzooms a tab it takes a pane from (`workspace/tab.rs` `detach_pane`), and the tab or
+    /// workspace closed takes Remux's zoom with it, so nothing leaves first. A place the session is at
+    /// already still gets its focus.
     private func plan(
         to destination: HerdrDestination,
         zooms: Bool,
@@ -714,6 +726,8 @@ actor HerdrTerminalEngine {
             return steps
         case .creation(let creation):
             return [.leave(to: creation.tabPlace), .create(creation), .zoomReached(policy)]
+        case .closing(let place, let group):
+            return [.close(place, group: group), .zoomReached(policy)]
         }
     }
 
@@ -766,6 +780,8 @@ actor HerdrTerminalEngine {
         case .creation(let creation):
             guard let tabPlace = creation.tabPlace else { return true }
             place = tabPlace
+        case .closing:
+            return false
         }
         guard let snapshot, let tabID = snapshot.tabID(reachedBy: place) else { return false }
         return tabID != snapshot.focusedTabID
@@ -920,6 +936,8 @@ actor HerdrTerminalEngine {
             return (step, place.focusParams)
         case .create(let creation):
             return (step, creation.params)
+        case .close(let place, let group):
+            return (step, place.closeParams(group: group))
         }
     }
 
@@ -995,7 +1013,7 @@ actor HerdrTerminalEngine {
     private func finish(_ inFlight: HerdrCommandLane.InFlight, with result: Result<HerdrCommandReply, HerdrCommandError>) {
         switch inFlight.item {
         case .step(let id, let step):
-            if step.method == HerdrScreenModel.paneZoomMethod {
+            if step.isZoom {
                 zoomAnswered(result, seen: inFlight.snapshots, reportsFailure: false)
             }
             var effect = Self.effect(of: step, result)
@@ -1006,8 +1024,8 @@ actor HerdrTerminalEngine {
             switch (step, result) {
             case (.leave, _), (.zoomReached, _):
                 break
-            case (.zoom, .success), (.create, .success):
-                if case .create = step {
+            case (.zoom, .success), (.create, .success), (.close, .success):
+                if !step.isZoom {
                     continuation.yield(.answered(request: id, step: step, failure: nil, connection: connection))
                 }
                 if let effect {
@@ -1025,9 +1043,10 @@ actor HerdrTerminalEngine {
                 continuation.yield(.answered(request: id, step: step, failure: failure, connection: connection))
                 // The session stays where Herdr has it.
                 if request.target == .place(place) { request.target = nil }
-            case (.create, .failure(let failure)):
-                // Nothing was made; the session stays where Herdr has it.
+            case (.create, .failure(let failure)), (.close, .failure(let failure)):
+                // Nothing was made or closed; the session stays where Herdr has it.
                 continuation.yield(.answered(request: id, step: step, failure: failure, connection: connection))
+                request.target = nil
             }
             self.request = request
             checkOvertaken()
@@ -1048,7 +1067,7 @@ actor HerdrTerminalEngine {
     }
 
     /// Where a step's answer took the session, if anywhere: Remux's zoom off the tab left takes it nowhere,
-    /// and a creation to the pane Herdr made.
+    /// a creation to the pane Herdr made, and a close wherever Herdr shows the session without the place.
     private static func effect(
         of step: HerdrCommandLane.Step,
         _ result: Result<HerdrCommandReply, HerdrCommandError>
@@ -1066,6 +1085,8 @@ actor HerdrTerminalEngine {
         case .create:
             guard let pane = HerdrCreation.pane(madeIn: reply.json) else { return nil }
             target = .made(pane: pane, listed: false)
+        case .close(let place, _):
+            target = .closed(place)
         }
         return StepEffect(target: target, sentAfter: reply.sentAfter, answeredAfter: reply.answeredAfter)
     }
@@ -1419,11 +1440,7 @@ actor HerdrTerminalEngine {
     /// the pane sheet shows one tab. The snapshot carries a title only for an agent's pane.
     private static func name(ofPane paneID: String, in snapshot: HerdrSnapshot) -> String {
         let pane = snapshot.panes.first { $0.paneID == paneID }
-        let agent = snapshot.agents.first { $0.paneID == paneID }
-        let name = pane?.label ?? agent?.name
-        let title = agent?.title ?? agent?.terminalTitleStripped
-        let kind = agent?.agent ?? agent?.displayAgent
-        let paneName = name ?? title ?? kind ?? "terminal"
+        let paneName = pane?.label ?? snapshot.automaticName(ofPane: paneID)
         let tabPanes = pane.map { pane in snapshot.panes.filter { $0.tabID == pane.tabID } } ?? []
         guard tabPanes.count > 1, let index = tabPanes.firstIndex(where: { $0.paneID == paneID }) else {
             return paneName

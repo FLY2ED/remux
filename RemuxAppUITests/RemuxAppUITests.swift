@@ -1932,6 +1932,73 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertEqual(app.state, .runningForeground)
     }
 
+    /// Closing tabs from the Tabs sheet asks where Herdr's client asks, on the tabs test's server with a
+    /// worktree group added: the repository `shop`'s root checkout and its linked worktree `shop-feature`. A
+    /// tab beside another closes at once; a workspace's only tab asks about the workspace's close first; and
+    /// the only tab of the group's root, whose close Herdr's server asks to confirm, asks about the group's
+    /// close in the same dialog.
+    func testLiveHerdrClosesWhenConfigured() throws {
+        let configuration = try launchLiveHerdrApp()
+        let tabs = app.buttons.matching(identifier: "terminal.windows").firstMatch
+        let tabsSheet = elementWithIdentifier("terminal.windows.sheet")
+        func capsule(_ index: Int) -> XCUIElement { app.buttons["terminal.windows.group.\(index)"] }
+        let more = elementWithIdentifier("terminal.windows.group.more")
+        func tile(_ index: Int) -> XCUIElement { app.buttons["terminal.window.tile.\(index)"] }
+        func remove(tile index: Int) {
+            XCTAssertTrue(tile(index).waitForExistence(timeout: 5), "Missing tab tile \(index)")
+            tile(index).press(forDuration: 1.0)
+            tapPickerButton(identifier: "terminal.window.remove.\(index)", fallbackLabel: "Remove Tab \(index)")
+        }
+
+        openFirstSavedSession()
+        waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 2", timeout: 10))
+        tabs.tap()
+        XCTAssertTrue(tabsSheet.waitForExistence(timeout: 5))
+
+        remove(tile: 2)
+        XCTAssertTrue(tile(2).waitForNonExistence(timeout: 10), "remux's second tab didn't close.")
+        XCTAssertFalse(app.buttons["terminal.window.remove.confirm.2"].exists, "A tab beside another asked first.")
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 1", timeout: 10))
+
+        XCTAssertEqual(capsule(3).label, "Workspace web")
+        capsule(3).tap()
+        XCTAssertTrue(capsule(3).isSelected)
+        remove(tile: 1)
+        // The action sheet nests each button in another with its identifier.
+        let closeWorkspace = app.buttons.matching(identifier: "terminal.window.remove.confirm.1").firstMatch
+        XCTAssertTrue(closeWorkspace.waitForExistence(timeout: 5), "web's only tab didn't ask first.")
+        XCTAssertEqual(closeWorkspace.label, "Close Workspace")
+        XCTAssertTrue(app.staticTexts["Close Workspace?"].exists)
+        XCTAssertTrue(app.staticTexts["“web” and its 1 tab and 1 pane will close."].exists)
+        captureLiveHerdrStep("d1-close-workspace", in: configuration)
+        closeWorkspace.tap()
+        XCTAssertTrue(waitForLabel(of: capsule(3), "Workspace notes", timeout: 10), "web didn't close.")
+        XCTAssertTrue(capsule(1).isSelected, "The sheet didn't go back to the workspace on screen.")
+
+        more.tap()
+        let shop = app.buttons["shop"]
+        XCTAssertTrue(shop.waitForExistence(timeout: 5), "The worktree group's root isn't listed.")
+        XCTAssertTrue(app.buttons["shop-feature"].exists, "The linked worktree isn't listed.")
+        shop.tap()
+        XCTAssertTrue(waitForLabel(of: more, "Workspace shop, more workspaces", timeout: 5))
+        remove(tile: 1)
+        let closeGroup = app.buttons.matching(identifier: "terminal.close.asked.confirm").firstMatch
+        XCTAssertTrue(closeGroup.waitForExistence(timeout: 10), "Herdr's question about the group didn't reach the user.")
+        XCTAssertEqual(closeGroup.label, "Close Worktree Group")
+        XCTAssertTrue(app.staticTexts["Close Worktree Group?"].exists)
+        XCTAssertTrue(app.staticTexts["“shop” and its 1 other workspace will close, with 2 tabs and 2 panes."].exists)
+        captureLiveHerdrStep("d2-close-worktree-group", in: configuration)
+        closeGroup.tap()
+        XCTAssertTrue(waitForLabel(of: more, "More workspaces", timeout: 10), "The sheet didn't leave the closed group.")
+        more.tap()
+        let infra = app.buttons["infra"]
+        XCTAssertTrue(infra.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["shop"].exists || app.buttons["shop-feature"].exists, "The group didn't close.")
+        captureLiveHerdrStep("d3-group-closed", in: configuration)
+        infra.tap()
+    }
+
     /// The session `locked` that Herdr can't reach, on the tabs test's server, saved as the server's latest
     /// session: the server row's Resume Latest is disabled, as the session's own row is, and doesn't open it,
     /// and its swipe actions leave out Resume.

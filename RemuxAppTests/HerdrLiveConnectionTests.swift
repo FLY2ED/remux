@@ -417,6 +417,166 @@ final class HerdrLiveConnectionTests: XCTestCase {
         _ = try await made(["pane", "split", root, "--direction", "right", "--no-focus"])
     }
 
+    // MARK: - Close and rename
+
+    /// Renames and closes go as Herdr's own client sends them, as Herdr's own lists then show: a tab, a pane
+    /// (and its name cleared back to Herdr's) and a workspace renamed; a pane on screen, a tab and a
+    /// workspace not on screen closed; the last tab asks first; a target that is gone is refused.
+    @MainActor
+    func testClosesAndRenamesGoAsHerdrsClientSendsThemOnHerdr093() async throws {
+        try await checkClosesAndRenames(version: "0.9.3")
+    }
+
+    @MainActor
+    func testClosesAndRenamesGoAsHerdrsClientSendsThemOnHerdr095() async throws {
+        try await checkClosesAndRenames(version: "0.9.5")
+    }
+
+    @MainActor
+    private func checkClosesAndRenames(version: String) async throws {
+        let session = try await openShownSession(version: version, through: { $0 })
+        let model = session.model
+        let adapter = model.terminalScreenAdapter
+        let herdr = herdrCommand(session)
+        let first = try XCTUnwrap(model.focusedPaneID)
+        let splitAnswer = try await herdr(["pane", "split", first, "--direction", "right", "--no-focus"])
+        let split = try XCTUnwrap(HerdrCreation.pane(madeIn: splitAnswer))
+        _ = try await herdr(["tab", "create", "--label", "logs", "--no-focus"])
+        _ = try await herdr(["workspace", "create", "--label", "docs", "--no-focus"])
+        try await waitUntil("Herdr's new places weren't listed", timeout: .seconds(15)) {
+            model.places.outline?.workspaces.count == 2 && model.places.outline?.workspaces.first?.tabs.count == 2
+                && model.layout?.panes.filter(\.hasTextArea).count == 2
+        }
+        func outline() throws -> HerdrSessionOutline { try XCTUnwrap(model.places.outline) }
+        func tile(_ label: String) throws -> GhosttyWindowSelectionSheetRenderProjection.Window {
+            try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).windows.first { $0.displayName == label })
+        }
+        let splitLeaf = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.panes.first { !$0.isFocused }).id
+        let docs = try XCTUnwrap(try outline().workspaces.last).id
+        let onScreenTab = try XCTUnwrap(try outline().workspaces.first?.tabs.first)
+
+        XCTAssertNil(try tile("logs").closeConfirmation, "a tab that leaves its workspace another asked")
+        XCTAssertTrue(adapter.renameTopLevel(try tile(onScreenTab.label).id, to: "  editor "))
+        try await waitUntil("the tab wasn't renamed", timeout: .seconds(10)) {
+            (try? outline().workspaces.first?.tabs.first?.label) == "editor"
+        }
+        XCTAssertTrue(adapter.renamePane(splitLeaf, to: "server"))
+        try await waitUntil("the pane wasn't renamed", timeout: .seconds(10)) {
+            model.layout?.panes.contains { $0.paneID == split && $0.name.hasPrefix("server") } == true
+        }
+        XCTAssertEqual(adapter.renameField(forPane: splitLeaf)?.name, "server")
+        XCTAssertTrue(adapter.renamePane(splitLeaf, to: ""))
+        try await waitUntil("clearing the pane's name didn't bring Herdr's back", timeout: .seconds(10)) {
+            model.layout?.panes.contains { $0.paneID == split && $0.name.hasPrefix("terminal") } == true
+        }
+        XCTAssertTrue(model.ask(.rename(.workspace(docs), name: "notes"), bootID: try outline().bootID))
+        try await waitUntil("the workspace wasn't renamed", timeout: .seconds(10)) {
+            (try? outline().workspace(docs)?.label) == "notes"
+        }
+
+        XCTAssertEqual(adapter.closePane(splitLeaf), .queued)
+        try await waitUntil("the pane on screen didn't close", timeout: .seconds(10)) {
+            (try? outline().workspaces.first?.tabs.first?.paneIDs) == [first] && model.stateTraceLabel == "shown"
+        }
+        let logs = try XCTUnwrap(try outline().workspaces.first?.tabs.last).id
+        XCTAssertEqual(adapter.closeTopLevel(try tile("logs").id), .queued)
+        try await waitUntil("the tab off screen didn't close", timeout: .seconds(10)) {
+            (try? outline().workspaces.first?.tabs.count) == 1
+        }
+        let workspace = try XCTUnwrap(try outline().closeConfirmation(ofWorkspace: docs))
+        XCTAssertEqual([workspace.label, "\(workspace.tabCount)", "\(workspace.paneCount)"], ["notes", "1", "1"])
+        XCTAssertTrue(model.ask(workspace.request, bootID: workspace.bootID))
+        try await waitUntil("the workspace off screen didn't close", timeout: .seconds(10)) {
+            (try? outline().workspaces.count) == 1
+        }
+
+        let lastWorkspace = GhosttyCloseConfirmation(
+            title: "Close Workspace?",
+            message: "“\(try XCTUnwrap(try outline().workspaces.first).label)” and its 1 tab and 1 pane will close.",
+            action: "Close Workspace"
+        )
+        XCTAssertEqual(try tile("editor").closeConfirmation, lastWorkspace, "the last tab didn't ask first")
+        XCTAssertEqual(
+            adapter.paneSelectionSheetRenderProjection(topLevelID: try tile("editor").id).panes.map(\.closeConfirmation),
+            [lastWorkspace],
+            "the only pane of the only tab didn't ask first"
+        )
+        XCTAssertFalse(model.ask(.close(.tab(logs), group: false), bootID: try outline().bootID), "a closed tab's close went")
+        let workspaces = try JSONSerialization.jsonObject(with: try await herdr(["workspace", "list"])) as? [String: Any]
+        let listed = ((workspaces?["result"] as? [String: Any])?["workspaces"] as? [[String: Any]])?.compactMap { $0["label"] as? String }
+        XCTAssertEqual(listed?.count, 1, "Herdr's own list: \(String(describing: listed))")
+    }
+
+    /// Closing the only tab of a worktree group's root would close the group, so Herdr's server asks to
+    /// confirm it; Remux asks the user about the group's close instead of failing, and agreeing closes the
+    /// root with its linked worktree, as Herdr's own list then shows.
+    @MainActor
+    func testHerdrAskingToConfirmAGroupsCloseAsksTheUserOnHerdr093() async throws {
+        try await checkGroupCloseConfirmation(version: "0.9.3")
+    }
+
+    @MainActor
+    func testHerdrAskingToConfirmAGroupsCloseAsksTheUserOnHerdr095() async throws {
+        try await checkGroupCloseConfirmation(version: "0.9.5")
+    }
+
+    @MainActor
+    private func checkGroupCloseConfirmation(version: String) async throws {
+        let session = try await openShownSession(version: version, through: { $0 })
+        let model = session.model
+        let herdr = herdrCommand(session)
+        // A repository in the fixture's own home, with git's user and system settings left out.
+        let repository = try await session.fixture.run(
+            """
+            root=$(printf %b "$1")
+            cd "$root/home" && env -i PATH=/usr/bin:/bin HOME="$root/home" GIT_CONFIG_NOSYSTEM=1 /bin/sh -c '
+            git init -q app && git -C app -c user.name=remux -c user.email=remux@localhost commit -q --allow-empty -m init'
+            """,
+            arguments: [session.fixture.root]
+        )
+        XCTAssertEqual(repository.exitStatus, 0, String(decoding: repository.stderr, as: UTF8.self))
+        let created = try JSONSerialization.jsonObject(with: try await herdr([
+            "workspace", "create", "--cwd", session.fixture.root + "/home/app", "--label", "app", "--no-focus",
+        ])) as? [String: Any]
+        let root = try XCTUnwrap(((created?["result"] as? [String: Any])?["workspace"] as? [String: Any])?["workspace_id"] as? String)
+        _ = try await herdr(["worktree", "create", "--workspace", root, "--branch", "feature", "--no-focus", "--trust-repository"])
+        func outline() throws -> HerdrSessionOutline { try XCTUnwrap(model.places.outline) }
+        try await waitUntil("Herdr didn't group the worktree with its root", timeout: .seconds(15)) {
+            (try? outline().closeConfirmation(ofWorkspace: root)?.closesGroup) == true
+        }
+        let rootTab = try XCTUnwrap(try outline().workspace(root)?.tabs.first).id
+        XCTAssertNil(try outline().closeConfirmation(before: .tab(rootTab)), "the group's close was asked before Herdr's server")
+        let before = try outline().workspaces.count
+
+        XCTAssertTrue(model.ask(.close(.tab(rootTab), group: false), bootID: try outline().bootID))
+        try await waitUntil("Herdr's question didn't reach the user", timeout: .seconds(10)) {
+            model.askedCloseConfirmation != nil
+        }
+        let asked = try XCTUnwrap(model.askedCloseConfirmation)
+        XCTAssertTrue(asked.closesGroup)
+        XCTAssertEqual(asked.label, "app")
+        XCTAssertEqual(asked.request, .close(.workspace(root), group: true))
+        let dialog = try XCTUnwrap(model.terminalScreenAdapter.askedCloseConfirmation)
+        XCTAssertEqual([dialog.title, dialog.action], ["Close Worktree Group?", "Close Worktree Group"])
+        XCTAssertTrue(dialog.message.hasPrefix("“app” and its 1 other workspace will close, with "), dialog.message)
+        XCTAssertEqual(try outline().workspaces.count, before, "the tab closed before the user agreed")
+
+        model.answerAskedCloseConfirmation(agreed: true)
+        try await waitUntil("the group didn't close", timeout: .seconds(15)) {
+            (try? outline().workspaces.count) == before - 2
+        }
+    }
+
+    /// Runs the fixture's Herdr and returns its output, failing the test when Herdr fails.
+    @MainActor
+    private func herdrCommand(_ session: ShownSession) -> ([String]) async throws -> Data {
+        { arguments in
+            let result = try await session.fixture.herdr(arguments, trace: RemuxTransportStartupTrace(flowID: "herdr-live-close"))
+            XCTAssertEqual(result.exitStatus, 0, String(decoding: result.stderr, as: UTF8.self))
+            return result.stdout
+        }
+    }
+
     // MARK: - Agents
 
     /// Herdr's agent states reach the sheets as the phone shows them: an agent in another tab working, then
