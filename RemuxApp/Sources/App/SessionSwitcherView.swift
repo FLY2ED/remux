@@ -417,10 +417,13 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
         let isExpanded = herdrDisclosures[session.id] ?? session.isSelected
         activeSessionRow(session, disclosure: workspaces.isEmpty ? nil : isExpanded)
         if let outline, !workspaces.isEmpty, isExpanded {
+            let agents = herdrAgents(session.id)
             ForEach(workspaces) { workspace in
                 herdrWorkspaceRow(
                     workspace,
-                    isCurrent: session.isSelected && workspace.id == outline.focusedWorkspaceID
+                    isCurrent: session.isSelected && workspace.id == outline.focusedWorkspaceID,
+                    agentStatus: agents?.status(ofWorkspace: workspace.id),
+                    isStale: session.runtimeState != .connected
                 ) {
                     onSelectHerdrWorkspace(workspace.id, outline.bootID, session.id)
                 }
@@ -466,6 +469,8 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
     private func herdrWorkspaceRow(
         _ workspace: HerdrSessionOutline.Workspace,
         isCurrent: Bool,
+        agentStatus: TerminalAgentStatus?,
+        isStale: Bool,
         open: @escaping () -> Void
     ) -> some View {
         Button {
@@ -473,7 +478,13 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
             dismiss()
             open()
         } label: {
-            HerdrWorkspaceSwitcherRow(workspace: workspace, isCurrent: isCurrent, chromeStyle: chromeStyle)
+            HerdrWorkspaceSwitcherRow(
+                workspace: workspace,
+                isCurrent: isCurrent,
+                agentStatus: agentStatus,
+                isStale: isStale,
+                chromeStyle: chromeStyle
+            )
         }
         .buttonStyle(.plain)
         .sessionSwitcherListRow(
@@ -745,17 +756,29 @@ private struct ActiveSessionSwitcherRow: View {
     }
 }
 
-/// A Herdr workspace under its session's row, lined up with the session's name.
+/// A Herdr workspace under its session's row, lined up with the session's name. Its most urgent agent's
+/// dot comes before its name, as in Herdr's sidebar, in the margin, so the names stay lined up whichever
+/// workspaces have agents.
 private struct HerdrWorkspaceSwitcherRow: View {
     /// The session row's logo and the space after it.
     static let leadingInset: CGFloat = 40
+    private static let dotSize: CGFloat = 9
+    private static let dotSpacing: CGFloat = 7
 
     let workspace: HerdrSessionOutline.Workspace
     let isCurrent: Bool
+    let agentStatus: TerminalAgentStatus?
+    /// The session isn't connected, so the agents' state may be out of date.
+    let isStale: Bool
     let chromeStyle: GhosttyTerminalChromeStyle
 
     private var tabCount: String {
         workspace.tabs.count == 1 ? "1 tab" : "\(workspace.tabs.count) tabs"
+    }
+
+    private var accessibilityLabel: String {
+        let agent = agentStatus.map { ", agent \($0.word)" } ?? ""
+        return "Workspace \(workspace.label), \(tabCount)\(agent)\(isCurrent ? ", current workspace" : "")"
     }
 
     var body: some View {
@@ -766,6 +789,12 @@ private struct HerdrWorkspaceSwitcherRow: View {
                     .foregroundStyle(TerminalSelectionSheetPalette.primary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .overlay(alignment: .leading) {
+                        if let agentStatus {
+                            TerminalAgentDot(status: agentStatus, size: Self.dotSize, isStale: isStale)
+                                .offset(x: -(Self.dotSize + Self.dotSpacing))
+                        }
+                    }
 
                 Text(tabCount)
                     .font(.footnote)
@@ -785,7 +814,7 @@ private struct HerdrWorkspaceSwitcherRow: View {
         .frame(minHeight: 44)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Workspace \(workspace.label), \(tabCount)\(isCurrent ? ", current workspace" : "")")
+        .accessibilityLabel(accessibilityLabel)
         .accessibilityAddTraits(isCurrent ? [.isSelected, .isButton] : .isButton)
     }
 }

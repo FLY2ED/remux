@@ -483,6 +483,25 @@ final class SessionSwitcherProjectionTests: XCTestCase {
         XCTAssertEqual(projection.sessions(.all), projection.sessions)
     }
 
+    /// The filters are Herdr's, in its order (`client/shell/overlays.rs`): All, Blocked, Working, Idle and
+    /// Done. Working and Idle show and count only those agents; Idle has the agents whose state isn't known
+    /// yet too, as they read as idle.
+    func testWorkingAndIdleShowAndCountTheirAgentsInHerdrsFilterOrder() throws {
+        XCTAssertEqual(SessionAgentsFilter.allCases.map(\.title), ["All", "Blocked", "Working", "Idle", "Done"])
+        let devbox = item(.herdr, "default", on: "devbox")
+        let training = item(.herdr, "train", on: "gpu-box")
+        let agents = [
+            devbox.id: try agents([("w1:p1", .working), ("w1:p2", .idle), ("w1:p3", .unknown)]),
+            training.id: try agents([("w1:p1", .working), ("w1:p2", .blocked)]),
+        ]
+        let projection = SessionAgentsProjection(activeSessions: [devbox, training], agents: { agents[$0] })
+        XCTAssertEqual(projection.count(.working), 2)
+        XCTAssertEqual(projection.count(.idle), 2)
+        XCTAssertEqual(projection.sessions(.working).map { $0.agents.map(\.paneID) }, [["w1:p1"], ["w1:p1"]])
+        XCTAssertEqual(projection.sessions(.idle).map(\.id), [devbox.id])
+        XCTAssertEqual(projection.sessions(.idle).first?.agents.map(\.paneID), ["w1:p2", "w1:p3"])
+    }
+
     private func loadedDiscovery(
         _ tmuxNames: [String],
         herdr: [DiscoveredSession]? = nil

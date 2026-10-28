@@ -5225,6 +5225,22 @@ extension HerdrScreenModelTests {
         }
     }
 
+    /// The Tabs sheet's workspaces each show their most urgent agent, across their tabs; a workspace
+    /// without agents shows none.
+    func testTheTabsSheetsWorkspacesShowTheirAgents() async throws {
+        let harness = await makeHarness()
+        let session = try await shownWorkspaces(harness, zoomingOnShow: false)
+        await session.bridge.serve(Self.twoWorkspaces(revision: 2, agents: [
+            HerdrServerScript.snapshotAgent("w2:p5", workspace: "w2", tab: "t3", status: .working, stateChange: 2),
+            HerdrServerScript.snapshotAgent("w2:p6", workspace: "w2", tab: "t4", status: .blocked, stateChange: 2),
+        ]))
+        try await harness.waitUntil("the agents weren't shown") { harness.model.agents.agents.count == 2 }
+
+        let grouping = try XCTUnwrap(harness.model.terminalScreenAdapter.windowSelectionSheetRenderProjection(group: nil).grouping)
+        XCTAssertEqual(grouping.groups.map(\.name), ["alpha", "beta"])
+        XCTAssertEqual(grouping.groups.map(\.agentStatus), [nil, .blocked])
+    }
+
     /// A swipe goes to the next tab of the workspace on screen, by the same move as a tile.
     func testASwipeGoesToTheNextTabOfTheWorkspace() async throws {
         let harness = await makeHarness()
@@ -5412,7 +5428,8 @@ extension HerdrScreenModelTests {
         boot: String = "boot",
         focusedTab: String = "t1",
         focusedPane: String = "w1:p1",
-        zoomedTabs: Set<String> = []
+        zoomedTabs: Set<String> = [],
+        agents: [String] = []
     ) -> [UInt8] {
         HerdrServerScript.snapshot(
             revision: revision,
@@ -5423,7 +5440,8 @@ extension HerdrScreenModelTests {
             ],
             focusedTab: focusedTab,
             focusedPane: focusedPane,
-            zoomedTabs: zoomedTabs
+            zoomedTabs: zoomedTabs,
+            agents: agents
         )
     }
 

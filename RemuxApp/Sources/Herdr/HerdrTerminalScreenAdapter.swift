@@ -585,7 +585,8 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     /// The tabs of the workspace `group` names, or of the workspace on screen, with the workspaces most
-    /// recent first. Only the tab on screen has a preview: the frame Remux already has.
+    /// recent first, each with its most urgent agent. Only the tab on screen has a preview: the frame Remux
+    /// already has.
     func windowSelectionSheetRenderProjection(group: UUID?) -> GhosttyWindowSelectionSheetRenderProjection {
         let topology = topologySnapshot
         let onScreen = GhosttyTerminalPresentationProjector.windowSelectionSheetRenderProjection(snapshot: topology)
@@ -611,8 +612,12 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
             previewLeafIDs: previewLeafIDs,
             grouping: GhosttyWindowSelectionSheetRenderProjection.Grouping(
                 noun: .workspace,
-                groups: outline.workspacesByRecency.map {
-                    .init(id: groupID(forWorkspace: $0.id), name: $0.label)
+                groups: outline.workspacesByRecency.map { workspace in
+                    .init(
+                        id: groupID(forWorkspace: workspace.id),
+                        name: workspace.label,
+                        agentStatus: model?.agents.status(ofWorkspace: workspace.id)
+                    )
                 },
                 shownGroupID: groupID(forWorkspace: shown.id),
                 largestWindowCount: outline.workspaces.map(\.tabs.count).max() ?? 0

@@ -12,9 +12,9 @@ import Observation
 /// heard from a server boot count as seen.
 ///
 /// The agents are in the snapshot's order, which is Herdr's agent list's by default
-/// (`agent_panel_sort = "spaces"`). A tab or the session shows its most urgent agent, as Herdr's client
-/// rolls tabs up from the statuses it shows (`project_aggregate_status`). Views are told only when what
-/// they show changes.
+/// (`agent_panel_sort = "spaces"`). A tab, a workspace or the session shows its most urgent agent, as
+/// Herdr's client rolls tabs and workspaces up from the statuses it shows (`project_aggregate_status`).
+/// Views are told only when what they show changes.
 @Observable
 final class HerdrAgentPresentation {
     /// One agent as the sheets show it.
@@ -35,8 +35,6 @@ final class HerdrAgentPresentation {
     /// The server boot the agents' pane ids belong to.
     private(set) var bootID: String?
     private(set) var agents: [Agent] = []
-    /// Each agent pane's status, from the newest snapshot.
-    private(set) var statuses: [String: HerdrAgentStatus] = [:]
 
     /// The newest state change of each agent that was on screen.
     @ObservationIgnored private var acknowledged: [String: UInt64] = [:]
@@ -113,6 +111,11 @@ final class HerdrAgentPresentation {
         agents.lazy.filter { $0.tabID == tabID }.map(\.state.status).max()
     }
 
+    /// The workspace's most urgent agent, across its tabs, if it has any.
+    func status(ofWorkspace workspaceID: String) -> TerminalAgentStatus? {
+        agents.lazy.filter { $0.workspaceID == workspaceID }.map(\.state.status).max()
+    }
+
     /// The session's most urgent agent, if it has any.
     var status: TerminalAgentStatus? {
         agents.lazy.map(\.state.status).max()
@@ -120,21 +123,19 @@ final class HerdrAgentPresentation {
 
     /// Only a change is set, so views reading the agents are told only then.
     private func update() -> Bool {
-        let nextStatuses = Dictionary(reported.map { ($0.agent.paneID, status(of: $0.agent)) }) { $1 }
-        let nextAgents = reported.map { agent, name, place in
-            let status = nextStatuses[agent.paneID] ?? agent.agentStatus
+        let next = reported.map { agent, name, place in
+            let shown = status(of: agent)
             return Agent(
                 paneID: agent.paneID,
                 workspaceID: agent.workspaceID,
                 tabID: agent.tabID,
                 name: name,
                 place: place,
-                state: TerminalAgentState(status.terminalStatus, word: agent.label(for: status))
+                state: TerminalAgentState(shown.terminalStatus, word: agent.label(for: shown))
             )
         }
-        guard nextAgents != agents || nextStatuses != statuses else { return false }
-        statuses = nextStatuses
-        agents = nextAgents
+        guard next != agents else { return false }
+        agents = next
         return true
     }
 

@@ -140,15 +140,16 @@ enum HerdrServerScript {
         var activeTab: String?
     }
 
-    /// A snapshot of `workspaces` in order, with this phone at `focusedTab` and `focusedPane`; each tab is
-    /// named after its id, and zoomed when in `zoomedTabs`.
+    /// A snapshot of `workspaces` in order, with this phone at `focusedTab` and `focusedPane`, and `agents`;
+    /// each tab is named after its id, and zoomed when in `zoomedTabs`.
     static func snapshot(
         revision: UInt64,
         boot: String = "boot",
         workspaces: [Workspace],
         focusedTab: String,
         focusedPane: String?,
-        zoomedTabs: Set<String> = []
+        zoomedTabs: Set<String> = [],
+        agents: [String] = []
     ) -> [UInt8] {
         let focusedWorkspace = workspaces.first { $0.tabs.contains { $0.id == focusedTab } }?.id
         let workspaceEntries = workspaces.enumerated().map { index, workspace in
@@ -182,7 +183,7 @@ enum HerdrServerScript {
         {"boot_id":"\(boot)","revision":\(revision),"focused_workspace_id":\(json(focusedWorkspace)),
          "focused_tab_id":"\(focusedTab)","focused_pane_id":\(json(focusedPane)),
          "workspaces":[\(workspaceEntries.joined(separator: ","))],"tabs":[\(tabEntries.joined(separator: ","))],
-         "panes":[\(paneEntries.joined(separator: ","))],"agents":[]}
+         "panes":[\(paneEntries.joined(separator: ","))],"agents":[\(agents.joined(separator: ","))]}
         """
         return control(HerdrControlKind.snapshot, json)
     }
