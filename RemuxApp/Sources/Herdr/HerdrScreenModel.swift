@@ -815,10 +815,14 @@ final class HerdrScreenModel {
     }
 
     /// The engine took move `ask`: `request` carries it, or nothing does, as when Herdr has the session
-    /// there already. A newer move has replaced it if the attempt's isn't this one.
+    /// there already. A newer move has replaced it if the attempt's isn't this one. The engine's updates
+    /// come on their own, so the request may already have completed, as one to a pane gone by then does at
+    /// once, or a later one replaced it.
     private func moveTaken(_ ask: UInt64, by request: UInt64?, on attempt: Attempt) {
         guard attempt.move?.ask == ask else { return }
-        guard let request else { return moveEnded(on: attempt) }
+        guard let request, attempt.activatedRequest.map({ $0 < request }) ?? true,
+              attempt.request.map({ $0.id <= request }) ?? true
+        else { return moveEnded(on: attempt) }
         attempt.move?.request = request
     }
 

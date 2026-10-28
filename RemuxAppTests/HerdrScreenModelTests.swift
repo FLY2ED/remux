@@ -4186,6 +4186,35 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(sent3, frame("w1:p1", [typed("a")]))
     }
 
+    /// A tap on a pane Herdr has just closed, which the model still lists: the engine completes the move's
+    /// request as it starts, the move ends, and the user is back in the pane Herdr has focused, so a later
+    /// key goes there, not to the pane gone.
+    func testATapOnAPaneHerdrJustClosedEndsTheMove() async throws {
+        let harness = await makeHarness()
+        let session = try await shownTab(harness, panes: Self.threePanes)
+        var index = session.next
+
+        // Herdr closes the pane: the snapshot without it, and the frame drawn against that snapshot, in one
+        // read. Holding the main actor right after lets the engine take both while the model still has the
+        // pane, so the tap goes.
+        let closed = HerdrServerScript.snapshot(revision: 2, panes: Self.tabPanes(["w1:p1", "w1:p3"]))
+        let drawn = try harness.shownSurface(projection: 2, revision: 2, lines: ["one three"], panes: [
+            .init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true),
+            .init(id: "w1:p3", x: 4, width: 3, height: 1),
+        ])
+        await session.bridge.serve(closed + drawn)
+        usleep(300_000)
+        XCTAssertTrue(harness.model.focusPane("w1:p2"))
+        try await harness.waitUntil("the move to the pane gone didn't end") {
+            harness.model.userPaneID == "w1:p1"
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(harness.model.userPaneID, "w1:p1", "the move to the pane gone came back")
+        XCTAssertEqual(harness.model.terminalScreenAdapter.sendInputToFocusedSurface("k"), .accepted)
+        let sent = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(sent, frame("w1:p1", [typed("k")]))
+    }
+
     /// Another client moving the focus after Remux's move ends the move: keys go to the pane tapped until
     /// then, and to the pane Herdr has focused after.
     func testAnotherClientsFocusAfterTheMoveTakesTheKeys() async throws {
