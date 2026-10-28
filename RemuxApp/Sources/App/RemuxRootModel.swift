@@ -1692,15 +1692,16 @@ final class RemuxRootModel: ObservableObject {
 
     /// Shows an open Herdr session, at `paneID` when given.
     func openHerdrSession(_ workspaceID: SavedWorkspace.ID, atPane paneID: String?, bootID: String?) {
-        openHerdrSession(workspaceID, at: paneID.map(HerdrPlace.pane), bootID: bootID)
+        openHerdrSession(workspaceID, to: paneID.map { .place(.pane($0)) }, bootID: bootID)
     }
 
-    /// Shows an open Herdr session, at `place` when given: the session goes there once it is on screen, if
-    /// the place is still there on the server boot `bootID` names. The session on screen goes there at once.
-    private func openHerdrSession(_ workspaceID: SavedWorkspace.ID, at place: HerdrPlace?, bootID: String?) {
+    /// Shows an open Herdr session, taken to `destination` when given: the session goes there once it is on
+    /// screen, if what it names is still there on the server boot `bootID` names. The session on screen goes
+    /// there at once.
+    private func openHerdrSession(_ workspaceID: SavedWorkspace.ID, to destination: HerdrDestination?, bootID: String?) {
         guard RemuxActiveSessionCollection.containsWorkspace(workspaceID, in: activeSessions) else { return }
-        if let place {
-            herdrModel(of: workspaceID)?.reveal(place, bootID: bootID)
+        if let destination {
+            herdrModel(of: workspaceID)?.go(to: destination, bootID: bootID)
         }
         showActiveSession(workspaceID)
     }
@@ -1713,13 +1714,18 @@ final class RemuxRootModel: ObservableObject {
     /// A Herdr workspace picked in the Sessions sheet, as Herdr's client opens a machine at a workspace.
     /// `bootID` is the server boot the sheet listed it from.
     func openHerdrWorkspace(_ herdrWorkspaceID: String, bootID: String, in workspaceID: SavedWorkspace.ID) {
-        openHerdrSession(workspaceID, at: .workspace(herdrWorkspaceID), bootID: bootID)
+        openHerdrSession(workspaceID, to: .place(.workspace(herdrWorkspaceID)), bootID: bootID)
     }
 
-    /// New Workspace in the Sessions sheet, beside the session's workspace on screen.
+    /// New Workspace under a session in the Sessions sheet, beside the workspace this phone has there. A
+    /// session not on screen is shown, and the workspace made as part of its show.
     func createHerdrWorkspace(in workspaceID: SavedWorkspace.ID) {
-        guard let model = herdrModel(of: workspaceID) else { return }
-        _ = model.create(.workspace(source: model.places.outline?.focusedWorkspaceID))
+        guard let outline = herdrModel(of: workspaceID)?.places.outline else { return }
+        openHerdrSession(
+            workspaceID,
+            to: .creation(.workspace(source: outline.focusedWorkspaceID)),
+            bootID: outline.bootID
+        )
     }
 
     /// An open Herdr session's agents.

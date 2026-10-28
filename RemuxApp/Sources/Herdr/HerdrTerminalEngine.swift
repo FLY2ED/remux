@@ -203,13 +203,11 @@ struct HerdrEngineFeed: Sendable {
 
 /// What Remux asks Herdr to show (`HerdrTerminalEngine.start`).
 enum HerdrView: Sendable {
-    /// The session on screen at `geometry`, taken to `place` right after, when given.
-    case shown(HerdrSurfaceGeometry, place: HerdrPlace?, zoom: HerdrZoomPolicy)
-    /// The session on screen taken to `place`; `fromAnotherTab` when another tab was on screen as it was
-    /// asked for.
-    case moved(HerdrPlace, fromAnotherTab: Bool, columns: UInt16, rows: UInt16, zoom: HerdrZoomPolicy)
-    /// The session on screen taken to the pane `creation` makes, as Herdr focuses it.
-    case created(HerdrCreation, columns: UInt16, rows: UInt16, zoom: HerdrZoomPolicy)
+    /// The session on screen at `geometry`, taken to `destination` right after, when given.
+    case shown(HerdrSurfaceGeometry, to: HerdrDestination?, zoom: HerdrZoomPolicy)
+    /// The session on screen taken to `destination`; `fromAnotherTab` when another tab was on screen as it
+    /// was asked for.
+    case moved(HerdrDestination, fromAnotherTab: Bool, columns: UInt16, rows: UInt16, zoom: HerdrZoomPolicy)
     case hidden
 }
 
@@ -296,8 +294,8 @@ actor HerdrTerminalEngine {
         var rows: UInt16
         /// The projection revision Herdr's acknowledgement returned, once it arrives.
         var floor: UInt64?
-        /// Where it takes the session.
-        let destination: Destination
+        /// Where it takes the session; nil for a show that stays where Herdr has it, and for a hide.
+        let destination: HerdrDestination?
         /// For a show that stays where Herdr has the session, the pane Herdr had focused as it began, which
         /// its zoom keeps.
         let kept: String?
@@ -325,20 +323,20 @@ actor HerdrTerminalEngine {
         var inProgress: Bool { kind != .hide && !completed }
 
         mutating func record(_ snapshot: HerdrSnapshot) {
-            guard inProgress, snapshots.last.map({ $0.revision < snapshot.revision }) ?? true else { return }
+            guard inProgress else { return }
+            target = target?.noting(snapshot)
+            guard snapshots.last.map({ $0.revision < snapshot.revision }) ?? true else { return }
             snapshots.append(snapshot)
         }
 
         /// Whether `snapshot`, the newest, shows Herdr's state gone elsewhere since the request's commands:
         /// away from the pane a show keeps; with its target gone, whether or not its steps went out, since
-        /// a target a move or show picked is a place a snapshot has shown and one that is gone doesn't come
-        /// back; or, once Herdr has answered the step that took it there, away from its target, after that
-        /// answer or after a snapshot since it went out showed the target. The pane a creation made shows
-        /// only in a snapshot from after Herdr's answer, so only that answer's rule applies to it.
+        /// one that is gone doesn't come back; or, once Herdr has answered the step that took it there, away
+        /// from its target, after that answer or after a snapshot since it went out showed the target.
         func isOvertaken(by snapshot: HerdrSnapshot) -> Bool {
             if let kept, snapshot.focusedPaneID != kept { return true }
             guard let target, !target.isShown(in: snapshot) else { return false }
-            if destination != .made, target.isGone(in: snapshot) { return true }
+            if target.isGone(in: snapshot) { return true }
             guard let answer else { return false }
             return snapshot.revision > answer.answeredAfter
                 || snapshots.contains { $0.revision > answer.sentAfter && target.isShown(in: $0) }
@@ -353,20 +351,14 @@ actor HerdrTerminalEngine {
         }
     }
 
-    /// Where a view request takes the session.
-    enum Destination: Equatable {
-        /// Where Herdr has it: a show asked for no place.
-        case stays
-        case place(HerdrPlace)
-        /// The pane a creation makes, which is no place there already.
-        case made
-    }
-
     /// What a view request takes Herdr to, as Herdr's client matches an activation's target
     /// (`activation.rs` `target_matches`): the snapshot has the place focused and, for a pane, the frame
     /// drawn against it draws the pane focused. A place or tab that is gone isn't shown.
     enum Target: Sendable, Equatable {
         case place(HerdrPlace)
+        /// The pane a creation made, which Herdr lists only in snapshots from after it made it; snapshots
+        /// sent while the creation was in flight can come later. `listed` once a snapshot lists it.
+        case made(pane: String, listed: Bool)
         /// The pane, on its tab zoomed or not, as a `pane.zoom` focuses its target.
         case zoom(pane: String, tabID: String, zoomed: Bool)
 
@@ -374,6 +366,8 @@ actor HerdrTerminalEngine {
             switch self {
             case .place(let place):
                 return snapshot.isAt(place)
+            case .made(let pane, _):
+                return snapshot.focusedPaneID == pane
             case .zoom(let pane, let tabID, let zoomed):
                 return snapshot.focusedPaneID == pane
                     && snapshot.tabs.contains { $0.tabID == tabID && $0.zoomed == zoomed }
@@ -383,27 +377,37 @@ actor HerdrTerminalEngine {
         func isDrawn(in surface: HerdrPaneSurfaceFrame) -> Bool {
             let pane: String
             switch self {
-            case .place(.pane(let id)), .zoom(let id, _, _): pane = id
+            case .place(.pane(let id)), .made(let id, _), .zoom(let id, _, _): pane = id
             case .place(.tab), .place(.workspace): return true
             }
             return surface.panes.contains { $0.paneID == pane && $0.focused }
         }
 
-        /// Whether the place, or the pane or tab of a zoom, is gone from `snapshot`; it doesn't come back.
+        /// Whether the target is gone from `snapshot`, after which it doesn't come back: the place, the
+        /// pane or tab of a zoom, or a made pane a snapshot has listed. A made pane no snapshot has listed
+        /// yet isn't gone, since the snapshot may be from before Herdr made it.
         func isGone(in snapshot: HerdrSnapshot) -> Bool {
             switch self {
             case .place(let place):
                 return !snapshot.contains(place)
+            case .made(let pane, let listed):
+                return listed && !snapshot.contains(.pane(pane))
             case .zoom(let pane, let tabID, _):
                 return !snapshot.contains(.pane(pane)) || !snapshot.contains(.tab(tabID))
             }
+        }
+
+        /// The target once `snapshot` is in: a made pane is listed once a snapshot lists it.
+        func noting(_ snapshot: HerdrSnapshot) -> Target {
+            guard case .made(let pane, false) = self, snapshot.contains(.pane(pane)) else { return self }
+            return .made(pane: pane, listed: true)
         }
     }
 
     /// Herdr's answer to a step that took the session somewhere: what it took the session to, and where the
     /// step and its answer fell among the snapshots.
     private struct StepEffect {
-        let target: Target
+        var target: Target
         let sentAfter: UInt64
         let answeredAfter: UInt64
 
@@ -412,6 +416,10 @@ actor HerdrTerminalEngine {
         func isSettled(by snapshot: HerdrSnapshot) -> Bool {
             target.isShown(in: snapshot) || snapshot.revision > answeredAfter
                 || (snapshot.revision > sentAfter && target.isGone(in: snapshot))
+        }
+
+        mutating func note(_ snapshot: HerdrSnapshot) {
+            target = target.noting(snapshot)
         }
     }
 
@@ -568,12 +576,12 @@ actor HerdrTerminalEngine {
         switch view {
         case .hidden:
             hide(outbox: outbox, snapshot: snapshot)
-        case .shown(let geometry, let place, let policy):
+        case .shown(let geometry, let destination, let policy):
             let id = nextRequest()
-            let kept = place == nil ? snapshot?.focusedPaneID : nil
+            let kept = destination == nil ? snapshot?.focusedPaneID : nil
             var steps: [HerdrCommandLane.Step] = []
-            if let place {
-                steps = plan(to: place, zooms: true, policy: policy, in: snapshot)
+            if let destination {
+                steps = plan(to: destination, zooms: true, policy: policy, in: snapshot)
             } else if let kept, let snapshot, let tabID = snapshot.focusedTabID, policy.zooms(tabID, in: snapshot) {
                 steps = [.zoom(kept, navigates: false)]
             }
@@ -585,10 +593,10 @@ actor HerdrTerminalEngine {
                 due: due,
                 columns: max(geometry.cols, 1),
                 rows: max(geometry.rows, 1),
-                destination: place.map(Destination.place) ?? .stays,
+                destination: destination,
                 kept: kept,
                 zooms: true,
-                target: place.map(Target.place)
+                target: destination.flatMap(Self.target(of:))
             )
             lane.replaceSteps(steps, for: id)
             // The tab takes this size, the surface activates, then the phone takes focus, as Herdr's own
@@ -605,80 +613,35 @@ actor HerdrTerminalEngine {
                     request: id, reason: HerdrCommandError.noSnapshot.localizedDescription, connection: connection
                 ))
             }
-        case .moved(let place, let fromAnotherTab, let columns, let rows, let policy):
+        case .moved(let destination, let fromAnotherTab, let columns, let rows, let policy):
             guard let current = request, current.kind != .hide else { return }
             let taken = current.inProgress ? current : nil
             // At the place already, a move asked from another tab still goes, so the setting zooms the tab
             // it reaches, as when another client took the session there first.
-            guard !Self.goes(to: place, taking: taken, in: snapshot) || (taken == nil && fromAnotherTab) else {
+            guard !Self.goes(to: destination, taking: taken, in: snapshot) || (taken == nil && fromAnotherTab) else {
                 return
             }
-            let zooms = taken?.zooms == true || fromAnotherTab || Self.leaves(to: place, in: snapshot)
-            startMove(
-                to: .place(place),
-                steps: plan(to: place, zooms: zooms, policy: policy, in: snapshot),
+            let id = nextRequest()
+            let zooms = taken?.zooms == true || fromAnotherTab || Self.leaves(to: destination, in: snapshot)
+            let due = (taken?.show != nil ? taken?.due : nil) ?? ContinuousClock.now + deadline
+            request = ViewRequest(
+                id: id,
+                kind: .move,
+                show: taken?.show,
+                due: due,
+                columns: max(columns, 1),
+                rows: max(rows, 1),
+                floor: taken == nil ? 0 : taken?.floor,
+                destination: destination,
+                kept: nil,
                 zooms: zooms,
-                taking: taken,
-                columns: columns,
-                rows: rows,
-                within: deadline
+                target: Self.target(of: destination),
+                received: taken == nil
+                    ? presentation.presented.map { ($0.surface.projectionRevision, $0.surface.frame.width, $0.surface.frame.height) }
+                    : taken?.received
             )
-        case .created(let creation, let columns, let rows, let policy):
-            guard let current = request, current.kind != .hide else { return }
-            startMove(
-                to: .made,
-                steps: [.leave(to: creation.tabPlace), .create(creation), .zoomReached(policy)],
-                zooms: true,
-                taking: current.inProgress ? current : nil,
-                columns: columns,
-                rows: rows,
-                within: deadline
-            )
-        }
-    }
-
-    /// Starts a move or a creation. It takes over `taken`, the show or move in progress, keeping its show's
-    /// floor, frames and time; with none it starts on the frame on screen, with its own time.
-    private func startMove(
-        to destination: Destination,
-        steps: [HerdrCommandLane.Step],
-        zooms: Bool,
-        taking taken: ViewRequest?,
-        columns: UInt16,
-        rows: UInt16,
-        within deadline: Duration
-    ) {
-        let id = nextRequest()
-        let due = (taken?.show != nil ? taken?.due : nil) ?? ContinuousClock.now + deadline
-        var target: Target?
-        if case .place(let place) = destination { target = .place(place) }
-        request = ViewRequest(
-            id: id,
-            kind: .move,
-            show: taken?.show,
-            due: due,
-            columns: max(columns, 1),
-            rows: max(rows, 1),
-            floor: taken == nil ? 0 : taken?.floor,
-            destination: destination,
-            kept: nil,
-            zooms: zooms,
-            target: target,
-            received: taken == nil
-                ? presentation.presented.map { ($0.surface.projectionRevision, $0.surface.frame.width, $0.surface.frame.height) }
-                : taken?.received
-        )
-        lane.replaceSteps(steps, for: id)
-        begin(id, kind: .move, showing: taken?.show != nil, until: due)
-    }
-
-    /// Whether the request in progress already takes the session to `place` or, with none or with a show
-    /// that stays where Herdr has the session, whether Herdr has it there.
-    private static func goes(to place: HerdrPlace, taking taken: ViewRequest?, in snapshot: HerdrSnapshot?) -> Bool {
-        switch taken?.destination {
-        case .place(let destination)?: destination == place
-        case .made?: false
-        case .stays?, nil: snapshot?.isAt(place) == true
+            lane.replaceSteps(plan(to: destination, zooms: zooms, policy: policy, in: snapshot), for: id)
+            begin(id, kind: .move, showing: taken?.show != nil, until: due)
         }
     }
 
@@ -696,30 +659,52 @@ actor HerdrTerminalEngine {
         dispatch()
     }
 
-    /// The steps that take the session to `place`: Remux's zoom off the tab left, if it leaves one Remux
-    /// zoomed; then, for a pane, the setting's zoom of its tab when the request zooms, which takes the
+    /// What a request to `destination` waits to see: the place; a creation's pane is known only from
+    /// Herdr's answer.
+    private static func target(of destination: HerdrDestination) -> Target? {
+        guard case .place(let place) = destination else { return nil }
+        return .place(place)
+    }
+
+    /// Whether the request in progress already takes the session to `destination` or, with none or with a
+    /// show that stays where Herdr has the session, whether Herdr has it there. A creation goes somewhere
+    /// new.
+    private static func goes(to destination: HerdrDestination, taking taken: ViewRequest?, in snapshot: HerdrSnapshot?) -> Bool {
+        guard case .place(let place) = destination else { return false }
+        if let going = taken?.destination { return going == destination }
+        return snapshot?.isAt(place) == true
+    }
+
+    /// The steps that take the session to `destination`: Remux's zoom off the tab left, if it leaves one
+    /// Remux zoomed; then, for a pane, the setting's zoom of its tab when the request zooms, which takes the
     /// session there, and the pane's focus, which marks its tab's agents seen, as Herdr's client goes to a
     /// pane. A tab or workspace shows a pane the snapshot doesn't name before the session is there, so its
-    /// focus goes first and the setting's zoom follows on the pane it shows. A place the session is at
-    /// already still gets its focus.
+    /// focus goes first and the setting's zoom follows on the pane it shows. A creation's command goes, and
+    /// the setting's zoom follows on the pane it made whether or not the request zooms, since Herdr gives its
+    /// tab a new pane. A place the session is at already still gets its focus.
     private func plan(
-        to place: HerdrPlace,
+        to destination: HerdrDestination,
         zooms: Bool,
         policy: HerdrZoomPolicy,
         in snapshot: HerdrSnapshot?
     ) -> [HerdrCommandLane.Step] {
-        var steps: [HerdrCommandLane.Step] = [.leave(to: place)]
-        switch place {
-        case .pane(let pane):
-            if zooms, let snapshot, let tabID = snapshot.tabID(reachedBy: place), policy.zooms(tabID, in: snapshot) {
-                steps.append(.zoom(pane, navigates: true))
+        switch destination {
+        case .place(let place):
+            var steps: [HerdrCommandLane.Step] = [.leave(to: place)]
+            switch place {
+            case .pane(let pane):
+                if zooms, let snapshot, let tabID = snapshot.tabID(reachedBy: place), policy.zooms(tabID, in: snapshot) {
+                    steps.append(.zoom(pane, navigates: true))
+                }
+                steps.append(.focus(place))
+            case .tab, .workspace:
+                steps.append(.focus(place))
+                if zooms { steps.append(.zoomReached(policy)) }
             }
-            steps.append(.focus(place))
-        case .tab, .workspace:
-            steps.append(.focus(place))
-            if zooms { steps.append(.zoomReached(policy)) }
+            return steps
+        case .creation(let creation):
+            return [.leave(to: creation.tabPlace), .create(creation), .zoomReached(policy)]
         }
-        return steps
     }
 
     /// Hides the session at once: the request in progress ends, its steps not yet sent don't go, and the
@@ -733,7 +718,7 @@ actor HerdrTerminalEngine {
         lane.takeWaiting().forEach { fail($0, .notSent) }
         let id = nextRequest()
         request = ViewRequest(
-            id: id, kind: .hide, show: nil, due: nil, columns: 1, rows: 1, destination: .stays, kept: nil, zooms: false
+            id: id, kind: .hide, show: nil, due: nil, columns: 1, rows: 1, destination: nil, kept: nil, zooms: false
         )
         cancelDeadline()
         // A hide Herdr doesn't confirm leaves only its stale foreground on the server.
@@ -762,8 +747,16 @@ actor HerdrTerminalEngine {
         return true
     }
 
-    /// Whether `place` is on another tab than the one `snapshot` shows.
-    private static func leaves(to place: HerdrPlace, in snapshot: HerdrSnapshot?) -> Bool {
+    /// Whether `destination` is on another tab than the one `snapshot` shows: a place on another tab, or a
+    /// new tab or workspace.
+    private static func leaves(to destination: HerdrDestination, in snapshot: HerdrSnapshot?) -> Bool {
+        let place: HerdrPlace
+        switch destination {
+        case .place(let picked): place = picked
+        case .creation(let creation):
+            guard let tabPlace = creation.tabPlace else { return true }
+            place = tabPlace
+        }
         guard let snapshot, let tabID = snapshot.tabID(reachedBy: place) else { return false }
         return tabID != snapshot.focusedTabID
     }
@@ -995,7 +988,9 @@ actor HerdrTerminalEngine {
             if step.method == HerdrScreenModel.paneZoomMethod {
                 zoomAnswered(result, seen: inFlight.snapshots, reportsFailure: false)
             }
-            let effect = Self.effect(of: step, result)
+            var effect = Self.effect(of: step, result)
+            // A pane a creation made may be listed by the snapshots that came while it was in flight.
+            for snapshot in inFlight.snapshots { effect?.note(snapshot) }
             if let effect { hold(until: effect, seen: inFlight.snapshots) }
             guard var request, request.id == id, request.inProgress else { return }
             switch (step, result) {
@@ -1060,7 +1055,7 @@ actor HerdrTerminalEngine {
             target = .place(place)
         case .create:
             guard let pane = HerdrCreation.pane(madeIn: reply.json) else { return nil }
-            target = .place(.pane(pane))
+            target = .made(pane: pane, listed: false)
         }
         return StepEffect(target: target, sentAfter: reply.sentAfter, answeredAfter: reply.answeredAfter)
     }
@@ -1168,6 +1163,7 @@ actor HerdrTerminalEngine {
         presentation.receive(snapshot)
         lane.record(snapshot)
         ownedZoom.reconcile(with: snapshot)
+        unsettled?.note(snapshot)
         if unsettled?.isSettled(by: snapshot) == true { unsettled = nil }
         request?.record(snapshot)
         bordersMayHaveChanged = true

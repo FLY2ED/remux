@@ -936,7 +936,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let (feed, outbox) = await connect(engine)
         await feed.receive(try Self.places(revision: 1))
         let geometry = HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 0, rows: 12)
-        _ = try await start(feed, updates, .shown(geometry, place: nil, zoom: Self.notZooming))
+        _ = try await start(feed, updates, .shown(geometry, to: nil, zoom: Self.notZooming))
         let shown = try outbox.writes()
         XCTAssertEqual(shown.count, 3, "\(shown)")
         XCTAssertEqual(shown.first, .resize(cols: 1, rows: 12, cellWidth: 9, cellHeight: 18))
@@ -1856,11 +1856,11 @@ final class HerdrTerminalEngineTests: XCTestCase {
 
     /// The session on screen at 4 × 2, taken to `pane` when given.
     static func show(_ pane: String? = nil, zoom: HerdrZoomPolicy = notZooming) -> HerdrView {
-        .shown(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 4, rows: 2), place: pane.map(HerdrPlace.pane), zoom: zoom)
+        .shown(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 4, rows: 2), to: pane.map { .place(.pane($0)) }, zoom: zoom)
     }
 
     static func move(_ pane: String, fromAnotherTab: Bool = false, zoom: HerdrZoomPolicy = notZooming) -> HerdrView {
-        .moved(.pane(pane), fromAnotherTab: fromAnotherTab, columns: 4, rows: 2, zoom: zoom)
+        .moved(.place(.pane(pane)), fromAnotherTab: fromAnotherTab, columns: 4, rows: 2, zoom: zoom)
     }
 
     /// A move to another tab focuses the tab with Herdr's client's `tab.focus` after Remux's zoom comes off
@@ -1872,7 +1872,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let (feed, outbox) = await connect(engine)
         try await shownZoomed(feed, updates, outbox)
 
-        let move = try await start(feed, updates, .moved(.tab("t2"), fromAnotherTab: true, columns: 4, rows: 2, zoom: Self.zooming))
+        let move = try await start(feed, updates, .moved(.place(.tab("t2")), fromAnotherTab: true, columns: 4, rows: 2, zoom: Self.zooming))
         XCTAssertEqual(try outbox.commands().last, "zoom P off")
         try await answerZoom(feed, outbox, zoomed: false)
         XCTAssertEqual(try outbox.commands().last, "tab.focus")
@@ -1919,7 +1919,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         XCTAssertEqual(try outbox.commands(), [], "a one-pane tab was zoomed")
         let split = HerdrCreation.split(pane: "P", workspaceID: "w1", direction: .right)
 
-        let request = try await start(feed, updates, .created(split, columns: 4, rows: 2, zoom: Self.zooming))
+        let request = try await start(feed, updates, .moved(.creation(split), fromAnotherTab: false, columns: 4, rows: 2, zoom: Self.zooming))
         XCTAssertEqual(try outbox.commands().last, "pane.split")
         XCTAssertEqual(
             try outbox.lastParams(),
@@ -1946,6 +1946,34 @@ final class HerdrTerminalEngineTests: XCTestCase {
         XCTAssertEqual(try outbox.commands(), ["pane.split", "zoom Q on"])
         XCTAssertEqual(updates.creationAnswers.map(\.request), [request])
         XCTAssertNil(updates.creationAnswers.first?.failure)
+        await engine.stop()
+    }
+
+    /// A snapshot Herdr sent before it made the split's pane can come while the split is in flight. It
+    /// doesn't list the pane, which isn't gone for that: the setting's zoom still goes once a snapshot shows
+    /// the session on the new pane.
+    func testASplitZoomsItsPaneAfterASnapshotFromBeforeHerdrMadeIt() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        await feed.receive(try Self.places(revision: 1, closed: ["Q"]))
+        let show = try await start(feed, updates, Self.show(zoom: Self.zooming))
+        try await acknowledgeShow(feed, outbox, floor: 1)
+        await feed.receive(.surface(try Self.surface(
+            revision: 1,
+            lines: ["one ", "two "],
+            panes: [Self.pane("P", x: 0, width: 4, height: 2, focused: true)]
+        )))
+        try await activation(show, updates)
+        let split = HerdrCreation.split(pane: "P", workspaceID: "w1", direction: .right)
+
+        _ = try await start(feed, updates, .moved(.creation(split), fromAnotherTab: false, columns: 4, rows: 2, zoom: Self.zooming))
+        XCTAssertEqual(try outbox.commands().last, "pane.split")
+        await feed.receive(try Self.places(revision: 2, closed: ["Q"]))
+        try await answer(feed, outbox, json: #"{"type":"pane_info","pane":{"pane_id":"Q"}}"#)
+        XCTAssertEqual(try outbox.commands().last, "pane.split", "the zoom went before the new pane was on screen")
+        await feed.receive(try Self.places(revision: 3, focusedPane: "Q"))
+        XCTAssertEqual(try outbox.commands().last, "zoom Q on", "the new pane wasn't zoomed")
         await engine.stop()
     }
 

@@ -128,6 +128,23 @@ enum HerdrCreation: Equatable, Sendable {
     }
 }
 
+/// Where Remux takes a Herdr session: a place there already, or the pane a creation makes.
+enum HerdrDestination: Equatable, Sendable {
+    case place(HerdrPlace)
+    case creation(HerdrCreation)
+
+    /// The place it names, which must still be on the server for it to go: the place, or the workspace
+    /// or pane a creation starts from.
+    var origin: HerdrPlace? {
+        switch self {
+        case .place(let place): place
+        case .creation(.tab(let workspaceID)): .workspace(workspaceID)
+        case .creation(.workspace(let source)): source.map(HerdrPlace.workspace)
+        case .creation(.split(let pane, _, _)): .pane(pane)
+        }
+    }
+}
+
 extension HerdrSnapshot {
     /// The tab a move to `place` shows: a pane's tab, the tab, or the tab this phone has in the workspace.
     func tabID(reachedBy place: HerdrPlace) -> String? {

@@ -4535,7 +4535,7 @@ extension HerdrScreenModelTests {
         let focus = try await nextWrite(bridge, from: &index, command)
         XCTAssertEqual(focus.method, "workspace.focus")
         XCTAssertEqual(focus.params, ["workspace_id": "w2"])
-        XCTAssertTrue(harness.model.focusTab("t3"), "a later pick during the show was refused")
+        XCTAssertTrue(harness.model.reveal(.tab("t3"), bootID: "boot"), "a later pick during the show was refused")
 
         await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
         await bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
@@ -4726,11 +4726,11 @@ extension HerdrScreenModelTests {
         let session = try await shownWorkspaces(harness, zoomingOnShow: false)
         var index = session.next
 
-        XCTAssertTrue(harness.model.focusTab("t2"))
+        XCTAssertTrue(harness.model.reveal(.tab("t2"), bootID: "boot"))
         let first = try await nextWrite(session.bridge, from: &index, command)
         XCTAssertEqual(first.params, ["tab_id": "t2"])
-        XCTAssertTrue(harness.model.focusTab("t3"))
-        XCTAssertTrue(harness.model.create(.tab(workspaceID: "w1")))
+        XCTAssertTrue(harness.model.reveal(.tab("t3"), bootID: "boot"))
+        XCTAssertTrue(harness.model.create(.tab(workspaceID: "w1"), bootID: "boot"))
         await session.bridge.serve(HerdrConnectionTests.reply(id: first.id, json: #"{"type":"ok"}"#))
         await session.bridge.serve(Self.twoWorkspaces(revision: 3, focusedTab: "t2", focusedPane: "w1:p3"))
         let created = try await nextWrite(session.bridge, from: &index, command)
@@ -4780,16 +4780,88 @@ extension HerdrScreenModelTests {
         XCTAssertEqual([zoom.paneID, zoom.mode], ["w1:p8", "on"])
     }
 
+    /// A tile and a pane picked from the layout on screen go only on that layout's server boot: once a new
+    /// boot's snapshot is in, while the old frame is still on screen, they send nothing, though the new boot
+    /// has a tab and a pane by the same ids.
+    func testATileFromAnEarlierBootsLayoutSendsNothingOnANewBoot() async throws {
+        let harness = await makeHarness()
+        _ = try await shownWorkspaces(harness, zoomingOnShow: false)
+        let adapter = harness.model.terminalScreenAdapter
+        let tile = try XCTUnwrap(
+            adapter.windowSelectionSheetRenderProjection(group: nil).windows.first { $0.displayName == "t2" }
+        )
+        let pane = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.panes.first { !$0.isFocused }).id
+
+        XCTAssertTrue(harness.model.reconnect())
+        let restarted = try await harness.bridge(1)
+        await restarted.serve(try HerdrServerScript.welcome() + Self.twoWorkspaces(revision: 1, boot: "boot-2"))
+        var index = 0
+        _ = try await harness.nextSurfaceSet(restarted, from: &index)
+        XCTAssertEqual(harness.model.layout?.bootID, "boot", "the earlier boot's frame wasn't still on screen")
+
+        XCTAssertEqual(adapter.focusTopLevel(tile.id), .missingTarget(.topLevel(tile.id)))
+        XCTAssertEqual(adapter.focusPane(pane), .missingTarget(.pane(pane)))
+        try await Task.sleep(for: .milliseconds(150))
+        let written = await restarted.writtenCount
+        for write in try await harness.writes(restarted, from: index, count: written - index) {
+            XCTAssertFalse(isCommand(write), "a pick from the earlier boot went: \(write)")
+        }
+    }
+
+    /// New Workspace under a session not on screen shows the session and makes the workspace as part of the
+    /// show, as a place picked there goes: the show, then `workspace.create` from the workspace this phone
+    /// has there, and the show ends on the new workspace's pane.
+    func testANewWorkspaceForASessionNotOnScreenGoesWithItsShow() async throws {
+        let harness = await makeHarness()
+        let bridge = try await hiddenWorkspaces(harness)
+
+        XCTAssertTrue(harness.model.create(.workspace(source: "w1"), bootID: "boot"))
+        harness.model.setSelected(true)
+        var index = 0
+        let show = try await harness.nextSurfaceSet(bridge, from: &index)
+        XCTAssertTrue(show.active)
+        let created = try await nextWrite(bridge, from: &index, command)
+        XCTAssertEqual(created.method, "workspace.create")
+        XCTAssertEqual(created.params, ["source_workspace_id": "w1", "focus": "true"])
+
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        await bridge.serve(HerdrConnectionTests.reply(
+            id: created.id,
+            json: #"{"type":"workspace_created","workspace":{"workspace_id":"w3"},"tab":{"tab_id":"t5"},"root_pane":{"pane_id":"w3:p8"}}"#
+        ))
+        await bridge.serve(HerdrServerScript.snapshot(
+            revision: 2,
+            workspaces: [
+                .init(id: "w1", label: "alpha", tabs: [("t1", ["w1:p1", "w1:p2"]), ("t2", ["w1:p3", "w1:p4"])]),
+                .init(id: "w2", label: "beta", tabs: [("t3", ["w2:p5"]), ("t4", ["w2:p6", "w2:p7"])], activeTab: "t4"),
+                .init(id: "w3", label: "gamma", tabs: [("t5", ["w3:p8"])]),
+            ],
+            focusedTab: "t5",
+            focusedPane: "w3:p8"
+        ))
+        await bridge.serve(try harness.shownSurface(
+            projection: 2,
+            revision: 1,
+            lines: ["new"],
+            panes: [.init(id: "w3:p8", x: 0, width: 7, height: 1, focused: true)]
+        ))
+        try await harness.waitUntil("the session wasn't shown on the new workspace") {
+            harness.model.stateTraceLabel == "shown" && harness.model.layout?.tab?.tabID == "t5"
+        }
+    }
+
     /// Workspace `w1` "alpha" has tab `t1` (`w1:p1`, `w1:p2`) and `t2` (`w1:p3`, `w1:p4`); workspace `w2`
     /// "beta" has tab `t3` (`w2:p5`) and `t4` (`w2:p6`, `w2:p7`), where this phone has `t4`.
     private static func twoWorkspaces(
         revision: UInt64,
+        boot: String = "boot",
         focusedTab: String = "t1",
         focusedPane: String = "w1:p1",
         zoomedTabs: Set<String> = []
     ) -> [UInt8] {
         HerdrServerScript.snapshot(
             revision: revision,
+            boot: boot,
             workspaces: [
                 .init(id: "w1", label: "alpha", tabs: [("t1", ["w1:p1", "w1:p2"]), ("t2", ["w1:p3", "w1:p4"])]),
                 .init(id: "w2", label: "beta", tabs: [("t3", ["w2:p5"]), ("t4", ["w2:p6", "w2:p7"])], activeTab: "t4"),

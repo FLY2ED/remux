@@ -420,17 +420,21 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func focusPane(_ id: UUID) -> GhosttyTerminalActionOutcome {
-        guard let paneID = paneID(for: id), model?.focusPane(paneID) == true else {
-            return .missingTarget(.pane(id))
-        }
+        guard let paneID = paneID(for: id), go(to: .place(.pane(paneID))) else { return .missingTarget(.pane(id)) }
         return .queued
     }
 
     func focusTopLevel(_ id: UUID) -> GhosttyTerminalActionOutcome {
-        guard let tabID = tabIDsBySurfaceID[id], model?.focusTab(tabID) == true else {
-            return .missingTarget(.topLevel(id))
-        }
+        guard let tabID = tabIDsBySurfaceID[id], go(to: .place(.tab(tabID))) else { return .missingTarget(.topLevel(id)) }
         return .queued
+    }
+
+    /// The screen's tiles, swipes and sheet buttons pick from what it draws: the layout on screen, and the
+    /// session's outline only while it has the layout's server boot (`workspaceOnScreen`). So each pick goes
+    /// only on that boot, through the model's one way to go somewhere.
+    private func go(to destination: HerdrDestination) -> Bool {
+        guard let model, let layout = model.layout else { return false }
+        return model.go(to: destination, bootID: layout.bootID)
     }
 
     func focusAdjacentTopLevel(
@@ -445,16 +449,16 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
 
     /// New Tab goes in the workspace the Tabs sheet shows.
     func createTopLevel(inGroup group: UUID?) -> GhosttyTerminalActionOutcome {
-        guard let workspaceID = workspaceID(shownFor: group),
-              model?.create(.tab(workspaceID: workspaceID)) == true
-        else { return .missingTarget(.host) }
+        guard let workspaceID = workspaceID(shownFor: group), go(to: .creation(.tab(workspaceID: workspaceID))) else {
+            return .missingTarget(.host)
+        }
         return .queued
     }
 
     /// New Workspace starts from the workspace the Tabs sheet shows, as Herdr's client starts one from the
     /// workspace it has picked.
     func createTopLevelGroup(from group: UUID?) -> GhosttyTerminalActionOutcome {
-        model?.create(.workspace(source: workspaceID(shownFor: group))) == true ? .queued : .missingTarget(.host)
+        go(to: .creation(.workspace(source: workspaceID(shownFor: group)))) ? .queued : .missingTarget(.host)
     }
 
     private func workspaceID(shownFor group: UUID?) -> String? {
@@ -476,8 +480,8 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         case GHOSTTY_SPLIT_DIRECTION_DOWN: herdrDirection = .down
         default: return .missingTarget(.focusedPane)
         }
-        guard let model, let paneID = model.focusedPaneID,
-              model.create(.split(pane: paneID, workspaceID: workspaceOnScreen?.id, direction: herdrDirection))
+        guard let paneID = focusedPaneID,
+              go(to: .creation(.split(pane: paneID, workspaceID: workspaceOnScreen?.id, direction: herdrDirection)))
         else { return .missingTarget(.focusedPane) }
         return .queued
     }

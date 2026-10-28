@@ -410,7 +410,7 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
     }
 
     /// A Herdr session that has listed its workspaces opens and closes over them, with New Workspace
-    /// under the session on screen; picking one goes there.
+    /// under each; picking one goes there.
     @ViewBuilder
     private func activeSessionRows(_ session: ActiveSessionSwitcherItem, outline: HerdrSessionOutline?) -> some View {
         let workspaces = outline?.workspaces ?? []
@@ -425,9 +425,7 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
                     onSelectHerdrWorkspace(workspace.id, outline.bootID, session.id)
                 }
             }
-            if session.isSelected {
-                newHerdrWorkspaceRow(session)
-            }
+            newHerdrWorkspaceRow(session)
         }
     }
 

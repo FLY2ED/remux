@@ -61,19 +61,17 @@ final class HerdrScreenModel {
 
     /// What the model asks of the connection and the engine, in the order it asks.
     private enum Operation: Sendable {
-        /// Shows the session, and takes it to `place` right after, when given (`reconcileVisibility`).
-        case show(HerdrSurfaceGeometry, place: HerdrPlace?)
+        /// Shows the session, and takes it to `destination` right after, when given (`reconcileVisibility`).
+        case show(HerdrSurfaceGeometry, to: HerdrDestination?)
         case hide
         case resize(HerdrSurfaceGeometry)
         case theme([HerdrHostThemeUpdate])
         case appActive(Bool)
         /// `delivered`, when given, learns whether Herdr has the input.
         case input(paneID: String, events: [HerdrInputEvent], delivered: CheckedContinuation<Bool, Never>?)
-        /// Remux's move to a place (`move(_:to:)`); `fromAnotherTab` when another tab was on screen as it
-        /// was asked for.
-        case move(HerdrPlace, fromAnotherTab: Bool)
-        /// A new tab, workspace or split pane, which takes the session there (`create(_:)`).
-        case create(HerdrCreation)
+        /// Remux's move to a place or creation (`move(_:to:)`); `fromAnotherTab` when another tab was on
+        /// screen as it was asked for.
+        case move(HerdrDestination, fromAnotherTab: Bool)
         /// The zoom button's zoom of the focused pane's tab.
         case zoom(String, zoomed: Bool)
         /// The pane sheet's question for a zoomed tab's layout, through a zoom of `paneID` that changes
@@ -292,8 +290,8 @@ final class HerdrScreenModel {
     private var presentedFrame: (connection: UInt64, bootID: String, projectionRevision: UInt64, paneIDs: Set<String>)?
     /// The session's agents as this phone shows them.
     let agents = HerdrAgentPresentation()
-    /// A place to go to once the session is shown, and the server boot its id belongs to.
-    private var pendingReveal: (place: HerdrPlace, bootID: String?)?
+    /// Where to go once the session is shown, and the server boot its ids belong to.
+    private var pendingReveal: (destination: HerdrDestination, bootID: String?)?
     /// The pane keys go to and the screen highlights: the newest snapshot's focused pane, as in
     /// Herdr's client. A pane can be focused before its first frame arrives.
     private(set) var focusedPaneID: String?
@@ -375,32 +373,56 @@ final class HerdrScreenModel {
     func setSelected(_ selected: Bool) {
         guard !stopped, selected != isSelected else { return }
         isSelected = selected
-        // A place asked for applies to the show it was asked for.
+        // Where the session was asked to go applies to the show it was asked for.
         if !selected { pendingReveal = nil }
         reconcilePresentationActivity()
         reconcileVisibility()
     }
 
-    /// Goes to `place`, a pick from a list of the session's places, as Herdr's client goes to a
-    /// notification's pane or a workspace on its machine: on the session on screen it is a move there
-    /// (`move(_:to:)`); a session not on screen goes there right after its show, as part of it. It goes
-    /// only on the server boot the place's id came from, while the place is still there.
-    func reveal(_ place: HerdrPlace, bootID: String?) {
-        guard !stopped else { return }
-        pendingReveal = (place, bootID)
-        guard let attempt, isCurrent(attempt), attempt.isOpen, attempt.requestedShown,
-              let place = takePendingReveal()
-        else { return }
-        move(attempt, to: place)
+    /// Goes to `place`, a pick from what the screen or a list shows of the session (`go(to:bootID:)`).
+    @discardableResult
+    func reveal(_ place: HerdrPlace, bootID: String?) -> Bool {
+        go(to: .place(place), bootID: bootID)
     }
 
-    /// The place asked for, once a snapshot is in, if it is still there on the server boot its id came
+    /// New Tab, New Workspace or a split of a pane, with the command Herdr's client sends, focused, which
+    /// goes to the pane Herdr makes (`go(to:bootID:)`). Remux's zoom comes off a tab the session leaves for
+    /// a new one. Herdr's split unzooms the tab it splits (`workspace/tab.rs`), so the setting zooms the
+    /// new pane, as tmux keeps a window zoomed through a split; a tab the user unzoomed stays unzoomed.
+    @discardableResult
+    func create(_ creation: HerdrCreation, bootID: String?) -> Bool {
+        go(to: .creation(creation), bootID: bootID)
+    }
+
+    /// A pane of the tab on screen, as a scroll over it picks it: a pick from the layout drawn.
+    func focusPane(_ paneID: String) -> Bool {
+        reveal(.pane(paneID), bootID: layout?.bootID)
+    }
+
+    /// The one way the session goes somewhere, as Herdr's client goes to a notification's pane or a
+    /// workspace on its machine: on the session on screen it is a move there (`move(_:to:)`); a session not
+    /// on screen goes there right after its show, as part of it. It goes only on the server boot its ids
+    /// came from, while what it names is still there. Returns false when it won't go: the model has stopped,
+    /// or the session on screen has another boot or no longer has what it names.
+    @discardableResult
+    func go(to destination: HerdrDestination, bootID: String?) -> Bool {
+        guard !stopped else { return false }
+        pendingReveal = (destination, bootID)
+        guard let attempt, isCurrent(attempt), attempt.isOpen, attempt.requestedShown else { return true }
+        guard let destination = takePendingReveal() else { return false }
+        move(attempt, to: destination)
+        return true
+    }
+
+    /// Where to go, once a snapshot is in, if what it names is still there on the server boot its ids came
     /// from.
-    private func takePendingReveal() -> HerdrPlace? {
+    private func takePendingReveal() -> HerdrDestination? {
         guard let reveal = pendingReveal, let snapshot else { return nil }
         pendingReveal = nil
-        guard reveal.bootID.map({ $0 == snapshot.bootID }) ?? true, snapshot.contains(reveal.place) else { return nil }
-        return reveal.place
+        guard reveal.bootID.map({ $0 == snapshot.bootID }) ?? true,
+              reveal.destination.origin.map(snapshot.contains) ?? true
+        else { return nil }
+        return reveal.destination
     }
 
     /// The background hides the session; the app's other phases leave it on screen.
@@ -726,46 +748,21 @@ final class HerdrScreenModel {
         attempt.ask(.input(paneID: paneID, events: events, delivered: delivered))
     }
 
-    /// A tap on a pane of the tab on screen, or a scroll over one, takes the session there with Remux's own
-    /// move (`move(_:to:)`), after the operations asked before it. Returns false when the session isn't on
-    /// screen.
-    func focusPane(_ paneID: String) -> Bool {
-        go(to: .pane(paneID))
-    }
-
-    /// A tab tile, or a swipe to the next tab, the same way as `focusPane`.
-    func focusTab(_ tabID: String) -> Bool {
-        go(to: .tab(tabID))
-    }
-
-    private func go(to place: HerdrPlace) -> Bool {
-        guard let attempt, isCurrent(attempt), attempt.requestedShown else { return false }
-        move(attempt, to: place)
-        return true
-    }
-
-    /// Remux's move to `place`, the one way the session goes to a pane, tab or workspace: a view request
-    /// the engine starts when it goes (`.move`); the newest wins, and as in Herdr's client, a move while a
-    /// show is in progress takes that show over. It goes with the command Herdr's client sends for the
-    /// place. Herdr's zoom is a flag on a tab, which shows its focused pane, so a move within the tab on
-    /// screen is a `pane.focus`, as Herdr's client sends on a click. A move to another tab changes the tab:
-    /// Remux's zoom comes off the tab left while it is still on screen, since an unzoom focuses its target;
-    /// the setting zooms the tab reached; and a pane's `pane.focus` marks the tab's agents seen. The engine
-    /// holds the frames meanwhile, so only the tab reached shows, as it ends up. A tab another client moves
-    /// the session to stays as it is: unzooming a tab off screen would focus it and take the session back.
-    private func move(_ attempt: Attempt, to place: HerdrPlace) {
-        attempt.ask(.move(place, fromAnotherTab: tab(reachedBy: place).map { $0 != onScreenTab } == true))
-    }
-
-    /// New Tab, New Workspace or a split of a pane, with the command Herdr's client sends, focused: a view
-    /// request like a move, which takes the session to the pane Herdr makes. Remux's zoom comes off a tab
-    /// the session leaves for a new one. Herdr's split unzooms the tab it splits (`workspace/tab.rs`), so
-    /// the setting zooms the new pane, as tmux keeps a window zoomed through a split. Returns false when the
-    /// session isn't on screen.
-    func create(_ creation: HerdrCreation) -> Bool {
-        guard let attempt, isCurrent(attempt), attempt.requestedShown else { return false }
-        attempt.ask(.create(creation))
-        return true
+    /// Remux's move to `destination`: a view request the engine starts when it goes (`.move`); the newest
+    /// wins, and as in Herdr's client, a move while a show is in progress takes that show over. It goes
+    /// with the command Herdr's client sends for the place or creation. Herdr's zoom is a flag on a tab,
+    /// which shows its focused pane, so a move within the tab on screen is a `pane.focus`, as Herdr's
+    /// client sends on a click. A move to another tab changes the tab: Remux's zoom comes off the tab left
+    /// while it is still on screen, since an unzoom focuses its target; the setting zooms the tab reached;
+    /// and a pane's `pane.focus` marks the tab's agents seen. The engine holds the frames meanwhile, so only
+    /// the tab reached shows, as it ends up. A tab another client moves the session to stays as it is:
+    /// unzooming a tab off screen would focus it and take the session back.
+    private func move(_ attempt: Attempt, to destination: HerdrDestination) {
+        var fromAnotherTab = false
+        if case .place(let place) = destination {
+            fromAnotherTab = tab(reachedBy: place).map { $0 != onScreenTab } == true
+        }
+        attempt.ask(.move(destination, fromAnotherTab: fromAnotherTab))
     }
 
     /// Which tabs the setting zooms as the session comes to them.
@@ -1174,9 +1171,9 @@ final class HerdrScreenModel {
     ) async {
         let attemptID = attempt.id
         switch operation {
-        case .show(let geometry, let place):
+        case .show(let geometry, let destination):
             // The engine sends the show and its steps; its frames are held from here on.
-            await feed.start(.shown(geometry, place: place, zoom: zoomPolicy), within: connectionTiming.activation)
+            await feed.start(.shown(geometry, to: destination, zoom: zoomPolicy), within: connectionTiming.activation)
         case .hide:
             // Frames from here on show what leaving does, so the engine holds them before anything goes out.
             await feed.start(.hidden, within: connectionTiming.activation)
@@ -1207,16 +1204,10 @@ final class HerdrScreenModel {
             // Herdr acknowledges no input, but answers a ping only after reading everything sent before
             // it. Later operations don't wait for the answer.
             Task { delivered.resume(returning: await connection.confirmAlive()) }
-        case .move(let place, let fromAnotherTab):
+        case .move(let destination, let fromAnotherTab):
             guard let geometry else { return }
             await feed.start(
-                .moved(place, fromAnotherTab: fromAnotherTab, columns: geometry.cols, rows: geometry.rows, zoom: zoomPolicy),
-                within: connectionTiming.activation
-            )
-        case .create(let creation):
-            guard let geometry else { return }
-            await feed.start(
-                .created(creation, columns: geometry.cols, rows: geometry.rows, zoom: zoomPolicy),
+                .moved(destination, fromAnotherTab: fromAnotherTab, columns: geometry.cols, rows: geometry.rows, zoom: zoomPolicy),
                 within: connectionTiming.activation
             )
         case .zoom(let paneID, let zoomed):
@@ -1463,7 +1454,7 @@ final class HerdrScreenModel {
 
     /// Shows the session while the root wants it on screen and hides it otherwise. Herdr takes the
     /// newest of a show and a hide, so each change is sent at once, even while the last is unanswered.
-    /// A place asked for goes right after the show, as part of it.
+    /// A place or creation asked for goes right after the show, as part of it.
     private func reconcileVisibility() {
         guard let attempt, isCurrent(attempt), attempt.isOpen, attempt.hasSnapshot, let geometry
         else { return }
@@ -1471,7 +1462,7 @@ final class HerdrScreenModel {
         guard wanted != attempt.wantsShown else { return }
         attempt.wantsShown = wanted
         attempt.visibilityPending = true
-        attempt.ask(wanted ? .show(geometry, place: takePendingReveal()) : .hide)
+        attempt.ask(wanted ? .show(geometry, to: takePendingReveal()) : .hide)
         // Input is offered only once a show completes, and closes as soon as a hide is asked.
         didChange()
     }
