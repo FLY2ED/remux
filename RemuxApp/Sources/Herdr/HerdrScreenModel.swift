@@ -302,10 +302,12 @@ final class HerdrScreenModel {
     private var terminals: [String: HerdrRetainedTerminal] = [:]
     private var surfaces: [String: HerdrPaneSurface] = [:]
     private var paneScrolls: [String: HerdrPaneScroll] = [:]
-    /// Where the current scroll gesture over each pane is, in the pane's points, and the travel not
-    /// yet a whole wheel step.
-    private var scrollPointers: [String: CGPoint] = [:]
+    /// Where the pointer is over each pane, in the pane's points: a tap's place or a scroll gesture's.
+    private var pointers: [String: CGPoint] = [:]
+    /// The scroll travel over each pane not yet a whole wheel step.
     private var wheelRemainders: [String: Double] = [:]
+    /// The mouse button held down in a pane, from its press to its release.
+    private var mouseGesture: MouseGesture?
     private var presentationFailures: [String: TerminalDisconnectReason] = [:]
     private var notices = HerdrNoticePolicy(visibleFor: GhosttyTerminalNotice.failureDuration)
     private var creatingTerminals: Set<ObjectIdentifier> = []
@@ -876,12 +878,6 @@ final class HerdrScreenModel {
     /// or takes the wheel as arrow keys, gets one report or key per step instead.
     static let wheelLines: UInt16 = 3
 
-    /// Where a scroll gesture over the pane is; its wheel steps are reported at that cell, as Herdr's
-    /// client reports the pointer's.
-    func setScrollPointer(_ point: CGPoint, inPane paneID: String) {
-        scrollPointers[paneID] = point
-    }
-
     /// A scroll gesture's travel over a pane becomes Herdr wheel steps the way Ghostty turns travel into
     /// lines for tmux: one step per cell height, the rest kept for the next. Herdr decides what a step
     /// does: it scrolls the pane's history, or goes to the program as a wheel report or an arrow key. As
@@ -899,7 +895,7 @@ final class HerdrScreenModel {
             if momentum == .ended { wheelRemainders[paneID] = nil }
         }
         guard let target = inputTarget(forPane: paneID), let measurement,
-              let area = layout?.panes.first(where: { $0.paneID == paneID })?.innerRect
+              let cell = paneCell(at: pointers[paneID] ?? .zero, inPane: paneID)
         else { return false }
         if momentum == .began, paneID != focusedPaneID { _ = focusPane(paneID) }
 
@@ -909,16 +905,10 @@ final class HerdrScreenModel {
         wheelRemainders[paneID] = travel - steps * cellHeight
         guard steps != 0 else { return true }
 
-        let scale = measurement.cellMetrics.contentScale
-        let point = scrollPointers[paneID] ?? .zero
-        func cell(_ points: CGFloat, size: UInt32, count: UInt16) -> UInt16 {
-            let index = Int((Double(points) * scale / Double(max(size, 1))).rounded(.down))
-            return UInt16(min(max(index, 0), Int(max(count, 1)) - 1))
-        }
         let wheel = HerdrMouseEvent(
             kind: steps > 0 ? .scrollUp : .scrollDown,
-            column: cell(point.x, size: measurement.cellMetrics.pixelWidth, count: area.width),
-            row: cell(point.y, size: measurement.cellMetrics.pixelHeight, count: area.height),
+            column: cell.column,
+            row: cell.row,
             lines: Self.wheelLines
         )
         let events = Array(repeating: HerdrInputEvent.mouse(wheel), count: Int(steps.magnitude))
@@ -930,6 +920,106 @@ final class HerdrScreenModel {
               let managed = surfaces[paneID]?.renderer.managedSurface
         else { return }
         managed.setRemoteScroll(scroll.scrollState, route: scroll.route)
+    }
+
+    // MARK: - Mouse
+
+    /// A pane's cell, relative to its text area.
+    private struct PaneCell: Equatable {
+        let column: UInt16
+        let row: UInt16
+    }
+
+    /// A mouse button held down in a pane, and the cell last reported with it.
+    private struct MouseGesture {
+        let paneID: String
+        let button: HerdrMouseEvent.Button
+        var cell: PaneCell
+    }
+
+    /// Whether the pane's program reads the mouse, as Herdr's surface says.
+    func reportsMouse(inPane paneID: String) -> Bool {
+        paneScrolls[paneID]?.mouseReporting == true
+    }
+
+    /// The pointer moved over a pane. As Herdr's client passes on the host terminal's motion
+    /// (`client/shell/mouse.rs`), a program that reads the mouse gets a move each time the pointer reaches
+    /// another cell, which Herdr reports only to a program asking for every motion, and while a button is
+    /// held in the pane, a drag. The wheel's steps are reported at this cell too.
+    func movePointer(to point: CGPoint, inPane paneID: String, mods: GhosttySurfaceKeyEvent.Mods) {
+        let previous = pointers[paneID].flatMap { paneCell(at: $0, inPane: paneID) }
+        pointers[paneID] = point
+        guard let target = inputTarget(forPane: paneID), let cell = paneCell(at: point, inPane: paneID) else { return }
+        let kind: HerdrMouseEvent.Kind
+        if let gesture = mouseGesture {
+            guard gesture.paneID == paneID, cell != gesture.cell else { return }
+            mouseGesture?.cell = cell
+            kind = .drag(gesture.button)
+        } else {
+            guard reportsMouse(inPane: paneID), cell != previous else { return }
+            kind = .moved
+        }
+        _ = send([mouseEvent(kind, at: cell, mods: mods)], to: target)
+    }
+
+    /// A button pressed or released at the pointer, as Herdr's client sends one to a pane: a press goes
+    /// only to a program that reads the mouse, and a right press only to a pane set to take right-clicks
+    /// (`pane.input.set`) with no modifier held, since Herdr's own menu takes them otherwise. Until its
+    /// release, which goes to the same pane, the press takes the pointer's moves and no other press goes.
+    /// The tap that makes the press focuses the pane, as a tap does on any pane. Returns false when the
+    /// event doesn't go.
+    func sendMouseButton(_ event: GhosttySurfaceMouseButtonEvent, inPane paneID: String) -> Bool {
+        guard let button = HerdrInputTranslator.mouseButton(event.button) else { return false }
+        switch event.state {
+        case .press:
+            guard mouseGesture == nil, let target = inputTarget(forPane: paneID), reportsMouse(inPane: paneID),
+                  button != .right || takesRightClick(inPane: paneID, mods: event.mods),
+                  let cell = pointers[paneID].flatMap({ paneCell(at: $0, inPane: paneID) }),
+                  send([mouseEvent(.down(button), at: cell, mods: event.mods)], to: target) == .accepted
+            else { return false }
+            mouseGesture = MouseGesture(paneID: paneID, button: button, cell: cell)
+            return true
+        case .release:
+            guard let gesture = mouseGesture, gesture.button == button else { return false }
+            mouseGesture = nil
+            guard let target = inputTarget(forPane: gesture.paneID) else { return false }
+            let cell = pointers[gesture.paneID].flatMap { paneCell(at: $0, inPane: gesture.paneID) } ?? gesture.cell
+            return send([mouseEvent(.up(button), at: cell, mods: event.mods)], to: target) == .accepted
+        }
+    }
+
+    private func takesRightClick(inPane paneID: String, mods: GhosttySurfaceKeyEvent.Mods) -> Bool {
+        HerdrInputTranslator.modifiers(for: mods).isEmpty
+            && snapshot?.panes.first { $0.paneID == paneID }?.rightClickPassthrough == true
+    }
+
+    private func mouseEvent(
+        _ kind: HerdrMouseEvent.Kind,
+        at cell: PaneCell,
+        mods: GhosttySurfaceKeyEvent.Mods
+    ) -> HerdrInputEvent {
+        .mouse(HerdrMouseEvent(
+            kind: kind,
+            column: cell.column,
+            row: cell.row,
+            modifiers: HerdrInputTranslator.modifiers(for: mods)
+        ))
+    }
+
+    /// The cell at `point`, in the pane's points, within the pane's drawn area. Herdr reports a cell to a
+    /// program in SGR pixel mode as the cell's centre pixel.
+    private func paneCell(at point: CGPoint, inPane paneID: String) -> PaneCell? {
+        guard let measurement, let area = layout?.panes.first(where: { $0.paneID == paneID })?.innerRect
+        else { return nil }
+        let scale = measurement.cellMetrics.contentScale
+        func index(_ points: CGFloat, size: UInt32, count: UInt16) -> UInt16 {
+            let index = Int((Double(points) * scale / Double(max(size, 1))).rounded(.down))
+            return UInt16(min(max(index, 0), Int(max(count, 1)) - 1))
+        }
+        return PaneCell(
+            column: index(point.x, size: measurement.cellMetrics.pixelWidth, count: area.width),
+            row: index(point.y, size: measurement.cellMetrics.pixelHeight, count: area.height)
+        )
     }
 
     // MARK: - Selection
@@ -1552,8 +1642,9 @@ final class HerdrScreenModel {
             let shown = Set(layout.panes.lazy.filter(\.hasTextArea).map(\.paneID))
             terminals = terminals.filter { shown.contains($0.key) }
             presentationFailures = presentationFailures.filter { shown.contains($0.key) }
-            scrollPointers = scrollPointers.filter { shown.contains($0.key) }
+            pointers = pointers.filter { shown.contains($0.key) }
             wheelRemainders = wheelRemainders.filter { shown.contains($0.key) }
+            if let gesture = mouseGesture, !shown.contains(gesture.paneID) { mouseGesture = nil }
             for paneID in Array(surfaces.keys) where !shown.contains(paneID) {
                 closeSurface(paneID)
             }

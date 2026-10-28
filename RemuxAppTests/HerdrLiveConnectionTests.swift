@@ -677,6 +677,83 @@ final class HerdrLiveConnectionTests: XCTestCase {
         XCTAssertEqual(reads.flatMap(\.bytes), expected, "Herdr \(version)")
     }
 
+    // MARK: - Mouse
+
+    /// As the screen sends a tap and a drag, a program that reads the mouse gets them at the cells under the
+    /// finger, relative to its pane: the pointer's move there, which it asked for with every motion, the
+    /// press, the held button's drag and the release.
+    @MainActor
+    func testATapAndADragReachAProgramThatReadsTheMouseOnHerdr093() async throws {
+        try await checkMouseReachesTheProgram(version: "0.9.3")
+    }
+
+    @MainActor
+    func testATapAndADragReachAProgramThatReadsTheMouseOnHerdr095() async throws {
+        try await checkMouseReachesTheProgram(version: "0.9.5")
+    }
+
+    /// A right-click reaches the program once Herdr is told to send the pane its right-clicks
+    /// (`herdr pane input --right-click pane`); until then it's Herdr's.
+    @MainActor
+    func testARightClickReachesAProgramOnlyInAPaneThatTakesThemOnHerdr095() async throws {
+        let session = try await openShownSession(version: "0.9.5", through: { $0 })
+        let adapter = session.model.terminalScreenAdapter
+        let pane = try XCTUnwrap(adapter.terminalInteractionProjection.selectedActiveLeafID)
+        let paneID = try XCTUnwrap(session.model.focusedPaneID)
+        let log = try await startReadLog(in: session, modes: #"\033[?1000h\033[?1006h"#)
+        try await waitUntil("the pane didn't say its program reads the mouse", timeout: .seconds(15)) {
+            adapter.isMouseCaptured(for: pane)
+        }
+        let rightPress = GhosttySurfaceMouseButtonEvent(state: .press, button: .right)
+        XCTAssertEqual(adapter.sendMousePosition(to: pane, try cellCentre(session, column: 1, row: 0), mods: []), .sent)
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, rightPress), .surfaceRejected)
+
+        let set = try await session.fixture.herdr(
+            ["pane", "input", paneID, "--right-click", "pane"],
+            trace: RemuxTransportStartupTrace(flowID: "herdr-live-mouse")
+        )
+        XCTAssertEqual(set.exitStatus, 0, String(decoding: set.stderr, as: UTF8.self))
+        let deadline = ContinuousClock.now + .seconds(10)
+        while adapter.sendMouseButton(to: pane, rightPress) != .sent {
+            guard ContinuousClock.now < deadline else { throw HerdrLiveError(description: "the pane never took a right-click") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .release, button: .right)), .sent)
+        let expected = Array("\u{1b}[<2;2;1M\u{1b}[<2;2;1m".utf8)
+        let reads = try await log.reads(until: { $0.flatMap(\.bytes).count >= expected.count })
+        XCTAssertEqual(reads.flatMap(\.bytes), expected)
+    }
+
+    @MainActor
+    private func checkMouseReachesTheProgram(version: String) async throws {
+        let session = try await openShownSession(version: version, through: { $0 })
+        let adapter = session.model.terminalScreenAdapter
+        let pane = try XCTUnwrap(adapter.terminalInteractionProjection.selectedActiveLeafID)
+        let log = try await startReadLog(in: session, modes: #"\033[?1003h\033[?1006h"#)
+        try await waitUntil("the pane didn't say its program reads the mouse", timeout: .seconds(15)) {
+            adapter.isMouseCaptured(for: pane)
+        }
+
+        XCTAssertEqual(adapter.sendMousePosition(to: pane, try cellCentre(session, column: 2, row: 1), mods: []), .sent)
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .press, button: .left)), .sent)
+        XCTAssertEqual(adapter.sendMousePosition(to: pane, try cellCentre(session, column: 4, row: 1), mods: []), .sent)
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .release, button: .left)), .sent)
+
+        let expected = Array("\u{1b}[<35;3;2M\u{1b}[<0;3;2M\u{1b}[<32;5;2M\u{1b}[<0;5;2m".utf8)
+        let reads = try await log.reads(until: { $0.flatMap(\.bytes).count >= expected.count })
+        XCTAssertEqual(reads.flatMap(\.bytes), expected, "Herdr \(version)")
+    }
+
+    /// The middle of a cell of the pane, in the pane's points, as a tap there gives it.
+    @MainActor
+    private func cellCentre(_ session: ShownSession, column: Double, row: Double) throws -> CGPoint {
+        let metrics = try XCTUnwrap(session.model.measurement).cellMetrics
+        return CGPoint(
+            x: (column + 0.5) * Double(metrics.pixelWidth) / metrics.contentScale,
+            y: (row + 0.5) * Double(metrics.pixelHeight) / metrics.contentScale
+        )
+    }
+
     // MARK: - Clipboard
 
     /// A program's OSC 52 copy in the session on screen lands on the iPhone clipboard, and the screen says

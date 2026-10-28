@@ -46,6 +46,26 @@ final class GhosttySurfaceMouseEventTests: XCTestCase {
         )
     }
 
+    /// A tap on a pane that isn't focused only focuses it, keyboard aside, unless its program reads the
+    /// mouse: then it is a click there too, as tmux's and Herdr's own clients make it.
+    func testTapGestureOnAnUnfocusedPaneFocusesItAndClicksWhenMouseIsCaptured() {
+        let point = CGPoint(x: 10, y: 20)
+
+        XCTAssertEqual(
+            GhosttySurfaceTapGesture.actions(forLocalPoint: point, mouseCaptured: false, showsKeyboard: false),
+            [.focusPane]
+        )
+        XCTAssertEqual(
+            GhosttySurfaceTapGesture.actions(forLocalPoint: point, mouseCaptured: true, showsKeyboard: false),
+            [
+                .focusPane,
+                .mousePosition(point),
+                .mouseButton(.init(state: .press, button: .left)),
+                .mouseButton(.init(state: .release, button: .left)),
+            ]
+        )
+    }
+
     func testTapGestureActivatesInputAndEmitsMouseClickWhenMouseIsCaptured() {
         let point = CGPoint(x: 10, y: 20)
 

@@ -3891,21 +3891,228 @@ final class HerdrScreenModelTests: XCTestCase {
         }
     }
 
+    // MARK: - Mouse
+
+    /// A tap in a pane whose program reads the mouse is a left click at the tap's cell, after the pointer's
+    /// move there, each reported relative to the pane's text area as Herdr's client reports them. A pane
+    /// whose program doesn't read the mouse takes no button.
+    func testATapInAProgramThatReadsTheMouseIsAClickAtItsCell() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness, mouseReporting: true)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let pane = try paneSurfaceID(harness, "w1:p1")
+
+        XCTAssertTrue(adapter.isMouseCaptured(for: pane))
+        XCTAssertEqual(adapter.sendMousePosition(to: pane, try point(harness, column: 2), mods: []), .sent)
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .press, button: .left)), .sent)
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .release, button: .left)), .sent)
+
+        var sent: [[UInt8]] = []
+        for _ in 0..<3 {
+            sent.append(try await nextWrite(session.bridge, from: &index, paneInput))
+        }
+        XCTAssertEqual(sent, [
+            frame("w1:p1", [mouse(.moved, column: 2)]),
+            frame("w1:p1", [mouse(.down(.left), column: 2)]),
+            frame("w1:p1", [mouse(.up(.left), column: 2)]),
+        ])
+
+        let plain = await makeHarness()
+        let plainSession = try await shownSession(plain)
+        let plainPane = try paneSurfaceID(plain, "w1:p1")
+        let adapterWithoutMouse = plain.model.terminalScreenAdapter
+        XCTAssertFalse(adapterWithoutMouse.isMouseCaptured(for: plainPane))
+        _ = adapterWithoutMouse.sendMousePosition(to: plainPane, try point(plain, column: 2), mods: [])
+        XCTAssertEqual(adapterWithoutMouse.sendMouseButton(to: plainPane, .init(state: .press, button: .left)), .surfaceRejected)
+        try await assertNoPaneInput(plainSession.bridge, from: plainSession.next, "a program that doesn't read the mouse got one")
+    }
+
+    /// As in Herdr's client, a held button takes the pointer's moves in its pane as drags, a cell at a
+    /// time, with the modifiers held, and its release; no other press goes meanwhile, and a button Herdr
+    /// has no code for doesn't go.
+    func testAHeldButtonDragsAndItsReleaseEndsIt() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness, mouseReporting: true)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let pane = try paneSurfaceID(harness, "w1:p1")
+        let other = try paneSurfaceID(harness, "w1:p2")
+
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .press, button: .four)), .surfaceRejected)
+        _ = adapter.sendMousePosition(to: pane, try point(harness, column: 0), mods: [])
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .press, button: .left, mods: [.shift])), .sent)
+        _ = adapter.sendMousePosition(to: pane, try point(harness, column: 1), mods: [.shift])
+        _ = adapter.sendMousePosition(to: pane, try point(harness, column: 1.4), mods: [.shift])
+        _ = adapter.sendMousePosition(to: other, try point(harness, column: 2), mods: [])
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .press, button: .middle)), .surfaceRejected)
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .release, button: .middle)), .surfaceRejected)
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .release, button: .left)), .sent)
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .release, button: .left)), .surfaceRejected)
+
+        var sent: [[UInt8]] = []
+        for _ in 0..<4 {
+            sent.append(try await nextWrite(session.bridge, from: &index, paneInput))
+        }
+        XCTAssertEqual(sent, [
+            frame("w1:p1", [mouse(.moved, column: 0)]),
+            frame("w1:p1", [mouse(.down(.left), column: 0, [.shift])]),
+            frame("w1:p1", [mouse(.drag(.left), column: 1, [.shift])]),
+            frame("w1:p1", [mouse(.up(.left), column: 1)]),
+        ])
+        try await assertNoPaneInput(session.bridge, from: index, "more mouse input was sent")
+    }
+
+    /// A right press goes to the program only in a pane set to take right-clicks, with no modifier held, as
+    /// Herdr's client keeps the others for its menu; a middle press goes to any program that reads the mouse.
+    /// Neither focuses the pane: the tap that makes a press does.
+    func testARightPressGoesOnlyToAPaneThatTakesRightClicks() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness, mouseReporting: true, takingRightClicks: ["w1:p2"])
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let pane = try paneSurfaceID(harness, "w1:p1")
+        let other = try paneSurfaceID(harness, "w1:p2")
+        _ = adapter.sendMousePosition(to: pane, try point(harness, column: 0), mods: [])
+        _ = adapter.sendMousePosition(to: other, try point(harness, column: 0), mods: [])
+
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .press, button: .right)), .surfaceRejected)
+        XCTAssertEqual(adapter.sendMouseButton(to: other, .init(state: .press, button: .right, mods: [.ctrl])), .surfaceRejected)
+        XCTAssertEqual(adapter.sendMouseButton(to: other, .init(state: .press, button: .middle)), .sent)
+        XCTAssertEqual(adapter.sendMouseButton(to: other, .init(state: .release, button: .middle)), .sent)
+        XCTAssertEqual(adapter.sendMouseButton(to: other, .init(state: .press, button: .right)), .sent)
+        XCTAssertEqual(adapter.sendMouseButton(to: other, .init(state: .release, button: .right)), .sent)
+
+        var inputs: [[UInt8]] = []
+        for _ in 0..<6 {
+            inputs.append(try await nextWrite(session.bridge, from: &index, paneInput))
+        }
+        XCTAssertEqual(inputs, [
+            frame("w1:p1", [mouse(.moved, column: 0)]),
+            frame("w1:p2", [mouse(.moved, column: 0)]),
+            frame("w1:p2", [mouse(.down(.middle), column: 0)]),
+            frame("w1:p2", [mouse(.up(.middle), column: 0)]),
+            frame("w1:p2", [mouse(.down(.right), column: 0)]),
+            frame("w1:p2", [mouse(.up(.right), column: 0)]),
+        ])
+        try await assertNoPaneFocus(session.bridge, from: session.next, "a press focused its pane")
+    }
+
+    /// A tap on a pane that isn't focused, whose program reads the mouse, does what the screen's tap does
+    /// there: focuses the pane, once, and clicks at the tap's cell, as both servers' own clients do.
+    func testATapOnAnUnfocusedMousePaneFocusesItOnceAndClicks() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness, mouseReporting: true)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let other = try paneSurfaceID(harness, "w1:p2")
+
+        for action in GhosttySurfaceTapGesture.actions(
+            forLocalPoint: try point(harness, column: 1),
+            mouseCaptured: adapter.isMouseCaptured(for: other),
+            showsKeyboard: false
+        ) {
+            switch action {
+            case .activateInput, .focusPane:
+                XCTAssertEqual(adapter.focusPane(other), .queued)
+            case .mousePosition(let position):
+                XCTAssertEqual(adapter.sendMousePosition(to: other, position, mods: []), .sent)
+            case .mouseButton(let event):
+                XCTAssertEqual(adapter.sendMouseButton(to: other, event), .sent)
+            }
+        }
+
+        var inputs: [[UInt8]] = []
+        var focused: [String] = []
+        while inputs.count < 3 || focused.isEmpty {
+            let write = try ClientWrite.decode(try await session.bridge.written(index))
+            index += 1
+            if let input = paneInput(write) { inputs.append(input) }
+            if let focus = paneFocus(write) { focused.append(focus.paneID) }
+        }
+        XCTAssertEqual(inputs, [
+            frame("w1:p2", [mouse(.moved, column: 1)]),
+            frame("w1:p2", [mouse(.down(.left), column: 1)]),
+            frame("w1:p2", [mouse(.up(.left), column: 1)]),
+        ])
+        XCTAssertEqual(focused, ["w1:p2"])
+        try await assertNoPaneFocus(session.bridge, from: index, "the tap focused its pane twice")
+    }
+
+    /// A hidden session takes no mouse input, as it takes no other input.
+    func testAHiddenSessionTakesNoMouseInput() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness, mouseReporting: true)
+        let adapter = harness.model.terminalScreenAdapter
+        let pane = try paneSurfaceID(harness, "w1:p1")
+
+        harness.model.setSelected(false)
+        _ = adapter.sendMousePosition(to: pane, try point(harness, column: 1), mods: [])
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .press, button: .left)), .surfaceRejected)
+        try await assertNoPaneInput(session.bridge, from: session.next, "a hidden session took mouse input")
+    }
+
+    private func paneSurfaceID(_ harness: HerdrModelHarness, _ paneID: String) throws -> UUID {
+        let panes = harness.model.terminalScreenAdapter.terminalScreenPresentationProjection.viewport.panes
+        let index = try XCTUnwrap(["w1:p1", "w1:p2"].firstIndex(of: paneID))
+        return panes[index].id
+    }
+
+    /// The middle of `column` in row 0, in the pane's points.
+    private func point(_ harness: HerdrModelHarness, column: Double) throws -> CGPoint {
+        let metrics = try XCTUnwrap(harness.model.measurement).cellMetrics
+        return CGPoint(
+            x: (column + 0.5) * Double(metrics.pixelWidth) / metrics.contentScale,
+            y: 0.5 * Double(metrics.pixelHeight) / metrics.contentScale
+        )
+    }
+
+    private func mouse(
+        _ kind: HerdrMouseEvent.Kind,
+        column: UInt16,
+        _ modifiers: HerdrKeyModifiers = []
+    ) -> HerdrInputEvent {
+        .mouse(HerdrMouseEvent(kind: kind, column: column, row: 0, modifiers: modifiers))
+    }
+
+    private func assertNoPaneFocus(_ bridge: FakeBridgeTransport, from index: Int, _ message: String) async throws {
+        try await Task.sleep(for: .milliseconds(100))
+        let written = await bridge.writtenCount
+        for position in index..<written {
+            let write = try ClientWrite.decode(try await bridge.written(position))
+            XCTAssertNil(paneFocus(write), message)
+        }
+    }
+
+    private func assertNoPaneInput(_ bridge: FakeBridgeTransport, from index: Int, _ message: String) async throws {
+        try await Task.sleep(for: .milliseconds(100))
+        let written = await bridge.writtenCount
+        for position in index..<written {
+            let write = try ClientWrite.decode(try await bridge.written(position))
+            XCTAssertNil(paneInput(write), message)
+        }
+    }
+
     /// A session shown with panes `w1:p1` and `w1:p2`, both drawn, its snapshot focusing `focusedPane`;
     /// returns its bridge and the index of the first write after the show. A test that moves the focus
     /// types into the other pane, which takes input only once it has drawn.
     private func shownSession(
         _ harness: HerdrModelHarness,
-        focusedPane: String = "w1:p1"
+        focusedPane: String = "w1:p1",
+        mouseReporting: Bool = false,
+        takingRightClicks: Set<String> = []
     ) async throws -> (bridge: FakeBridgeTransport, next: Int) {
         let bridge = try await harness.bridge()
+        let snapshotPanes = ["w1:p1", "w1:p2"].map {
+            HerdrServerScript.snapshotPane($0, rightClickPassthrough: takingRightClicks.contains($0))
+        }
         await bridge.serve(
             try HerdrServerScript.welcome()
-                + HerdrServerScript.snapshot(revision: 1, focusedPane: focusedPane, panes: Self.tabPanes(["w1:p1", "w1:p2"]))
+                + HerdrServerScript.snapshot(revision: 1, focusedPane: focusedPane, panes: snapshotPanes)
         )
         let panes: [HerdrServerScript.Pane] = [
-            .init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true),
-            .init(id: "w1:p2", x: 4, width: 3, height: 1),
+            .init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true, mouseReporting: mouseReporting),
+            .init(id: "w1:p2", x: 4, width: 3, height: 1, mouseReporting: mouseReporting),
         ]
         await bridge.serve(HerdrServerScript.surface(projection: 1, revision: 1, lines: ["one two"], panes: panes))
         harness.setScreenSize()

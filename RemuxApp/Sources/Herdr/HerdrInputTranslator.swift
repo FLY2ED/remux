@@ -102,7 +102,17 @@ enum HerdrInputTranslator {
         }
     }
 
-    private static func modifiers(for mods: GhosttySurfaceKeyEvent.Mods) -> HerdrKeyModifiers {
+    /// Herdr's client sends the three buttons a terminal reports.
+    static func mouseButton(_ button: GhosttySurfaceMouseButtonEvent.Button) -> HerdrMouseEvent.Button? {
+        switch button {
+        case .left: .left
+        case .right: .right
+        case .middle: .middle
+        default: nil
+        }
+    }
+
+    static func modifiers(for mods: GhosttySurfaceKeyEvent.Mods) -> HerdrKeyModifiers {
         var modifiers: HerdrKeyModifiers = []
         if mods.contains(.shift) { modifiers.insert(.shift) }
         if mods.contains(.ctrl) { modifiers.insert(.control) }

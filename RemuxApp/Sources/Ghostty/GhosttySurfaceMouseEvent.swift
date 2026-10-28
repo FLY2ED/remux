@@ -142,18 +142,26 @@ struct GhosttySurfaceMouseScrollEvent: Equatable {
     }
 }
 
+/// What a tap on a pane does. It focuses the pane, and a tap on the pane that is focused, or the only one
+/// drawn, brings the keyboard up. In a pane whose program reads the mouse it is also a left click there,
+/// as both servers' own clients make a click on any pane: tmux's default `MouseDown1Pane` binding selects
+/// the pane and sends the click, and Herdr's client focuses the pane and sends it.
 struct GhosttySurfaceTapGesture {
     enum Action: Equatable {
+        /// Focuses the pane and brings the keyboard up.
         case activateInput
+        /// Focuses the pane, leaving the keyboard as it is.
+        case focusPane
         case mousePosition(CGPoint)
         case mouseButton(GhosttySurfaceMouseButtonEvent)
     }
 
     static func actions(
         forLocalPoint point: CGPoint,
-        mouseCaptured: Bool
+        mouseCaptured: Bool,
+        showsKeyboard: Bool = true
     ) -> [Action] {
-        var actions: [Action] = [.activateInput]
+        var actions: [Action] = [showsKeyboard ? .activateInput : .focusPane]
         guard mouseCaptured else { return actions }
 
         actions.append(contentsOf: [
