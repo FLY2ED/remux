@@ -1778,8 +1778,9 @@ final class RemuxAppUITests: XCTestCase {
     /// Tabs and workspaces of a live Herdr session whose workspace `remux` has a three-pane tab and a tab
     /// `build`, beside workspaces `api` (a two-pane tab `server` and a tab `tests`), `web`, `notes` and
     /// `infra`, with a session `locked` Herdr can't reach. The Tabs sheet lists the tabs of the workspace
-    /// on screen, and offers the three most recent workspaces as capsules and the rest behind More; picking
-    /// one only changes the tiles, a tile goes there, and the capsules follow recency. The Sessions sheet
+    /// on screen, and offers the three most recent workspaces as capsules and the rest behind More, with New
+    /// Workspace beside New Tab; picking one only changes the tiles, a tile goes there, and the capsules
+    /// follow recency. The Sessions sheet
     /// lists the workspaces under the session with New Workspace, and lists `locked` as unavailable. New
     /// Tab goes to its tab, and the Panes sheet's Split → goes to the pane it makes, zoomed by the setting.
     func testLiveHerdrTabsAndWorkspacesWhenConfigured() throws {
@@ -1813,7 +1814,11 @@ final class RemuxAppUITests: XCTestCase {
         let infra = app.buttons["infra"]
         XCTAssertTrue(infra.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["notes"].exists)
-        XCTAssertTrue(app.buttons["New Workspace"].exists)
+        XCTAssertTrue(app.buttons["terminal.windows.group.new"].exists, "New Workspace isn't in the sheet's bar.")
+        XCTAssertEqual(
+            app.buttons.matching(NSPredicate(format: "label == %@", "New Workspace")).count, 1,
+            "More's menu still offers New Workspace."
+        )
         captureLiveHerdrStep("w3-more-menu", in: configuration)
         infra.tap()
         XCTAssertTrue(waitForLabel(of: more, "Workspace infra, more workspaces", timeout: 5))
