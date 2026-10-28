@@ -36,6 +36,15 @@ struct HerdrCommandLane {
         /// session where it is then. `group` closes a worktree group's root with its linked worktrees.
         case close(HerdrPlace, group: Bool)
 
+        /// Whether the step is a `pane.zoom`: Remux's zoom off a tab, the setting's zoom, or the zoom of a tab
+        /// reached.
+        var isZoom: Bool {
+            switch self {
+            case .leave, .zoom, .zoomReached: true
+            case .focus, .create, .close: false
+            }
+        }
+
         var method: String {
             switch self {
             case .leave, .zoom, .zoomReached: HerdrScreenModel.paneZoomMethod

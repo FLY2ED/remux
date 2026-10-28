@@ -1003,7 +1003,7 @@ actor HerdrTerminalEngine {
     private func finish(_ inFlight: HerdrCommandLane.InFlight, with result: Result<HerdrCommandReply, HerdrCommandError>) {
         switch inFlight.item {
         case .step(let id, let step):
-            if step.method == HerdrScreenModel.paneZoomMethod {
+            if step.isZoom {
                 zoomAnswered(result, seen: inFlight.snapshots, reportsFailure: false)
             }
             var effect = Self.effect(of: step, result)
@@ -1014,13 +1014,10 @@ actor HerdrTerminalEngine {
             switch (step, result) {
             case (.leave, _), (.zoomReached, _):
                 break
-            case (.zoom, .success):
-                if let effect {
-                    request.target = effect.target
-                    request.answer = (effect.sentAfter, effect.answeredAfter)
+            case (.zoom, .success), (.create, .success), (.close, .success):
+                if !step.isZoom {
+                    continuation.yield(.answered(request: id, step: step, failure: nil, connection: connection))
                 }
-            case (.create, .success), (.close, .success):
-                continuation.yield(.answered(request: id, step: step, failure: nil, connection: connection))
                 if let effect {
                     request.target = effect.target
                     request.answer = (effect.sentAfter, effect.answeredAfter)
