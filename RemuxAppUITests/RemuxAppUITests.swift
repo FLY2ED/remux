@@ -1779,8 +1779,8 @@ final class RemuxAppUITests: XCTestCase {
     /// `build`, beside workspaces `api` (a two-pane tab `server` and a tab `tests`), `web`, `notes` and
     /// `infra`, with a session `locked` Herdr can't reach. The Tabs sheet lists the tabs of the workspace
     /// on screen, and offers the three most recent workspaces as capsules and the rest behind More, with New
-    /// Workspace beside New Tab; picking one only changes the tiles, a tile goes there, and the capsules
-    /// follow recency. The Sessions sheet
+    /// Workspace at the end of More's menu; picking one only changes the tiles, a tile goes there, and the
+    /// capsules follow recency. The Sessions sheet
     /// lists the workspaces under the session with New Workspace, and lists `locked` as unavailable. New
     /// Tab goes to its tab, and the Panes sheet's Split → goes to the pane it makes, zoomed by the setting.
     func testLiveHerdrTabsAndWorkspacesWhenConfigured() throws {
@@ -1814,10 +1814,10 @@ final class RemuxAppUITests: XCTestCase {
         let infra = app.buttons["infra"]
         XCTAssertTrue(infra.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["notes"].exists)
-        XCTAssertTrue(app.buttons["terminal.windows.group.new"].exists, "New Workspace isn't in the sheet's bar.")
+        XCTAssertTrue(app.buttons["New Workspace"].exists, "More's menu doesn't offer New Workspace.")
         XCTAssertEqual(
             app.buttons.matching(NSPredicate(format: "label == %@", "New Workspace")).count, 1,
-            "More's menu still offers New Workspace."
+            "New Workspace is offered twice."
         )
         captureLiveHerdrStep("w3-more-menu", in: configuration)
         infra.tap()
@@ -2252,7 +2252,9 @@ final class RemuxAppUITests: XCTestCase {
         )
         XCTAssertEqual(app.buttons["terminal.windows.group.1"].label, "Workspace remux, agent blocked")
         XCTAssertFalse(app.buttons["terminal.windows.group.more"].exists, "One workspace offered More.")
-        XCTAssertTrue(app.buttons["terminal.windows.group.new"].isHittable, "New Workspace isn't offered beside New Tab.")
+        let newWorkspace = app.buttons["terminal.windows.group.new"]
+        XCTAssertTrue(newWorkspace.isHittable, "New Workspace doesn't follow the workspace's capsule.")
+        XCTAssertEqual(newWorkspace.frame.midY, app.buttons["terminal.windows.group.1"].frame.midY, accuracy: 1)
         captureLiveHerdrStep("a2-tabs", in: configuration)
         app.buttons["terminal.windows.close"].tap()
 
@@ -2320,8 +2322,11 @@ final class RemuxAppUITests: XCTestCase {
     /// Herdr's workspaces on a live server, each showing its most urgent agent: the fixture's `remux`, with
     /// agent `claude` working, then `api`, whose agent works and finishes when the test asks (`finish`),
     /// `web`, with none, `notes`, whose agent is idle, and `infra`, whose agent is blocked. Sessions shows
-    /// each workspace's agent on its row, and Tabs on its capsule; the workspaces behind More show theirs in
-    /// its menu, and on More once picked.
+    /// each workspace's agent on its row, and collapses the session to one row that says it's current; Tabs
+    /// shows each workspace's agent on its capsule; the workspaces behind More show theirs in
+    /// its menu, top to bottom in Herdr's order then New Workspace, and on More once picked. Once `notes` and
+    /// `infra` close (`trim`), the three left fit as capsules, so there's no More and New Workspace ends the
+    /// capsules.
     func testLiveHerdrWorkspaceAgentsWhenConfigured() throws {
         let configuration = try launchLiveHerdrApp(requiringSteps: true)
         let banner = app.descendants(matching: .any)["herdr.notification.banner"].firstMatch
@@ -2364,6 +2369,20 @@ final class RemuxAppUITests: XCTestCase {
             "Workspace infra, 1 tab, agent blocked",
         ], "The workspace rows didn't show their agents.")
         captureLiveHerdrStep("w1b-sessions-scrolled", in: configuration)
+        // Collapsed, the session the user is in is marked on its own row; VoiceOver reads it as before.
+        let sessionRow = app.descendants(matching: .any).matching(identifier: "terminal.sessions.active-session").firstMatch
+        let sessionList = app.descendants(matching: .any)["terminal.sessions.list"]
+        for _ in 0..<4 where !sessionRow.isHittable {
+            sessionList.swipeDown()
+        }
+        XCTAssertEqual(sessionRow.value as? String, "Expanded")
+        sessionRow.tap()
+        XCTAssertTrue(waitForValue("Collapsed", of: sessionRow, timeout: 5), "The session didn't collapse.")
+        XCTAssertTrue(workspaceRows.firstMatch.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(sessionRow.label.hasSuffix(", current session"), sessionRow.label)
+        captureLiveHerdrStep("w1c-sessions-collapsed", in: configuration)
+        sessionRow.tap()
+        XCTAssertTrue(waitForValue("Expanded", of: sessionRow, timeout: 5), "The session didn't expand again.")
         app.buttons["terminal.sessions.close"].tap()
         XCTAssertTrue(sessionsSheet.waitForNonExistence(timeout: 5))
 
@@ -2376,7 +2395,7 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertEqual(app.buttons["terminal.windows.group.3"].label, "Workspace web")
         XCTAssertEqual(more.label, "More workspaces")
         XCTAssertTrue(app.buttons["terminal.window.new"].isHittable, "New Tab isn't offered.")
-        XCTAssertTrue(app.buttons["terminal.windows.group.new"].isHittable, "New Workspace isn't offered beside New Tab.")
+        XCTAssertFalse(app.buttons["New Workspace"].exists, "New Workspace is offered outside More's menu.")
         captureLiveHerdrStep("w2-tabs", in: configuration)
 
         more.tap()
@@ -2385,9 +2404,12 @@ final class RemuxAppUITests: XCTestCase {
         let notes = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "notes")).firstMatch
         XCTAssertTrue(notes.exists)
         XCTAssertLessThan(notes.frame.minY, infra.frame.minY, "More didn't list its workspaces top to bottom in Herdr's order.")
+        let menuNewWorkspace = app.buttons["New Workspace"]
+        XCTAssertTrue(menuNewWorkspace.exists, "More's menu doesn't offer New Workspace.")
+        XCTAssertLessThan(infra.frame.minY, menuNewWorkspace.frame.minY, "New Workspace doesn't end More's menu.")
         XCTAssertEqual(
             app.buttons.matching(NSPredicate(format: "label == %@", "New Workspace")).count, 1,
-            "More's menu still offers New Workspace."
+            "New Workspace is offered twice."
         )
         captureLiveHerdrStep("w3-more-menu", in: configuration)
         infra.tap()
@@ -2396,6 +2418,22 @@ final class RemuxAppUITests: XCTestCase {
             "More didn't show the picked workspace's agent."
         )
         captureLiveHerdrStep("w4-more-picked", in: configuration)
+        app.buttons["terminal.windows.close"].tap()
+        XCTAssertTrue(app.buttons["terminal.windows.close"].waitForNonExistence(timeout: 5))
+
+        try requestLiveHerdrStep("trim", in: configuration)
+        openWindowsSheet()
+        XCTAssertTrue(more.waitForNonExistence(timeout: 15), "Three workspaces still offered More.")
+        XCTAssertEqual(
+            (1...3).map { app.buttons["terminal.windows.group.\($0)"].label },
+            ["Workspace remux, agent working", "Workspace api, agent done", "Workspace web"]
+        )
+        let newWorkspace = app.buttons["terminal.windows.group.new"]
+        XCTAssertTrue(newWorkspace.isHittable, "New Workspace doesn't end the capsules.")
+        XCTAssertEqual(newWorkspace.label, "New Workspace")
+        XCTAssertEqual(newWorkspace.frame.midY, app.buttons["terminal.windows.group.3"].frame.midY, accuracy: 1)
+        XCTAssertGreaterThan(newWorkspace.frame.minX, app.buttons["terminal.windows.group.3"].frame.maxX)
+        captureLiveHerdrStep("w5-tabs-three-workspaces", in: configuration)
         app.buttons["terminal.windows.close"].tap()
     }
 
