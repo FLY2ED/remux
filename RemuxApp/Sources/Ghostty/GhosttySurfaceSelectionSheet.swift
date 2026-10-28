@@ -162,8 +162,10 @@ struct GhosttyWindowSelectionSheet: View {
                             paneCount: window.paneCount,
                             isSelected: window.isSelected,
                             agentStatus: window.agentStatus,
-                            previewState: window.focusedPreviewPaneID
-                                .flatMap { session.imagesByPaneID[$0] },
+                            previewState: window.focusedPreviewPaneID.flatMap { pane in
+                                // A pane the sheet doesn't capture has no preview coming.
+                                projection.previewLeafIDs.contains(pane) ? session.imagesByPaneID[pane] : .failed
+                            },
                             chromeStyle: chromeStyle,
                             layout: layout
                         )

@@ -1801,6 +1801,7 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertTrue(capsule(1).isSelected)
         XCTAssertEqual([capsule(2).label, capsule(3).label], ["Workspace api", "Workspace web"])
         XCTAssertTrue(tile(2).exists && !tile(3).exists, "The sheet should list remux's two tabs.")
+        XCTAssertEqual(tile(2).value as? String, "Preview unavailable", "A tab not on screen waits for a preview it won't get.")
         captureLiveHerdrStep("w1-tabs-sheet", in: configuration)
 
         capsule(2).tap()
