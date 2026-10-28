@@ -151,7 +151,9 @@ struct HerdrEngineFeed: Sendable {
         await engine.opened(methods: methods, commandTimeout: commandTimeout, connection: connection)
     }
 
-    func start(_ view: HerdrView, within deadline: Duration) async {
+    /// The request that takes the session where `view` asks (`HerdrTerminalEngine.start`).
+    @discardableResult
+    func start(_ view: HerdrView, within deadline: Duration) async -> UInt64? {
         await engine.start(view, within: deadline, connection: connection)
     }
 
@@ -576,12 +578,18 @@ actor HerdrTerminalEngine {
     /// later request. A move with nothing to do starts nothing: one to the place the request in progress
     /// already goes to or, with none, to where Herdr has the session, asked from that tab; or one asked
     /// before any show. A creation is a move to what it makes.
-    fileprivate func start(_ view: HerdrView, within deadline: Duration, connection: UInt64) {
-        guard state == .running, connection == self.connection, let outbox else { return }
+    ///
+    /// Returns the request that takes the session where `view` asks: the one it starts or, for a move to
+    /// where the request in progress already goes, that one; nil when none does, as for a hide or a move to
+    /// where Herdr has the session.
+    @discardableResult
+    fileprivate func start(_ view: HerdrView, within deadline: Duration, connection: UInt64) -> UInt64? {
+        guard state == .running, connection == self.connection, let outbox else { return nil }
         let snapshot = presentation.snapshot
         switch view {
         case .hidden:
             hide(outbox: outbox, snapshot: snapshot)
+            return nil
         case .shown(let geometry, let destination, let policy):
             let id = nextRequest()
             let kept = destination == nil ? snapshot?.focusedPaneID : nil
@@ -619,13 +627,14 @@ actor HerdrTerminalEngine {
                     request: id, reason: HerdrCommandError.noSnapshot.localizedDescription, connection: connection
                 ))
             }
+            return id
         case .moved(let destination, let fromAnotherTab, let columns, let rows, let policy):
-            guard let current = request, current.kind != .hide else { return }
+            guard let current = request, current.kind != .hide else { return nil }
             let taken = current.inProgress ? current : nil
             // At the place already, a move asked from another tab still goes, so the setting zooms the tab
             // it reaches, as when another client took the session there first.
             guard !Self.goes(to: destination, taking: taken, in: snapshot) || (taken == nil && fromAnotherTab) else {
-                return
+                return taken?.id
             }
             let id = nextRequest()
             let zooms = taken?.zooms == true || fromAnotherTab || Self.leaves(to: destination, in: snapshot)
@@ -648,6 +657,7 @@ actor HerdrTerminalEngine {
             )
             lane.replaceSteps(plan(to: destination, zooms: zooms, policy: policy, in: snapshot), for: id)
             begin(id, kind: .move, showing: taken?.show != nil, until: due)
+            return id
         }
     }
 

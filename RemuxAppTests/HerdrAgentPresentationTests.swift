@@ -28,12 +28,12 @@ final class HerdrAgentPresentationTests: XCTestCase {
         return try JSONDecoder().decode(HerdrSnapshot.self, from: Data(json.utf8))
     }
 
-    private func status(after states: [(HerdrAgentStatus, UInt64)]) throws -> HerdrAgentStatus? {
+    private func status(after states: [(HerdrAgentStatus, UInt64)]) throws -> TerminalAgentStatus? {
         let presentation = HerdrAgentPresentation()
         for (index, state) in states.enumerated() {
             presentation.project(try snapshot(state.0, stateChange: state.1, revision: UInt64(index) + 1), completions: nil)
         }
-        return presentation.statuses["agent-pane"]
+        return presentation.state(ofPane: "agent-pane")?.status
     }
 
     func testTheFirstSnapshotIsABaselineWhateverTheServerSays() throws {
@@ -45,7 +45,7 @@ final class HerdrAgentPresentationTests: XCTestCase {
         let presentation = HerdrAgentPresentation()
         presentation.project(try decode(boot: "endpoint-boot", revision: 1, agents: []), completions: nil)
         presentation.project(try snapshot(.idle, stateChange: 1, revision: 2), completions: nil)
-        XCTAssertEqual(presentation.statuses["agent-pane"], .idle)
+        XCTAssertEqual(presentation.state(ofPane: "agent-pane")?.status, .idle)
     }
 
     func testARebindOrAStartupBlockerIsNotFinishedWork() throws {
@@ -61,9 +61,9 @@ final class HerdrAgentPresentationTests: XCTestCase {
             presentation.project(try snapshot(.idle, stateChange: 4, revision: 1), completions: nil)
             let settled = try snapshot(.idle, stateChange: 6, revision: 2)
             presentation.project(settled, completions: completion.map { ["agent-pane": $0] } ?? [:])
-            XCTAssertEqual(presentation.statuses["agent-pane"], completion == nil ? .idle : .done)
+            XCTAssertEqual(presentation.state(ofPane: "agent-pane")?.status, completion == nil ? .idle : .done)
             presentation.project(settled, completions: nil)
-            XCTAssertEqual(presentation.statuses["agent-pane"], completion == nil ? .idle : .done)
+            XCTAssertEqual(presentation.state(ofPane: "agent-pane")?.status, completion == nil ? .idle : .done)
         }
     }
 
@@ -71,21 +71,21 @@ final class HerdrAgentPresentationTests: XCTestCase {
         let presentation = HerdrAgentPresentation()
         presentation.project(try snapshot(.working, stateChange: 1, revision: 1), completions: nil)
         presentation.project(try snapshot(.idle, stateChange: 2, revision: 2), completions: [:])
-        XCTAssertEqual(presentation.statuses["agent-pane"], .idle)
+        XCTAssertEqual(presentation.state(ofPane: "agent-pane")?.status, .idle)
     }
 
     func testARecordForAnotherStateChangeDoesNotCount() throws {
         let presentation = HerdrAgentPresentation()
         presentation.project(try snapshot(.idle, stateChange: 4, revision: 1), completions: nil)
         presentation.project(try snapshot(.idle, stateChange: 6, revision: 2), completions: ["agent-pane": 5])
-        XCTAssertEqual(presentation.statuses["agent-pane"], .idle)
+        XCTAssertEqual(presentation.state(ofPane: "agent-pane")?.status, .idle)
     }
 
     func testANewServerBootStartsFromABaseline() throws {
         let presentation = HerdrAgentPresentation()
         presentation.project(try snapshot(.working, stateChange: 1, revision: 1, boot: "old-boot"), completions: nil)
         presentation.project(try snapshot(.idle, stateChange: 6, revision: 1), completions: ["agent-pane": 6])
-        XCTAssertEqual(presentation.statuses["agent-pane"], .idle)
+        XCTAssertEqual(presentation.state(ofPane: "agent-pane")?.status, .idle)
     }
 
     func testWorkThisPhoneSawFinishIsDone() throws {
@@ -104,9 +104,9 @@ final class HerdrAgentPresentationTests: XCTestCase {
         elsewhere.project(finished, completions: nil)
 
         XCTAssertFalse(viewing.acknowledge(panes: ["other-pane"]))
-        XCTAssertEqual(viewing.statuses["agent-pane"], .done)
+        XCTAssertEqual(viewing.state(ofPane: "agent-pane")?.status, .done)
         XCTAssertTrue(viewing.acknowledge(panes: ["agent-pane"]))
-        XCTAssertEqual(viewing.statuses["agent-pane"], .idle)
-        XCTAssertEqual(elsewhere.statuses["agent-pane"], .done)
+        XCTAssertEqual(viewing.state(ofPane: "agent-pane")?.status, .idle)
+        XCTAssertEqual(elsewhere.state(ofPane: "agent-pane")?.status, .done)
     }
 }

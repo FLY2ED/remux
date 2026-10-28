@@ -98,9 +98,9 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
         return layout.tab?.zoomed == true ? layout.panes : layout.panes.filter(\.hasTextArea)
     }
 
-    /// The model's focused pane, once it is laid out.
+    /// The pane the screen shows as the user's (`HerdrScreenModel.screenPaneID`), once it is laid out.
     private var focusedPaneID: String? {
-        guard let paneID = model?.focusedPaneID, listedPanes.contains(where: { $0.paneID == paneID }) else {
+        guard let paneID = model?.screenPaneID, listedPanes.contains(where: { $0.paneID == paneID }) else {
             return nil
         }
         return paneID
@@ -646,7 +646,8 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     /// The tabs of the workspace `group` names, or of the workspace on screen, with the workspaces most
-    /// recent first. Only the tab on screen has a preview: the frame Remux already has.
+    /// recent first, each with its most urgent agent. Only the tab on screen has a preview: the frame Remux
+    /// already has.
     func windowSelectionSheetRenderProjection(group: UUID?) -> GhosttyWindowSelectionSheetRenderProjection {
         let topology = topologySnapshot
         let onScreen = GhosttyTerminalPresentationProjector.windowSelectionSheetRenderProjection(snapshot: topology)
@@ -672,8 +673,12 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
             previewLeafIDs: previewLeafIDs,
             grouping: GhosttyWindowSelectionSheetRenderProjection.Grouping(
                 noun: .workspace,
-                groups: outline.workspacesByRecency.map {
-                    .init(id: groupID(forWorkspace: $0.id), name: $0.label)
+                groups: outline.workspacesByRecency.map { workspace in
+                    .init(
+                        id: groupID(forWorkspace: workspace.id),
+                        name: workspace.label,
+                        agentStatus: model?.agents.status(ofWorkspace: workspace.id)
+                    )
                 },
                 shownGroupID: groupID(forWorkspace: shown.id),
                 largestWindowCount: outline.workspaces.map(\.tabs.count).max() ?? 0

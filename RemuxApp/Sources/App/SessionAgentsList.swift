@@ -1,15 +1,20 @@
 import SwiftUI
 
 /// Which agents the Agents list shows, by Herdr's names for its agent filters (`client/shell/overlays.rs`).
+/// An agent whose state isn't known yet reads as idle, so Idle includes it.
 enum SessionAgentsFilter: CaseIterable, Hashable {
     case all
     case blocked
+    case working
+    case idle
     case done
 
     var title: String {
         switch self {
         case .all: "All"
         case .blocked: "Blocked"
+        case .working: "Working"
+        case .idle: "Idle"
         case .done: "Done"
         }
     }
@@ -18,6 +23,8 @@ enum SessionAgentsFilter: CaseIterable, Hashable {
         switch self {
         case .all: true
         case .blocked: status == .blocked
+        case .working: status == .working
+        case .idle: status == .idle || status == .unknown
         case .done: status == .done
         }
     }
@@ -83,8 +90,8 @@ struct SessionAgentsProjection: Equatable {
     }
 }
 
-/// The Sessions sheet's Agents list: filters for every agent, those blocked and those done, then each
-/// session's agents under its name. A row opens the agent's pane.
+/// The Sessions sheet's Agents list: filters for every agent and for each state, in a row that scrolls
+/// sideways when it doesn't fit, then each session's agents under its name. A row opens the agent's pane.
 struct SessionAgentsList: View {
     @Environment(\.ghosttyTerminalChromeStyle) private var chromeStyle
 
@@ -125,6 +132,14 @@ struct SessionAgentsList: View {
     }
 
     private var filterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            filterChips
+        }
+        .contentMargins(.horizontal, 16, for: .scrollContent)
+        .padding(.vertical, 8)
+    }
+
+    private var filterChips: some View {
         HStack(spacing: 8) {
             ForEach(SessionAgentsFilter.allCases, id: \.self) { option in
                 let isSelected = option == filter
@@ -151,16 +166,15 @@ struct SessionAgentsList: View {
                 .accessibilityAddTraits(isSelected ? .isSelected : [])
                 .accessibilityIdentifier("terminal.agents.filter.\(option.title.lowercased())")
             }
-            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
     }
 
     private var emptyResults: some View {
         let title = switch filter {
         case .all: "No Agents"
         case .blocked: "No Agents Blocked"
+        case .working: "No Agents Working"
+        case .idle: "No Agents Idle"
         case .done: "No Agents Done"
         }
         return ContentUnavailableView {

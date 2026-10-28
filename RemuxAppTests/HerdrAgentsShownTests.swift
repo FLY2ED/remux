@@ -112,6 +112,28 @@ final class HerdrAgentsShownTests: XCTestCase {
         XCTAssertNil(try HerdrSnapshotJSON.presentation([]).status)
     }
 
+    /// A workspace shows its most urgent agent across its tabs by Herdr's order, as Herdr's client rolls its
+    /// workspaces up; a workspace without agents shows none.
+    func testAWorkspaceShowsItsMostUrgentAgentAcrossItsTabsInHerdrsOrder() throws {
+        for (index, urgent) in Self.herdrOrder.enumerated() {
+            for calmer in Self.herdrOrder[index...] {
+                // Each agent works first, so one that then reads idle finished work this phone saw: done.
+                func snapshot(_ revision: UInt64) throws -> HerdrSnapshot {
+                    let reported = [("w1:p1", "t1", calmer), ("w1:p2", "t2", urgent)].map { pane, tab, status in
+                        let sent: HerdrAgentStatus = status == .done ? (revision == 1 ? .working : .idle) : status
+                        return agent(pane, tab: tab, status: sent, stateChange: revision)
+                    }
+                    return try HerdrSnapshotJSON.twoWorkspaces(revision: revision, agents: reported)
+                }
+                let agents = HerdrAgentPresentation()
+                agents.project(try snapshot(1), completions: nil)
+                agents.project(try snapshot(2), completions: nil)
+                XCTAssertEqual(agents.status(ofWorkspace: "w1"), urgent.terminalStatus, "\(urgent) over \(calmer)")
+                XCTAssertNil(agents.status(ofWorkspace: "w2"))
+            }
+        }
+    }
+
     /// The phone's statuses decide, done until seen on this phone, as Herdr's client rolls its own up: not
     /// the server's roll-up for the tab, nor the server's status for the agent.
     func testThePhonesStatusesDecideNotTheServers() throws {
