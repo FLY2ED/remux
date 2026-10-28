@@ -14,22 +14,30 @@ import Foundation
 struct HerdrCommandLane {
     /// A step of the current view request. The engine decides what each sends, if anything, as it goes.
     enum Step: Equatable, Sendable {
-        /// Remux's zoom off the tab it zoomed, when the session leaves that tab for the pane's: an unzoom
-        /// of the tab's focused pane, which Herdr's unzoom focuses. Decided as it goes, since the answer to
-        /// a request this one replaced can change what Remux zoomed.
-        case leave(to: String)
+        /// Remux's zoom off the tab it zoomed, when the session leaves that tab for the tab `place` is on,
+        /// or for a tab a creation makes (nil): an unzoom of the tab's focused pane, which Herdr's unzoom
+        /// focuses. Decided as it goes, since the answer to a request this one replaced can change what
+        /// Remux zoomed.
+        case leave(to: HerdrPlace?)
         /// The setting's zoom of the pane's tab. `navigates` for a move's, which takes the session to the
         /// pane: Herdr's zoom focuses its target (`actions.rs` `apply_pane_zoom`). A show's zooms the pane
         /// already focused.
         case zoom(String, navigates: Bool)
-        /// The pane focused, which also marks its tab's agents seen (`api/panes.rs` `handle_pane_focus`),
-        /// as Herdr's client goes to a pane.
-        case focus(String)
+        /// The setting's zoom of the tab the step before it took the session to, on the pane Herdr has
+        /// focused there: the snapshot doesn't say which pane a tab or workspace shows before the session
+        /// is there, nor which pane a creation makes. It goes as a show's zoom once decided.
+        case zoomReached(HerdrZoomPolicy)
+        /// The place focused, with Herdr's client's command for it. A pane's also marks its tab's agents
+        /// seen (`api/panes.rs` `handle_pane_focus`), as Herdr's client goes to a pane.
+        case focus(HerdrPlace)
+        /// A new tab, workspace or split pane, which Herdr focuses.
+        case create(HerdrCreation)
 
         var method: String {
             switch self {
-            case .leave, .zoom: HerdrScreenModel.paneZoomMethod
-            case .focus: HerdrScreenModel.paneFocusMethod
+            case .leave, .zoom, .zoomReached: HerdrScreenModel.paneZoomMethod
+            case .focus(let place): place.focusMethod
+            case .create(let creation): creation.method
             }
         }
     }

@@ -29,6 +29,18 @@ final class HerdrSessionDiscoveryTests: XCTestCase {
         ]))
     }
 
+    /// From v0.9.4, a session Herdr can't reach carries its reason, as Herdr's own list marks it
+    /// unavailable (`session.rs`, `cli.rs`).
+    func testASessionHerdrCannotReachCarriesItsReason() throws {
+        let json = #"{"sessions":[{"connection_error":"Permission denied (os error 13)","default":false,"name":"locked","running":false,"session_dir":"/h/.config/herdr/sessions/locked","socket_path":"/h/.config/herdr/sessions/locked/herdr.sock"},{"default":false,"name":"open","running":true,"session_dir":"/h/.config/herdr/sessions/open","socket_path":"/h/.config/herdr/sessions/open/herdr.sock"}]}"#
+        let listing = try HerdrSessionDiscovery.listing(from: result(stdout: "/usr/local/bin/herdr\nherdr 0.9.5\n\(json)\n"))
+
+        XCTAssertEqual(listing.sessions, [
+            DiscoveredSession(name: "locked", isRunning: false, unavailableReason: "Permission denied (os error 13)"),
+            DiscoveredSession(name: "open", isRunning: true),
+        ])
+    }
+
     /// A missing Herdr is an error, not an empty list, so the app can tell it apart from a Herdr without
     /// sessions. Captured on Debian.
     func testMissingHerdrIsNotFound() {

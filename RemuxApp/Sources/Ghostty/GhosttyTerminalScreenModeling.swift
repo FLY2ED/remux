@@ -212,8 +212,13 @@ protocol GhosttyTerminalActionModeling: ObservableObject {
         _ direction: GhosttyRuntimeSelectionDirection
     ) -> GhosttyTerminalActionOutcome
 
+    /// `group`, when the backend groups its top-levels, is the group the window sheet shows.
     @discardableResult
-    func createTopLevel() -> GhosttyTerminalActionOutcome
+    func createTopLevel(inGroup group: UUID?) -> GhosttyTerminalActionOutcome
+
+    /// A new group, as a Herdr workspace, made from `group`, the group the window sheet shows.
+    @discardableResult
+    func createTopLevelGroup(from group: UUID?) -> GhosttyTerminalActionOutcome
 
     @discardableResult
     func splitFocusedPane(
@@ -269,7 +274,8 @@ protocol GhosttyTerminalSelectionModeling: ObservableObject {
     func paneSelectionSheetTopologyProjection(
         topLevelID: UUID?
     ) -> GhosttyPaneSelectionSheetTopologyProjection
-    func windowSelectionSheetRenderProjection() -> GhosttyWindowSelectionSheetRenderProjection
+    /// The windows of `group`, or of the group on screen, for a backend that groups its top-levels.
+    func windowSelectionSheetRenderProjection(group: UUID?) -> GhosttyWindowSelectionSheetRenderProjection
     func paneSelectionSheetRenderProjection(
         topLevelID: UUID
     ) -> GhosttyPaneSelectionSheetRenderProjection

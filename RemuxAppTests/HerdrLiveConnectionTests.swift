@@ -262,6 +262,161 @@ final class HerdrLiveConnectionTests: XCTestCase {
         throw HerdrLiveError(description: "Herdr reported the tab zoomed \(String(describing: last)), not \(zoomed)")
     }
 
+    // MARK: - Tabs and workspaces
+
+    /// New Tab and New Workspace make what Herdr's own client makes and go there, and a tab tile and a
+    /// workspace take the session back, as the frame Herdr then sends shows.
+    @MainActor
+    func testTabsAndWorkspacesAreMadeAndReachedOnHerdr093() async throws {
+        try await checkTabsAndWorkspaces(version: "0.9.3")
+    }
+
+    @MainActor
+    func testTabsAndWorkspacesAreMadeAndReachedOnHerdr095() async throws {
+        try await checkTabsAndWorkspaces(version: "0.9.5")
+    }
+
+    @MainActor
+    private func checkTabsAndWorkspaces(version: String) async throws {
+        let session = try await openShownSession(version: version, through: { $0 })
+        let model = session.model
+        let adapter = model.terminalScreenAdapter
+        let first = try XCTUnwrap(model.places.outline?.workspaces.first)
+        let firstTab = try XCTUnwrap(first.tabs.first).id
+        func onScreen() -> String? { model.layout?.tab?.tabID }
+
+        XCTAssertEqual(adapter.createTopLevel(inGroup: nil), .queued)
+        try await waitUntil("New Tab didn't make a tab", timeout: .seconds(15)) {
+            model.places.outline?.workspace(first.id)?.tabs.count == 2
+        }
+        try await waitUntil("New Tab didn't go to its tab", timeout: .seconds(15)) {
+            onScreen() != firstTab && model.stateTraceLabel == "shown"
+        }
+        XCTAssertEqual(adapter.terminalInteractionProjection.windowCount, 2)
+        XCTAssertEqual(adapter.terminalInteractionProjection.selectedWindowIndex, 1)
+
+        let tile = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).windows.first)
+        XCTAssertEqual(adapter.focusTopLevel(tile.id), .queued)
+        try await waitUntil("the tile didn't go to its tab", timeout: .seconds(15)) { onScreen() == firstTab }
+
+        XCTAssertEqual(adapter.createTopLevelGroup(from: nil), .queued)
+        try await waitUntil("New Workspace didn't make a workspace", timeout: .seconds(15)) {
+            model.places.outline?.workspaces.count == 2
+        }
+        try await waitUntil("New Workspace didn't go to its workspace", timeout: .seconds(15)) {
+            guard let tab = onScreen() else { return false }
+            return model.places.outline?.workspace(containingTab: tab)?.id != first.id
+        }
+        let grouping = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).grouping)
+        XCTAssertEqual(grouping.groups.last?.name, first.label, "the workspace left isn't the most recent")
+
+        model.reveal(.workspace(first.id), bootID: try XCTUnwrap(model.places.outline).bootID)
+        try await waitUntil("the workspace didn't go back to the tab this phone had there", timeout: .seconds(15)) {
+            onScreen() == firstTab
+        }
+    }
+
+    /// With "Zoom multipane windows" on, a move to another tab or workspace takes Remux's zoom along: the
+    /// two-pane tab left is unzoomed, and going back zooms it again, as Herdr itself reports.
+    @MainActor
+    func testRemuxsZoomFollowsTabAndWorkspaceMovesOnHerdr093() async throws {
+        try await checkZoomFollowsMoves(version: "0.9.3")
+    }
+
+    @MainActor
+    func testRemuxsZoomFollowsTabAndWorkspaceMovesOnHerdr095() async throws {
+        try await checkZoomFollowsMoves(version: "0.9.5")
+    }
+
+    @MainActor
+    private func checkZoomFollowsMoves(version: String) async throws {
+        let session = try await openShownSession(version: version, settings: Self.zooming, through: { $0 })
+        let model = session.model
+        let adapter = model.terminalScreenAdapter
+        let panes = try await split(session)
+        session.model.setSelected(false)
+        session.model.setSelected(true)
+        try await zoomState(session, pane: panes.focused, is: true)
+        try await waitUntil("the session wasn't shown again", timeout: .seconds(10)) { model.isInputAvailable }
+        let first = try XCTUnwrap(model.places.outline?.workspaces.first)
+        let firstTab = try XCTUnwrap(first.tabs.first).id
+        func onScreen() -> String? { model.layout?.tab?.tabID }
+
+        XCTAssertEqual(adapter.createTopLevel(inGroup: nil), .queued)
+        try await zoomState(session, pane: panes.focused, is: false)
+        try await waitUntil("New Tab didn't go to its tab", timeout: .seconds(15)) {
+            onScreen() != firstTab && model.stateTraceLabel == "shown"
+        }
+        let tile = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).windows.first)
+        XCTAssertEqual(adapter.focusTopLevel(tile.id), .queued)
+        try await zoomState(session, pane: panes.focused, is: true)
+
+        try await waitUntil("the tab wasn't on screen again", timeout: .seconds(15)) { onScreen() == firstTab }
+        XCTAssertEqual(adapter.createTopLevelGroup(from: nil), .queued)
+        try await zoomState(session, pane: panes.focused, is: false)
+        try await waitUntil("New Workspace didn't go to its workspace", timeout: .seconds(15)) {
+            guard let tab = onScreen() else { return false }
+            return model.places.outline?.workspace(containingTab: tab)?.id != first.id
+        }
+        model.reveal(.workspace(first.id), bootID: try XCTUnwrap(model.places.outline).bootID)
+        try await zoomState(session, pane: panes.focused, is: true)
+    }
+
+    /// The Panes sheet's Split → and Split ↓ make the pane Herdr's client makes and go to it, as the frame
+    /// Herdr then sends shows. Herdr unzooms the tab it splits; with "Zoom multipane windows" on, the new
+    /// pane is zoomed, as Herdr itself reports.
+    @MainActor
+    func testThePanesSheetSplitsAsHerdrsClientDoesOnHerdr093() async throws {
+        try await checkSplits(version: "0.9.3")
+    }
+
+    @MainActor
+    func testThePanesSheetSplitsAsHerdrsClientDoesOnHerdr095() async throws {
+        try await checkSplits(version: "0.9.5")
+    }
+
+    @MainActor
+    private func checkSplits(version: String) async throws {
+        let session = try await openShownSession(version: version, through: { $0 })
+        let model = session.model
+        let adapter = model.terminalScreenAdapter
+        let first = try XCTUnwrap(model.focusedPaneID)
+        func panes() -> [String] {
+            model.places.outline?.workspaces.lazy.flatMap(\.tabs).first { $0.paneIDs.contains(first) }?.paneIDs ?? []
+        }
+
+        XCTAssertEqual(adapter.splitFocusedPane(GHOSTTY_SPLIT_DIRECTION_RIGHT), .queued)
+        try await waitUntil("Split → didn't go to the pane it made", timeout: .seconds(15)) {
+            panes().count == 2 && model.focusedPaneID != first && model.stateTraceLabel == "shown"
+        }
+        let right = try XCTUnwrap(model.focusedPaneID)
+        try await waitUntil("both panes weren't drawn", timeout: .seconds(10)) {
+            (model.layout?.panes.filter(\.hasTextArea).count ?? 0) == 2
+        }
+        try await zoomState(session, pane: right, is: false)
+
+        try model.applyTerminalSettings(Self.zooming)
+        XCTAssertEqual(adapter.splitFocusedPane(GHOSTTY_SPLIT_DIRECTION_DOWN), .queued)
+        try await waitUntil("Split ↓ didn't go to the pane it made", timeout: .seconds(15)) {
+            panes().count == 3 && model.focusedPaneID.map { $0 != first && $0 != right } == true
+                && model.stateTraceLabel == "shown"
+        }
+        try await zoomState(session, pane: try XCTUnwrap(model.focusedPaneID), is: true)
+
+        // Herdr's own answers to a new tab and a split name the pane each made, as Remux reads them.
+        func made(_ arguments: [String]) async throws -> String {
+            let created = try await session.fixture.herdr(arguments, trace: RemuxTransportStartupTrace(flowID: "herdr-live-split"))
+            XCTAssertEqual(created.exitStatus, 0, String(decoding: created.stderr, as: UTF8.self))
+            let pane = try XCTUnwrap(HerdrCreation.pane(madeIn: created.stdout), String(decoding: created.stdout, as: UTF8.self))
+            try await waitUntil("the pane Herdr's answer names isn't in the session", timeout: .seconds(10)) {
+                model.places.outline?.workspaces.contains { $0.tabs.contains { $0.paneIDs.contains(pane) } } == true
+            }
+            return pane
+        }
+        let root = try await made(["tab", "create", "--no-focus"])
+        _ = try await made(["pane", "split", root, "--direction", "right", "--no-focus"])
+    }
+
     // MARK: - Agents
 
     /// Herdr's agent states reach the sheets as the phone shows them: an agent in another tab working, then

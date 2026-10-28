@@ -4915,6 +4915,35 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertLessThan(show, focus)
     }
 
+    /// New Workspace under a Herdr session that isn't on screen shows the session and makes the workspace as
+    /// part of its show, beside the workspace this phone has there.
+    func testNewWorkspaceUnderASessionNotOnScreenShowsItAndMakesTheWorkspace() async throws {
+        let (harness, workspace, bridge) = try await connectedHerdrSession(agentStatus: .working)
+        let listed = await waitUntil(timeout: 3) { harness.model.herdrPlaces(of: workspace.id)?.outline != nil }
+        XCTAssertTrue(listed, "the session's workspaces weren't listed")
+        await harness.model.showLibrary()
+        // Leaving for Home hides the session; the New Workspace's writes follow the hide's.
+        var beforeTap = 0
+        while true {
+            let write = try ClientWrite.decode(try await bridge.written(beforeTap))
+            beforeTap += 1
+            if case .surfaceSet(_, false) = write { break }
+        }
+
+        harness.model.createHerdrWorkspace(in: workspace.id)
+
+        XCTAssertEqual(harness.model.state, .terminal(workspace.id))
+        var writes: [ClientWrite] = []
+        for position in beforeTap..<(beforeTap + 4) {
+            writes.append(try ClientWrite.decode(try await bridge.written(position)))
+        }
+        let show = try XCTUnwrap(writes.firstIndex { if case .surfaceSet(_, true) = $0 { true } else { false } })
+        let created = try XCTUnwrap(writes.firstIndex {
+            if case .command(_, "workspace.create", ["source_workspace_id": "w1", "focus": "true"]) = $0 { true } else { false }
+        })
+        XCTAssertLessThan(show, created)
+    }
+
     /// An open Herdr session's agents are listed, as the phone shows them, until the session closes; an
     /// agent's row opens the session and asks Herdr to focus the agent's pane right after the show, as a
     /// banner does.
