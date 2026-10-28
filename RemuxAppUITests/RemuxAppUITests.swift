@@ -1961,6 +1961,42 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertFalse(app.buttons["terminal.window.remove.confirm.2"].exists, "A tab beside another asked first.")
         XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 1", timeout: 10))
 
+        // The tab on screen has a preview, which fills its tile and is drawn past its sides. The tile to its
+        // left still takes the touches on its own right edge and on its own Remove.
+        func openTabsShowingPreview(of index: Int) {
+            tabs.tap()
+            XCTAssertTrue(tabsSheet.waitForExistence(timeout: 5))
+            XCTAssertTrue(waitForValue("Preview ready", of: tile(index), timeout: 10), "Tab \(index) had no preview.")
+        }
+        app.buttons["terminal.window.new"].tap()
+        XCTAssertTrue(tabsSheet.waitForNonExistence(timeout: 5), "New Tab didn't close the sheet.")
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 2 of 2", timeout: 10), "New Tab didn't go to the new tab.")
+        openTabsShowingPreview(of: 2)
+        tile(1).coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        XCTAssertTrue(tabsSheet.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 2", timeout: 10), "A tap on tab 1's right edge didn't go to tab 1.")
+        tabs.tap()
+        XCTAssertTrue(tabsSheet.waitForExistence(timeout: 5))
+        tile(2).tap()
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 2 of 2", timeout: 10))
+        openTabsShowingPreview(of: 2)
+        // The tiles are numbered by position, so the tab left is told by its panes: remux's three-pane tab
+        // and the new tab's one.
+        func panes(ofTile index: Int) -> String? {
+            tile(index).label.components(separatedBy: ", ").first { $0.hasSuffix(" pane") || $0.hasSuffix(" panes") }
+        }
+        let newTabPanes = panes(ofTile: 2)
+        XCTAssertNotEqual(panes(ofTile: 1), newTabPanes, "Tabs 1 and 2 can't be told apart.")
+        tile(1).press(forDuration: 1.0)
+        let removeFirst = app.buttons["terminal.window.remove.1"]
+        XCTAssertTrue(removeFirst.waitForExistence(timeout: 5), "Tab 1's long press didn't offer Remove.")
+        removeFirst.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(tile(2).waitForNonExistence(timeout: 10), "Tab 1's Remove didn't close a tab.")
+        XCTAssertTrue(tabsSheet.exists, "Tab 1's Remove closed the sheet.")
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 1", timeout: 10))
+        XCTAssertEqual(panes(ofTile: 1), newTabPanes, "Tab 1's Remove closed tab 2.")
+        captureLiveHerdrStep("d0-remove-beside-tab-on-screen", in: configuration)
+
         XCTAssertEqual(capsule(3).label, "Workspace web")
         capsule(3).tap()
         XCTAssertTrue(capsule(3).isSelected)
