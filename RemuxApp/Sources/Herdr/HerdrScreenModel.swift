@@ -245,6 +245,7 @@ final class HerdrScreenModel {
     private let onNotification: (NotificationEvent) -> Void
     private let engine: HerdrTerminalEngine
     private let makeRendererFence: RendererFenceFactory
+    private let clipboard: TerminalClipboard
     private var runtime: GhosttyKitRuntime?
     private var currentTerminalSettings: TerminalSettings
     /// The colours of the current theme: Herdr gets them in the theme report, and Herdr's pane borders
@@ -306,7 +307,7 @@ final class HerdrScreenModel {
     private var scrollPointers: [String: CGPoint] = [:]
     private var wheelRemainders: [String: Double] = [:]
     private var presentationFailures: [String: TerminalDisconnectReason] = [:]
-    private var notices = HerdrNoticePolicy(visibleFor: GhosttyTerminalCommandFailureNotice.duration)
+    private var notices = HerdrNoticePolicy(visibleFor: GhosttyTerminalNotice.failureDuration)
     private var creatingTerminals: Set<ObjectIdentifier> = []
     /// Ghostty gives a terminal one renderer at a time, so a replacement waits for these to close.
     private var closingTerminals: Set<ObjectIdentifier> = []
@@ -327,7 +328,8 @@ final class HerdrScreenModel {
         engine: HerdrTerminalEngine = HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1),
         makeRendererFence: @escaping RendererFenceFactory = {
             HerdrPaneRendererFence(engine: $0, paneID: $1, terminal: $2)
-        }
+        },
+        clipboard: TerminalClipboard = .general
     ) {
         self.target = target
         self.sessionInstanceID = sessionInstanceID
@@ -338,6 +340,7 @@ final class HerdrScreenModel {
         self.recoveryTiming = recoveryTiming
         self.engine = engine
         self.makeRendererFence = makeRendererFence
+        self.clipboard = clipboard
         currentTerminalSettings = target.terminalSettings
         terminalScreenAdapter.attach(to: self)
         do {
@@ -1223,8 +1226,8 @@ final class HerdrScreenModel {
                 Task { @MainActor in model.notificationArrived(attemptID, notification) }
             case .bell:
                 Task { @MainActor in model.bellRang(attemptID) }
-            case .clipboard:
-                break
+            case .clipboard(let base64):
+                Task { @MainActor in model.clipboardWritten(attemptID, base64: base64) }
             }
         }
     }
@@ -1313,8 +1316,22 @@ final class HerdrScreenModel {
     /// Herdr rings only the session in front, which the connection checks; a bell that comes after the
     /// session left the screen has no one to ring for.
     private func bellRang(_ attemptID: UInt64) {
-        guard let attempt, attempt.id == attemptID, isCurrent(attempt), isSelected else { return }
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt), isOnScreen else { return }
         onNotification(.bell)
+    }
+
+    /// A program in the session on screen wrote the clipboard (OSC 52); a write that comes after the session
+    /// left the screen has no one to write for. As in Herdr's client, a payload that isn't base64 is
+    /// dropped, and the copy notice shows only after a write that went in and wasn't a duplicate
+    /// (`client/clipboard_forwarding.rs`, `selection.rs` `write_osc52_bytes`). The iPhone clipboard holds
+    /// text, so bytes that aren't UTF-8 are dropped too.
+    private func clipboardWritten(_ attemptID: UInt64, base64: String) {
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt), isOnScreen,
+              let bytes = Data(base64Encoded: base64), let text = String(data: bytes, encoding: .utf8),
+              clipboard.write(text)
+        else { return }
+        notices.replaced()
+        terminalScreenAdapter.presentInformation(Self.copiedNotice, for: Self.copiedNoticeDuration)
     }
 
     /// The panes on screen show their agents as they are now, as Herdr's client counts a pane it
@@ -1425,13 +1442,18 @@ final class HerdrScreenModel {
         }
     }
 
-    /// Shows the session while the root wants it on screen and hides it otherwise. Herdr takes the
+    /// The root wants the session on screen, and the app isn't in the background, which hides it.
+    private var isOnScreen: Bool {
+        isSelected && appPhase != .background
+    }
+
+    /// Shows the session while it is on screen (`isOnScreen`) and hides it otherwise. Herdr takes the
     /// newest of a show and a hide, so each change is sent at once, even while the last is unanswered.
     /// A pane asked for goes right after the show, as part of it.
     private func reconcileVisibility() {
         guard let attempt, isCurrent(attempt), attempt.isOpen, attempt.hasSnapshot, let geometry
         else { return }
-        let wanted = isSelected && appPhase != .background
+        let wanted = isOnScreen
         guard wanted != attempt.wantsShown else { return }
         attempt.wantsShown = wanted
         attempt.visibilityPending = true
@@ -1767,6 +1789,9 @@ final class HerdrScreenModel {
     private static let copyFailureLabel = "copy"
     private static let focusFailureLabel = "select pane"
     private static let zoomFailureLabel = "zoom pane"
+    static let copiedNotice = "Copied to clipboard"
+    /// As long as Herdr's client shows its copy notice.
+    static let copiedNoticeDuration: Duration = .seconds(2)
 
     private static let rendererFailureMessage = "Terminal renderer is unavailable. Reconnect to try again."
     private static let configurationFailureMessage =

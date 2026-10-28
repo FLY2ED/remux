@@ -1842,6 +1842,24 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertEqual(app.state, .runningForeground)
     }
 
+    /// A program's OSC 52 copy in a Herdr pane lands on the clipboard, and the screen says so.
+    func testLiveHerdrProgramCopyWhenConfigured() throws {
+        let configuration = try launchLiveHerdrApp()
+        openFirstSavedSession()
+        waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
+
+        let copied = "herdr-copy-\(UUID().uuidString.prefix(8).lowercased())"
+        sendTerminalCommand(#"clear; printf '\033]52;c;%s\a' "$(printf %s "# + copied + #" | base64)""#)
+        let notice = app.descendants(matching: .any)["terminal.notice"].firstMatch
+        XCTAssertTrue(notice.waitForExistence(timeout: 10), "A program's copy should say so.")
+        XCTAssertEqual(notice.label, "Copied to clipboard")
+        captureLiveHerdrStep("d1-copied", in: configuration)
+        hideKeyboardIfPresent()
+        XCTAssertEqual(pasteIntoEmptyComposer(), copied, "A program's copy should be on the clipboard.")
+        captureLiveHerdrStep("d2-copy-pasted", in: configuration)
+        clearAndCloseComposer()
+    }
+
     /// Opens Panes over a Herdr session whose tab has `paneCount` panes, checks that the pane picker maps
     /// every one, also while the tab is zoomed, and returns its Zoom switch.
     private func openHerdrPanesZoomSwitch(paneCount: Int) -> XCUIElement {

@@ -4371,6 +4371,72 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(bells(), 2, "a hidden session handed on a bell")
     }
 
+    /// A bell Herdr rang just before the app went to the background, taken by the model only after it did,
+    /// isn't handed on, so the phone doesn't vibrate for it: the session is no longer on screen.
+    func testABellTakenAfterTheAppWentToTheBackgroundIsntHandedOn() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+
+        await session.bridge.serve(HerdrServerScript.bell())
+        // Holding the main actor lets the connection hand the bell on while the session is still shown,
+        // and keeps the model from taking it until the app has gone to the background.
+        usleep(300_000)
+        harness.model.handleAppLifecyclePhase(.background)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertFalse(harness.stateLog.notifications.contains(.bell), "a bell was handed on in the background")
+    }
+
+    /// A program's copy in the session on screen goes on the iPhone clipboard and the copy notice shows, as
+    /// in Herdr's client: only for a write that went in and wasn't already there, never for a payload that
+    /// isn't base64 or isn't text, and not after the session left the screen.
+    func testAProgramsCopyInTheSessionOnScreenReachesTheClipboard() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        let adapter = harness.model.terminalScreenAdapter
+        func copy(_ text: String) -> [UInt8] {
+            HerdrServerScript.clipboard(Data(text.utf8).base64EncodedString())
+        }
+
+        await session.bridge.serve(copy("copied text"))
+        try await harness.waitUntil("the copy didn't reach the clipboard") {
+            harness.pasteboard.writes == ["copied text"]
+        }
+        XCTAssertEqual(adapter.terminalScreenPresentationProjection.statusOverlay, .notice(HerdrScreenModel.copiedNotice))
+
+        await session.bridge.serve(copy("copied text"))
+        await session.bridge.serve(HerdrServerScript.clipboard("not base64!"))
+        await session.bridge.serve(HerdrServerScript.clipboard(Data([0xff, 0xfe]).base64EncodedString()))
+        await session.bridge.serve(copy("next"))
+        try await harness.waitUntil("the next copy didn't reach the clipboard") {
+            harness.pasteboard.writes.count == 2
+        }
+        XCTAssertEqual(harness.pasteboard.writes, ["copied text", "next"])
+
+        harness.model.setSelected(false)
+        await session.bridge.serve(copy("hidden"))
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(harness.pasteboard.writes, ["copied text", "next"], "a hidden session wrote the clipboard")
+    }
+
+    /// A copy Herdr sent just before the app went to the background, taken by the model only after it
+    /// did, isn't written: the session is no longer on screen.
+    func testACopyTakenAfterTheAppWentToTheBackgroundIsntWritten() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+
+        await session.bridge.serve(HerdrServerScript.clipboard(Data("late copy".utf8).base64EncodedString()))
+        // Holding the main actor lets the connection hand the copy on while the session is still shown,
+        // and keeps the model from taking it until the app has gone to the background.
+        usleep(300_000)
+        harness.model.handleAppLifecyclePhase(.background)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(harness.pasteboard.writes, [], "a copy was written after the app went to the background")
+        XCTAssertNotEqual(
+            harness.model.terminalScreenAdapter.terminalScreenPresentationProjection.statusOverlay,
+            .notice(HerdrScreenModel.copiedNotice)
+        )
+    }
+
     /// A hidden session asked to go to a pane in another tab asks Herdr to focus it right after the show,
     /// as Herdr's client sends `pane.focus` with the activation; Herdr then shows the pane's tab.
     func testARevealedPaneIsFocusedRightAfterTheShow() async throws {

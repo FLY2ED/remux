@@ -47,15 +47,10 @@ struct GhosttySurfaceStatusOverlay: View {
             openingSessionOverlay(accessibilityIdentifier: "terminal.status.starting")
 
         case .commandFailure(let commandFailureMessage):
-            Text(commandFailureMessage)
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundStyle(Color.white.opacity(0.88))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(Color.black.opacity(0.62))
-                .clipShape(Capsule())
-                .padding(10)
-                .accessibilityIdentifier("terminal.command.failure")
+            noticeCapsule(commandFailureMessage, accessibilityIdentifier: "terminal.command.failure")
+
+        case .notice(let message):
+            noticeCapsule(message, accessibilityIdentifier: "terminal.notice")
 
         case .waitingForPanes:
             openingSessionOverlay(accessibilityIdentifier: "terminal.status.waiting")
@@ -70,6 +65,18 @@ struct GhosttySurfaceStatusOverlay: View {
         case .failed(_, let reason):
             repairPanel(GhosttyRepairPanelContent(reason: reason, sessionName: sessionName, serverName: serverName))
         }
+    }
+
+    private func noticeCapsule(_ message: String, accessibilityIdentifier: String) -> some View {
+        Text(message)
+            .font(.system(size: 12, weight: .semibold, design: .rounded))
+            .foregroundStyle(Color.white.opacity(0.88))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(Color.black.opacity(0.62))
+            .clipShape(Capsule())
+            .padding(10)
+            .accessibilityIdentifier(accessibilityIdentifier)
     }
 
     private func openingSessionOverlay(accessibilityIdentifier: String) -> some View {

@@ -677,6 +677,41 @@ final class HerdrLiveConnectionTests: XCTestCase {
         XCTAssertEqual(reads.flatMap(\.bytes), expected, "Herdr \(version)")
     }
 
+    // MARK: - Clipboard
+
+    /// A program's OSC 52 copy in the session on screen lands on the iPhone clipboard, and the screen says
+    /// so.
+    @MainActor
+    func testAProgramsCopyReachesTheClipboardOnHerdr093() async throws {
+        try await checkAProgramsCopyReachesTheClipboard(version: "0.9.3")
+    }
+
+    @MainActor
+    func testAProgramsCopyReachesTheClipboardOnHerdr095() async throws {
+        try await checkAProgramsCopyReachesTheClipboard(version: "0.9.5")
+    }
+
+    @MainActor
+    private func checkAProgramsCopyReachesTheClipboard(version: String) async throws {
+        let session = try await openShownSession(version: version, through: { $0 })
+        let text = "copied on Herdr \(version) \(UUID().uuidString.prefix(8))"
+        let before = UIPasteboard.general.changeCount
+        XCTAssertEqual(
+            session.model.sendText("printf '\\033]52;c;%s\\a' \"$(printf '%s' '\(text)' | base64)\"\r"),
+            .accepted
+        )
+        // Reading what another process put on the clipboard makes iOS ask the user, so the test reads it
+        // only once this process has written it.
+        try await waitUntil("the copy didn't reach the clipboard", timeout: .seconds(15)) {
+            UIPasteboard.general.changeCount != before
+        }
+        XCTAssertEqual(UIPasteboard.general.string, text)
+        XCTAssertEqual(
+            session.model.terminalScreenAdapter.terminalScreenPresentationProjection.statusOverlay,
+            .notice(HerdrScreenModel.copiedNotice)
+        )
+    }
+
     // MARK: - Selection
 
     /// A line longer than the pane copies as one line, as Herdr keeps it: the pane's own terminal holds

@@ -168,6 +168,14 @@ enum HerdrServerScript {
         return HerdrWire.frame(writer.bytes)
     }
 
+    /// A program's OSC 52 write, as Herdr sends its bytes in base64.
+    static func clipboard(_ base64: String) -> [UInt8] {
+        var writer = HerdrWireWriter()
+        writer.variant(5)
+        writer.string(base64)
+        return HerdrWire.frame(writer.bytes)
+    }
+
     static func bell(count: UInt16 = 1) -> [UInt8] {
         var writer = HerdrWireWriter()
         writer.variant(9)
@@ -562,6 +570,8 @@ final class HerdrModelHarness {
 
     let bridges: Bridges
     let stateLog: StateLog
+    /// The clipboard programs in the session write, so no test writes the simulator's.
+    let pasteboard: FakePasteboard
     let model: HerdrScreenModel
 
     init(
@@ -589,8 +599,10 @@ final class HerdrModelHarness {
             ),
             terminalSettings: settings
         )
+        let pasteboard = FakePasteboard()
         self.bridges = bridges
         self.stateLog = stateLog
+        self.pasteboard = pasteboard
         model = HerdrScreenModel(
             target: target,
             sessionInstanceID: UUID(),
@@ -602,7 +614,8 @@ final class HerdrModelHarness {
             engine: producerFailure.map {
                 HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1, makeProducer: SwitchableProducer.factory($0))
             } ?? HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1),
-            makeRendererFence: rendererFenceGate?.factory ?? Self.herdrRendererFence
+            makeRendererFence: rendererFenceGate?.factory ?? Self.herdrRendererFence,
+            clipboard: TerminalClipboard(pasteboard: pasteboard)
         )
     }
 
