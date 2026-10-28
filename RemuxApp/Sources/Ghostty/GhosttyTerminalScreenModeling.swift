@@ -234,6 +234,12 @@ protocol GhosttyTerminalActionModeling: ObservableObject {
     @discardableResult
     func closeTopLevel(_ id: UUID) -> GhosttyTerminalActionOutcome
 
+    /// A close the backend's server asked the user to confirm, as Herdr's asks before a close that would
+    /// close a worktree group, until the user answers it (`answerAskedCloseConfirmation(agreed:)`).
+    var askedCloseConfirmation: GhosttyCloseConfirmation? { get }
+
+    func answerAskedCloseConfirmation(agreed: Bool)
+
     @discardableResult
     func enterFocusedTmuxCopyMode() -> GhosttyTerminalActionOutcome
 

@@ -558,6 +558,14 @@ struct GhosttyPaneSelectionSheetTopologyProjection: Equatable, Sendable {
     let shouldDismissPaneSheet: Bool
 }
 
+/// What a close asks the user first, in its backend's words, as the selection sheets' dialog shows it.
+struct GhosttyCloseConfirmation: Equatable, Sendable {
+    let title: String
+    let message: String
+    /// The destructive button's title.
+    let action: String
+}
+
 struct GhosttyWindowSelectionSheetRenderProjection: Equatable, Sendable {
     struct Window: Identifiable, Equatable, Sendable {
         let id: UUID
@@ -569,6 +577,8 @@ struct GhosttyWindowSelectionSheetRenderProjection: Equatable, Sendable {
         let focusedPreviewPaneID: UUID?
         /// The window's most urgent agent, when the backend reports agents.
         var agentStatus: TerminalAgentStatus?
+        /// What closing the window asks the user first; nil when it closes at once.
+        var closeConfirmation: GhosttyCloseConfirmation?
     }
 
     /// The groups a backend keeps its top-levels in, as Herdr's workspaces hold its tabs.
@@ -615,6 +625,8 @@ struct GhosttyPaneSelectionSheetRenderProjection: Equatable, Sendable {
         let currentCommand: String
         let currentPath: String
         var agent: TerminalAgentState?
+        /// What closing the pane asks the user first; nil when it closes at once.
+        var closeConfirmation: GhosttyCloseConfirmation?
     }
 
     let panes: [Pane]

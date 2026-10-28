@@ -5508,7 +5508,7 @@ extension HerdrScreenModelTests {
         let adapter = harness.model.terminalScreenAdapter
         let tile = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).windows.first { $0.displayName == "t2" })
 
-        XCTAssertNil(adapter.closeConfirmation(forTopLevel: tile.id), "a tab that leaves its workspace another asked")
+        XCTAssertNil(tile.closeConfirmation, "a tab that leaves its workspace another asked")
         XCTAssertEqual(adapter.closeTopLevel(tile.id), .queued)
         let close = try await nextWrite(session.bridge, from: &index, command)
         XCTAssertEqual(close.method, "tab.close")
@@ -5635,9 +5635,12 @@ extension HerdrScreenModelTests {
             error: ("confirmation_required", "closing this tab closes the worktree group")
         ))
         try await harness.waitUntil("Herdr's question didn't reach the user") { adapter.askedCloseConfirmation != nil }
-        let asked = try XCTUnwrap(adapter.askedCloseConfirmation)
-        XCTAssertEqual([asked.label, "\(asked.tabCount)", "\(asked.paneCount)"], ["beta", "2", "3"])
-        XCTAssertEqual(asked.request, .close(.workspace("w2"), group: false))
+        XCTAssertEqual(adapter.askedCloseConfirmation, GhosttyCloseConfirmation(
+            title: "Close Workspace?",
+            message: "“beta” and its 2 tabs and 3 panes will close.",
+            action: "Close Workspace"
+        ))
+        XCTAssertEqual(harness.model.askedCloseConfirmation?.request, .close(.workspace("w2"), group: false))
         if case .commandFailure = adapter.terminalScreenPresentationProjection.statusOverlay {
             XCTFail("Herdr's question was shown as a failure")
         }
@@ -5649,8 +5652,8 @@ extension HerdrScreenModelTests {
         XCTAssertEqual(workspace.params, ["workspace_id": "w2", "close_group": "false"])
     }
 
-    /// The workspace's only tab, or the only pane of its only tab, asks before it closes, since that closes
-    /// the workspace; agreeing closes the tab or pane itself.
+    /// The workspace's only tab asks before it closes, since that closes the workspace; agreeing closes the
+    /// tab itself. A pane of a tab with others closes at once.
     func testClosingAWorkspacesLastTabAsksFirst() async throws {
         let harness = await makeHarness()
         let session = try await shownWorkspaces(harness, zoomingOnShow: false)
@@ -5658,9 +5661,13 @@ extension HerdrScreenModelTests {
         let adapter = harness.model.terminalScreenAdapter
         let grouping = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).grouping)
         let beta = try XCTUnwrap(grouping.groups.first { $0.name == "beta" }).id
-        let lastTab = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: beta).windows.first { $0.displayName == "t3" })
+        func betaTab() throws -> GhosttyWindowSelectionSheetRenderProjection.Window {
+            try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: beta).windows.first { $0.displayName == "t3" })
+        }
+        let onScreen = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).windows.first { $0.isSelected })
 
-        XCTAssertNil(adapter.closeConfirmation(forTopLevel: lastTab.id), "t3 isn't beta's only tab")
+        XCTAssertNil(try betaTab().closeConfirmation, "t3 isn't beta's only tab")
+        XCTAssertEqual(adapter.paneSelectionSheetRenderProjection(topLevelID: onScreen.id).panes.map(\.closeConfirmation), [nil, nil])
         await session.bridge.serve(HerdrServerScript.snapshot(
             revision: 2,
             workspaces: [
@@ -5671,9 +5678,12 @@ extension HerdrScreenModelTests {
             focusedPane: "w1:p1"
         ))
         try await harness.waitUntil("beta's other tab didn't close") { harness.model.places.outline?.workspace("w2")?.tabs.count == 1 }
-        let confirmation = try XCTUnwrap(adapter.closeConfirmation(forTopLevel: lastTab.id))
-        XCTAssertEqual([confirmation.label, "\(confirmation.tabCount)", "\(confirmation.paneCount)"], ["beta", "1", "1"])
-        XCTAssertTrue(adapter.close(confirmed: confirmation))
+        XCTAssertEqual(try betaTab().closeConfirmation, GhosttyCloseConfirmation(
+            title: "Close Workspace?",
+            message: "“beta” and its 1 tab and 1 pane will close.",
+            action: "Close Workspace"
+        ))
+        XCTAssertEqual(adapter.closeTopLevel(try betaTab().id), .queued)
         let close = try await nextWrite(session.bridge, from: &index, command)
         XCTAssertEqual(close.method, "tab.close")
         XCTAssertEqual(close.params, ["tab_id": "t3"])

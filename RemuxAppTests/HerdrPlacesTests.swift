@@ -108,6 +108,11 @@ final class HerdrPlacesTests: XCTestCase {
         XCTAssertFalse(workspace.closesGroup)
         XCTAssertEqual(workspace.request, .close(.workspace("api"), group: false))
         XCTAssertEqual(workspace.bootID, "boot")
+        XCTAssertEqual(workspace.dialog, GhosttyCloseConfirmation(
+            title: "Close Workspace?",
+            message: "“api” and its 2 tabs and 3 panes will close.",
+            action: "Close Workspace"
+        ))
 
         XCTAssertNil(outline.closeConfirmation(before: .tab("api-t1")), "a tab that leaves its workspace another asked")
         XCTAssertNil(outline.closeConfirmation(before: .pane("api-p2")), "a pane that leaves its tab another asked")
@@ -115,6 +120,7 @@ final class HerdrPlacesTests: XCTestCase {
 
         let lastTab = try XCTUnwrap(outline.closeConfirmation(before: .tab("web-t1")))
         XCTAssertEqual([lastTab.label, "\(lastTab.tabCount)", "\(lastTab.paneCount)"], ["web", "1", "1"])
+        XCTAssertEqual(lastTab.dialog.message, "“web” and its 1 tab and 1 pane will close.")
         XCTAssertEqual(lastTab.request, .close(.tab("web-t1"), group: false))
         let onlyPane = try XCTUnwrap(outline.closeConfirmation(before: .pane("web-p1")))
         XCTAssertEqual(onlyPane.request, .close(.pane("web-p1"), group: false))
@@ -135,6 +141,11 @@ final class HerdrPlacesTests: XCTestCase {
         XCTAssertTrue(root.closesGroup)
         XCTAssertEqual([root.otherWorkspaceCount, root.tabCount, root.paneCount], [2, 4, 5])
         XCTAssertEqual(root.request, .close(.workspace("app"), group: true))
+        XCTAssertEqual(root.dialog, GhosttyCloseConfirmation(
+            title: "Close Worktree Group?",
+            message: "“app” and its 2 other workspaces will close, with 4 tabs and 5 panes.",
+            action: "Close Worktree Group"
+        ))
         let linked = try XCTUnwrap(outline.closeConfirmation(ofWorkspace: "feature"))
         XCTAssertFalse(linked.closesGroup)
         XCTAssertEqual(linked.request, .close(.workspace("feature"), group: false))

@@ -36,6 +36,8 @@ struct GhosttyWindowSelectionSheet: View {
     let layout: PanePreviewLayout.Metrics
     let contentHeight: CGFloat
     let commandFailureMessage: String?
+    /// The close the backend's server asked about, which the sheet asks while it is open.
+    let askedCloseQuestion: GhosttyCloseQuestion?
     let onCreateWindow: (() -> Void)?
     let onSelect: (UUID) -> Void
     let onRemoveWindow: (UUID) -> Void
@@ -113,20 +115,7 @@ struct GhosttyWindowSelectionSheet: View {
                 self.pendingContextAction = nil
             }
         }
-        .confirmationDialog(
-            "Remove \(topLevelNoun.singular)?",
-            isPresented: pendingRemovalBinding,
-            titleVisibility: .visible,
-            presenting: pendingRemoval
-        ) { request in
-            Button("Remove \(topLevelNoun.singular) \(request.displayIndex)", role: .destructive) {
-                onRemoveWindow(request.id)
-                pendingRemoval = nil
-            }
-            .accessibilityIdentifier("terminal.window.remove.confirm.\(request.displayIndex)")
-        } message: { request in
-            Text(windowRemovalMessage(for: request))
-        }
+        .ghosttyCloseConfirmationDialog(closeQuestion)
         .overlay(alignment: .bottom) {
             if let commandFailureMessage {
                 GhosttySelectionSheetFailureBanner(message: commandFailureMessage)
@@ -156,7 +145,7 @@ struct GhosttyWindowSelectionSheet: View {
                 let request = GhosttyWindowRemovalRequest(
                     id: window.id,
                     displayIndex: window.displayIndex,
-                    paneCount: window.paneCount
+                    confirmation: window.closeConfirmation
                 )
 
                 ZStack(alignment: .topTrailing) {
@@ -207,7 +196,7 @@ struct GhosttyWindowSelectionSheet: View {
                 .animation(.spring(response: 0.24, dampingFraction: 0.82), value: pendingContextAction?.id)
                 .accessibilityAction(named: Text("Remove \(topLevelNoun.singular) \(window.displayIndex)")) {
                     Haptic.warning()
-                    pendingRemoval = request
+                    requestRemoval(request)
                 }
             }
 
@@ -215,25 +204,31 @@ struct GhosttyWindowSelectionSheet: View {
         .frame(maxWidth: .infinity, alignment: .top)
     }
 
-    private var pendingRemovalBinding: Binding<Bool> {
-        Binding(
-            get: { pendingRemoval != nil },
-            set: { isPresented in
-                if !isPresented {
-                    pendingRemoval = nil
-                    pendingContextAction = nil
-                }
-            }
-        )
+    /// The window's removal asked about, else the close the backend's server asked about.
+    private var closeQuestion: GhosttyCloseQuestion? {
+        guard let request = pendingRemoval, let confirmation = request.confirmation else { return askedCloseQuestion }
+        return GhosttyCloseQuestion(
+            confirmation: confirmation,
+            confirmIdentifier: "terminal.window.remove.confirm.\(request.displayIndex)"
+        ) { agreed in
+            if agreed { onRemoveWindow(request.id) }
+            pendingRemoval = nil
+            pendingContextAction = nil
+        }
     }
 
     private func confirmPendingContextAction() {
-        pendingRemoval = pendingContextAction
-        pendingContextAction = nil
+        pendingContextAction.map(requestRemoval)
     }
 
-    private func windowRemovalMessage(for request: GhosttyWindowRemovalRequest) -> String {
-        "This will close \(topLevelNoun.singular) \(request.displayIndex) and \(request.paneCount) \(request.paneCount == 1 ? "pane" : "panes")."
+    /// Removes the window, after asking when its backend asks first.
+    private func requestRemoval(_ request: GhosttyWindowRemovalRequest) {
+        pendingContextAction = nil
+        if request.confirmation == nil {
+            onRemoveWindow(request.id)
+        } else {
+            pendingRemoval = request
+        }
     }
 }
 
@@ -244,9 +239,10 @@ struct GhosttyPaneSelectionSheet: View {
     @State private var pendingContextAction: GhosttyPaneRemovalRequest?
 
     let projection: GhosttyPaneSelectionSheetRenderProjection
-    let topLevelNoun: GhosttyTopLevelNoun
     let topologySize: CGSize
     let commandFailureMessage: String?
+    /// The close the backend's server asked about, which the sheet asks while it is open.
+    let askedCloseQuestion: GhosttyCloseQuestion?
     let onSplitPane: (() -> Void)?
     let onStackPane: (() -> Void)?
     let onSetZoomed: (Bool) -> Void
@@ -318,21 +314,7 @@ struct GhosttyPaneSelectionSheet: View {
                 self.pendingContextAction = nil
             }
         }
-        .confirmationDialog(
-            "Remove Pane?",
-            isPresented: pendingRemovalBinding,
-            titleVisibility: .visible,
-            presenting: pendingRemoval
-        ) { request in
-            Button("Remove Pane", role: .destructive) {
-                onRemovePane(request.id)
-                pendingRemoval = nil
-                pendingContextAction = nil
-            }
-            .accessibilityIdentifier("terminal.pane.remove.confirm")
-        } message: { request in
-            Text(paneRemovalMessage(for: request))
-        }
+        .ghosttyCloseConfirmationDialog(closeQuestion)
         .overlay(alignment: .bottom) {
             if let commandFailureMessage {
                 GhosttySelectionSheetFailureBanner(message: commandFailureMessage)
@@ -374,37 +356,60 @@ struct GhosttyPaneSelectionSheet: View {
     ) -> GhosttyPaneRemovalRequest {
         GhosttyPaneRemovalRequest(
             id: pane.id,
-            isOnlyPane: projection.paneCount == 1
+            confirmation: pane.closeConfirmation
         )
     }
 
-    private var pendingRemovalBinding: Binding<Bool> {
-        Binding(
-            get: { pendingRemoval != nil },
-            set: { isPresented in
-                if !isPresented {
-                    pendingRemoval = nil
-                    pendingContextAction = nil
-                }
-            }
-        )
-    }
-
-    private func performRemoval(_ request: GhosttyPaneRemovalRequest) {
-        if request.isOnlyPane {
-            pendingRemoval = request
-        } else {
-            onRemovePane(request.id)
+    /// The pane's removal asked about, else the close the backend's server asked about.
+    private var closeQuestion: GhosttyCloseQuestion? {
+        guard let request = pendingRemoval, let confirmation = request.confirmation else { return askedCloseQuestion }
+        return GhosttyCloseQuestion(confirmation: confirmation, confirmIdentifier: "terminal.pane.remove.confirm") { agreed in
+            if agreed { onRemovePane(request.id) }
+            pendingRemoval = nil
             pendingContextAction = nil
         }
     }
 
-    private func paneRemovalMessage(for request: GhosttyPaneRemovalRequest) -> String {
-        if request.isOnlyPane {
-            let noun = topLevelNoun.singular.lowercased()
-            return "This is the only pane in the \(noun), so removing it can close the \(noun) too."
+    /// Removes the pane, after asking when its backend asks first.
+    private func performRemoval(_ request: GhosttyPaneRemovalRequest) {
+        if request.confirmation == nil {
+            onRemovePane(request.id)
+            pendingContextAction = nil
+        } else {
+            pendingRemoval = request
         }
-        return "This will close the pane."
+    }
+}
+
+/// A close the user is asked to confirm, and what their answer does.
+struct GhosttyCloseQuestion {
+    let confirmation: GhosttyCloseConfirmation
+    let confirmIdentifier: String
+    /// The dialog answers no as it goes, after any button, so a no after a yes must change nothing.
+    let answer: (Bool) -> Void
+}
+
+extension View {
+    /// The selection sheets' dialog before a close, in its backend's words.
+    func ghosttyCloseConfirmationDialog(_ question: GhosttyCloseQuestion?) -> some View {
+        confirmationDialog(
+            question?.confirmation.title ?? "",
+            isPresented: Binding(
+                get: { question != nil },
+                set: { isPresented in
+                    if !isPresented { question?.answer(false) }
+                }
+            ),
+            titleVisibility: .visible,
+            presenting: question
+        ) { question in
+            Button(question.confirmation.action, role: .destructive) {
+                question.answer(true)
+            }
+            .accessibilityIdentifier(question.confirmIdentifier)
+        } message: { question in
+            Text(question.confirmation.message)
+        }
     }
 }
 
@@ -530,12 +535,12 @@ private struct GhosttyWindowGroupCapsule: View {
 private struct GhosttyWindowRemovalRequest: Identifiable {
     let id: UUID
     let displayIndex: Int
-    let paneCount: Int
+    let confirmation: GhosttyCloseConfirmation?
 }
 
 private struct GhosttyPaneRemovalRequest: Identifiable {
     let id: UUID
-    let isOnlyPane: Bool
+    let confirmation: GhosttyCloseConfirmation?
 }
 
 private struct GhosttySelectionSheetFailureBanner: View {

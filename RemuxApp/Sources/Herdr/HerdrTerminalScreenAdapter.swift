@@ -12,7 +12,7 @@ extension GhosttyTopLevelNoun {
 /// for each pane of the tab on screen that has a text area, laid out on the tab's cell grid, and while
 /// the tab is zoomed a leaf for each of its panes. The Tabs sheet offers the other workspaces as groups.
 /// The model owns all state; this maps it to the screen's projections and stable ids, and passes typing,
-/// moves, zoom and New Tab and New Workspace to it. Other topology actions aren't offered.
+/// moves, zoom, New Tab and New Workspace, splits and closes to it, with Herdr's questions before a close.
 @MainActor
 final class HerdrTerminalScreenAdapter: ObservableObject {
     private weak var model: HerdrScreenModel?
@@ -510,28 +510,10 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
 
     // MARK: Close and rename
 
-    /// What closing a tab tile asks first, if anything, as Herdr's client asks: closing a workspace's only
-    /// tab closes the workspace.
-    func closeConfirmation(forTopLevel id: UUID) -> HerdrCloseConfirmation? {
-        tabIDsBySurfaceID[id].flatMap { drawnOutline?.closeConfirmation(before: .tab($0)) }
-    }
-
-    /// What closing a pane tile asks first, if anything: the only pane of a workspace's only tab closes the
-    /// workspace.
-    func closeConfirmation(forPane id: UUID) -> HerdrCloseConfirmation? {
-        paneID(for: id).flatMap { drawnOutline?.closeConfirmation(before: .pane($0)) }
-    }
-
-    /// The close the user agreed to, checked as any close is when it goes.
-    @discardableResult
-    func close(confirmed confirmation: HerdrCloseConfirmation) -> Bool {
-        model?.ask(confirmation.request, bootID: confirmation.bootID) == true
-    }
-
     /// The workspace close Herdr's server asked to confirm, as for a tab or pane whose close would close a
-    /// worktree group, until the user answers (`answerAskedCloseConfirmation(agreed:)`).
-    var askedCloseConfirmation: HerdrCloseConfirmation? {
-        model?.askedCloseConfirmation
+    /// worktree group, until the user answers.
+    var askedCloseConfirmation: GhosttyCloseConfirmation? {
+        model?.askedCloseConfirmation?.dialog
     }
 
     func answerAskedCloseConfirmation(agreed: Bool) {
@@ -668,7 +650,11 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
                 )
             ).windows
         return GhosttyWindowSelectionSheetRenderProjection(
-            windows: windows,
+            windows: windows.map { window in
+                var window = window
+                window.closeConfirmation = tabIDsBySurfaceID[window.id].flatMap { closeConfirmation(before: .tab($0)) }
+                return window
+            },
             selectedWindowID: onScreen.selectedWindowID,
             previewLeafIDs: previewLeafIDs,
             grouping: GhosttyWindowSelectionSheetRenderProjection.Grouping(
@@ -687,11 +673,27 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func paneSelectionSheetRenderProjection(topLevelID: UUID) -> GhosttyPaneSelectionSheetRenderProjection {
-        GhosttyTerminalPresentationProjector.paneSelectionSheetRenderProjection(
+        let projection = GhosttyTerminalPresentationProjector.paneSelectionSheetRenderProjection(
             topLevelID: topLevelID,
             snapshot: topologySnapshot,
             viewport: topologySnapshot.selectedTopLevelID == topLevelID ? viewportProjection : nil
         )
+        return GhosttyPaneSelectionSheetRenderProjection(
+            panes: projection.panes.map { pane in
+                var pane = pane
+                pane.closeConfirmation = paneID(for: pane.id).flatMap { closeConfirmation(before: .pane($0)) }
+                return pane
+            },
+            selectedPaneID: projection.selectedPaneID,
+            isServerZoomed: projection.isServerZoomed
+        )
+    }
+
+    /// What closing a tab or pane tile asks first, as Herdr's client asks: a workspace's only tab, or the only
+    /// pane of its only tab, closes the workspace. Agreeing closes the tab or pane, which goes as any close
+    /// does.
+    private func closeConfirmation(before place: HerdrPlace) -> GhosttyCloseConfirmation? {
+        drawnOutline?.closeConfirmation(before: place)?.dialog
     }
 
     private func capturablePreviewLeafIDs(_ prioritizedLeafIDs: [UUID]) -> [UUID] {
@@ -699,5 +701,28 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
             guard let paneID = paneID(for: leafID) else { return false }
             return model?.paneSurface(paneID) != nil
         }
+    }
+}
+
+extension HerdrCloseConfirmation {
+    /// The question the selection sheets ask: the workspace closes with its tabs and panes, or a worktree
+    /// group's root with its other workspaces.
+    var dialog: GhosttyCloseConfirmation {
+        func counted(_ count: Int, _ noun: String) -> String {
+            count == 1 ? "1 \(noun)" : "\(count) \(noun)s"
+        }
+        let contents = "\(counted(tabCount, "tab")) and \(counted(paneCount, "pane"))"
+        guard closesGroup else {
+            return GhosttyCloseConfirmation(
+                title: "Close Workspace?",
+                message: "“\(label)” and its \(contents) will close.",
+                action: "Close Workspace"
+            )
+        }
+        return GhosttyCloseConfirmation(
+            title: "Close Worktree Group?",
+            message: "“\(label)” and its \(counted(otherWorkspaceCount, "other workspace")) will close, with \(contents).",
+            action: "Close Worktree Group"
+        )
     }
 }

@@ -448,15 +448,15 @@ final class HerdrLiveConnectionTests: XCTestCase {
                 && model.layout?.panes.filter(\.hasTextArea).count == 2
         }
         func outline() throws -> HerdrSessionOutline { try XCTUnwrap(model.places.outline) }
-        func tile(_ label: String) throws -> UUID {
-            try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).windows.first { $0.displayName == label }).id
+        func tile(_ label: String) throws -> GhosttyWindowSelectionSheetRenderProjection.Window {
+            try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).windows.first { $0.displayName == label })
         }
         let splitLeaf = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.panes.first { !$0.isFocused }).id
         let docs = try XCTUnwrap(try outline().workspaces.last).id
         let onScreenTab = try XCTUnwrap(try outline().workspaces.first?.tabs.first)
 
-        XCTAssertNil(adapter.closeConfirmation(forTopLevel: try tile("logs")), "a tab that leaves its workspace another asked")
-        XCTAssertTrue(adapter.renameTopLevel(try tile(onScreenTab.label), to: "  editor "))
+        XCTAssertNil(try tile("logs").closeConfirmation, "a tab that leaves its workspace another asked")
+        XCTAssertTrue(adapter.renameTopLevel(try tile(onScreenTab.label).id, to: "  editor "))
         try await waitUntil("the tab wasn't renamed", timeout: .seconds(10)) {
             (try? outline().workspaces.first?.tabs.first?.label) == "editor"
         }
@@ -479,7 +479,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
             (try? outline().workspaces.first?.tabs.first?.paneIDs) == [first] && model.stateTraceLabel == "shown"
         }
         let logs = try XCTUnwrap(try outline().workspaces.first?.tabs.last).id
-        XCTAssertEqual(adapter.closeTopLevel(try tile("logs")), .queued)
+        XCTAssertEqual(adapter.closeTopLevel(try tile("logs").id), .queued)
         try await waitUntil("the tab off screen didn't close", timeout: .seconds(10)) {
             (try? outline().workspaces.first?.tabs.count) == 1
         }
@@ -490,8 +490,17 @@ final class HerdrLiveConnectionTests: XCTestCase {
             (try? outline().workspaces.count) == 1
         }
 
-        let lastTab = try XCTUnwrap(adapter.closeConfirmation(forTopLevel: try tile("editor")), "the last tab didn't ask first")
-        XCTAssertEqual(lastTab.request, .close(.tab(onScreenTab.id), group: false))
+        let lastWorkspace = GhosttyCloseConfirmation(
+            title: "Close Workspace?",
+            message: "“\(try XCTUnwrap(try outline().workspaces.first).label)” and its 1 tab and 1 pane will close.",
+            action: "Close Workspace"
+        )
+        XCTAssertEqual(try tile("editor").closeConfirmation, lastWorkspace, "the last tab didn't ask first")
+        XCTAssertEqual(
+            adapter.paneSelectionSheetRenderProjection(topLevelID: try tile("editor").id).panes.map(\.closeConfirmation),
+            [lastWorkspace],
+            "the only pane of the only tab didn't ask first"
+        )
         XCTAssertFalse(model.ask(.close(.tab(logs), group: false), bootID: try outline().bootID), "a closed tab's close went")
         let workspaces = try JSONSerialization.jsonObject(with: try await herdr(["workspace", "list"])) as? [String: Any]
         let listed = ((workspaces?["result"] as? [String: Any])?["workspaces"] as? [[String: Any]])?.compactMap { $0["label"] as? String }
@@ -547,6 +556,9 @@ final class HerdrLiveConnectionTests: XCTestCase {
         XCTAssertTrue(asked.closesGroup)
         XCTAssertEqual(asked.label, "app")
         XCTAssertEqual(asked.request, .close(.workspace(root), group: true))
+        let dialog = try XCTUnwrap(model.terminalScreenAdapter.askedCloseConfirmation)
+        XCTAssertEqual([dialog.title, dialog.action], ["Close Worktree Group?", "Close Worktree Group"])
+        XCTAssertTrue(dialog.message.hasPrefix("“app” and its 1 other workspace will close, with "), dialog.message)
         XCTAssertEqual(try outline().workspaces.count, before, "the tab closed before the user agreed")
 
         model.answerAskedCloseConfirmation(agreed: true)
