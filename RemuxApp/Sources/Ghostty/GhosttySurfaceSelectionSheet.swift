@@ -474,6 +474,8 @@ private struct GhosttyWindowGroupPicker: View {
                 showsMenuIndicator: true
             )
         }
+        // Top to bottom in the groups' order, as the Sessions list has them, whichever way the menu opens.
+        .menuOrder(.fixed)
         .accessibilityLabel(
             shownInMore.map { "\(accessibilityName(of: $0)), more \(grouping.noun.plural.lowercased())" }
                 ?? "More \(grouping.noun.plural.lowercased())"

@@ -2382,7 +2382,9 @@ final class RemuxAppUITests: XCTestCase {
         more.tap()
         let infra = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "infra")).firstMatch
         XCTAssertTrue(infra.waitForExistence(timeout: 5), "More didn't list infra.")
-        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "notes")).firstMatch.exists)
+        let notes = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "notes")).firstMatch
+        XCTAssertTrue(notes.exists)
+        XCTAssertLessThan(notes.frame.minY, infra.frame.minY, "More didn't list its workspaces top to bottom in Herdr's order.")
         XCTAssertEqual(
             app.buttons.matching(NSPredicate(format: "label == %@", "New Workspace")).count, 1,
             "More's menu still offers New Workspace."
