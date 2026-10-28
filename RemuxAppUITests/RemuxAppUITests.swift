@@ -2984,6 +2984,18 @@ final class RemuxAppUITests: XCTestCase {
         tapPickerButton(identifier: "terminal.window.tile.2", fallbackLabel: "Window 2 of 2")
         waitForLiveTerminalReady(timeout: 30)
 
+        // A preview fills its tile and is drawn past its sides; the tile beside the window on screen still
+        // takes the touches on its own right edge.
+        let windows = app.buttons.matching(identifier: "terminal.windows").firstMatch
+        openWindowsSheet()
+        XCTAssertTrue(waitForValue("Preview ready", of: app.buttons["terminal.window.tile.2"], timeout: 10))
+        app.buttons["terminal.window.tile.1"].coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        XCTAssertTrue(waitForLabel(of: windows, "Window 1 of 2", timeout: 10), "A tap on tile 1's right edge didn't go to window 1.")
+        waitForLiveTerminalReady(timeout: 30)
+        openWindowsSheet()
+        tapPickerButton(identifier: "terminal.window.tile.2", fallbackLabel: "Window 2 of 2")
+        waitForLiveTerminalReady(timeout: 30)
+
         openPanesSheet()
         tapPickerButton(identifier: "terminal.pane.split.right", fallbackLabel: "Split right")
         waitForLiveTerminalReady(timeout: 30)
