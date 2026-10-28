@@ -2245,6 +2245,9 @@ final class RemuxAppUITests: XCTestCase {
             element("terminal.window.tile.", labelContaining: "agent working").waitForExistence(timeout: 10),
             "The tab's tile didn't show its agent."
         )
+        XCTAssertEqual(app.buttons["terminal.windows.group.1"].label, "Workspace remux, agent blocked")
+        XCTAssertFalse(app.buttons["terminal.windows.group.more"].exists, "One workspace offered More.")
+        XCTAssertTrue(app.buttons["terminal.windows.group.new"].isHittable, "New Workspace isn't offered beside New Tab.")
         captureLiveHerdrStep("a2-tabs", in: configuration)
         app.buttons["terminal.windows.close"].tap()
 
@@ -2357,11 +2360,18 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertEqual(app.buttons["terminal.windows.group.2"].label, "Workspace api, agent done")
         XCTAssertEqual(app.buttons["terminal.windows.group.3"].label, "Workspace web")
         XCTAssertEqual(more.label, "More workspaces")
+        XCTAssertTrue(app.buttons["terminal.window.new"].isHittable, "New Tab isn't offered.")
+        XCTAssertTrue(app.buttons["terminal.windows.group.new"].isHittable, "New Workspace isn't offered beside New Tab.")
         captureLiveHerdrStep("w2-tabs", in: configuration)
 
         more.tap()
         let infra = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "infra")).firstMatch
         XCTAssertTrue(infra.waitForExistence(timeout: 5), "More didn't list infra.")
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "notes")).firstMatch.exists)
+        XCTAssertEqual(
+            app.buttons.matching(NSPredicate(format: "label == %@", "New Workspace")).count, 1,
+            "More's menu still offers New Workspace."
+        )
         captureLiveHerdrStep("w3-more-menu", in: configuration)
         infra.tap()
         XCTAssertTrue(

@@ -47,7 +47,7 @@ struct GhosttyWindowSelectionSheet: View {
         NavigationStack {
             TerminalSelectionSheetContent {
                 if let grouping = projection.grouping {
-                    GhosttyWindowGroupPicker(grouping: grouping, onShow: onShowGroup, onCreate: onCreateGroup)
+                    GhosttyWindowGroupPicker(grouping: grouping, onShow: onShowGroup)
                 } else {
                     TerminalSelectionSheetContextLabel(
                         text: "\(sessionName) · \(projection.windows.count) \((projection.windows.count == 1 ? topLevelNoun.singular : topLevelNoun.plural).lowercased())"
@@ -68,12 +68,23 @@ struct GhosttyWindowSelectionSheet: View {
                     for: .scrollContent
                 )
             } actions: {
-                TerminalSelectionSheetActionButton(
-                    title: "New \(topLevelNoun.singular)",
-                    systemName: "plus",
-                    accessibilityIdentifier: "terminal.window.new",
-                    action: onCreateWindow
-                )
+                HStack(spacing: 12) {
+                    TerminalSelectionSheetActionButton(
+                        title: "New \(topLevelNoun.singular)",
+                        systemName: "plus",
+                        accessibilityIdentifier: "terminal.window.new",
+                        action: onCreateWindow
+                    )
+
+                    if let grouping = projection.grouping {
+                        TerminalSelectionSheetActionButton(
+                            title: "New \(grouping.noun.singular)",
+                            systemName: "plus",
+                            accessibilityIdentifier: "terminal.windows.group.new",
+                            action: onCreateGroup
+                        )
+                    }
+                }
             }
             .navigationTitle(topLevelNoun.plural)
             .navigationBarTitleDisplayMode(.inline)
@@ -397,26 +408,18 @@ struct GhosttyPaneSelectionSheet: View {
     }
 }
 
-/// A backend's groups of windows, as Herdr's workspaces: the three most recent as capsules, and the rest
-/// and a new group behind More, which shows the group it lists when that one is picked. The order follows
-/// the backend's recency, so it holds as groups are added. Each group shows its most urgent agent's dot
-/// before its name.
+/// A backend's groups of windows, as Herdr's workspaces: the most recent as capsules, and the rest behind
+/// More, which shows the group it lists when that one is picked. The order follows the backend's recency,
+/// so it holds as groups are added. Each group shows its most urgent agent's dot before its name.
 private struct GhosttyWindowGroupPicker: View {
-    private static let capsuleCount = 3
-
     @Environment(\.colorScheme) private var colorScheme
 
     let grouping: GhosttyWindowSelectionSheetRenderProjection.Grouping
     let onShow: (UUID) -> Void
-    let onCreate: () -> Void
 
     var body: some View {
-        let capsules = Array(grouping.groups.prefix(Self.capsuleCount))
-        let rest = Array(grouping.groups.dropFirst(Self.capsuleCount))
-        let shownInMore = rest.first { $0.id == grouping.shownGroupID }
-
         HStack(spacing: 8) {
-            ForEach(Array(capsules.enumerated()), id: \.element.id) { index, group in
+            ForEach(Array(grouping.capsules.enumerated()), id: \.element.id) { index, group in
                 let isShown = group.id == grouping.shownGroupID
                 Button {
                     Haptic.selection()
@@ -430,54 +433,52 @@ private struct GhosttyWindowGroupPicker: View {
                 .accessibilityIdentifier("terminal.windows.group.\(index + 1)")
             }
 
-            Menu {
-                // A toggle for each group, which a menu draws as a checkmark, not a picker: the group shown
-                // may be a capsule, which the menu doesn't list.
-                Section {
-                    ForEach(rest) { group in
-                        Toggle(
-                            isOn: Binding(
-                                get: { group.id == grouping.shownGroupID },
-                                set: { isOn in if isOn { onShow(group.id) } }
-                            )
-                        ) {
-                            if let status = group.agentStatus {
-                                Label {
-                                    Text(group.name)
-                                } icon: {
-                                    Image(uiImage: status.dotImage(for: colorScheme))
-                                }
-                                .accessibilityLabel("\(group.name), agent \(status.word)")
-                            } else {
-                                Text(group.name)
-                            }
-                        }
-                    }
-                }
-
-                Button {
-                    onCreate()
-                } label: {
-                    Label("New \(grouping.noun.singular)", systemImage: "plus")
-                }
-                .accessibilityIdentifier("terminal.windows.group.new")
-            } label: {
-                GhosttyWindowGroupCapsule(
-                    title: shownInMore?.name ?? "More",
-                    agentStatus: shownInMore?.agentStatus,
-                    isShown: shownInMore != nil,
-                    showsMenuIndicator: true
-                )
+            if !grouping.overflow.isEmpty {
+                more
             }
-            .accessibilityLabel(
-                shownInMore.map { "\(accessibilityName(of: $0)), more \(grouping.noun.plural.lowercased())" }
-                    ?? "More \(grouping.noun.plural.lowercased())"
-            )
-            .accessibilityIdentifier("terminal.windows.group.more")
 
             Spacer(minLength: 0)
         }
         .frame(height: TerminalSelectionSheetLayout.groupPickerHeight)
+    }
+
+    private var more: some View {
+        let shownInMore = grouping.overflow.first { $0.id == grouping.shownGroupID }
+        return Menu {
+            // A toggle for each group, which a menu draws as a checkmark, not a picker: the group shown may be
+            // a capsule, which the menu doesn't list.
+            ForEach(grouping.overflow) { group in
+                Toggle(
+                    isOn: Binding(
+                        get: { group.id == grouping.shownGroupID },
+                        set: { isOn in if isOn { onShow(group.id) } }
+                    )
+                ) {
+                    if let status = group.agentStatus {
+                        Label {
+                            Text(group.name)
+                        } icon: {
+                            Image(uiImage: status.dotImage(for: colorScheme))
+                        }
+                        .accessibilityLabel("\(group.name), agent \(status.word)")
+                    } else {
+                        Text(group.name)
+                    }
+                }
+            }
+        } label: {
+            GhosttyWindowGroupCapsule(
+                title: shownInMore?.name ?? "More",
+                agentStatus: shownInMore?.agentStatus,
+                isShown: shownInMore != nil,
+                showsMenuIndicator: true
+            )
+        }
+        .accessibilityLabel(
+            shownInMore.map { "\(accessibilityName(of: $0)), more \(grouping.noun.plural.lowercased())" }
+                ?? "More \(grouping.noun.plural.lowercased())"
+        )
+        .accessibilityIdentifier("terminal.windows.group.more")
     }
 
     private func accessibilityName(of group: GhosttyWindowSelectionSheetRenderProjection.Grouping.Group) -> String {

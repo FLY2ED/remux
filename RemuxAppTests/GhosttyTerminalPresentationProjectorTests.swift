@@ -727,6 +727,22 @@ final class GhosttyTerminalPresentationProjectorTests: XCTestCase {
         )
     }
 
+    /// The window sheet offers the three most recent groups as capsules, and the rest behind More only when
+    /// some don't fit.
+    func testTheGroupsThatDontFitAsCapsulesAreTheOnlyOnesBehindMore() {
+        for count in [1, 3, 4, 5] {
+            let groups = (1...count).map { GhosttyWindowSelectionSheetRenderProjection.Grouping.Group(id: UUID(), name: "w\($0)") }
+            let grouping = GhosttyWindowSelectionSheetRenderProjection.Grouping(
+                noun: .workspace,
+                groups: groups,
+                shownGroupID: groups[0].id,
+                largestWindowCount: 1
+            )
+            XCTAssertEqual(grouping.capsules, Array(groups.prefix(3)), "\(count) groups")
+            XCTAssertEqual(grouping.overflow, Array(groups.dropFirst(3)), "\(count) groups")
+        }
+    }
+
     func testTerminalReadyTraceFieldsPreserveExistingKeysAndAddRawReadinessFacts() throws {
         let workspaceID = try XCTUnwrap(UUID(uuidString: "11111111-2222-3333-4444-555555555555"))
         let selectedLeafID = try XCTUnwrap(UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"))

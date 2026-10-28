@@ -580,6 +580,8 @@ struct GhosttyWindowSelectionSheetRenderProjection: Equatable, Sendable {
             var agentStatus: TerminalAgentStatus?
         }
 
+        static let capsuleCount = 3
+
         let noun: GhosttyTopLevelNoun
         /// The most recent first.
         let groups: [Group]
@@ -587,6 +589,16 @@ struct GhosttyWindowSelectionSheetRenderProjection: Equatable, Sendable {
         let shownGroupID: UUID
         /// The most windows a group has, so the sheet keeps one height whichever group it shows.
         let largestWindowCount: Int
+
+        /// The most recent groups, which the sheet offers as capsules.
+        var capsules: [Group] {
+            Array(groups.prefix(Self.capsuleCount))
+        }
+
+        /// The groups that don't fit as capsules, which the sheet offers behind More, only when there are any.
+        var overflow: [Group] {
+            Array(groups.dropFirst(Self.capsuleCount))
+        }
     }
 
     let windows: [Window]
