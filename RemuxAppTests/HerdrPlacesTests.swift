@@ -116,7 +116,7 @@ final class HerdrPlacesTests: XCTestCase {
         let panes = workspaces.flatMap { name in
             [("t1", 1), ("t2", 2)].flatMap { tab, count in
                 (1...count).map { pane in
-                    #"{"pane_id":"\#(name)-\#(tab)-p\#(pane)","workspace_id":"\#(name)","tab_id":"\#(name)-\#(tab)","label":null,"cwd":null,"foreground_cwd":null,"focused":false}"#
+                    HerdrServerScript.snapshotPane("\(name)-\(tab)-p\(pane)", workspace: name, tab: "\(name)-\(tab)")
                 }
             }
         }

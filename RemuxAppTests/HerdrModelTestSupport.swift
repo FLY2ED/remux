@@ -249,6 +249,7 @@ enum HerdrServerScript {
 
     static func snapshotPane(
         _ id: String,
+        workspace: String = "w1",
         tab: String = "t1",
         label: String? = nil,
         cwd: String? = nil,
@@ -256,7 +257,7 @@ enum HerdrServerScript {
         rightClickPassthrough: Bool = false
     ) -> String {
         """
-        {"pane_id":"\(id)","workspace_id":"w1","tab_id":"\(tab)","label":\(json(label)),"cwd":\(json(cwd)),
+        {"pane_id":"\(id)","workspace_id":"\(workspace)","tab_id":"\(tab)","label":\(json(label)),"cwd":\(json(cwd)),
          "foreground_cwd":\(json(foregroundCWD)),"focused":false,"right_click_passthrough":\(rightClickPassthrough)}
         """
     }
