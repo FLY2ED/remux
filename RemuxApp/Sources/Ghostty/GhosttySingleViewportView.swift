@@ -634,22 +634,20 @@ private final class GhosttyCompositeViewportContainerView: UIView,
         }.count
         let shouldShowKeyboard = visiblePaneCount == 1
             || projection.focusedSurfaceID == surfaceID
-        if !shouldShowKeyboard {
-            onSurfaceTap?(surfaceID, false)
-            return
-        }
-
         let mouseCaptured = isMouseCaptured(surfaceID)
-        if container.consumeMomentumCatchTap() == true {
+        if shouldShowKeyboard, container.consumeMomentumCatchTap() == true {
             return
         }
         for action in GhosttySurfaceTapGesture.actions(
             forLocalPoint: recognizer.location(in: surface.view),
-            mouseCaptured: mouseCaptured
+            mouseCaptured: mouseCaptured,
+            showsKeyboard: shouldShowKeyboard
         ) {
             switch action {
             case .activateInput:
                 onSurfaceTap?(surfaceID, true)
+            case .focusPane:
+                onSurfaceTap?(surfaceID, false)
             case .mousePosition(let position):
                 _ = submitMousePosition?(surfaceID, position, [])
             case .mouseButton(let event):

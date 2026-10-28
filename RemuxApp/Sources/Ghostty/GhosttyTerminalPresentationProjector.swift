@@ -203,6 +203,8 @@ struct GhosttyTerminalInteractionProjection: Equatable, Sendable {
 enum GhosttyTerminalStatusOverlayProjection: Equatable, Sendable {
     case starting
     case commandFailure(String)
+    /// Something a program did that the user should know, such as a copy.
+    case notice(String)
     case waitingForPanes(debugStatus: String, registryDebugSummary: String)
     case ready
     case failed(message: String, reason: TerminalDisconnectReason?)
@@ -614,6 +616,7 @@ enum GhosttyTerminalPresentationProjector {
         phase: GhosttyTerminalRuntimePhase,
         transportWritable: Bool,
         commandFailureMessage: String?,
+        noticeMessage: String? = nil,
         debugStatus: String,
         registryDebugSummary: String,
         presentedSurfaceID: UUID?,
@@ -643,15 +646,18 @@ enum GhosttyTerminalPresentationProjector {
             statusOverlay: terminalStatusOverlayProjection(
                 readiness: readiness,
                 commandFailureMessage: commandFailureMessage,
+                noticeMessage: noticeMessage,
                 debugStatus: debugStatus,
                 registryDebugSummary: registryDebugSummary
             )
         )
     }
 
+    /// A session's notice holds one message at a time, so at most one of a failure and a notice is given.
     static func terminalStatusOverlayProjection(
         readiness: TerminalReadinessSnapshot,
         commandFailureMessage: String?,
+        noticeMessage: String? = nil,
         debugStatus: String,
         registryDebugSummary: String
     ) -> GhosttyTerminalStatusOverlayProjection {
@@ -666,6 +672,9 @@ enum GhosttyTerminalPresentationProjector {
             }
             if let commandFailureMessage {
                 return .commandFailure(commandFailureMessage)
+            }
+            if let noticeMessage {
+                return .notice(noticeMessage)
             }
             if TerminalReadinessProjector.isTerminalStatusReady(
                 readiness,

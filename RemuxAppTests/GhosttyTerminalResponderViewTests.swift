@@ -288,6 +288,34 @@ final class GhosttyTerminalResponderViewTests: XCTestCase {
         )
     }
 
+    /// A hardware F1 to F12 or Insert is that key, with its modifiers, never the name UIKit gives it as text.
+    func testHardwareCommandMappingResolvesFunctionKeysAndInsert() {
+        let usages: [UIKeyboardHIDUsage] = [
+            .keyboardF1, .keyboardF2, .keyboardF3, .keyboardF4, .keyboardF5, .keyboardF6,
+            .keyboardF7, .keyboardF8, .keyboardF9, .keyboardF10, .keyboardF11, .keyboardF12,
+        ]
+        for (usage, code) in zip(usages, GhosttySurfaceKeyEvent.KeyCode.functionKeys) {
+            XCTAssertEqual(
+                GhosttyTerminalHardwareCommandMapping.resolveHardwareKey(keyCode: usage, modifiers: []),
+                .keyEvent(.init(keyCode: code)),
+                "HID usage \(usage.rawValue)"
+            )
+        }
+        XCTAssertEqual(
+            GhosttyTerminalHardwareCommandMapping.resolveHardwareKey(keyCode: .keyboardInsert, modifiers: []),
+            .keyEvent(.init(keyCode: .insert))
+        )
+        XCTAssertEqual(
+            GhosttyTerminalHardwareCommandMapping.resolveHardwarePress(
+                keyCode: .keyboardF5,
+                modifiers: [.shift],
+                characters: "UIKeyInputF5",
+                charactersIgnoringModifiers: "UIKeyInputF5"
+            ),
+            .keyEvent(.init(keyCode: .f5, mods: [.shift]))
+        )
+    }
+
     func testHardwareCommandMappingPreservesHIDModifiers() {
         XCTAssertEqual(
             GhosttyTerminalHardwareCommandMapping.resolveHardwareKey(

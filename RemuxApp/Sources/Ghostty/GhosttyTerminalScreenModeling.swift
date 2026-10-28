@@ -25,32 +25,60 @@ struct GhosttyTerminalCommandFailureEvent: Equatable {
     let message: String
 }
 
-/// A failed command: an event the screen reacts to once, and a message the status overlay shows for a
-/// few seconds, until a newer failure replaces it.
+/// The status overlay's notice: a failed command, which is also an event the screen reacts to once, or
+/// something a program did that the user should know, such as a copy. The overlay shows one at a time,
+/// for its time, until a newer one replaces it.
 @MainActor
-final class GhosttyTerminalCommandFailureNotice {
-    /// How long a notice stays on screen.
-    nonisolated static let duration: Duration = .seconds(4)
+final class GhosttyTerminalNotice {
+    /// How long a failure stays on screen.
+    nonisolated static let failureDuration: Duration = .seconds(4)
+
+    private struct Shown {
+        let token: UInt64
+        let message: String
+        let isFailure: Bool
+    }
 
     private(set) var event: GhosttyTerminalCommandFailureEvent?
-    private(set) var message: String?
+    private var shown: Shown?
+    private var lastToken: UInt64 = 0
     private let onChange: () -> Void
 
     init(onChange: @escaping () -> Void) {
         self.onChange = onChange
     }
 
-    func present(_ message: String) {
-        let token = (event?.token ?? 0) &+ 1
+    var failureMessage: String? {
+        shown.flatMap { $0.isFailure ? $0.message : nil }
+    }
+
+    var informationMessage: String? {
+        shown.flatMap { $0.isFailure ? nil : $0.message }
+    }
+
+    func presentFailure(_ message: String) {
+        let token = show(message, isFailure: true, for: Self.failureDuration)
         event = GhosttyTerminalCommandFailureEvent(token: token, message: message)
-        self.message = message
         onChange()
+    }
+
+    func presentInformation(_ message: String, for duration: Duration) {
+        show(message, isFailure: false, for: duration)
+        onChange()
+    }
+
+    @discardableResult
+    private func show(_ message: String, isFailure: Bool, for duration: Duration) -> UInt64 {
+        lastToken &+= 1
+        let token = lastToken
+        shown = Shown(token: token, message: message, isFailure: isFailure)
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: Self.duration)
-            guard let self, self.event?.token == token else { return }
-            self.message = nil
+            try? await Task.sleep(for: duration)
+            guard let self, self.shown?.token == token else { return }
+            self.shown = nil
             self.onChange()
         }
+        return token
     }
 }
 

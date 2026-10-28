@@ -16,7 +16,7 @@ extension GhosttyTopLevelNoun {
 @MainActor
 final class HerdrTerminalScreenAdapter: ObservableObject {
     private weak var model: HerdrScreenModel?
-    private lazy var commandFailure = GhosttyTerminalCommandFailureNotice { [weak self] in
+    private lazy var notice = GhosttyTerminalNotice { [weak self] in
         self?.objectWillChange.send()
     }
     /// One id per Herdr pane and tab id for the model's life, as tmux's are per pane. A pane's screen
@@ -34,7 +34,11 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
     }
 
     func presentFailure(_ label: String) {
-        commandFailure.present("Herdr: \(label) failed")
+        notice.presentFailure("Herdr: \(label) failed")
+    }
+
+    func presentInformation(_ message: String, for duration: Duration) {
+        notice.presentInformation(message, for: duration)
     }
 
     func invalidate() {
@@ -248,7 +252,8 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         let projection = GhosttyTerminalPresentationProjector.terminalScreenPresentationProjection(
             phase: runtimePhase,
             transportWritable: model?.isConnectionReady ?? false,
-            commandFailureMessage: commandFailure.message,
+            commandFailureMessage: notice.failureMessage,
+            noticeMessage: notice.informationMessage,
             debugStatus: stateTraceLabel,
             registryDebugSummary: "herdr session",
             presentedSurfaceID: presentedSurfaceID,
@@ -295,7 +300,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     var commandFailureEvent: GhosttyTerminalCommandFailureEvent? {
-        commandFailure.event
+        notice.event
     }
 
     var stateTraceLabel: String {
@@ -348,24 +353,25 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func isMouseCaptured(for surfaceID: UUID) -> Bool {
-        false
+        guard let model, let paneID = paneID(for: surfaceID) else { return false }
+        return model.reportsMouse(inPane: paneID)
     }
 
     func sendMouseButton(
         to surfaceID: UUID,
         _ event: GhosttySurfaceMouseButtonEvent
     ) -> GhosttyMouseInputSubmissionOutcome {
-        .surfaceRejected
+        guard let model, let paneID = paneID(for: surfaceID) else { return .missingTarget(surfaceID) }
+        return model.sendMouseButton(event, inPane: paneID) ? .sent : .surfaceRejected
     }
 
-    /// The screen moves the pointer only where a scroll gesture over the pane is.
     func sendMousePosition(
         to surfaceID: UUID,
         _ position: CGPoint,
         mods: GhosttySurfaceKeyEvent.Mods
     ) -> GhosttyMouseInputSubmissionOutcome {
         guard let model, let paneID = paneID(for: surfaceID) else { return .missingTarget(surfaceID) }
-        model.setScrollPointer(position, inPane: paneID)
+        model.movePointer(to: position, inPane: paneID, mods: mods)
         return .sent
     }
 

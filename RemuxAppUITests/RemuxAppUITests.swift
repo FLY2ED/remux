@@ -2041,6 +2041,48 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertEqual(app.state, .runningForeground)
     }
 
+    /// A program's OSC 52 copy in a Herdr pane lands on the clipboard, and the screen says so.
+    func testLiveHerdrProgramCopyWhenConfigured() throws {
+        let configuration = try launchLiveHerdrApp()
+        openFirstSavedSession()
+        waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
+
+        let copied = "herdr-copy-\(UUID().uuidString.prefix(8).lowercased())"
+        sendTerminalCommand(#"clear; printf '\033]52;c;%s\a' "$(printf %s "# + copied + #" | base64)""#)
+        let notice = app.descendants(matching: .any)["terminal.notice"].firstMatch
+        XCTAssertTrue(notice.waitForExistence(timeout: 10), "A program's copy should say so.")
+        XCTAssertEqual(notice.label, "Copied to clipboard")
+        captureLiveHerdrStep("d1-copied", in: configuration)
+        hideKeyboardIfPresent()
+        XCTAssertEqual(pasteIntoEmptyComposer(), copied, "A program's copy should be on the clipboard.")
+        captureLiveHerdrStep("d2-copy-pasted", in: configuration)
+        clearAndCloseComposer()
+    }
+
+    /// A tap on a Herdr pane that isn't focused, whose program reads the mouse, focuses the pane and is a
+    /// click where the finger is. The session's tab has two panes, and the right one, not focused, runs
+    /// `cat -v` with SGR mouse reports on, which shows the reports it reads; the harness reads its text and
+    /// the focus after the test.
+    func testLiveHerdrMouseClickWhenConfigured() throws {
+        let configuration = try launchLiveHerdrApp()
+        openFirstSavedSession()
+        waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
+
+        // A phone opens a multi-pane tab zoomed; turned off from Panes, both panes are on screen.
+        let zoom = openHerdrPanesZoomSwitch(paneCount: 2)
+        zoom.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
+        XCTAssertTrue(waitForValue("0", of: zoom, timeout: 8), "Zoom should turn off from Panes.")
+        app.buttons["terminal.panes.close"].tap()
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        captureLiveHerdrStep("d3-two-panes", in: configuration)
+
+        let terminal = app.otherElements["terminal.screen"].firstMatch
+        terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.3)).tap()
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "the click shows")], timeout: 1.5)
+        captureLiveHerdrStep("d3-click", in: configuration)
+        XCTAssertEqual(app.state, .runningForeground)
+    }
+
     /// Opens Panes over a Herdr session whose tab has `paneCount` panes, checks that the pane picker maps
     /// every one, also while the tab is zoomed, and returns its Zoom switch.
     private func openHerdrPanesZoomSwitch(paneCount: Int) -> XCUIElement {

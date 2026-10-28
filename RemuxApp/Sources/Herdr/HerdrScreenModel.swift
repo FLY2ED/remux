@@ -247,6 +247,7 @@ final class HerdrScreenModel {
     private let onNotification: (NotificationEvent) -> Void
     private let engine: HerdrTerminalEngine
     private let makeRendererFence: RendererFenceFactory
+    private let clipboard: TerminalClipboard
     private var runtime: GhosttyKitRuntime?
     private var currentTerminalSettings: TerminalSettings
     /// The colours of the current theme: Herdr gets them in the theme report, and Herdr's pane borders
@@ -303,12 +304,14 @@ final class HerdrScreenModel {
     private var terminals: [String: HerdrRetainedTerminal] = [:]
     private var surfaces: [String: HerdrPaneSurface] = [:]
     private var paneScrolls: [String: HerdrPaneScroll] = [:]
-    /// Where the current scroll gesture over each pane is, in the pane's points, and the travel not
-    /// yet a whole wheel step.
-    private var scrollPointers: [String: CGPoint] = [:]
+    /// Where the pointer is over each pane, in the pane's points: a tap's place or a scroll gesture's.
+    private var pointers: [String: CGPoint] = [:]
+    /// The scroll travel over each pane not yet a whole wheel step.
     private var wheelRemainders: [String: Double] = [:]
+    /// The mouse button held down in a pane, from its press to its release.
+    private var mouseGesture: MouseGesture?
     private var presentationFailures: [String: TerminalDisconnectReason] = [:]
-    private var notices = HerdrNoticePolicy(visibleFor: GhosttyTerminalCommandFailureNotice.duration)
+    private var notices = HerdrNoticePolicy(visibleFor: GhosttyTerminalNotice.failureDuration)
     private var creatingTerminals: Set<ObjectIdentifier> = []
     /// Ghostty gives a terminal one renderer at a time, so a replacement waits for these to close.
     private var closingTerminals: Set<ObjectIdentifier> = []
@@ -329,7 +332,8 @@ final class HerdrScreenModel {
         engine: HerdrTerminalEngine = HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1),
         makeRendererFence: @escaping RendererFenceFactory = {
             HerdrPaneRendererFence(engine: $0, paneID: $1, terminal: $2)
-        }
+        },
+        clipboard: TerminalClipboard = .general
     ) {
         self.target = target
         self.sessionInstanceID = sessionInstanceID
@@ -340,6 +344,7 @@ final class HerdrScreenModel {
         self.recoveryTiming = recoveryTiming
         self.engine = engine
         self.makeRendererFence = makeRendererFence
+        self.clipboard = clipboard
         currentTerminalSettings = target.terminalSettings
         terminalScreenAdapter.attach(to: self)
         do {
@@ -898,12 +903,6 @@ final class HerdrScreenModel {
     /// or takes the wheel as arrow keys, gets one report or key per step instead.
     static let wheelLines: UInt16 = 3
 
-    /// Where a scroll gesture over the pane is; its wheel steps are reported at that cell, as Herdr's
-    /// client reports the pointer's.
-    func setScrollPointer(_ point: CGPoint, inPane paneID: String) {
-        scrollPointers[paneID] = point
-    }
-
     /// A scroll gesture's travel over a pane becomes Herdr wheel steps the way Ghostty turns travel into
     /// lines for tmux: one step per cell height, the rest kept for the next. Herdr decides what a step
     /// does: it scrolls the pane's history, or goes to the program as a wheel report or an arrow key. As
@@ -921,7 +920,7 @@ final class HerdrScreenModel {
             if momentum == .ended { wheelRemainders[paneID] = nil }
         }
         guard let target = inputTarget(forPane: paneID), let measurement,
-              let area = layout?.panes.first(where: { $0.paneID == paneID })?.innerRect
+              let cell = paneCell(at: pointers[paneID] ?? .zero, inPane: paneID)
         else { return false }
         if momentum == .began, paneID != focusedPaneID { _ = focusPane(paneID) }
 
@@ -931,16 +930,10 @@ final class HerdrScreenModel {
         wheelRemainders[paneID] = travel - steps * cellHeight
         guard steps != 0 else { return true }
 
-        let scale = measurement.cellMetrics.contentScale
-        let point = scrollPointers[paneID] ?? .zero
-        func cell(_ points: CGFloat, size: UInt32, count: UInt16) -> UInt16 {
-            let index = Int((Double(points) * scale / Double(max(size, 1))).rounded(.down))
-            return UInt16(min(max(index, 0), Int(max(count, 1)) - 1))
-        }
         let wheel = HerdrMouseEvent(
             kind: steps > 0 ? .scrollUp : .scrollDown,
-            column: cell(point.x, size: measurement.cellMetrics.pixelWidth, count: area.width),
-            row: cell(point.y, size: measurement.cellMetrics.pixelHeight, count: area.height),
+            column: cell.column,
+            row: cell.row,
             lines: Self.wheelLines
         )
         let events = Array(repeating: HerdrInputEvent.mouse(wheel), count: Int(steps.magnitude))
@@ -952,6 +945,106 @@ final class HerdrScreenModel {
               let managed = surfaces[paneID]?.renderer.managedSurface
         else { return }
         managed.setRemoteScroll(scroll.scrollState, route: scroll.route)
+    }
+
+    // MARK: - Mouse
+
+    /// A pane's cell, relative to its text area.
+    private struct PaneCell: Equatable {
+        let column: UInt16
+        let row: UInt16
+    }
+
+    /// A mouse button held down in a pane, and the cell last reported with it.
+    private struct MouseGesture {
+        let paneID: String
+        let button: HerdrMouseEvent.Button
+        var cell: PaneCell
+    }
+
+    /// Whether the pane's program reads the mouse, as Herdr's surface says.
+    func reportsMouse(inPane paneID: String) -> Bool {
+        paneScrolls[paneID]?.mouseReporting == true
+    }
+
+    /// The pointer moved over a pane. As Herdr's client passes on the host terminal's motion
+    /// (`client/shell/mouse.rs`), a program that reads the mouse gets a move each time the pointer reaches
+    /// another cell, which Herdr reports only to a program asking for every motion, and while a button is
+    /// held in the pane, a drag. The wheel's steps are reported at this cell too.
+    func movePointer(to point: CGPoint, inPane paneID: String, mods: GhosttySurfaceKeyEvent.Mods) {
+        let previous = pointers[paneID].flatMap { paneCell(at: $0, inPane: paneID) }
+        pointers[paneID] = point
+        guard let target = inputTarget(forPane: paneID), let cell = paneCell(at: point, inPane: paneID) else { return }
+        let kind: HerdrMouseEvent.Kind
+        if let gesture = mouseGesture {
+            guard gesture.paneID == paneID, cell != gesture.cell else { return }
+            mouseGesture?.cell = cell
+            kind = .drag(gesture.button)
+        } else {
+            guard reportsMouse(inPane: paneID), cell != previous else { return }
+            kind = .moved
+        }
+        _ = send([mouseEvent(kind, at: cell, mods: mods)], to: target)
+    }
+
+    /// A button pressed or released at the pointer, as Herdr's client sends one to a pane: a press goes
+    /// only to a program that reads the mouse, and a right press only to a pane set to take right-clicks
+    /// (`pane.input.set`) with no modifier held, since Herdr's own menu takes them otherwise. Until its
+    /// release, which goes to the same pane, the press takes the pointer's moves and no other press goes.
+    /// The tap that makes the press focuses the pane, as a tap does on any pane. Returns false when the
+    /// event doesn't go.
+    func sendMouseButton(_ event: GhosttySurfaceMouseButtonEvent, inPane paneID: String) -> Bool {
+        guard let button = HerdrInputTranslator.mouseButton(event.button) else { return false }
+        switch event.state {
+        case .press:
+            guard mouseGesture == nil, let target = inputTarget(forPane: paneID), reportsMouse(inPane: paneID),
+                  button != .right || takesRightClick(inPane: paneID, mods: event.mods),
+                  let cell = pointers[paneID].flatMap({ paneCell(at: $0, inPane: paneID) }),
+                  send([mouseEvent(.down(button), at: cell, mods: event.mods)], to: target) == .accepted
+            else { return false }
+            mouseGesture = MouseGesture(paneID: paneID, button: button, cell: cell)
+            return true
+        case .release:
+            guard let gesture = mouseGesture, gesture.button == button else { return false }
+            mouseGesture = nil
+            guard let target = inputTarget(forPane: gesture.paneID) else { return false }
+            let cell = pointers[gesture.paneID].flatMap { paneCell(at: $0, inPane: gesture.paneID) } ?? gesture.cell
+            return send([mouseEvent(.up(button), at: cell, mods: event.mods)], to: target) == .accepted
+        }
+    }
+
+    private func takesRightClick(inPane paneID: String, mods: GhosttySurfaceKeyEvent.Mods) -> Bool {
+        HerdrInputTranslator.modifiers(for: mods).isEmpty
+            && snapshot?.panes.first { $0.paneID == paneID }?.rightClickPassthrough == true
+    }
+
+    private func mouseEvent(
+        _ kind: HerdrMouseEvent.Kind,
+        at cell: PaneCell,
+        mods: GhosttySurfaceKeyEvent.Mods
+    ) -> HerdrInputEvent {
+        .mouse(HerdrMouseEvent(
+            kind: kind,
+            column: cell.column,
+            row: cell.row,
+            modifiers: HerdrInputTranslator.modifiers(for: mods)
+        ))
+    }
+
+    /// The cell at `point`, in the pane's points, within the pane's drawn area. Herdr reports a cell to a
+    /// program in SGR pixel mode as the cell's centre pixel.
+    private func paneCell(at point: CGPoint, inPane paneID: String) -> PaneCell? {
+        guard let measurement, let area = layout?.panes.first(where: { $0.paneID == paneID })?.innerRect
+        else { return nil }
+        let scale = measurement.cellMetrics.contentScale
+        func index(_ points: CGFloat, size: UInt32, count: UInt16) -> UInt16 {
+            let index = Int((Double(points) * scale / Double(max(size, 1))).rounded(.down))
+            return UInt16(min(max(index, 0), Int(max(count, 1)) - 1))
+        }
+        return PaneCell(
+            column: index(point.x, size: measurement.cellMetrics.pixelWidth, count: area.width),
+            row: index(point.y, size: measurement.cellMetrics.pixelHeight, count: area.height)
+        )
     }
 
     // MARK: - Selection
@@ -1248,8 +1341,8 @@ final class HerdrScreenModel {
                 Task { @MainActor in model.notificationArrived(attemptID, notification) }
             case .bell:
                 Task { @MainActor in model.bellRang(attemptID) }
-            case .clipboard:
-                break
+            case .clipboard(let base64):
+                Task { @MainActor in model.clipboardWritten(attemptID, base64: base64) }
             }
         }
     }
@@ -1340,8 +1433,22 @@ final class HerdrScreenModel {
     /// Herdr rings only the session in front, which the connection checks; a bell that comes after the
     /// session left the screen has no one to ring for.
     private func bellRang(_ attemptID: UInt64) {
-        guard let attempt, attempt.id == attemptID, isCurrent(attempt), isSelected else { return }
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt), isOnScreen else { return }
         onNotification(.bell)
+    }
+
+    /// A program in the session on screen wrote the clipboard (OSC 52); a write that comes after the session
+    /// left the screen has no one to write for. As in Herdr's client, a payload that isn't base64 is
+    /// dropped, and the copy notice shows only after a write that wasn't a duplicate
+    /// (`client/clipboard_forwarding.rs`, `selection.rs` `write_osc52_bytes`). The iPhone clipboard holds
+    /// text, so bytes that aren't UTF-8 are dropped too.
+    private func clipboardWritten(_ attemptID: UInt64, base64: String) {
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt), isOnScreen,
+              let bytes = Data(base64Encoded: base64), let text = String(data: bytes, encoding: .utf8),
+              clipboard.write(text)
+        else { return }
+        notices.replaced()
+        terminalScreenAdapter.presentInformation(Self.copiedNotice, for: Self.copiedNoticeDuration)
     }
 
     /// The panes on screen show their agents as they are now, as Herdr's client counts a pane it
@@ -1452,13 +1559,18 @@ final class HerdrScreenModel {
         }
     }
 
-    /// Shows the session while the root wants it on screen and hides it otherwise. Herdr takes the
+    /// The root wants the session on screen, and the app isn't in the background, which hides it.
+    private var isOnScreen: Bool {
+        isSelected && appPhase != .background
+    }
+
+    /// Shows the session while it is on screen (`isOnScreen`) and hides it otherwise. Herdr takes the
     /// newest of a show and a hide, so each change is sent at once, even while the last is unanswered.
     /// A place or creation asked for goes right after the show, as part of it.
     private func reconcileVisibility() {
         guard let attempt, isCurrent(attempt), attempt.isOpen, attempt.hasSnapshot, let geometry
         else { return }
-        let wanted = isSelected && appPhase != .background
+        let wanted = isOnScreen
         guard wanted != attempt.wantsShown else { return }
         attempt.wantsShown = wanted
         attempt.visibilityPending = true
@@ -1557,8 +1669,9 @@ final class HerdrScreenModel {
             let shown = Set(layout.panes.lazy.filter(\.hasTextArea).map(\.paneID))
             terminals = terminals.filter { shown.contains($0.key) }
             presentationFailures = presentationFailures.filter { shown.contains($0.key) }
-            scrollPointers = scrollPointers.filter { shown.contains($0.key) }
+            pointers = pointers.filter { shown.contains($0.key) }
             wheelRemainders = wheelRemainders.filter { shown.contains($0.key) }
+            if let gesture = mouseGesture, !shown.contains(gesture.paneID) { mouseGesture = nil }
             for paneID in Array(surfaces.keys) where !shown.contains(paneID) {
                 closeSurface(paneID)
             }
@@ -1793,6 +1906,9 @@ final class HerdrScreenModel {
     private static let inputFailureLabel = "input"
     private static let copyFailureLabel = "copy"
     private static let zoomFailureLabel = "zoom pane"
+    static let copiedNotice = "Copied to clipboard"
+    /// As long as Herdr's client shows its copy notice.
+    static let copiedNoticeDuration: Duration = .seconds(2)
 
     private static let rendererFailureMessage = "Terminal renderer is unavailable. Reconnect to try again."
     private static let configurationFailureMessage =

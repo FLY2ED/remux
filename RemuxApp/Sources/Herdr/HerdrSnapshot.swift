@@ -61,6 +61,8 @@ struct HerdrSnapshot: Equatable, Sendable, Decodable {
         let cwd: String?
         let foregroundCWD: String?
         let focused: Bool
+        /// Whether a right-click goes to the pane's program rather than to Herdr's menu (`pane.input.set`).
+        let rightClickPassthrough: Bool
 
         private enum CodingKeys: String, CodingKey {
             case paneID = "pane_id"
@@ -69,6 +71,7 @@ struct HerdrSnapshot: Equatable, Sendable, Decodable {
             case label, cwd
             case foregroundCWD = "foreground_cwd"
             case focused
+            case rightClickPassthrough = "right_click_passthrough"
         }
     }
 
