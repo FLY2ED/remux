@@ -605,7 +605,8 @@ struct GhosttyWindowSelectionSheetRenderProjection: Equatable, Sendable {
             Array(groups.prefix(Self.capsuleCount))
         }
 
-        /// The groups that don't fit as capsules, which the sheet offers behind More, only when there are any.
+        /// The groups that don't fit as capsules, which the sheet offers behind More, only when there are any;
+        /// otherwise a new group ends the capsules.
         var overflow: [Group] {
             Array(groups.dropFirst(Self.capsuleCount))
         }

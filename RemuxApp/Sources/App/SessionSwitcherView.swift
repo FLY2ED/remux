@@ -7,6 +7,12 @@ struct ActiveSessionSwitcherItem: Identifiable, Equatable {
     let serverName: String
     let runtimeState: TerminalRuntimeState
     let isSelected: Bool
+
+    /// Whether the session's row marks it as the one the user is in, as a list marks its current choice. A
+    /// session open over its workspaces leaves the mark to the workspace the user is in.
+    func showsCheckmark(disclosure: Bool?) -> Bool {
+        isSelected && disclosure != true
+    }
 }
 
 struct RemoteSessionIdentity: Hashable {
@@ -487,10 +493,7 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
             )
         }
         .buttonStyle(.plain)
-        .sessionSwitcherListRow(
-            accessibilityIdentifier: "terminal.sessions.herdr-workspace",
-            background: isCurrent ? chromeStyle.accent.opacity(0.14) : .clear
-        )
+        .sessionSwitcherListRow(accessibilityIdentifier: "terminal.sessions.herdr-workspace")
     }
 
     private func newHerdrWorkspaceRow(_ session: ActiveSessionSwitcherItem) -> some View {
@@ -683,8 +686,7 @@ private struct HerdrOutlineReader<Content: View>: View {
 
 private struct ActiveSessionSwitcherRow: View {
     let session: ActiveSessionSwitcherItem
-    /// Whether the rows under it are open, for a session that lists its places; it then shows that in
-    /// place of the check.
+    /// Whether the rows under it are open, for a session that lists its places.
     let disclosure: Bool?
     /// The session's most urgent agent, for a session that reports agents.
     let agentStatus: TerminalAgentStatus?
@@ -727,16 +729,18 @@ private struct ActiveSessionSwitcherRow: View {
 
             Spacer(minLength: 8)
 
+            if session.showsCheckmark(disclosure: disclosure) {
+                Image(systemName: "checkmark")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(chromeStyle.accent)
+                    .accessibilityHidden(true)
+            }
+
             if let disclosure {
                 Image(systemName: "chevron.right")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(TerminalSelectionSheetPalette.tertiary)
                     .rotationEffect(.degrees(disclosure ? 90 : 0))
-                    .accessibilityHidden(true)
-            } else if session.isSelected {
-                Image(systemName: "checkmark")
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(chromeStyle.accent)
                     .accessibilityHidden(true)
             }
         }
@@ -1141,12 +1145,12 @@ private struct NewSessionServerPickerView: View {
 }
 
 extension View {
-    func sessionSwitcherListRow(accessibilityIdentifier: String, background: Color = .clear) -> some View {
+    func sessionSwitcherListRow(accessibilityIdentifier: String) -> some View {
         self
             .accessibilityIdentifier(accessibilityIdentifier)
             .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
             .listRowSeparator(.visible)
             .listRowSeparatorTint(TerminalSelectionSheetPalette.stroke)
-            .listRowBackground(background)
+            .listRowBackground(Color.clear)
     }
 }

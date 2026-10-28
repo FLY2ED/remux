@@ -418,13 +418,25 @@ final class SessionSwitcherProjectionTests: XCTestCase {
         )
     }
 
+    /// The session the user is in is marked on its row, as a list marks its current choice, unless the row
+    /// is open over its workspaces, which mark the one the user is in.
+    func testTheSessionYoureInIsMarkedOnItsRowUnlessItListsItsWorkspaces() {
+        let current = item(.herdr, "default", on: "devbox", selected: true)
+        let other = item(.herdr, "train", on: "gpu-box")
+        XCTAssertTrue(current.showsCheckmark(disclosure: nil), "a session without workspaces listed")
+        XCTAssertTrue(current.showsCheckmark(disclosure: false), "a collapsed session")
+        XCTAssertFalse(current.showsCheckmark(disclosure: true), "an expanded session")
+        XCTAssertFalse([nil, false, true].contains { other.showsCheckmark(disclosure: $0) })
+    }
+
     // MARK: - Agents
 
     private func item(
         _ backend: SessionBackend,
         _ sessionName: String,
         on serverName: String,
-        _ runtimeState: TerminalRuntimeState = .connected
+        _ runtimeState: TerminalRuntimeState = .connected,
+        selected: Bool = false
     ) -> ActiveSessionSwitcherItem {
         ActiveSessionSwitcherItem(
             id: UUID(),
@@ -432,7 +444,7 @@ final class SessionSwitcherProjectionTests: XCTestCase {
             sessionName: sessionName,
             serverName: serverName,
             runtimeState: runtimeState,
-            isSelected: false
+            isSelected: selected
         )
     }
 
