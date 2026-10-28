@@ -2274,6 +2274,13 @@ final class RemuxAppUITests: XCTestCase {
         app.buttons["terminal.agents.filter.done"].tap()
         XCTAssertTrue(waitForAgentRows([done]), "Done didn't show only the finished agent.")
         captureLiveHerdrStep("a6-agents-done", in: configuration)
+        app.buttons["terminal.agents.filter.working"].tap()
+        XCTAssertTrue(waitForAgentRows([working]), "Working didn't show only the working agent.")
+        captureLiveHerdrStep("a6b-agents-working", in: configuration)
+        app.buttons["terminal.agents.filter.idle"].tap()
+        XCTAssertTrue(waitForAgentRows([]), "Idle showed an agent while none is idle.")
+        XCTAssertTrue(app.staticTexts["No Agents Idle"].waitForExistence(timeout: 5))
+        captureLiveHerdrStep("a6c-agents-idle", in: configuration)
         app.buttons["terminal.agents.filter.all"].tap()
         XCTAssertTrue(waitForAgentRows([working, blocked, done]))
 
@@ -2299,6 +2306,9 @@ final class RemuxAppUITests: XCTestCase {
             "The agent that finished wasn't seen once its pane was on screen."
         )
         captureLiveHerdrStep("a9-agents-after-seen", in: configuration)
+        app.buttons["terminal.agents.filter.idle"].tap()
+        XCTAssertTrue(waitForAgentRows(["claude, remux › build, idle"]), "Idle didn't show only the idle agent.")
+        captureLiveHerdrStep("a9b-agents-idle", in: configuration)
         app.buttons["terminal.sessions.close"].tap()
     }
 
