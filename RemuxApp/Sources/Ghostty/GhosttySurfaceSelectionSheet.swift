@@ -99,7 +99,7 @@ struct GhosttyWindowSelectionSheet: View {
             session.reconcile(leafIDs: newValue)
         }
         .onChange(of: projection.windows.map(\.id)) { _, newValue in
-            removal.keepBubble(among: newValue)
+            removal.keep(among: newValue)
         }
         .ghosttyCloseConfirmationDialog(closeQuestion)
         .overlay(alignment: .bottom) {
@@ -279,7 +279,7 @@ struct GhosttyPaneSelectionSheet: View {
             }
         }
         .onChange(of: projection.panes.map(\.id)) { _, newValue in
-            removal.keepBubble(among: newValue)
+            removal.keep(among: newValue)
         }
         .ghosttyCloseConfirmationDialog(closeQuestion)
         .overlay(alignment: .bottom) {
@@ -370,9 +370,10 @@ struct GhosttyTileRemoval<Tile: GhosttyRemovableTile> {
         return nil
     }
 
-    /// The tiles the sheet lists changed: a bubble on one no longer listed goes.
-    mutating func keepBubble(among ids: [UUID]) {
+    /// The tiles the sheet lists changed: a tile no longer listed takes its bubble and its question with it.
+    mutating func keep(among ids: [UUID]) {
         if let id = bubbleTileID, !ids.contains(id) { bubbleTileID = nil }
+        if let id = asked?.id, !ids.contains(id) { asked = nil }
     }
 
     /// The question was answered, or the bubble set aside.

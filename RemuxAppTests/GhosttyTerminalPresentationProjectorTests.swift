@@ -778,6 +778,27 @@ final class GhosttyTerminalPresentationProjectorTests: XCTestCase {
         XCTAssertNil(removal.asked)
     }
 
+    /// A tile that goes while its question is up, as when another client closes it, takes the question with it,
+    /// so nothing is left to agree to; a question about a tile still listed stays.
+    func testATileThatGoesTakesItsRemovalQuestionWithIt() {
+        let lastTab = GhosttyCloseConfirmation(title: "Close Workspace?", message: "“web” will close.", action: "Close Workspace")
+        let id = UUID()
+        let other = UUID()
+        let tab = GhosttyWindowSelectionSheetRenderProjection.Window(
+            id: id, displayName: "build", displayIndex: 1, totalCount: 1, paneCount: 1, isSelected: false,
+            focusedPreviewPaneID: nil, closeConfirmation: lastTab
+        )
+        var removal = GhosttyTileRemoval<GhosttyWindowSelectionSheetRenderProjection.Window>()
+
+        XCTAssertNil(removal.remove(tab), "The workspace's only tab closed without asking.")
+        removal.keep(among: [id, other])
+        XCTAssertEqual(removal.asked?.id, id, "A question about a tab still listed went.")
+
+        removal.keep(among: [other])
+        XCTAssertNil(removal.asked, "A question about a tab no longer listed stayed.")
+        XCTAssertNil(removal.bubbleTileID)
+    }
+
     func testTerminalReadyTraceFieldsPreserveExistingKeysAndAddRawReadinessFacts() throws {
         let workspaceID = try XCTUnwrap(UUID(uuidString: "11111111-2222-3333-4444-555555555555"))
         let selectedLeafID = try XCTUnwrap(UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"))
