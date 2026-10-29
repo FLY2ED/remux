@@ -2554,6 +2554,37 @@ final class HerdrScreenModelTests: XCTestCase {
         await stopping.value
     }
 
+    /// The phone's zoom record is for the Herdr session as Remux reaches it: the server's address, the account and
+    /// Herdr it runs as, and the session's name. A saved server edited to reach another machine finds no record
+    /// there, so its end unzooms none of that machine's tabs, while another saved server that reaches the first
+    /// machine finds the record and takes the zoom off.
+    func testTheZoomRecordIsForTheHerdrSessionAsRemuxReachesIt() async throws {
+        let keepers = HerdrZoomKeepers(store: InMemoryHerdrOwnedZoomStore())
+        let server = SavedServer(displayName: "Herdr Host", host: "herdr.example.test", username: "builder")
+        let zoomed = await makeHarness(settings: Self.zooming, zoomKeepers: keepers, server: server)
+        _ = try await shownTab(zoomed, zoomingOnShow: true)
+        // The app ends without ending the session, which keeps the zoom and its record.
+        await zoomed.model.stop(.replacedByNewAttempt)
+
+        let edited = SavedServer(id: server.id, displayName: "Herdr Host", host: "other.example.test", username: "builder")
+        let elsewhere = await makeHarness(zoomKeepers: keepers, server: edited)
+        let other = try await shownTab(elsewhere, zoomed: true)
+        await elsewhere.model.stop()
+        let written = await other.bridge.writtenCount
+        let end = try await elsewhere.writes(other.bridge, from: other.next, count: written - other.next)
+        XCTAssertFalse(end.contains { paneZoom($0) != nil }, "another machine's tab was unzoomed: \(end)")
+
+        let sameMachine = SavedServer(displayName: "Same Host", host: "herdr.example.test", username: "builder")
+        let again = await makeHarness(zoomKeepers: keepers, server: sameMachine)
+        let session = try await shownTab(again, zoomed: true)
+        var index = session.next
+        let stopping = Task { await again.model.stop() }
+        let unzoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        XCTAssertEqual([unzoom.paneID, unzoom.mode], ["w1:p1", "off"])
+        await session.bridge.serve(HerdrServerScript.zoomReply(id: unzoom.id, changed: true, zoomed: false, panes: Self.places(2)))
+        await stopping.value
+    }
+
     /// The session opened again while its end still takes Remux's zooms off waits for that end before it opens
     /// its bridge, so none of Herdr's time for the hello goes on the wait: the end stops after its step in
     /// flight, goes back to the tab it started on, where Herdr starts the new model's session, and unzooms

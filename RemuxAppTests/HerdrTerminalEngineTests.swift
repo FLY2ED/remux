@@ -707,7 +707,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let updates = UpdateLog(engine)
         let (feed, outbox) = await connect(engine)
         let store = InMemoryHerdrOwnedZoomStore()
-        let session = HerdrZoomSession(serverID: UUID(), session: "s")
+        let session = Self.herdrSession
         await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
         try await shownZoomed(feed, updates, outbox)
         let closed = Closed()
@@ -802,7 +802,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let updates = UpdateLog(engine)
         let (feed, outbox) = await connect(engine)
         let store = InMemoryHerdrOwnedZoomStore()
-        let session = HerdrZoomSession(serverID: UUID(), session: "s")
+        let session = Self.herdrSession
         await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
         try await shownZoomed(feed, updates, outbox)
         let closed = Closed()
@@ -881,7 +881,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let updates = UpdateLog(engine)
         let (feed, outbox) = await connect(engine)
         let store = InMemoryHerdrOwnedZoomStore()
-        let session = HerdrZoomSession(serverID: UUID(), session: "s")
+        let session = Self.herdrSession
         await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
         try await shownZoomed(feed, updates, outbox)
         let closed = Closed()
@@ -986,7 +986,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAttachingAgainDuringTheSessionsEndTakesItsZoomsOver() async throws {
         let store = InMemoryHerdrOwnedZoomStore()
         let keepers = HerdrZoomKeepers(store: store)
-        let session = HerdrZoomSession(serverID: UUID(), session: "s")
+        let session = Self.herdrSession
         let old = makeEngine()
         let updates = UpdateLog(old)
         let (feed, outbox) = await connect(old)
@@ -1030,7 +1030,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testOnlyTheNewestOfTwoAttachmentsDuringTheSessionsEndKeepsItsZooms() async throws {
         let store = InMemoryHerdrOwnedZoomStore()
         let keepers = HerdrZoomKeepers(store: store)
-        let session = HerdrZoomSession(serverID: UUID(), session: "s")
+        let session = Self.herdrSession
         let old = makeEngine()
         let updates = UpdateLog(old)
         let (feed, outbox) = await connect(old)
@@ -1090,7 +1090,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     func testAZoomAnsweredAsTheSessionIsOpenedAgainIsTakenOverAndTakenOff() async throws {
         let store = InMemoryHerdrOwnedZoomStore()
         let keepers = HerdrZoomKeepers(store: store)
-        let session = HerdrZoomSession(serverID: UUID(), session: "s")
+        let session = Self.herdrSession
         let old = makeEngine()
         let updates = UpdateLog(old)
         let (feed, outbox) = await connect(old)
@@ -1133,7 +1133,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let updates = UpdateLog(engine)
         let (feed, outbox) = await connect(engine)
         let store = InMemoryHerdrOwnedZoomStore()
-        let session = HerdrZoomSession(serverID: UUID(), session: "s")
+        let session = Self.herdrSession
         await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
         try await shownZoomed(feed, updates, outbox)
         // Another client zooms the second tab.
@@ -1183,7 +1183,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     /// step's time of its own, so the release ends on the tab it started on.
     func testTheFocusBackOfAStoppedReleaseHasAStepsTimeOfItsOwn() async throws {
         let keepers = HerdrZoomKeepers(store: InMemoryHerdrOwnedZoomStore())
-        let session = HerdrZoomSession(serverID: UUID(), session: "s")
+        let session = Self.herdrSession
         let old = makeEngine()
         let updates = UpdateLog(old)
         let (feed, outbox) = await connect(old)
@@ -1253,7 +1253,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let updates = UpdateLog(engine)
         let (feed, outbox) = await connect(engine)
         let store = InMemoryHerdrOwnedZoomStore()
-        let session = HerdrZoomSession(serverID: UUID(), session: "s")
+        let session = Self.herdrSession
         await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
         try await zoomedOnBothTabs(feed, updates, outbox)
         let closed = Closed()
@@ -1281,7 +1281,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let updates = UpdateLog(engine)
         let (feed, outbox) = await connect(engine)
         let store = InMemoryHerdrOwnedZoomStore()
-        let session = HerdrZoomSession(serverID: UUID(), session: "s")
+        let session = Self.herdrSession
         await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
         try await shown(feed, updates, outbox, panes: Self.atP)
         let answers = Answers()
@@ -1312,7 +1312,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     /// with other panes now isn't Remux's.
     func testAZoomKeptOnThePhoneIsTakenOverOnlyWhileItsTabHasItsPanes() async throws {
         let store = InMemoryHerdrOwnedZoomStore()
-        let session = HerdrZoomSession(serverID: UUID(), session: "s")
+        let session = Self.herdrSession
         let first = makeEngine()
         await first.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
         let firstUpdates = UpdateLog(first)
@@ -2543,6 +2543,11 @@ final class HerdrTerminalEngineTests: XCTestCase {
     /// Herdr's time for each step of taking Remux's zooms off, as for a show.
     static let releaseStepTime: Duration = .seconds(5)
 
+    /// The Herdr session whose zooms a test keeps.
+    static let herdrSession = HerdrSessionAddress(
+        host: "herdr.example.test", port: 22, username: "builder", herdrExecutablePath: nil, session: "s"
+    )
+
     /// The session on screen at 4 × 2, taken to `pane` when given.
     static func show(_ pane: String? = nil, zoom: HerdrZoomPolicy = notZooming) -> HerdrView {
         .shown(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 4, rows: 2), to: pane.map { .place(.pane($0)) }, zoom: zoom)
@@ -3167,11 +3172,11 @@ private final class StaleZoomStore: HerdrOwnedZoomStore, @unchecked Sendable {
         )
     }
 
-    func zooms(of session: HerdrZoomSession) -> HerdrOwnedZooms {
+    func zooms(of session: HerdrSessionAddress) -> HerdrOwnedZooms {
         lock.withLock { zooms }
     }
 
-    func save(_ zooms: HerdrOwnedZooms, of session: HerdrZoomSession) {
+    func save(_ zooms: HerdrOwnedZooms, of session: HerdrSessionAddress) {
         lock.withLock { self.zooms = zooms }
     }
 }

@@ -1471,7 +1471,7 @@ final class HerdrScreenModel {
     private func run(_ attempt: Attempt) async {
         let feed = HerdrEngineFeed(engine: engine, connection: attempt.id)
         if zoomClaim == nil {
-            let session = HerdrZoomSession(serverID: target.server.id, session: target.workspace.sessionName)
+            let session = HerdrSessionAddress(target)
             zoomClaim = Task { [engine, zoomKeepers] in await engine.keepOwnedZooms(of: session, from: zoomKeepers) }
         }
         await zoomClaim?.value

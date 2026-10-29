@@ -1804,11 +1804,8 @@ final class RemuxRootModel: ObservableObject {
     /// Whether two targets reach the same Herdr session the same way. Terminal settings don't count:
     /// a running model takes them live.
     private static func opensTheSameHerdrBridge(_ lhs: SessionTarget, _ rhs: SessionTarget) -> Bool {
-        lhs.server.host == rhs.server.host
-            && lhs.server.port == rhs.server.port
-            && lhs.server.herdrExecutablePath == rhs.server.herdrExecutablePath
-            && lhs.workspace.locator == rhs.workspace.locator
-            && lhs.sshAuth.username == rhs.sshAuth.username
+        HerdrSessionAddress(lhs) == HerdrSessionAddress(rhs)
+            && lhs.workspace.backend == rhs.workspace.backend
             && lhs.sshAuth.authFingerprint == rhs.sshAuth.authFingerprint
     }
 

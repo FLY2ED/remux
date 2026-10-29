@@ -264,7 +264,7 @@ struct HerdrZoomPolicy: Equatable, Sendable {
 final class HerdrZoomKeepers: @unchecked Sendable {
     /// A claim on a session's zooms, which saves while no newer claim on the session was made.
     struct Claim: Sendable {
-        let session: HerdrZoomSession
+        let session: HerdrSessionAddress
         let generation: UInt64
     }
 
@@ -281,7 +281,7 @@ final class HerdrZoomKeepers: @unchecked Sendable {
 
     private let store: any HerdrOwnedZoomStore
     private let lock = NSLock()
-    private var sessions: [HerdrZoomSession: Keeping] = [:]
+    private var sessions: [HerdrSessionAddress: Keeping] = [:]
 
     init(store: any HerdrOwnedZoomStore) {
         self.store = store
@@ -289,7 +289,7 @@ final class HerdrZoomKeepers: @unchecked Sendable {
 
     /// A claim on `session`'s zooms for `engine`, and the zooms the phone keeps for it, once the release under
     /// way on the engine holding them has stopped; nil when a newer claim was made meanwhile.
-    func claim(_ session: HerdrZoomSession, for engine: HerdrTerminalEngine) async -> (Claim, HerdrOwnedZooms)? {
+    func claim(_ session: HerdrSessionAddress, for engine: HerdrTerminalEngine) async -> (Claim, HerdrOwnedZooms)? {
         let (generation, stopping) = lock.withLock { () -> (UInt64, Task<Void, Never>?) in
             var keeping = sessions[session] ?? Keeping()
             keeping.newest += 1
@@ -1141,7 +1141,7 @@ actor HerdrTerminalEngine {
     /// claims them once, takes over those kept for the session once the release under way on the engine holding
     /// them has stopped, checks them against each snapshot (`HerdrOwnedZooms.reconcile`), and saves every change
     /// while its claim is the newest.
-    func keepOwnedZooms(of session: HerdrZoomSession, from keepers: HerdrZoomKeepers) async {
+    func keepOwnedZooms(of session: HerdrSessionAddress, from keepers: HerdrZoomKeepers) async {
         guard state != .stopped, !claimsZooms else { return }
         claimsZooms = true
         guard let (claim, zooms) = await keepers.claim(session, for: self), state != .stopped else { return }

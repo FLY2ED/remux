@@ -1,23 +1,18 @@
 import Foundation
 
-/// A Herdr session on a saved server, whose zooms the phone keeps.
-struct HerdrZoomSession: Hashable, Codable, Sendable {
-    let serverID: SavedServer.ID
-    let session: String
-}
-
-/// The zooms Remux made on each Herdr session, kept on the phone since Herdr's zoom has no owner
+/// The zooms Remux made on each Herdr session, by the session as Remux reaches it (`HerdrSessionAddress`), kept
+/// on the phone since Herdr's zoom has no owner
 /// (`HerdrOwnedZooms`). Reads and writes are synchronous, for the engine, which owns the zooms and
 /// changes them as Herdr's answers and snapshots come; a write that fails loses only what a later attachment
 /// would take over.
 protocol HerdrOwnedZoomStore: Sendable {
-    func zooms(of session: HerdrZoomSession) -> HerdrOwnedZooms
-    func save(_ zooms: HerdrOwnedZooms, of session: HerdrZoomSession)
+    func zooms(of session: HerdrSessionAddress) -> HerdrOwnedZooms
+    func save(_ zooms: HerdrOwnedZooms, of session: HerdrSessionAddress)
 }
 
 final class FileBackedHerdrOwnedZoomStore: HerdrOwnedZoomStore, @unchecked Sendable {
     private struct Entry: Codable {
-        let session: HerdrZoomSession
+        let session: HerdrSessionAddress
         let zooms: HerdrOwnedZooms
     }
 
@@ -31,12 +26,12 @@ final class FileBackedHerdrOwnedZoomStore: HerdrOwnedZoomStore, @unchecked Senda
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     }
 
-    func zooms(of session: HerdrZoomSession) -> HerdrOwnedZooms {
+    func zooms(of session: HerdrSessionAddress) -> HerdrOwnedZooms {
         lock.withLock { loadLocked().first { $0.session == session }?.zooms ?? HerdrOwnedZooms() }
     }
 
     /// A session without zooms has no entry.
-    func save(_ zooms: HerdrOwnedZooms, of session: HerdrZoomSession) {
+    func save(_ zooms: HerdrOwnedZooms, of session: HerdrSessionAddress) {
         lock.withLock {
             var entries = loadLocked().filter { $0.session != session }
             if !zooms.tabIDs.isEmpty { entries.append(Entry(session: session, zooms: zooms)) }
@@ -53,13 +48,13 @@ final class FileBackedHerdrOwnedZoomStore: HerdrOwnedZoomStore, @unchecked Senda
 
 final class InMemoryHerdrOwnedZoomStore: HerdrOwnedZoomStore, @unchecked Sendable {
     private let lock = NSLock()
-    private var entries: [HerdrZoomSession: HerdrOwnedZooms] = [:]
+    private var entries: [HerdrSessionAddress: HerdrOwnedZooms] = [:]
 
-    func zooms(of session: HerdrZoomSession) -> HerdrOwnedZooms {
+    func zooms(of session: HerdrSessionAddress) -> HerdrOwnedZooms {
         lock.withLock { entries[session] ?? HerdrOwnedZooms() }
     }
 
-    func save(_ zooms: HerdrOwnedZooms, of session: HerdrZoomSession) {
+    func save(_ zooms: HerdrOwnedZooms, of session: HerdrSessionAddress) {
         lock.withLock { entries[session] = zooms.tabIDs.isEmpty ? nil : zooms }
     }
 }
