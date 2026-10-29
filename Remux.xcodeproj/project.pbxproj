@@ -187,6 +187,7 @@
 		842E6402F6F631B4DB19B8DE /* GhosttyTerminalResponderTextInputShim.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25DBECAA1C7625528DD0831B /* GhosttyTerminalResponderTextInputShim.swift */; };
 		8538B4599CD88CEC07452142 /* GhosttyKitRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF11321286DB9076CB3FA983 /* GhosttyKitRuntime.swift */; };
 		8620C4D7CE5B8ABA4E3C9B47 /* HerdrPaneImages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 044FF7468C5503DE4E10F610 /* HerdrPaneImages.swift */; };
+		8683BBAC12E7AB477CA76A87 /* TerminalProgramMarkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09C986AA13BBB4781CFCA167 /* TerminalProgramMarkTests.swift */; };
 		87A3C40BA75A75592A482867 /* GhosttyComposerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65F7D40090293C627F8A1800 /* GhosttyComposerModel.swift */; };
 		890ADA9AC6BC01F9D619CAD8 /* PanePreviewLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 603A62637F1E7C43FD9A1370 /* PanePreviewLayoutTests.swift */; };
 		8979E49587E4949F5F3B8582 /* HerdrPlacesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE5167DFBE5586055B87A524 /* HerdrPlacesTests.swift */; };
@@ -396,6 +397,7 @@
 		07BA9B44F1D18EDA012CBB63 /* herdr-15-cells-A.expected.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "herdr-15-cells-A.expected.json"; sourceTree = "<group>"; };
 		0855398F8D7F1E3C0C58F9B9 /* TerminalPreviewFileLoaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPreviewFileLoaderTests.swift; sourceTree = "<group>"; };
 		08FA18CCB40D2C7746D7D569 /* TerminalSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSettingsTests.swift; sourceTree = "<group>"; };
+		09C986AA13BBB4781CFCA167 /* TerminalProgramMarkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalProgramMarkTests.swift; sourceTree = "<group>"; };
 		0A9F4B4B0260131778AB2BA5 /* GhosttyTmuxPrefixInputBufferTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttyTmuxPrefixInputBufferTests.swift; sourceTree = "<group>"; };
 		0AEE33A88E32559AC5689F69 /* herdr-07-surface-set-A.expected.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "herdr-07-surface-set-A.expected.json"; sourceTree = "<group>"; };
 		0B071B9413E09859105FFB55 /* HerdrSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HerdrSelectionTests.swift; sourceTree = "<group>"; };
@@ -915,6 +917,7 @@
 				D5437829CC09E381C6615908 /* TerminalPreviewLiveWebTests.swift */,
 				4494B99A635444622AEC6970 /* TerminalPreviewSessionTests.swift */,
 				642B17B3F845A938C581F1AA /* TerminalPreviewStaticHTMLTests.swift */,
+				09C986AA13BBB4781CFCA167 /* TerminalProgramMarkTests.swift */,
 				B1AAF15C6761B24466DD78D6 /* TerminalRuntimeStatusPresentationTests.swift */,
 				7303BA60EDF97F8E9F3BFB26 /* TerminalSettingsRepositoryTests.swift */,
 				08FA18CCB40D2C7746D7D569 /* TerminalSettingsTests.swift */,
@@ -1758,6 +1761,7 @@
 				6548541B3AD17F7D70BFE8C0 /* TerminalPreviewLiveWebTests.swift in Sources */,
 				F3A21C20385E6E8D75397B15 /* TerminalPreviewSessionTests.swift in Sources */,
 				289D7673486A18F986C60788 /* TerminalPreviewStaticHTMLTests.swift in Sources */,
+				8683BBAC12E7AB477CA76A87 /* TerminalProgramMarkTests.swift in Sources */,
 				44C12052281C243559EAFF20 /* TerminalRuntimeStatusPresentationTests.swift in Sources */,
 				F803023604D68C15385E45AB /* TerminalSettingsRepositoryTests.swift in Sources */,
 				245F3E2F2ED1675C0BFC0318 /* TerminalSettingsTests.swift in Sources */,

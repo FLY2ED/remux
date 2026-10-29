@@ -4,7 +4,9 @@ import UIKit
 /// The windows as a plain list, as the Sessions sheet lists sessions, for a backend that says what each window
 /// holds. A row has its panes' marks, its name if the user gave it one and what its focused pane is doing, a
 /// spinner while an agent in it works, and the checkmark on the window on screen. Its most urgent agent's
-/// other states show as the dot on its front mark. A long press offers Close.
+/// other states show as the dot on its front mark. A long press offers Close. The marks take one fixed column,
+/// `TerminalProgramStack.width`, and the text starts 8 points after it, so every row's front tile and text start at
+/// the same x, whatever each row's mark holds.
 struct GhosttyWindowRowList: View {
     /// A row's content, without the list's insets above and below it.
     private static let contentHeight: CGFloat = 44
@@ -60,7 +62,7 @@ private struct GhosttyWindowRow: View {
     let topLevelNoun: GhosttyTopLevelNoun
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             TerminalProgramStack(
                 programs: window.contents?.programs ?? [],
                 paneCount: window.paneCount,
