@@ -25,14 +25,17 @@ final class HerdrPipelineTests: XCTestCase {
     }
 
     /// The welcome, the snapshot and every surface can arrive in the same read; the model paints them,
-    /// and keeps the last frame when the stream ends, reconnecting by itself.
+    /// and keeps the last frame when the stream ends, reconnecting by itself. The screen has the recording's
+    /// size, as Herdr draws at the phone's: a frame at another grid would wait for one at this screen's.
     func testASessionArrivingWithTheWelcomeIsPaintedAsHerdrSentIt() async throws {
         let recording = "herdr-04-patch-and-delta-A"
+        let last = try Self.herdrsLastFrame(recording)
+        let screen = try HerdrModelHarness.screenSize(columns: last.frame.width, rows: last.frame.height)
         let harness = await makeHarness()
         let bridge = try await harness.bridge()
         await bridge.serve(try HerdrConnectionTests.recording(recording))
         await bridge.finishServing()
-        harness.setScreenSize()
+        harness.setScreenSize(screen)
 
         try await assertPanesShowHerdrsCells(harness, recording: recording)
         XCTAssertEqual(harness.states.last, .reconnecting(.transportLoss))

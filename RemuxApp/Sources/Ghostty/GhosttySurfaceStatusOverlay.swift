@@ -52,6 +52,9 @@ struct GhosttySurfaceStatusOverlay: View {
         case .notice(let message):
             noticeCapsule(message, accessibilityIdentifier: "terminal.notice")
 
+        case .switching(let tab):
+            switchingCapsule(tab)
+
         case .waitingForPanes:
             openingSessionOverlay(accessibilityIdentifier: "terminal.status.waiting")
 
@@ -77,6 +80,27 @@ struct GhosttySurfaceStatusOverlay: View {
             .clipShape(Capsule())
             .padding(10)
             .accessibilityIdentifier(accessibilityIdentifier)
+    }
+
+    /// The notice's capsule with a spinner, while the screen still shows the tab before.
+    private func switchingCapsule(_ tab: String) -> some View {
+        HStack(spacing: 6) {
+            ProgressView()
+                .controlSize(.mini)
+                .tint(Color.white.opacity(0.88))
+            Text("Switching to \(tab)")
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .font(.system(size: 12, weight: .semibold, design: .rounded))
+        .foregroundStyle(Color.white.opacity(0.88))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color.black.opacity(0.62))
+        .clipShape(Capsule())
+        .padding(10)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("terminal.status.switching")
     }
 
     private func openingSessionOverlay(accessibilityIdentifier: String) -> some View {

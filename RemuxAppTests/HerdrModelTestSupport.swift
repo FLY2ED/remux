@@ -523,6 +523,8 @@ enum ClientWrite: Equatable {
 @MainActor
 final class RendererFenceGate {
     var holdsRegistrations = false
+    /// Panes whose registrations are held even while others go.
+    var holdsRegistrationsOf: Set<String> = []
     var holdsCloses = false
     private(set) var log: [String] = []
     private var heldRegistrations: [() -> Void] = []
@@ -547,6 +549,7 @@ final class RendererFenceGate {
 
     func releaseRegistrations() {
         holdsRegistrations = false
+        holdsRegistrationsOf.removeAll()
         let held = heldRegistrations
         heldRegistrations.removeAll()
         held.forEach { $0() }
@@ -560,8 +563,8 @@ final class RendererFenceGate {
         released.forEach { $0.deliver() }
     }
 
-    fileprivate func passRegistration(_ deliver: @escaping () -> Void) {
-        if holdsRegistrations { heldRegistrations.append(deliver) } else { deliver() }
+    fileprivate func passRegistration(of paneID: String, _ deliver: @escaping () -> Void) {
+        if holdsRegistrations || holdsRegistrationsOf.contains(paneID) { heldRegistrations.append(deliver) } else { deliver() }
     }
 
     fileprivate func passClose(of paneID: String, _ deliver: @escaping () -> Void) {
@@ -586,8 +589,8 @@ private final class GatedRendererFence: TerminalPaneRendererFence {
         _ surface: ghostty_terminal_surface_t,
         completion: @escaping @MainActor @Sendable (Result<Void, any Error>) -> Void
     ) {
-        base.registerRenderer(surface) { [gate] result in
-            gate.passRegistration { completion(result) }
+        base.registerRenderer(surface) { [gate, paneID] result in
+            gate.passRegistration(of: paneID) { completion(result) }
         }
     }
 
@@ -654,7 +657,8 @@ final class HerdrModelHarness {
         failingOpenWith openError: Error? = nil,
         bridgeOpeningTakes: Duration = .zero,
         producerFailure: ProducerFailure? = nil,
-        rendererFenceGate: RendererFenceGate? = nil
+        rendererFenceGate: RendererFenceGate? = nil,
+        switchingCueDelay: Duration = HerdrScreenModel.switchingCueDelay
     ) async {
         let bridges = Bridges(openingTakes: bridgeOpeningTakes)
         let stateLog = StateLog()
@@ -684,6 +688,7 @@ final class HerdrModelHarness {
             onNotification: { stateLog.notifications.append($0) },
             connectionTiming: timing,
             recoveryTiming: recovery,
+            switchingCueDelay: switchingCueDelay,
             engine: producerFailure.map {
                 HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1, makeProducer: SwitchableProducer.factory($0))
             } ?? HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1),

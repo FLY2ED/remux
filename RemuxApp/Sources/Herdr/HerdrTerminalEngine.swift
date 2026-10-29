@@ -24,6 +24,8 @@ struct HerdrPaneLayout: Equatable, Sendable {
 
     let bootID: String
     let tab: Tab?
+    /// The pane Herdr had focused in the snapshot the frame was drawn against.
+    let focusedPaneID: String?
     let columns: UInt16
     let rows: UInt16
     /// The tab's panes in Herdr's order, as the snapshot lists them, also those the frame doesn't draw.
@@ -32,6 +34,21 @@ struct HerdrPaneLayout: Equatable, Sendable {
     let borders: [HerdrBorderLine]
     /// Whether a popup is open over the tab. It takes the tab's input meanwhile.
     let hasPopup: Bool
+}
+
+/// A terminal Remux sends input to: a pane, by Herdr's id.
+enum HerdrTerminalTarget: Hashable, Sendable {
+    case pane(String)
+}
+
+/// How input the engine was asked to send went (`HerdrEngineFeed.send(_:to:)`).
+enum HerdrInputSend: Sendable {
+    case sent
+    /// Herdr wouldn't take it as it arrives, so it didn't go.
+    case notTaken
+    /// The session isn't shown, and Herdr drops input on a hidden surface.
+    case inactive
+    case ended
 }
 
 /// Where a pane's history viewport is and what its program asks of the mouse, from Herdr's surface.
@@ -84,8 +101,10 @@ enum HerdrEngineUpdate: Sendable {
     /// `HerdrPaneRendererFence`. It replaces an earlier terminal for the same pane, whose renderer the
     /// owner closes.
     case paneTerminal(paneID: String, terminal: HerdrRetainedTerminal)
-    /// Follows the terminals of the new panes it lists.
-    case layout(HerdrPaneLayout)
+    /// A frame the engine drew on `connection`, whenever its layout, the snapshot it was drawn against or
+    /// its terminals changed: the tab's layout, and that snapshot's revision, whose agents the user sees once
+    /// the frame is on screen. Follows the terminals of the new panes it lists.
+    case drawn(HerdrPaneLayout, projectionRevision: UInt64, connection: UInt64)
     /// Each listed pane's scrolling, whenever any of it changed. Kept out of the layout because the
     /// history grows with every line a program prints.
     case paneScroll([String: HerdrPaneScroll])
@@ -107,18 +126,15 @@ enum HerdrEngineUpdate: Sendable {
     /// View request `request` didn't complete within its time.
     case timedOut(request: UInt64, connection: UInt64)
     /// Herdr answered the step of the current view request `request` that takes the session to its
-    /// place, a focus or a creation: why it failed, or nil when it worked. Reported only while `request`
-    /// is current, in order with its other events.
-    case answered(request: UInt64, step: HerdrCommandLane.Step, failure: HerdrCommandError?, connection: UInt64)
+    /// place, a focus or a creation: why it failed, or nil when it worked, and for a creation the pane Herdr
+    /// made. Reported only while `request` is current, in order with its other events.
+    case answered(request: UInt64, step: HerdrCommandLane.Step, failure: HerdrCommandError?, made: String?, connection: UInt64)
     /// Herdr answered a zoom Remux sent, of a request's step or not: the tab's layout, for the pane
     /// sheet's map, or why it failed or didn't go. `reportsFailure` for the zoom button's, whose
     /// outcome the screen reports.
     case zoomAnswered(HerdrPaneZoomResult?, bootID: String, failure: HerdrCommandError?, reportsFailure: Bool, connection: UInt64)
     /// Herdr refused the show of the current view request `request`, for `reason`.
     case showRefused(request: UInt64, reason: String, connection: UInt64)
-    /// The frame on screen now was drawn against snapshot `projectionRevision` and shows these panes,
-    /// whose agents the user can see. Comes before that frame's layout.
-    case presented(bootID: String, projectionRevision: UInt64, paneIDs: Set<String>, connection: UInt64)
 }
 
 /// One connection's way into the engine, named by its owner's attempt. Once that connection ends or a
@@ -188,6 +204,11 @@ struct HerdrEngineFeed: Sendable {
 
     func resize(columns: UInt16, rows: UInt16) async {
         await engine.resize(columns: columns, rows: rows, connection: connection)
+    }
+
+    /// Input for `target`, sent when Herdr takes it as it arrives (`HerdrTerminalEngine.send(_:to:connection:)`).
+    func send(_ events: [HerdrInputEvent], to target: HerdrTerminalTarget) async -> HerdrInputSend {
+        await engine.send(events, to: target, connection: connection)
     }
 
     private static func zoom(
@@ -418,6 +439,8 @@ actor HerdrTerminalEngine {
         var target: Target
         let sentAfter: UInt64
         let answeredAfter: UInt64
+        /// How the answered command moves this client's view (`takesInput`).
+        let change: ViewChange
 
         /// Whether `snapshot`, the newest, shows the effect or Herdr past it: the target, a snapshot from after
         /// the answer, or the target gone since the step went out.
@@ -428,6 +451,119 @@ actor HerdrTerminalEngine {
 
         mutating func note(_ snapshot: HerdrSnapshot) {
             target = target.noting(snapshot)
+        }
+    }
+
+    /// How a command Remux sends moves the tab Herdr shows this client, which decides the input Herdr takes
+    /// (`InputView`).
+    fileprivate enum ViewChange {
+        /// `pane.focus`, `tab.focus` or `workspace.focus`: the place's tab, its zoom unchanged
+        /// (`app/actions.rs` `focus_pane_in_workspace`, `server/headless/client_views.rs`
+        /// `apply_shell_navigation_request`).
+        case focus(HerdrPlace)
+        /// `pane.zoom`, which focuses the pane and then zooms or unzooms its tab, zooming nothing in a tab of
+        /// one pane (`app/actions.rs` `apply_pane_zoom`).
+        case zoom(pane: String, on: Bool)
+        /// The setting's zoom of the tab the steps before it reach, on the pane Herdr focuses there: before
+        /// it goes, whether the setting zooms that tab can turn on panes Herdr hasn't made yet.
+        case zoomReached(HerdrZoomPolicy)
+        /// A split beside the pane, which Herdr focuses in its tab, unzoomed (`workspace/tab.rs`).
+        case split(of: String)
+        /// The pane closed, its tab unzoomed (`workspace/tab.rs` `detach_pane`), or gone with its last pane.
+        case close(String)
+        /// A tab or workspace made, or the tab or workspace on screen closed: the tab Herdr shows then is
+        /// one Remux can't tell.
+        case elsewhere
+
+        /// The change a lane command makes: the zoom button's zoom, and Remux's zoom off the tab on screen. The
+        /// layout question zooms the tab as it is, and the other commands move nothing.
+        init?(_ command: HerdrCommandLane.Command) {
+            switch command.purpose {
+            case .zoom(let pane, let zoomed): self = .zoom(pane: pane, on: zoomed)
+            case .unzoom(let pane, _): self = .zoom(pane: pane, on: false)
+            case .layout, .other: return nil
+            }
+        }
+
+        /// The change a step sends, where it moves the view; Remux's zoom off the tab left moves nothing
+        /// input could go to, since only a step to another tab follows it.
+        init?(sent step: HerdrCommandLane.Step) {
+            switch step {
+            case .leave: return nil
+            case .zoom(let pane, _): self = .zoom(pane: pane, on: true)
+            case .zoomReached(let policy): self = .zoomReached(policy)
+            case .focus(let place): self = .focus(place)
+            case .create(.split(let pane, _, _)): self = .split(of: pane)
+            case .create: self = .elsewhere
+            case .close(.pane(let pane), _): self = .close(pane)
+            case .close: self = .elsewhere
+            }
+        }
+    }
+
+    /// The tab Herdr shows this client, as far as Remux can tell, for the input Herdr takes there: any pane
+    /// of the tab, or only its focused pane while it is zoomed (`server/headless/client_views.rs`
+    /// `shell_client_views_pane`). Panes closed since the snapshot take none.
+    fileprivate struct InputView {
+        var tabID: String?
+        var zoomed: Bool
+        /// The tab's focused pane, where Remux can tell it.
+        var focusedPane: String?
+        var closed: Set<String> = []
+
+        init(_ snapshot: HerdrSnapshot) {
+            tabID = snapshot.focusedTabID
+            zoomed = snapshot.tabs.first { $0.tabID == snapshot.focusedTabID }?.zoomed ?? false
+            focusedPane = snapshot.focusedPaneID
+        }
+
+        func takes(_ pane: String, in snapshot: HerdrSnapshot) -> Bool {
+            guard let tabID, !closed.contains(pane), panes(of: tabID, in: snapshot).contains(pane) else { return false }
+            return !zoomed || pane == focusedPane
+        }
+
+        /// The view once Herdr applied `change`. A command that fails leaves the view as it was before it,
+        /// which input has met already.
+        mutating func apply(_ change: ViewChange, in snapshot: HerdrSnapshot) {
+            switch change {
+            case .focus(.pane(let pane)):
+                show(snapshot.panes.first { $0.paneID == pane }?.tabID, focusing: pane, in: snapshot)
+            case .focus(.tab(let tab)):
+                if tab != tabID { show(tab, focusing: nil, in: snapshot) }
+            case .focus(.workspace(let workspace)):
+                let tab = snapshot.workspaces.first { $0.workspaceID == workspace }?.activeTabID
+                if tab != tabID { show(tab, focusing: nil, in: snapshot) }
+            case .zoom(let pane, let on):
+                show(snapshot.panes.first { $0.paneID == pane }?.tabID, focusing: pane, in: snapshot)
+                zoomed = on && tabID.map { panes(of: $0, in: snapshot).count > 1 } == true
+            case .zoomReached(let policy):
+                guard let tabID, policy.zoomsMultipaneTabs,
+                      !policy.unzoomedByUser.contains(HerdrTabKey(bootID: snapshot.bootID, tabID: tabID))
+                else { return }
+                zoomed = true
+            case .split(let pane):
+                show(snapshot.panes.first { $0.paneID == pane }?.tabID, focusing: nil, in: snapshot)
+                zoomed = false
+            case .close(let pane):
+                closed.insert(pane)
+                guard let tabID, snapshot.panes.contains(where: { $0.paneID == pane && $0.tabID == tabID }) else { return }
+                zoomed = false
+                let left = panes(of: tabID, in: snapshot)
+                if left.isEmpty { self.tabID = nil }
+                if focusedPane == pane || left.count == 1 { focusedPane = left.count == 1 ? left.first : nil }
+            case .elsewhere:
+                tabID = nil
+            }
+        }
+
+        private mutating func show(_ tab: String?, focusing pane: String?, in snapshot: HerdrSnapshot) {
+            if tab != tabID { zoomed = snapshot.tabs.first { $0.tabID == tab }?.zoomed ?? false }
+            tabID = tab
+            focusedPane = pane
+        }
+
+        private func panes(of tab: String, in snapshot: HerdrSnapshot) -> [String] {
+            snapshot.panes.filter { $0.tabID == tab && !closed.contains($0.paneID) }.map(\.paneID)
         }
     }
 
@@ -489,6 +625,10 @@ actor HerdrTerminalEngine {
     /// sends the snapshot showing the answer, so the next step waits for that snapshot, going from where the
     /// step before it took the session, and a leave unzooms nothing meanwhile.
     private var unsettled: StepEffect?
+    /// The commands Herdr answered whose effect no snapshot shows yet, the steps and the zoom button's zooms, in
+    /// the order Herdr applied them, which is the order of their answers, since one command is in flight at a
+    /// time. Input that goes now reaches Herdr after them (`takesInput`).
+    private var unshown: [StepEffect] = []
     private var layout: HerdrPaneLayout?
     private var paneScrolls: [String: HerdrPaneScroll] = [:]
     /// Herdr's border lines in the frame painted last. A patch never changes them, since
@@ -509,6 +649,80 @@ actor HerdrTerminalEngine {
         self.cellWidthPx = max(cellWidthPx, 1)
         self.cellHeightPx = max(cellHeightPx, 1)
         self.makeProducer = makeProducer
+    }
+
+    // MARK: - Input
+
+    /// Input for `target` goes now, in the connection's order with the lane's commands, when Herdr takes it as
+    /// it arrives (`takesInput`); a press's release goes whatever the view, as Herdr takes it there.
+    fileprivate func send(_ events: [HerdrInputEvent], to target: HerdrTerminalTarget, connection: UInt64) -> HerdrInputSend {
+        guard state == .running, connection == self.connection, let outbox else { return .ended }
+        guard outbox.isSurfaceActive else { return .inactive }
+        guard events.allSatisfy(\.releasesPress) || takesInput(target) else { return .notTaken }
+        switch target {
+        case .pane(let pane):
+            outbox.send([.paneInput(paneID: pane, events: events)])
+        }
+        return .sent
+    }
+
+    /// Whether Herdr takes input for `target` that goes now. Herdr applies each command the moment it reads
+    /// it, in the connection's order with input (`server/headless/client_views.rs`
+    /// `handle_client_shell_api_request`), and drops a pane's input while it doesn't show this client the pane
+    /// (`server/headless.rs` `ClientShellPaneInput`). The view input meets is the newest snapshot's, moved by
+    /// the commands Herdr answered that no snapshot shows yet, in their order. The commands still to come
+    /// (`changesToCome`) may fail, which leaves the view as it was, so input must be taken in each view they
+    /// lead through. Where Remux can't tell where a command takes the view, input is refused.
+    private func takesInput(_ target: HerdrTerminalTarget) -> Bool {
+        guard let snapshot = presentation.snapshot else { return false }
+        switch target {
+        case .pane(let pane):
+            var view = InputView(snapshot)
+            for effect in unshown { view.apply(effect.change, in: snapshot) }
+            guard view.takes(pane, in: snapshot) else { return false }
+            for change in changesToCome {
+                view.apply(change, in: snapshot)
+                guard view.takes(pane, in: snapshot) else { return false }
+            }
+            return true
+        }
+    }
+
+    /// The view changes of the commands Herdr hasn't answered, in the order it applies them: the command in
+    /// flight unless a snapshot since it went shows its effect, and the current request's steps not yet sent,
+    /// which take the session where the user goes.
+    private var changesToCome: [ViewChange] {
+        var changes = lane.inFlight.flatMap(inFlightChange).map { [$0] } ?? []
+        if let request, request.inProgress, !request.overtaken {
+            changes += lane.steps.compactMap(ViewChange.init(sent:))
+        }
+        return changes
+    }
+
+    /// The change the command in flight makes, unless a snapshot that came while it was in flight shows its
+    /// effect already, as the reply's does (`unsettledEffect`): Herdr applied it, and the newest snapshot tells
+    /// what became of it since, as another client may have moved the session on.
+    private func inFlightChange(_ inFlight: HerdrCommandLane.InFlight) -> ViewChange? {
+        let change: ViewChange?
+        switch inFlight.item {
+        case .step(_, let step): change = ViewChange(sent: step)
+        case .command(let command): change = ViewChange(command)
+        }
+        guard let change else { return nil }
+        let shown = inFlight.snapshots.contains { snapshot in
+            switch change {
+            case .focus(let place):
+                Target.place(place).isShown(in: snapshot)
+            case .zoom(let pane, let on):
+                snapshot.panes.first { $0.paneID == pane }
+                    .map { Target.zoom(pane: pane, tabID: $0.tabID, zoomed: on).isShown(in: snapshot) } ?? false
+            case .close(let pane):
+                Target.closed(.pane(pane)).isShown(in: snapshot)
+            case .zoomReached, .split, .elsewhere:
+                false
+            }
+        }
+        return shown ? nil : change
     }
 
     // MARK: - Frames
@@ -555,6 +769,7 @@ actor HerdrTerminalEngine {
         outbox = nil
         surfaceSets.removeAll()
         unsettled = nil
+        unshown.removeAll()
         let (inFlight, waiting) = lane.takeAll()
         if case .command(let command)? = inFlight?.item { fail(command, .connectionEnded) }
         waiting.forEach { fail($0, .connectionEnded) }
@@ -1019,14 +1234,19 @@ actor HerdrTerminalEngine {
             var effect = Self.effect(of: step, result)
             // A pane a creation made may be listed by the snapshots that came while it was in flight.
             for snapshot in inFlight.snapshots { effect?.note(snapshot) }
-            if let effect { hold(until: effect, seen: inFlight.snapshots) }
+            if let effect, let held = unsettledEffect(effect, seen: inFlight.snapshots) {
+                unsettled = held
+                unshown.append(held)
+            }
             guard var request, request.id == id, request.inProgress else { return }
             switch (step, result) {
             case (.leave, _), (.zoomReached, _):
                 break
             case (.zoom, .success), (.create, .success), (.close, .success):
                 if !step.isZoom {
-                    continuation.yield(.answered(request: id, step: step, failure: nil, connection: connection))
+                    var made: String?
+                    if case .made(let pane, _)? = effect?.target { made = pane }
+                    continuation.yield(.answered(request: id, step: step, failure: nil, made: made, connection: connection))
                 }
                 if let effect {
                     request.target = effect.target
@@ -1037,15 +1257,15 @@ actor HerdrTerminalEngine {
             case (.zoom(_, navigates: true), .failure):
                 break
             case (.focus, .success(let reply)):
-                continuation.yield(.answered(request: id, step: step, failure: nil, connection: connection))
+                continuation.yield(.answered(request: id, step: step, failure: nil, made: nil, connection: connection))
                 request.answer = (reply.sentAfter, reply.answeredAfter)
             case (.focus(let place), .failure(let failure)):
-                continuation.yield(.answered(request: id, step: step, failure: failure, connection: connection))
+                continuation.yield(.answered(request: id, step: step, failure: failure, made: nil, connection: connection))
                 // The session stays where Herdr has it.
                 if request.target == .place(place) { request.target = nil }
             case (.create, .failure(let failure)), (.close, .failure(let failure)):
                 // Nothing was made or closed; the session stays where Herdr has it.
-                continuation.yield(.answered(request: id, step: step, failure: failure, connection: connection))
+                continuation.yield(.answered(request: id, step: step, failure: failure, made: nil, connection: connection))
                 request.target = nil
             }
             self.request = request
@@ -1053,8 +1273,17 @@ actor HerdrTerminalEngine {
             completeIfReady()
         case .command(let command):
             switch command.purpose {
-            case .zoom:
+            case .zoom(let pane, _):
                 zoomAnswered(result, seen: inFlight.snapshots, reportsFailure: true)
+                if case .success(let reply) = result, let zoom = try? HerdrPaneZoomResult(reply: reply.json),
+                   let effect = unsettledEffect(StepEffect(
+                       target: .zoom(pane: pane, tabID: zoom.layout.tabID, zoomed: zoom.zoomed),
+                       sentAfter: reply.sentAfter,
+                       answeredAfter: reply.answeredAfter,
+                       change: .zoom(pane: pane, on: zoom.zoomed)
+                   ), seen: inFlight.snapshots) {
+                    unshown.append(effect)
+                }
             case .layout:
                 zoomAnswered(result, seen: inFlight.snapshots, reportsFailure: false)
             case .unzoom(_, let closed):
@@ -1088,16 +1317,17 @@ actor HerdrTerminalEngine {
         case .close(let place, _):
             target = .closed(place)
         }
-        return StepEffect(target: target, sentAfter: reply.sentAfter, answeredAfter: reply.answeredAfter)
+        guard let change = ViewChange(sent: step) else { return nil }
+        return StepEffect(target: target, sentAfter: reply.sentAfter, answeredAfter: reply.answeredAfter, change: change)
     }
 
-    /// The lane waits for a snapshot showing the step's effect, unless one already did while it was in
-    /// flight or the newest does.
-    private func hold(until effect: StepEffect, seen: [HerdrSnapshot]) {
+    /// `effect`, unless a snapshot that came while its command was in flight, or the newest, shows it. The lane
+    /// waits for a step's effect that no snapshot shows yet (`unsettled`).
+    private func unsettledEffect(_ effect: StepEffect, seen: [HerdrSnapshot]) -> StepEffect? {
         guard !seen.contains(where: effect.target.isShown(in:)), let snapshot = presentation.snapshot,
               !effect.isSettled(by: snapshot)
-        else { return }
-        unsettled = effect
+        else { return nil }
+        return effect
     }
 
     /// A command that doesn't go or can't be answered.
@@ -1196,6 +1426,8 @@ actor HerdrTerminalEngine {
         ownedZoom.reconcile(with: snapshot)
         unsettled?.note(snapshot)
         if unsettled?.isSettled(by: snapshot) == true { unsettled = nil }
+        for index in unshown.indices { unshown[index].note(snapshot) }
+        unshown.removeAll { $0.isSettled(by: snapshot) }
         request?.record(snapshot)
         bordersMayHaveChanged = true
         checkOvertaken()
@@ -1284,13 +1516,15 @@ actor HerdrTerminalEngine {
             bootID = surface.bootID
         }
         let cursor = HerdrPanePainter.paneCursor(of: surface)
+        var madeTerminal = false
         for pane in surface.panes {
-            paint(
+            let made = paint(
                 HerdrPanePainter.Painted(frame: surface.frame, area: pane.innerRect, cursor: cursor),
                 content: HerdrPaneContent(of: pane),
                 images: HerdrPaneImages.Scene(surface.graphics, pane: pane),
                 paneID: pane.paneID
             )
+            madeTerminal = madeTerminal || made
         }
         let listed = Set(surface.panes.map(\.paneID))
         panes = panes.filter { listed.contains($0.key) }
@@ -1300,36 +1534,32 @@ actor HerdrTerminalEngine {
             bordersMayHaveChanged = false
         }
         let frame = PresentedFrame(bootID: surface.bootID, projectionRevision: surface.projectionRevision, paneIDs: listed)
-        if frame != presentedFrame {
+        let next = layout(of: surface, snapshot: snapshot)
+        if madeTerminal || next != layout || frame != presentedFrame {
+            layout = next
             presentedFrame = frame
-            continuation.yield(.presented(
-                bootID: frame.bootID,
-                projectionRevision: frame.projectionRevision,
-                paneIDs: frame.paneIDs,
-                connection: connection
-            ))
+            continuation.yield(.drawn(next, projectionRevision: surface.projectionRevision, connection: connection))
         }
-        publishLayout(of: surface, snapshot: snapshot)
         publishScroll(of: surface)
     }
 
+    /// Returns whether the pane got a new terminal.
     private func paint(
         _ next: HerdrPanePainter.Painted,
         content: HerdrPaneContent,
         images scene: HerdrPaneImages.Scene,
         paneID: String
-    ) {
+    ) -> Bool {
         let area = next.area
         guard area.width > 0, area.height > 0 else {
             // A pane with no text area has no terminal; it gets a new one when it has room again.
             panes.removeValue(forKey: paneID)
             failedPaneIDs.remove(paneID)
-            return
+            return false
         }
-        guard !failedPaneIDs.contains(paneID) else { return }
+        guard !failedPaneIDs.contains(paneID) else { return false }
         guard var pane = panes[paneID] else {
-            createPane(paneID: paneID, painted: next, content: content, images: scene)
-            return
+            return createPane(paneID: paneID, painted: next, content: content, images: scene)
         }
         let result: ghostty_terminal_producer_result_e
         if pane.painted.area.width == area.width, pane.painted.area.height == area.height {
@@ -1339,7 +1569,7 @@ actor HerdrTerminalEngine {
                 pane.painted = next
                 pane.content = content
                 panes[paneID] = pane
-                return
+                return false
             }
             result = pane.producer.feed(bytes)
         } else {
@@ -1354,20 +1584,22 @@ actor HerdrTerminalEngine {
         }
         guard result == GHOSTTY_TERMINAL_PRODUCER_RESULT_OK else {
             fail(paneID: paneID)
-            return
+            return false
         }
         pane.painted = next
         pane.content = content
         wake(&pane, paneID: paneID)
         panes[paneID] = pane
+        return false
     }
 
+    /// Returns whether the pane got its terminal.
     private func createPane(
         paneID: String,
         painted: HerdrPanePainter.Painted,
         content: HerdrPaneContent,
         images scene: HerdrPaneImages.Scene
-    ) {
+    ) -> Bool {
         let producer: any HerdrPaneProducing
         let terminal: HerdrRetainedTerminal
         do {
@@ -1375,7 +1607,7 @@ actor HerdrTerminalEngine {
             terminal = try producer.retainTerminal()
         } catch {
             fail(paneID: paneID)
-            return
+            return false
         }
         // The cell size goes in with the first paint, before the terminal is shown.
         var paneImages = HerdrPaneImages()
@@ -1388,23 +1620,25 @@ actor HerdrTerminalEngine {
         )
         guard result == GHOSTTY_TERMINAL_PRODUCER_RESULT_OK else {
             fail(paneID: paneID)
-            return
+            return false
         }
         panes[paneID] = Pane(producer: producer, terminal: terminal, painted: painted, content: content, images: paneImages)
         continuation.yield(.paneTerminal(paneID: paneID, terminal: terminal))
+        return true
     }
 
     /// The tab's panes come from the snapshot, which lists a zoomed tab's undrawn panes too, in Herdr's
     /// order; a drawn pane it doesn't list follows them.
-    private func publishLayout(of surface: HerdrPaneSurfaceFrame, snapshot: HerdrSnapshot) {
+    private func layout(of surface: HerdrPaneSurfaceFrame, snapshot: HerdrSnapshot) -> HerdrPaneLayout {
         let tab = snapshot.tabs.first { $0.tabID == snapshot.focusedTabID }
         var paneIDs = tab.map { tab in snapshot.panes.filter { $0.tabID == tab.tabID }.map(\.paneID) } ?? []
         for pane in surface.panes where !paneIDs.contains(pane.paneID) {
             paneIDs.append(pane.paneID)
         }
-        let next = HerdrPaneLayout(
+        return HerdrPaneLayout(
             bootID: surface.bootID,
             tab: tab.map { HerdrPaneLayout.Tab(tabID: $0.tabID, label: $0.label, zoomed: $0.zoomed) },
+            focusedPaneID: snapshot.focusedPaneID,
             columns: surface.frame.width,
             rows: surface.frame.height,
             panes: paneIDs.map { paneID in
@@ -1418,9 +1652,6 @@ actor HerdrTerminalEngine {
             borders: borders,
             hasPopup: surface.popup != nil
         )
-        guard next != layout else { return }
-        layout = next
-        continuation.yield(.layout(next))
     }
 
     private func publishScroll(of surface: HerdrPaneSurfaceFrame) {

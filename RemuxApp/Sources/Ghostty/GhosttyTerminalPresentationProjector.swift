@@ -205,6 +205,8 @@ enum GhosttyTerminalStatusOverlayProjection: Equatable, Sendable {
     case commandFailure(String)
     /// Something a program did that the user should know, such as a copy.
     case notice(String)
+    /// The screen is going to the named tab, and still shows the one before until it has drawn.
+    case switching(String)
     case waitingForPanes(debugStatus: String, registryDebugSummary: String)
     case ready
     case failed(message: String, reason: TerminalDisconnectReason?)
@@ -662,7 +664,8 @@ enum GhosttyTerminalPresentationProjector {
         snapshot: GhosttyRuntimeSurfaceTopologySnapshot,
         viewportProjection: GhosttyTerminalViewportPresentationProjection,
         selectedPanePresentation: TerminalPanePresentation = .pending,
-        isShown: Bool = true
+        isShown: Bool = true,
+        switchingTo switchingTab: String? = nil
     ) -> GhosttyTerminalScreenPresentationProjection {
         let readiness = TerminalReadinessProjector.snapshot(
             phase: phase,
@@ -686,17 +689,20 @@ enum GhosttyTerminalPresentationProjector {
                 readiness: readiness,
                 commandFailureMessage: commandFailureMessage,
                 noticeMessage: noticeMessage,
+                switchingTo: switchingTab,
                 debugStatus: debugStatus,
                 registryDebugSummary: registryDebugSummary
             )
         )
     }
 
-    /// A session's notice holds one message at a time, so at most one of a failure and a notice is given.
+    /// A session's notice holds one message at a time, so at most one of a failure and a notice is given. A
+    /// switch to another tab under way says so over everything but a failure.
     static func terminalStatusOverlayProjection(
         readiness: TerminalReadinessSnapshot,
         commandFailureMessage: String?,
         noticeMessage: String? = nil,
+        switchingTo switchingTab: String? = nil,
         debugStatus: String,
         registryDebugSummary: String
     ) -> GhosttyTerminalStatusOverlayProjection {
@@ -711,6 +717,9 @@ enum GhosttyTerminalPresentationProjector {
             }
             if let commandFailureMessage {
                 return .commandFailure(commandFailureMessage)
+            }
+            if let switchingTab {
+                return .switching(switchingTab)
             }
             if let noticeMessage {
                 return .notice(noticeMessage)

@@ -45,7 +45,7 @@ final class HerdrBorderLineTests: XCTestCase {
         await engine.stop()
         var layout: HerdrPaneLayout?
         for await update in engine.updates {
-            if case .layout(let next) = update { layout = next }
+            if case .drawn(let next, _, _) = update { layout = next }
         }
 
         let surface = try XCTUnwrap(reference.presented?.surface)
@@ -86,8 +86,11 @@ final class HerdrBorderLineTests: XCTestCase {
         )))
         await engine.stop()
         var borders: [[String]] = []
+        var last: HerdrPaneLayout?
         for await update in engine.updates {
-            if case .layout(let layout) = update { borders.append(layout.borders.map(Self.describe)) }
+            guard case .drawn(let layout, _, _) = update, layout != last else { continue }
+            last = layout
+            borders.append(layout.borders.map(Self.describe))
         }
 
         XCTAssertEqual(borders, [

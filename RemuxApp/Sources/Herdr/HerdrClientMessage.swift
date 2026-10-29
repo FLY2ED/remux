@@ -157,6 +157,16 @@ enum HerdrInputEvent: Equatable, Sendable {
     /// Bracketed when the program enabled bracketed paste.
     case paste(String)
 
+    /// A key's or button's release, which Herdr takes for a pane whatever tab this client views, so a
+    /// program never keeps a key or button down (`server/headless.rs` `client_pane_input_releases_press`).
+    var releasesPress: Bool {
+        switch self {
+        case .key(let key): key.kind == .release
+        case .mouse(let mouse): if case .up = mouse.kind { true } else { false }
+        case .text, .paste: false
+        }
+    }
+
     func write(to writer: inout HerdrWireWriter) {
         switch self {
         case .key(let key):

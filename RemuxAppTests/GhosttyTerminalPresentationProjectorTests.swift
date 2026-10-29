@@ -597,6 +597,36 @@ final class GhosttyTerminalPresentationProjectorTests: XCTestCase {
         )
     }
 
+    /// A switch to another tab under way says where it goes over the session's notice and over the screen's
+    /// readiness, never as the session opening; a failure says why instead.
+    func testStatusOverlayProjectionSaysWhereASwitchGoes() {
+        let ready = Self.readinessSnapshot(phase: .running, transportWritable: true, focused: true)
+        func overlay(
+            _ readiness: TerminalReadinessSnapshot,
+            failure: String? = nil,
+            notice: String? = nil,
+            switchingTo tab: String?
+        ) -> GhosttyTerminalStatusOverlayProjection {
+            GhosttyTerminalPresentationProjector.terminalStatusOverlayProjection(
+                readiness: readiness,
+                commandFailureMessage: failure,
+                noticeMessage: notice,
+                switchingTo: tab,
+                debugStatus: "",
+                registryDebugSummary: ""
+            )
+        }
+        XCTAssertEqual(overlay(ready, switchingTo: "build"), .switching("build"))
+        XCTAssertEqual(overlay(ready, notice: "Copied to clipboard", switchingTo: "build"), .switching("build"))
+        XCTAssertEqual(overlay(ready, failure: "Herdr: select tab failed", switchingTo: "build"), .commandFailure("Herdr: select tab failed"))
+        XCTAssertEqual(overlay(Self.readinessSnapshot(phase: .running, focused: false), switchingTo: "build"), .switching("build"))
+        XCTAssertEqual(
+            overlay(Self.readinessSnapshot(phase: .failed(message: "lost", reason: nil), focused: true), switchingTo: "build"),
+            .failed(message: "lost", reason: nil)
+        )
+        XCTAssertEqual(overlay(ready, switchingTo: nil), .ready)
+    }
+
     func testViewportProjectionKeepsSurfaceInstanceSeparateFromPaneIdentity() {
         let paneID = UUID()
         let surfaceInstanceID = UUID()
