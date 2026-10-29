@@ -54,6 +54,37 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// A pane's renderer draws its first picture off screen when asked, before its view is in a window, and
+    /// reads ready only once that picture is at its size: a new size draws it again first.
+    func testARendererDrawsItsFirstPictureOffScreenAtItsSize() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let feed = await engine.beginConnection(1)
+        await feed.receive(try Self.snapshot(revision: 1))
+        await feed.receive(.surface(try Self.surface(revision: 1, lines: ["one"], panes: [Self.pane("P", x: 0, width: 3, height: 1)])))
+        let terminal = try await updates.terminal(for: "P")
+        let renderer = try await makeRenderer(engine: engine, paneID: "P", terminal: terminal, columns: 3, rows: 1)
+        XCTAssertEqual(renderer.presentation, .pending, "a renderer off screen read as shown")
+        func publishedSize() -> [Int]? {
+            GhosttyIOSurfaceFrame.rendererLayer(in: renderer.view.layer)
+                .flatMap(GhosttyIOSurfaceFrame.dimensions(in:))
+                .map { [$0.width, $0.height] }
+        }
+
+        renderer.prepare()
+        try await waitUntil("the first picture wasn't drawn off screen") { renderer.presentation == .ready }
+        XCTAssertNil(renderer.view.window)
+        let first = try XCTUnwrap(measurement.displayMetrics(columns: 3, rows: 1))
+        XCTAssertEqual(publishedSize(), [Int(first.pixelWidth), Int(first.pixelHeight)])
+
+        let wider = try XCTUnwrap(measurement.displayMetrics(columns: 5, rows: 1))
+        XCTAssertTrue(renderer.updateDisplay(metrics: wider))
+        XCTAssertEqual(renderer.presentation, .awaitingFrame, "the picture from before the new size read as ready")
+        try await waitUntil("the picture wasn't drawn again at the new size") { renderer.presentation == .ready }
+        XCTAssertEqual(publishedSize(), [Int(wider.pixelWidth), Int(wider.pixelHeight)])
+        await engine.stop()
+    }
+
     /// A patch repaints only what changed; the rest of the pane, and the other pane, keep their text.
     func testAPatchChangesOnlyTheRowsItTouches() async throws {
         let engine = makeEngine()
@@ -164,7 +195,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await feed.resize(columns: 5, rows: 2)
         try await acknowledgeShow(feed, outbox, floor: 1)
         await feed.receive(.surface(try Self.surface(revision: 3, lines: ["one  ", "two  "], panes: panes)))
-        guard case .layout(let resized) = try await updates.next(),
+        guard case .drawn(let resized, _, _) = try await updates.next(),
               case .activated(second, _) = try await updates.next()
         else { return XCTFail("a frame from before the resize completed the show") }
         XCTAssertEqual(resized.columns, 5)
@@ -249,7 +280,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await feed.receive(try Self.places(revision: 2, zoomed: ["t1"]))
         await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["one ", "two "], panes: one)))
         guard case .paneTerminal("P", _) = try await updates.next(),
-              case .layout(let shown) = try await updates.next()
+              case .drawn(let shown, _, _) = try await updates.next()
         else { return XCTFail("the show's frame from before the zoom was drawn") }
         XCTAssertEqual(shown.tab?.zoomed, true)
         _ = try await updates.nextPaneScroll()
@@ -307,7 +338,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         )))
         try await answer(feed, outbox)
         guard case .paneTerminal("R", _) = try await updates.next(),
-              case .layout(let reached) = try await updates.next()
+              case .drawn(let reached, _, _) = try await updates.next()
         else { return XCTFail("a frame from before the move's last step was drawn") }
         XCTAssertEqual(reached.tab?.tabID, "t2")
         _ = try await updates.nextPaneScroll()
@@ -348,7 +379,10 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await feed.receive(.surface(try Self.surface(projection: 2, revision: 2, lines: ["o t ", "w o "], panes: Self.atQ)))
         try await Task.sleep(for: .milliseconds(50))
         try await answer(feed, outbox)
-        guard case .activated(move, _) = try await updates.next() else {
+        // The frame brings only the new focus.
+        guard case .drawn(let focused, _, _) = try await updates.next(), focused.focusedPaneID == "Q",
+              case .activated(move, _) = try await updates.next()
+        else {
             return XCTFail("the move waited for a frame Herdr had already sent")
         }
         await engine.stop()
@@ -384,7 +418,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         )))
         try await answer(feed, outbox)
         guard case .paneTerminal("Q", _) = try await updates.next(),
-              case .layout(let shown) = try await updates.next()
+              case .drawn(let shown, _, _) = try await updates.next()
         else { return XCTFail("a frame was drawn before the newer request completed") }
         XCTAssertEqual(shown.panes.filter { $0.innerRect != nil }.map(\.paneID), ["Q"])
         _ = try await updates.nextPaneScroll()
@@ -808,8 +842,10 @@ final class HerdrTerminalEngineTests: XCTestCase {
         )))
         try await Task.sleep(for: .milliseconds(50))
         await feed.receive(.surface(try Self.surface(projection: 2, revision: 3, lines: ["o t ", "w o "], panes: Self.atQ)))
-        // The completing frame lays the tab out as before the move, so it brings no new layout.
-        guard case .activated(move, _) = try await updates.next() else {
+        // The completing frame lays the tab out as before the move, so it brings only the new focus.
+        guard case .drawn(let focused, _, _) = try await updates.next(), focused.focusedPaneID == "Q",
+              case .activated(move, _) = try await updates.next()
+        else {
             return XCTFail("the move completed on a frame that didn't draw its pane focused")
         }
         await engine.stop()
@@ -1179,7 +1215,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
                 switch update {
                 case .paneTerminal(let paneID, let terminal): terminals[paneID] = terminal
                 case .paneTerminalFailed, .rendererWakeFailed, .failed: XCTFail("\(fixture.name): \(update)")
-                case .layout, .paneScroll, .started, .activated, .timedOut, .answered, .zoomAnswered, .showRefused, .presented: break
+                case .drawn, .paneScroll, .started, .activated, .timedOut, .answered, .zoomAnswered, .showRefused: break
                 }
             }
             for pane in surface.panes where pane.innerRect.width > 0 && pane.innerRect.height > 0 {
@@ -1342,12 +1378,10 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
         // Only the new connection's frame is reported as what the screen shows.
         let rest = await updates.drain()
-        XCTAssertTrue(
-            rest.allSatisfy {
-                if case .presented(_, _, ["P"], let connection) = $0 { connection == second.connection } else { false }
-            },
-            "the same panes need no new terminals or layout: \(rest)"
-        )
+        XCTAssertTrue(rest.isEmpty, "the same panes need no new terminals or layout: \(rest)")
+        let shown = updates.unreadPresented()
+        XCTAssertEqual(shown.map(\.connection), [first.connection, second.connection], "another frame was reported shown")
+        XCTAssertEqual(shown.last?.paneIDs, ["P"])
         XCTAssertEqual(layout.tab, nil)
     }
 
@@ -1730,6 +1764,14 @@ final class HerdrTerminalEngineTests: XCTestCase {
         return renderer
     }
 
+    private func waitUntil(_ message: String, timeout: Duration = .seconds(3), _ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while !condition() {
+            guard ContinuousClock.now < deadline else { return XCTFail(message) }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
     private func close(_ renderer: TerminalPaneRenderer) async {
         renderers.removeAll { $0 === renderer }
         await withCheckedContinuation { continuation in
@@ -1890,7 +1932,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
             panes: [Self.pane("S", x: 0, width: 4, height: 2, focused: true)]
         )))
         guard case .paneTerminal("S", _) = try await updates.next(),
-              case .layout(let reached) = try await updates.next()
+              case .drawn(let reached, _, _) = try await updates.next()
         else { return XCTFail("a frame from before the tab's zoom was drawn") }
         XCTAssertEqual(reached.tab?.tabID, "t2")
         XCTAssertEqual(reached.tab?.zoomed, true)
@@ -1938,7 +1980,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
             panes: [Self.pane("Q", x: 0, width: 4, height: 2, focused: true)]
         )))
         guard case .paneTerminal("Q", _) = try await updates.next(),
-              case .layout(let made) = try await updates.next()
+              case .drawn(let made, _, _) = try await updates.next()
         else { return XCTFail("a frame from before the new pane's zoom was drawn") }
         XCTAssertEqual(made.tab?.zoomed, true)
         _ = try await updates.nextPaneScroll()
@@ -2011,7 +2053,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
             panes: [Self.pane("R", x: 0, width: 4, height: 2, focused: true)]
         )))
         guard case .paneTerminal("R", _) = try await updates.next(),
-              case .layout(let reached) = try await updates.next()
+              case .drawn(let reached, _, _) = try await updates.next()
         else { return XCTFail("a frame from before the close's zoom was drawn") }
         XCTAssertEqual(reached.tab?.tabID, "t2")
         XCTAssertEqual(reached.tab?.zoomed, true)
@@ -2251,13 +2293,16 @@ struct RendererColor: Equatable {
 }
 
 /// The engine's updates in order. `next` leaves out what a frame shows, a request's start and the
-/// answers the engine reports, which `nextPresented`, `nextStarted` and the answer lists read.
+/// answers the engine reports, which `nextPresented`, `nextStarted` and the answer lists read; it returns a
+/// drawn frame only when its layout changed.
 @MainActor
 private final class UpdateLog {
     private var iterator: AsyncStream<HerdrEngineUpdate>.AsyncIterator
     /// Updates `next` hasn't returned yet, read while looking for another kind.
     private var held: [HerdrEngineUpdate] = []
-    private var presented: [(bootID: String, projectionRevision: UInt64, paneIDs: Set<String>)] = []
+    private var presented: [(bootID: String, projectionRevision: UInt64, paneIDs: Set<String>, connection: UInt64)] = []
+    /// The newest drawn frame's layout and what it shows.
+    private var lastDrawn: (layout: HerdrPaneLayout, projectionRevision: UInt64, connection: UInt64)?
     /// Every request the engine started, in order, and how many `nextStarted` has returned.
     private(set) var started: [(request: UInt64, kind: HerdrViewKind)] = []
     private var startsRead = 0
@@ -2291,11 +2336,17 @@ private final class UpdateLog {
     }
 
     /// The next frame reported as presented.
-    func nextPresented() async throws -> (bootID: String, projectionRevision: UInt64, paneIDs: Set<String>) {
+    func nextPresented() async throws -> (bootID: String, projectionRevision: UInt64, paneIDs: Set<String>, connection: UInt64) {
         while presented.isEmpty {
             if let update = try await read() { held.append(update) }
         }
         return presented.removeFirst()
+    }
+
+    /// The frames reported as presented that `nextPresented` hasn't returned.
+    func unreadPresented() -> [(bootID: String, projectionRevision: UInt64, paneIDs: Set<String>, connection: UInt64)] {
+        defer { presented.removeAll() }
+        return presented
     }
 
     /// The rest of the updates `next` would return, once the engine has stopped.
@@ -2328,7 +2379,7 @@ private final class UpdateLog {
 
     func nextLayout() async throws -> HerdrPaneLayout {
         while true {
-            if case .layout(let layout) = try await next() { return layout }
+            if case .drawn(let layout, _, _) = try await next() { return layout }
         }
     }
 
@@ -2344,8 +2395,16 @@ private final class UpdateLog {
         defer { self.iterator = iterator }
         guard let update = await iterator.next(isolation: #isolation) else { throw UpdateLogError.finished }
         switch update {
-        case .presented(let bootID, let revision, let paneIDs, _):
-            presented.append((bootID, revision, paneIDs))
+        case .drawn(let layout, let revision, let connection):
+            let drawn = Set(layout.panes.filter { $0.innerRect != nil }.map(\.paneID))
+            let last = lastDrawn
+            lastDrawn = (layout, revision, connection)
+            let lastPanes = last.map { Set($0.layout.panes.filter { $0.innerRect != nil }.map(\.paneID)) }
+            if last?.layout.bootID != layout.bootID || last?.projectionRevision != revision || last?.connection != connection
+                || lastPanes != drawn {
+                presented.append((layout.bootID, revision, drawn, connection))
+            }
+            if last?.layout != layout { return update }
         case .started(let request, let kind, _, _):
             started.append((request, kind))
         case .answered(let request, .focus, let failure, _):

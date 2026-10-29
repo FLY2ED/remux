@@ -24,6 +24,8 @@ struct HerdrPaneLayout: Equatable, Sendable {
 
     let bootID: String
     let tab: Tab?
+    /// The pane Herdr had focused in the snapshot the frame was drawn against.
+    let focusedPaneID: String?
     let columns: UInt16
     let rows: UInt16
     /// The tab's panes in Herdr's order, as the snapshot lists them, also those the frame doesn't draw.
@@ -84,8 +86,10 @@ enum HerdrEngineUpdate: Sendable {
     /// `HerdrPaneRendererFence`. It replaces an earlier terminal for the same pane, whose renderer the
     /// owner closes.
     case paneTerminal(paneID: String, terminal: HerdrRetainedTerminal)
-    /// Follows the terminals of the new panes it lists.
-    case layout(HerdrPaneLayout)
+    /// A frame the engine drew on `connection`, whenever its layout, the snapshot it was drawn against or
+    /// its terminals changed: the tab's layout, and that snapshot's revision, whose agents the user sees once
+    /// the frame is on screen. Follows the terminals of the new panes it lists.
+    case drawn(HerdrPaneLayout, projectionRevision: UInt64, connection: UInt64)
     /// Each listed pane's scrolling, whenever any of it changed. Kept out of the layout because the
     /// history grows with every line a program prints.
     case paneScroll([String: HerdrPaneScroll])
@@ -116,9 +120,6 @@ enum HerdrEngineUpdate: Sendable {
     case zoomAnswered(HerdrPaneZoomResult?, bootID: String, failure: HerdrCommandError?, reportsFailure: Bool, connection: UInt64)
     /// Herdr refused the show of the current view request `request`, for `reason`.
     case showRefused(request: UInt64, reason: String, connection: UInt64)
-    /// The frame on screen now was drawn against snapshot `projectionRevision` and shows these panes,
-    /// whose agents the user can see. Comes before that frame's layout.
-    case presented(bootID: String, projectionRevision: UInt64, paneIDs: Set<String>, connection: UInt64)
 }
 
 /// One connection's way into the engine, named by its owner's attempt. Once that connection ends or a
@@ -1284,13 +1285,15 @@ actor HerdrTerminalEngine {
             bootID = surface.bootID
         }
         let cursor = HerdrPanePainter.paneCursor(of: surface)
+        var madeTerminal = false
         for pane in surface.panes {
-            paint(
+            let made = paint(
                 HerdrPanePainter.Painted(frame: surface.frame, area: pane.innerRect, cursor: cursor),
                 content: HerdrPaneContent(of: pane),
                 images: HerdrPaneImages.Scene(surface.graphics, pane: pane),
                 paneID: pane.paneID
             )
+            madeTerminal = madeTerminal || made
         }
         let listed = Set(surface.panes.map(\.paneID))
         panes = panes.filter { listed.contains($0.key) }
@@ -1300,36 +1303,32 @@ actor HerdrTerminalEngine {
             bordersMayHaveChanged = false
         }
         let frame = PresentedFrame(bootID: surface.bootID, projectionRevision: surface.projectionRevision, paneIDs: listed)
-        if frame != presentedFrame {
+        let next = layout(of: surface, snapshot: snapshot)
+        if madeTerminal || next != layout || frame != presentedFrame {
+            layout = next
             presentedFrame = frame
-            continuation.yield(.presented(
-                bootID: frame.bootID,
-                projectionRevision: frame.projectionRevision,
-                paneIDs: frame.paneIDs,
-                connection: connection
-            ))
+            continuation.yield(.drawn(next, projectionRevision: surface.projectionRevision, connection: connection))
         }
-        publishLayout(of: surface, snapshot: snapshot)
         publishScroll(of: surface)
     }
 
+    /// Returns whether the pane got a new terminal.
     private func paint(
         _ next: HerdrPanePainter.Painted,
         content: HerdrPaneContent,
         images scene: HerdrPaneImages.Scene,
         paneID: String
-    ) {
+    ) -> Bool {
         let area = next.area
         guard area.width > 0, area.height > 0 else {
             // A pane with no text area has no terminal; it gets a new one when it has room again.
             panes.removeValue(forKey: paneID)
             failedPaneIDs.remove(paneID)
-            return
+            return false
         }
-        guard !failedPaneIDs.contains(paneID) else { return }
+        guard !failedPaneIDs.contains(paneID) else { return false }
         guard var pane = panes[paneID] else {
-            createPane(paneID: paneID, painted: next, content: content, images: scene)
-            return
+            return createPane(paneID: paneID, painted: next, content: content, images: scene)
         }
         let result: ghostty_terminal_producer_result_e
         if pane.painted.area.width == area.width, pane.painted.area.height == area.height {
@@ -1339,7 +1338,7 @@ actor HerdrTerminalEngine {
                 pane.painted = next
                 pane.content = content
                 panes[paneID] = pane
-                return
+                return false
             }
             result = pane.producer.feed(bytes)
         } else {
@@ -1354,20 +1353,22 @@ actor HerdrTerminalEngine {
         }
         guard result == GHOSTTY_TERMINAL_PRODUCER_RESULT_OK else {
             fail(paneID: paneID)
-            return
+            return false
         }
         pane.painted = next
         pane.content = content
         wake(&pane, paneID: paneID)
         panes[paneID] = pane
+        return false
     }
 
+    /// Returns whether the pane got its terminal.
     private func createPane(
         paneID: String,
         painted: HerdrPanePainter.Painted,
         content: HerdrPaneContent,
         images scene: HerdrPaneImages.Scene
-    ) {
+    ) -> Bool {
         let producer: any HerdrPaneProducing
         let terminal: HerdrRetainedTerminal
         do {
@@ -1375,7 +1376,7 @@ actor HerdrTerminalEngine {
             terminal = try producer.retainTerminal()
         } catch {
             fail(paneID: paneID)
-            return
+            return false
         }
         // The cell size goes in with the first paint, before the terminal is shown.
         var paneImages = HerdrPaneImages()
@@ -1388,23 +1389,25 @@ actor HerdrTerminalEngine {
         )
         guard result == GHOSTTY_TERMINAL_PRODUCER_RESULT_OK else {
             fail(paneID: paneID)
-            return
+            return false
         }
         panes[paneID] = Pane(producer: producer, terminal: terminal, painted: painted, content: content, images: paneImages)
         continuation.yield(.paneTerminal(paneID: paneID, terminal: terminal))
+        return true
     }
 
     /// The tab's panes come from the snapshot, which lists a zoomed tab's undrawn panes too, in Herdr's
     /// order; a drawn pane it doesn't list follows them.
-    private func publishLayout(of surface: HerdrPaneSurfaceFrame, snapshot: HerdrSnapshot) {
+    private func layout(of surface: HerdrPaneSurfaceFrame, snapshot: HerdrSnapshot) -> HerdrPaneLayout {
         let tab = snapshot.tabs.first { $0.tabID == snapshot.focusedTabID }
         var paneIDs = tab.map { tab in snapshot.panes.filter { $0.tabID == tab.tabID }.map(\.paneID) } ?? []
         for pane in surface.panes where !paneIDs.contains(pane.paneID) {
             paneIDs.append(pane.paneID)
         }
-        let next = HerdrPaneLayout(
+        return HerdrPaneLayout(
             bootID: surface.bootID,
             tab: tab.map { HerdrPaneLayout.Tab(tabID: $0.tabID, label: $0.label, zoomed: $0.zoomed) },
+            focusedPaneID: snapshot.focusedPaneID,
             columns: surface.frame.width,
             rows: surface.frame.height,
             panes: paneIDs.map { paneID in
@@ -1418,9 +1421,6 @@ actor HerdrTerminalEngine {
             borders: borders,
             hasPopup: surface.popup != nil
         )
-        guard next != layout else { return }
-        layout = next
-        continuation.yield(.layout(next))
     }
 
     private func publishScroll(of surface: HerdrPaneSurfaceFrame) {

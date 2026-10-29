@@ -71,15 +71,19 @@ final class TerminalPaneRenderer {
     #endif
     private var rendererIsAvailable = true
     private var hasPublishedFrame = false
+    /// The pane draws its first picture off screen (`prepare()`), until it is presented in a window.
+    private var isPreparing = false
     private var presentationFailure: TerminalDisconnectReason?
     private var firstFrameObservation: NSKeyValueObservation?
     private var firstFrameDeadline: Task<Void, Never>?
     var onPresentationChange: (() -> Void)?
 
+    /// Ready once a frame at the pane's size is in its view: in a window, or drawn off screen for the view to
+    /// show the moment it is attached (`prepare()`).
     var presentation: TerminalPanePresentation {
         if let presentationFailure { return .failed(presentationFailure) }
         guard !isClosing, rendererIsAvailable, renderer != nil,
-              view.window != nil else { return .pending }
+              view.window != nil || isPreparing else { return .pending }
         return hasPublishedFrame ? .ready : .awaitingFrame
     }
 
@@ -118,7 +122,7 @@ final class TerminalPaneRenderer {
               replacementCompletion == nil || !suppressReplacementPublicationForTesting else { return }
         #endif
         guard lifecycle == .active, rendererIsAvailable, presentationFailure == nil,
-              !hasPublishedFrame, presented, sceneActive, view.window != nil,
+              !hasPublishedFrame, isPreparing || (presented && sceneActive && view.window != nil),
               appliedDisplayMetrics == canonicalViewportMetrics,
               let dimensions = GhosttyIOSurfaceFrame.dimensions(in: layer),
               dimensions.width == Int(canonicalViewportMetrics.pixelWidth),
@@ -128,19 +132,22 @@ final class TerminalPaneRenderer {
         firstFrameObservation = nil
         managedSurface?.finishRendererReplacement(isAvailable: true)
         GhosttyRuntimeTrace.diagnostics(
-            "terminalPane.firstFrame \(diagnosticName) attached=true size=\(dimensions.width)x\(dimensions.height)"
+            "terminalPane.firstFrame \(diagnosticName) attached=\(view.window != nil) size=\(dimensions.width)x\(dimensions.height)"
         )
         updatePresentationReadiness()
         finishReplacement(.replaced)
     }
 
-    private func updatePresentationReadiness() {
-        // Both initial presentation and renderer recovery wait only while this
-        // pane can be shown. Hidden/ detached time is not a renderer failure.
-        let awaitingFrame = lifecycle == .active && rendererIsAvailable
-            && presented && sceneActive && view.window != nil
+    /// Both initial presentation and renderer recovery wait only while this pane can be shown, or draws its
+    /// first picture off screen. Hidden or detached time is not a renderer failure.
+    private var isAwaitingFrame: Bool {
+        lifecycle == .active && rendererIsAvailable && sceneActive
+            && (isPreparing || (presented && view.window != nil))
             && !hasPublishedFrame && presentationFailure == nil
-        if !awaitingFrame {
+    }
+
+    private func updatePresentationReadiness() {
+        if !isAwaitingFrame {
             firstFrameDeadline?.cancel()
             firstFrameDeadline = nil
         } else if firstFrameDeadline == nil {
@@ -148,9 +155,7 @@ final class TerminalPaneRenderer {
                 try? await Task.sleep(for: Self.framePublicationTimeout)
                 guard !Task.isCancelled, let self else { return }
                 self.firstFrameDeadline = nil
-                guard self.lifecycle == .active, self.rendererIsAvailable,
-                      self.presented, self.sceneActive, self.view.window != nil,
-                      !self.hasPublishedFrame, self.presentationFailure == nil else { return }
+                guard self.isAwaitingFrame else { return }
                 self.failPresentation(message: "Terminal did not publish its first frame. Reconnect to try again.")
             }
         }
@@ -424,15 +429,34 @@ final class TerminalPaneRenderer {
 
     @discardableResult
     func updateDisplay(metrics: GhosttySurfaceDisplayMetrics) -> Bool {
+        let resized = metrics != canonicalViewportMetrics
         canonicalViewportMetrics = metrics
         // The native replacement owns the old renderer until unregister is
         // acknowledged. Installation and registration apply the latest size.
         guard lifecycle != .replacing else { return true }
         let applied = applyDisplayMetrics(metrics)
-        if applied, let layer = GhosttyIOSurfaceFrame.rendererLayer(in: view.layer) {
+        // A pane drawing off screen draws again at its new size, which its first picture must have.
+        if applied, resized, isPreparing {
+            observeFirstFrame()
+            updatePresentationReadiness()
+            renderer?.control.requestFrame()
+        } else if applied, let layer = GhosttyIOSurfaceFrame.rendererLayer(in: view.layer) {
             recordFirstFrameIfPublished(on: layer)
         }
         return applied
+    }
+
+    /// Has the hidden renderer draw a frame of its terminal at the pane's size, so its view shows a complete
+    /// picture the moment it is attached: `presentation` reads ready once that frame is in, before the view
+    /// is in a window, as a pane of a tab coming on screen needs. Ghostty draws a hidden surface's frame on
+    /// request (`ghostty_terminal_surface_request_frame`). The pane then shows as any other once presented
+    /// in a window.
+    func prepare() {
+        guard lifecycle == .active, !presented, !isPreparing else { return }
+        isPreparing = true
+        guard !hasPublishedFrame else { return updatePresentationReadiness() }
+        updatePresentationReadiness()
+        renderer?.control.requestFrame()
     }
 
     @discardableResult
@@ -705,6 +729,12 @@ final class TerminalPaneRenderer {
         guard lifecycle == .active else {
             updatePresentationReadiness()
             return
+        }
+        if presented, view.window != nil {
+            isPreparing = false
+        } else if isPreparing, sceneActive, !hasPublishedFrame {
+            // Asked again as the pane's state changes until its first picture is in; Ghostty coalesces requests.
+            renderer?.control.requestFrame()
         }
         let visible = presented && sceneActive && presentationFailure == nil
         let active = focused && visible

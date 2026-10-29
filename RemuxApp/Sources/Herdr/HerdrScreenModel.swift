@@ -103,6 +103,9 @@ final class HerdrScreenModel {
         let ask: UInt64
         /// The pane it goes to; nil for a tab, a workspace or a creation, whose pane Herdr names once there.
         let pane: String?
+        /// The tab it goes to when it leaves the tab on screen, by its id, or by the name the screen gives a tab
+        /// Herdr is making, whose id is known only once Herdr made it.
+        let switchesTo: (tabID: String?, name: String)?
         /// The engine's request that takes the session there, once the engine has the move.
         var request: UInt64?
     }
@@ -298,7 +301,30 @@ final class HerdrScreenModel {
     /// When the screen first had a size, which a waiting bridge's hello deadline is held against.
     private var sizeKnownSince: ContinuousClock.Instant?
 
+    /// A frame the engine drew, as it comes (`HerdrEngineUpdate.drawn`).
+    private struct DrawnFrame {
+        let layout: HerdrPaneLayout
+        let projectionRevision: UInt64
+        let connection: UInt64
+
+        /// What the frame shows once on screen, whose agents the user then sees (`presentedFrame`).
+        var presented: (connection: UInt64, bootID: String, projectionRevision: UInt64, paneIDs: Set<String>) {
+            (connection, layout.bootID, projectionRevision, Set(layout.panes.lazy.filter { $0.innerRect != nil }.map(\.paneID)))
+        }
+    }
+
+    /// The layout of the frame on screen. A frame the engine drew with panes that have no renderer yet waits
+    /// off screen until all of them have drawn (`pendingFrame`), so the screen goes from one whole picture to
+    /// the next, its names, focus and input with it.
     private(set) var layout: HerdrPaneLayout?
+    /// The newest frame the engine drew, while the frame on screen stays until this one's panes have drawn
+    /// off screen (`holdsScreen(for:)`).
+    private var pendingFrame: DrawnFrame?
+    /// The renderers of `pendingFrame`'s panes, each drawing its first picture off screen.
+    private var stagedSurfaces: [String: HerdrPaneSurface] = [:]
+    /// Surfaces of panes that left the screen, closed once the screen has let go of their views
+    /// (`closeReleasedSurfaces`), so the last picture stays until the next one is in its place.
+    private var retiredSurfaces: [HerdrPaneSurface] = []
     /// The newest snapshot, kept across a reconnect until the new connection's first.
     private var snapshot: HerdrSnapshot?
     /// The frame on screen: the connection and snapshot revision it was drawn against, and its panes.
@@ -337,6 +363,11 @@ final class HerdrScreenModel {
     /// so a stop releases the runtime only once this is back to zero.
     private var closingRenderers = 0
     private var closesDrained: CheckedContinuation<Void, Never>?
+    /// How long a switch to another tab goes before the screen says so (`switchingCue`).
+    private let switchingCueDelay: Duration
+    private var switchingCueTimer: Task<Void, Never>?
+    /// The switch under way has taken longer than `switchingCueDelay`.
+    private var isSwitchingCueDue = false
 
     init(
         target: SessionTarget,
@@ -346,6 +377,7 @@ final class HerdrScreenModel {
         onNotification: @escaping (NotificationEvent) -> Void,
         connectionTiming: HerdrConnection.Timing = HerdrConnection.Timing(),
         recoveryTiming: RecoveryTiming = RecoveryTiming(),
+        switchingCueDelay: Duration = HerdrScreenModel.switchingCueDelay,
         engine: HerdrTerminalEngine = HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1),
         makeRendererFence: @escaping RendererFenceFactory = {
             HerdrPaneRendererFence(engine: $0, paneID: $1, terminal: $2)
@@ -359,6 +391,7 @@ final class HerdrScreenModel {
         self.onNotification = onNotification
         self.connectionTiming = connectionTiming
         self.recoveryTiming = recoveryTiming
+        self.switchingCueDelay = switchingCueDelay
         self.engine = engine
         self.makeRendererFence = makeRendererFence
         self.clipboard = clipboard
@@ -398,6 +431,7 @@ final class HerdrScreenModel {
         // Where the session was asked to go applies to the show it was asked for.
         if !selected { pendingReveal = nil }
         reconcilePresentationActivity()
+        closeReleasedSurfaces()
         reconcileVisibility()
     }
 
@@ -629,7 +663,7 @@ final class HerdrScreenModel {
             terminalColors = try? runtime?.terminalColors()
             didChange()
         }
-        for surface in surfaces.values where !surface.renderer.isClosing {
+        for surface in Array(surfaces.values) + stagedSurfaces.values where !surface.renderer.isClosing {
             if !surface.renderer.applyTerminalConfiguration(theme: settings.theme) {
                 surface.renderer.failPresentation(message: Self.configurationFailureMessage)
             }
@@ -659,8 +693,10 @@ final class HerdrScreenModel {
         measurement = measured
         if let geometry { attempt?.ask(.resize(geometry)) }
         resumeSizeWaiter()
-        for paneID in Array(surfaces.keys) {
-            guard let surface = surfaces[paneID], let metrics = displayMetrics(for: paneID) else { continue }
+        // The panes of a frame held off screen take the new size there, and the frame on screen keeps its
+        // picture until they have drawn at it.
+        for (paneID, surface) in pendingFrame == nil ? surfaces : stagedSurfaces {
+            guard let metrics = displayMetrics(for: paneID) else { continue }
             _ = surface.renderer.updateDisplay(metrics: metrics)
         }
         for paneID in Array(terminals.keys) {
@@ -702,6 +738,7 @@ final class HerdrScreenModel {
         let feed = attempt.flatMap { isCurrent($0) && $0.isOpen ? HerdrEngineFeed(engine: engine, connection: $0.id) : nil }
         stopped = true
         cancelRecovery()
+        switchingCueTimer?.cancel()
         if let feed {
             let once = HerdrOnce()
             await withCheckedContinuation { (closed: CheckedContinuation<Void, Never>) in
@@ -720,10 +757,14 @@ final class HerdrScreenModel {
         if !creatingTerminals.isEmpty {
             await withCheckedContinuation { creationsDrained = $0 }
         }
-        for surface in surfaces.values {
+        let open = Array(surfaces.values) + stagedSurfaces.values + retiredSurfaces
+        surfaces.removeAll()
+        stagedSurfaces.removeAll()
+        retiredSurfaces.removeAll()
+        pendingFrame = nil
+        for surface in open {
             close(surface.renderer)
         }
-        surfaces.removeAll()
         if closingRenderers > 0 {
             await withCheckedContinuation { closesDrained = $0 }
         }
@@ -789,9 +830,11 @@ final class HerdrScreenModel {
     /// The session takes input: it is shown on an open connection with no show in progress, and Herdr has a
     /// pane focused, as Herdr's client sends input (`shell/input.rs`): Herdr's client drops input before its
     /// first snapshot and while a show is in progress, and the server drops input on a hidden surface. It
-    /// holds while Remux's move is under way, whichever pane the user is in (`userPaneID`).
+    /// holds while Remux's move is under way, whichever pane the user is in (`userPaneID`), and while the
+    /// screen catches up with where Herdr has the session, so the keyboard stays up; the keys typed meanwhile
+    /// are dropped (`inputTarget(forPane:)`).
     var isInputAvailable: Bool {
-        focusedPaneID.flatMap(inputTarget(forPane:)) != nil
+        focusedPaneID.flatMap(herdrInputTarget(forPane:)) != nil
     }
 
     /// The pane the user is in: the pane of Remux's move from the moment it is asked until it ends, else
@@ -803,28 +846,43 @@ final class HerdrScreenModel {
     /// tab or a pane on another tab, keys are dropped, one by one, as Herdr's client drops input during an
     /// activation, and never go to the pane left. The screen's drawing, readiness and the composer's pane
     /// follow it only once it is drawn (`screenPaneID`); until then they keep the focus of the frame on
-    /// screen, which the engine holds until the move completes, so the session stays ready to type into.
+    /// screen, which stays until the frame showing where the move went is on screen, so the session stays
+    /// ready to type into.
     var userPaneID: String? {
         guard let attempt, isCurrent(attempt), let move = attempt.move else { return focusedPaneID }
         return move.pane
     }
 
-    /// The pane the screen shows as the user's: `userPaneID` once it is drawn, else Herdr's focused pane.
+    /// The pane the screen shows as the user's: `userPaneID` once it is drawn, else the pane focused in the
+    /// frame on screen. A snapshot ahead of that frame changes nothing here until its own frame is on screen.
     var screenPaneID: String? {
-        guard let pane = userPaneID, layout?.panes.contains(where: { $0.paneID == pane && $0.hasTextArea }) == true
-        else { return focusedPaneID }
+        guard let layout else { return nil }
+        guard let pane = userPaneID, isDrawn(pane) else { return layout.focusedPaneID }
         return pane
+    }
+
+    /// Whether the frame on screen draws `paneID` with its text, and no newer frame waits off screen.
+    private func isDrawn(_ paneID: String) -> Bool {
+        pendingFrame == nil && layout?.panes.contains { $0.paneID == paneID && $0.hasTextArea } == true
     }
 
     private var inputTarget: (attempt: Attempt, paneID: String)? {
         userPaneID.flatMap(inputTarget(forPane:))
     }
 
-    /// Where input for `paneID` goes, the one rule for every input: the session is shown with no show in
-    /// progress, and Herdr takes input for the pane, as it does for the panes of the tab a client views
-    /// (`server/headless/client_views.rs` `shell_client_views_pane`), whatever Remux has drawn of them:
-    /// only the focused pane while that tab is zoomed, and any pane of it otherwise.
+    /// Where input for `paneID` goes, the one rule for every input: Herdr takes it (`herdrInputTarget`), and
+    /// the frame on screen draws the pane (`isDrawn`), so nothing typed goes to a pane the user doesn't see,
+    /// as one on the tab a move is going to while the tab left is still on screen.
     private func inputTarget(forPane paneID: String) -> (attempt: Attempt, paneID: String)? {
+        guard isDrawn(paneID) else { return nil }
+        return herdrInputTarget(forPane: paneID)
+    }
+
+    /// Whether Herdr takes input for `paneID`: the session is shown with no show in progress, and Herdr takes
+    /// input for the pane, as it does for the panes of the tab a client views
+    /// (`server/headless/client_views.rs` `shell_client_views_pane`): only the focused pane while that tab is
+    /// zoomed, and any pane of it otherwise.
+    private func herdrInputTarget(forPane paneID: String) -> (attempt: Attempt, paneID: String)? {
         guard let attempt = shownAttempt, let snapshot else { return nil }
         let tab = snapshot.tabs.first { $0.tabID == snapshot.focusedTabID }
         guard paneID == snapshot.focusedPaneID
@@ -935,12 +993,24 @@ final class HerdrScreenModel {
     private func move(_ attempt: Attempt, to destination: HerdrDestination) {
         var fromAnotherTab = false
         var pane: String?
-        if case .place(let place) = destination {
-            fromAnotherTab = tab(reachedBy: place).map { $0 != onScreenTab } == true
+        var switchesTo: (tabID: String?, name: String)?
+        switch destination {
+        case .place(let place):
+            let reached = tab(reachedBy: place)
+            fromAnotherTab = reached.map { $0 != onScreenTab } == true
             if case .pane(let id) = place { pane = id }
+            if let reached, reached.tabID != layout?.tab?.tabID, let name = switchName(ofTab: reached.tabID) {
+                switchesTo = (reached.tabID, name)
+            }
+        case .creation(.tab):
+            switchesTo = (nil, Self.newTabName)
+        case .creation(.workspace):
+            switchesTo = (nil, Self.newWorkspaceName)
+        case .creation(.split), .closing:
+            break
         }
         attempt.moveAsks += 1
-        attempt.move = PendingMove(ask: attempt.moveAsks, pane: pane)
+        attempt.move = PendingMove(ask: attempt.moveAsks, pane: pane, switchesTo: switchesTo)
         attempt.ask(.move(destination, fromAnotherTab: fromAnotherTab, ask: attempt.moveAsks))
         reconcilePresentationActivity()
         didChange()
@@ -1141,7 +1211,7 @@ final class HerdrScreenModel {
 
     private func applyScroll(toPane paneID: String) {
         guard let scroll = paneScrolls[paneID],
-              let managed = surfaces[paneID]?.renderer.managedSurface
+              let managed = currentSurface(of: paneID)?.renderer.managedSurface
         else { return }
         managed.setRemoteScroll(scroll.scrollState, route: scroll.route)
     }
@@ -1859,56 +1929,25 @@ final class HerdrScreenModel {
         case .paneTerminal(let paneID, let terminal):
             terminals[paneID] = terminal
             presentationFailures.removeValue(forKey: paneID)
-            if let surface = surfaces[paneID], surface.terminal !== terminal {
-                closeSurface(paneID)
-            }
-            createRendererIfPossible(paneID)
-        case .layout(let layout):
-            endSelections(movedBy: layout)
-            self.layout = layout
-            if let tab = layout.tab, !tab.zoomed {
-                let drawn = layout.panes.compactMap { pane in pane.hasTextArea ? pane.innerRect.map { (pane.paneID, $0) } : nil }
-                tabMap = HerdrTabMap(
-                    bootID: layout.bootID,
-                    tabID: tab.tabID,
-                    rects: Dictionary(drawn) { first, _ in first }
-                )
-            }
-            let shown = Set(layout.panes.lazy.filter(\.hasTextArea).map(\.paneID))
-            terminals = terminals.filter { shown.contains($0.key) }
-            presentationFailures = presentationFailures.filter { shown.contains($0.key) }
-            pointers = pointers.filter { shown.contains($0.key) }
-            wheelRemainders = wheelRemainders.filter { shown.contains($0.key) }
-            if let gesture = mouseGesture, !shown.contains(gesture.paneID) { mouseGesture = nil }
-            for paneID in Array(surfaces.keys) where !shown.contains(paneID) {
-                closeSurface(paneID)
-            }
-            for paneID in shown {
-                if let surface = surfaces[paneID], let metrics = displayMetrics(for: paneID) {
-                    _ = surface.renderer.updateDisplay(metrics: metrics)
-                } else {
-                    createRendererIfPossible(paneID)
-                }
-            }
-            reconcilePresentationActivity()
-        case .presented(let bootID, let projectionRevision, let paneIDs, let connection):
-            presentedFrame = (connection, bootID, projectionRevision, paneIDs)
-            acknowledgeShownAgents()
-            // Only what counts as seen follows it; the screen has nothing new to show.
+            // The frame that lists the pane follows, and decides where its renderer goes.
             return
+        case .drawn(let layout, let projectionRevision, let connection):
+            guard receive(DrawnFrame(layout: layout, projectionRevision: projectionRevision, connection: connection))
+            else { return }
         case .paneScroll(let scrolls):
             endSelections(movedBy: scrolls)
             paneScrolls = scrolls
-            for paneID in surfaces.keys {
+            for paneID in Set(surfaces.keys).union(stagedSurfaces.keys) {
                 applyScroll(toPane: paneID)
             }
             // Only the panes' scroll views follow it; the screen has nothing new to show.
             return
         case .paneTerminalFailed(let paneID):
             presentationFailures[paneID] = Self.paneFailure
-            surfaces[paneID]?.renderer.failPresentation(message: Self.paneFailure.message)
+            currentSurface(of: paneID)?.renderer.failPresentation(message: Self.paneFailure.message)
+            showPreparedFrameIfReady()
         case .rendererWakeFailed(let paneID):
-            surfaces[paneID]?.renderer.failPresentation(message: Self.rendererFailureMessage)
+            currentSurface(of: paneID)?.renderer.failPresentation(message: Self.rendererFailureMessage)
         case .failed(let error, let connection):
             if let attempt, attempt.id == connection {
                 end(attempt, error.terminalDisconnectReason(on: target.server), recovery: Self.recovery(connectionFailedWith: error, opened: true))
@@ -1919,9 +1958,151 @@ final class HerdrScreenModel {
         didChange()
     }
 
+    /// A frame the engine drew: shown at once, or held off screen while its panes draw their first pictures
+    /// (`holdsScreen(for:)`). Returns whether the screen has anything new to show: a frame that changes only
+    /// the snapshot it was drawn against changes only what counts as seen.
+    private func receive(_ frame: DrawnFrame) -> Bool {
+        let shown = frame.layout.textPaneIDs
+        terminals = terminals.filter { shown.contains($0.key) }
+        if pendingFrame == nil, frame.layout == layout, !shown.contains(where: lacksRenderer) {
+            presentedFrame = frame.presented
+            acknowledgeShownAgents()
+            return false
+        }
+        if holdsScreen(for: frame.layout) {
+            pendingFrame = frame
+            stage()
+            showPreparedFrameIfReady()
+        } else {
+            let discarded = stagedSurfaces.values
+            stagedSurfaces.removeAll()
+            show(frame)
+            for surface in discarded { close(surface.renderer) }
+        }
+        return true
+    }
+
+    /// Whether the frame on screen stays while `next`'s panes draw their first pictures off screen: `next`
+    /// draws a pane whose terminal has no renderer yet, as another tab's panes or a restarted server's do,
+    /// and none of the panes on screen goes on in it. A pane that goes on, as in a split, was painted for
+    /// `next` already, so its old picture can't stay, and `next` goes on screen at once.
+    private func holdsScreen(for next: HerdrPaneLayout) -> Bool {
+        guard layout != nil else { return false }
+        let panes = next.textPaneIDs
+        let goesOn = panes.contains { paneID in
+            surfaces[paneID].map { $0.terminal === terminals[paneID] } ?? false
+        }
+        return panes.contains(where: lacksRenderer) && !goesOn
+    }
+
+    /// Whether the pane's terminal has no renderer on screen.
+    private func lacksRenderer(_ paneID: String) -> Bool {
+        terminals[paneID].map { surfaces[paneID]?.terminal !== $0 } ?? false
+    }
+
+    /// Makes the renderers of the frame held off screen, each at its place in that frame, and closes those
+    /// made for a frame it replaced, as a quick switch on to a third tab does.
+    private func stage() {
+        guard let frame = pendingFrame else { return }
+        let shown = frame.layout.textPaneIDs
+        let replaced = stagedSurfaces.filter { !shown.contains($0.key) || $0.value.terminal !== terminals[$0.key] }
+        for paneID in replaced.keys { stagedSurfaces.removeValue(forKey: paneID) }
+        for paneID in shown {
+            if let surface = stagedSurfaces[paneID], let metrics = displayMetrics(for: paneID) {
+                _ = surface.renderer.updateDisplay(metrics: metrics)
+            } else {
+                createRendererIfPossible(paneID)
+            }
+        }
+        for surface in replaced.values { close(surface.renderer) }
+    }
+
+    /// Shows the frame held off screen once every pane it draws has its first picture, or failed: one pane
+    /// for a zoomed tab, each of a split one.
+    private func showPreparedFrameIfReady() {
+        guard let frame = pendingFrame else { return }
+        for paneID in frame.layout.textPaneIDs where presentationFailures[paneID] == nil && terminals[paneID] != nil {
+            guard let surface = stagedSurfaces[paneID], surface.terminal === terminals[paneID] else { return }
+            switch surface.renderer.presentation {
+            case .ready, .failed: continue
+            case .pending, .awaitingFrame: return
+            }
+        }
+        show(frame)
+    }
+
+    /// Puts `frame` on screen in one turn: its layout, its panes' renderers, the focus, and what counts as
+    /// seen. The surfaces it no longer shows retire, keeping their pictures until the screen lets go of them.
+    private func show(_ frame: DrawnFrame) {
+        let layout = frame.layout
+        pendingFrame = nil
+        endSelections(movedBy: layout)
+        self.layout = layout
+        if let tab = layout.tab, !tab.zoomed {
+            let drawn = layout.panes.compactMap { pane in pane.hasTextArea ? pane.innerRect.map { (pane.paneID, $0) } : nil }
+            tabMap = HerdrTabMap(
+                bootID: layout.bootID,
+                tabID: tab.tabID,
+                rects: Dictionary(drawn) { first, _ in first }
+            )
+        }
+        let shown = layout.textPaneIDs
+        presentationFailures = presentationFailures.filter { shown.contains($0.key) }
+        pointers = pointers.filter { shown.contains($0.key) }
+        wheelRemainders = wheelRemainders.filter { shown.contains($0.key) }
+        if let gesture = mouseGesture, !shown.contains(gesture.paneID) { mouseGesture = nil }
+        for (paneID, staged) in stagedSurfaces {
+            if let left = surfaces.updateValue(staged, forKey: paneID) { retiredSurfaces.append(left) }
+            applyScroll(toPane: paneID)
+        }
+        stagedSurfaces.removeAll()
+        for (paneID, surface) in surfaces where !shown.contains(paneID) || surface.terminal !== terminals[paneID] {
+            surfaces.removeValue(forKey: paneID)
+            retiredSurfaces.append(surface)
+        }
+        for paneID in shown {
+            if let surface = surfaces[paneID], let metrics = displayMetrics(for: paneID) {
+                _ = surface.renderer.updateDisplay(metrics: metrics)
+            } else {
+                createRendererIfPossible(paneID)
+            }
+        }
+        presentedFrame = frame.presented
+        acknowledgeShownAgents()
+        reconcilePresentationActivity()
+        closeReleasedSurfaces()
+    }
+
+    /// Closes the retired surfaces the screen has let go of: a view out of the window, or one whose pane shows
+    /// its new surface in the window now, over it in the same place. Off screen, the session lets go at once.
+    /// A renderer's close tells the model its presentation changed, so they leave the list before they close.
+    private func closeReleasedSurfaces() {
+        let released = retiredSurfaces.filter { surface in
+            !isSelected || surface.renderer.view.window == nil || surfaces[surface.paneID]?.renderer.view.window != nil
+        }
+        guard !released.isEmpty else { return }
+        retiredSurfaces.removeAll { surface in released.contains { $0 === surface } }
+        for surface in released { close(surface.renderer) }
+    }
+
+    /// A pane renderer's presentation changed: a renderer off screen may have drawn its first picture, a new
+    /// view may be in the window, and a retired one out of it.
+    private func paneRendererChanged() {
+        guard !stopped else { return }
+        closeReleasedSurfaces()
+        showPreparedFrameIfReady()
+        didChange()
+    }
+
+    /// The pane's surface over its terminal now: the one drawing off screen, else the one on screen.
+    private func currentSurface(of paneID: String) -> HerdrPaneSurface? {
+        stagedSurfaces[paneID] ?? surfaces[paneID]
+    }
+
+    /// A pane's size on screen in the newest frame the engine drew.
     private func displayMetrics(for paneID: String) -> GhosttySurfaceDisplayMetrics? {
         guard let measurement,
-              let area = layout?.panes.first(where: { $0.paneID == paneID })?.innerRect
+              let area = (pendingFrame?.layout ?? layout)?.panes.first(where: { $0.paneID == paneID })?.innerRect
         else { return nil }
         return measurement.displayMetrics(columns: UInt32(area.width), rows: UInt32(area.height))
     }
@@ -1931,25 +2112,30 @@ final class HerdrScreenModel {
         for paneID in Array(terminals.keys) {
             createRendererIfPossible(paneID)
         }
-        for (paneID, surface) in surfaces {
-            guard case .failed = surface.renderer.presentation else { continue }
-            surfaces.removeValue(forKey: paneID)
+        func replace(_ surface: HerdrPaneSurface) {
             let terminal = ObjectIdentifier(surface.terminal)
             closingTerminals.insert(terminal)
             close(surface.renderer) { [weak self] in
                 guard let self else { return }
                 closingTerminals.remove(terminal)
-                createRendererIfPossible(paneID)
+                createRendererIfPossible(surface.paneID)
                 didChange()
             }
         }
+        func isFailed(_ surface: HerdrPaneSurface) -> Bool {
+            if case .failed = surface.renderer.presentation { true } else { false }
+        }
+        let failed = surfaces.values.filter(isFailed) + stagedSurfaces.values.filter(isFailed)
+        surfaces = surfaces.filter { !isFailed($0.value) }
+        stagedSurfaces = stagedSurfaces.filter { !isFailed($0.value) }
+        failed.forEach(replace)
         didChange()
     }
 
     private func createRendererIfPossible(_ paneID: String) {
         guard !stopped, let runtime,
               let terminal = terminals[paneID],
-              surfaces[paneID]?.terminal !== terminal,
+              surfaces[paneID]?.terminal !== terminal, stagedSurfaces[paneID]?.terminal !== terminal,
               !closingTerminals.contains(ObjectIdentifier(terminal)),
               presentationFailures[paneID] == nil,
               let metrics = displayMetrics(for: paneID),
@@ -1996,28 +2182,39 @@ final class HerdrScreenModel {
             GhosttyRuntimeTrace.diagnostics(
                 "herdrPane.createFailed pane=\(paneID) error=\(String(describing: error))"
             )
+            showPreparedFrameIfReady()
         case .success(let renderer):
             guard isCurrentTerminal, let metrics = displayMetrics(for: paneID) else {
                 close(renderer)
                 return
             }
             let surface = HerdrPaneSurface(paneID: paneID, terminal: terminal, renderer: renderer)
-            surfaces[paneID] = surface
+            // The panes of a frame held off screen draw their first pictures there.
+            let staged = pendingFrame != nil
+            if staged {
+                stagedSurfaces[paneID] = surface
+            } else if let left = surfaces.updateValue(surface, forKey: paneID) {
+                retiredSurfaces.append(left)
+            }
             terminalScreenAdapter.makeScreenSurface(for: surface)
             applyScroll(toPane: paneID)
-            renderer.onPresentationChange = { [weak self] in self?.didChange() }
+            renderer.onPresentationChange = { [weak self] in self?.paneRendererChanged() }
             // Settings and the pane's size may have changed while the renderer was being registered.
             if !renderer.applyTerminalConfiguration(theme: currentTerminalSettings.theme)
                 || !renderer.updateDisplay(metrics: metrics) {
                 renderer.failPresentation(message: Self.configurationFailureMessage)
             }
             reconcilePresentationActivity()
+            if staged { renderer.prepare() }
+            closeReleasedSurfaces()
+            showPreparedFrameIfReady()
         }
         didChange()
     }
 
     private func rendererFailed(_ paneID: String, terminal: HerdrRetainedTerminal) {
-        guard let surface = surfaces[paneID], surface.terminal === terminal else { return }
+        guard let surface = [stagedSurfaces[paneID], surfaces[paneID]].lazy.compactMap({ $0 }).first(where: { $0.terminal === terminal })
+        else { return }
         surface.renderer.failPresentation(message: Self.rendererFailureMessage)
         didChange()
     }
@@ -2033,11 +2230,10 @@ final class HerdrScreenModel {
             surface.renderer.setPresented(isSelected && inLayout)
             surface.renderer.setFocused(isSelected && live && inLayout && paneID == screenPaneID)
         }
-    }
-
-    private func closeSurface(_ paneID: String) {
-        guard let surface = surfaces.removeValue(forKey: paneID) else { return }
-        close(surface.renderer)
+        // A pane drawing off screen is neither presented nor focused until its frame goes on screen.
+        for surface in stagedSurfaces.values {
+            surface.renderer.setSceneActive(sceneActive)
+        }
     }
 
     /// Every renderer is closed here, so a stop can wait for all of them; `completion` runs once the
@@ -2066,12 +2262,65 @@ final class HerdrScreenModel {
         continuation.resume()
     }
 
+    // MARK: - Switching tabs
+
+    /// The tab the screen is going to while it still shows another, by its id, once known, and its name: the
+    /// tab of a frame whose panes draw off screen, or the tab Remux's move goes to.
+    private var switchTarget: (tabID: String?, name: String)? {
+        let shownTab = layout?.tab?.tabID
+        if let tab = pendingFrame?.layout.tab {
+            return tab.tabID == shownTab ? nil : (tab.tabID, switchName(ofTab: tab.tabID) ?? tab.label)
+        }
+        guard let attempt, isCurrent(attempt), let target = attempt.move?.switchesTo,
+              target.tabID == nil || target.tabID != shownTab
+        else { return nil }
+        return (target.tabID, target.tabID.flatMap(switchName(ofTab:)) ?? target.name)
+    }
+
+    /// What the switching cue calls a tab, as the newest snapshot has it: the user's name for it, else "tab"
+    /// and its number, as the toolbar counts tabs; Herdr's own name for a tab is its number.
+    private func switchName(ofTab tabID: String) -> String? {
+        guard let tab = snapshot?.tabs.first(where: { $0.tabID == tabID }) else { return nil }
+        return tab.customLabel ? tab.label : "tab \(tab.number)"
+    }
+
+    /// The tab a switch under way goes to, which the next tab over is counted from.
+    var switchingTabID: String? {
+        switchTarget?.tabID
+    }
+
+    /// The name of the tab the screen says it is switching to: only once the switch has taken longer than
+    /// `switchingCueDelay`, so a quick one, whose tap is its own feedback, shows nothing in between.
+    var switchingCue: String? {
+        isSwitchingCueDue ? switchTarget?.name : nil
+    }
+
+    /// Times the switching cue from the moment a switch starts until it ends; a switch to another tab on the
+    /// way keeps the time of the first.
+    private func reconcileSwitchingCue() {
+        guard switchTarget != nil else {
+            switchingCueTimer?.cancel()
+            switchingCueTimer = nil
+            isSwitchingCueDue = false
+            return
+        }
+        guard switchingCueTimer == nil, !isSwitchingCueDue else { return }
+        switchingCueTimer = Task { [weak self, switchingCueDelay] in
+            try? await Task.sleep(for: switchingCueDelay)
+            guard !Task.isCancelled, let self else { return }
+            switchingCueTimer = nil
+            isSwitchingCueDue = true
+            didChange()
+        }
+    }
+
     // MARK: - Reporting
 
     private func didChange() {
         guard !stopped else { return }
         // A reconnect reads as one until the session is ready again, shown or not.
         if isConnectionReady { isReconnecting = false }
+        reconcileSwitchingCue()
         terminalScreenAdapter.objectWillChange.send()
         let readiness = terminalScreenAdapter.terminalScreenPresentationProjection.readiness
         var state = TerminalReadinessProjector.runtimeState(readiness)
@@ -2101,6 +2350,12 @@ final class HerdrScreenModel {
         kind: .runtime,
         message: "Terminal pane could not be painted. Reconnect to try again."
     )
+
+    /// The tap's own feedback, as the Tabs sheet closing, covers a quicker switch.
+    nonisolated static let switchingCueDelay: Duration = .milliseconds(500)
+    /// What the switching cue calls a tab or workspace Herdr is making.
+    static let newTabName = "a new tab"
+    static let newWorkspaceName = "a new workspace"
 
     private static let activationTimeout = TerminalDisconnectReason(
         kind: .transportIO,
@@ -2251,6 +2506,13 @@ extension HerdrPaneLayout.Pane {
     var hasTextArea: Bool {
         guard let innerRect else { return false }
         return innerRect.width > 0 && innerRect.height > 0
+    }
+}
+
+extension HerdrPaneLayout {
+    /// The panes the frame draws with a text area: those with a terminal.
+    var textPaneIDs: Set<String> {
+        Set(panes.lazy.filter(\.hasTextArea).map(\.paneID))
     }
 }
 
