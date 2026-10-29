@@ -1182,8 +1182,12 @@ final class HerdrScreenModel {
         return tabMap.rects[paneID]
     }
 
-    nonisolated static func zoomParams(_ paneID: String, zoomed: Bool) -> [String: String] {
-        ["pane_id": paneID, "mode": zoomed ? "on" : "off"]
+    /// A `pane.zoom` of `paneID`, or with none of the pane Herdr has focused on the tab this client views as
+    /// it handles the command (`app/api/panes.rs` `resolve_optional_pane`).
+    nonisolated static func zoomParams(_ paneID: String?, zoomed: Bool) -> [String: String] {
+        var params = ["mode": zoomed ? "on" : "off"]
+        params["pane_id"] = paneID
+        return params
     }
 
     // MARK: - Scrolling

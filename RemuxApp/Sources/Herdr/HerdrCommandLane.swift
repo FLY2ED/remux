@@ -61,7 +61,7 @@ struct HerdrCommandLane {
             /// would zoom it again for everyone.
             case layout(pane: String)
             /// A step of Remux's zooms coming off as the session ends: the focus of the tab `tabID`, or the
-            /// unzoom of its focused pane (`HerdrTerminalEngine.releaseZooms`). It goes with the lane free, and
+            /// unzoom of the pane Herdr has focused there (`HerdrTerminalEngine.releaseZooms`). It goes with the lane free, and
             /// nothing else goes from the release's start.
             case release(tabID: String)
             /// Anything else, whose caller gets its answer; it goes only while the session is shown.

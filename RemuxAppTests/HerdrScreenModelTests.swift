@@ -2291,8 +2291,9 @@ final class HerdrScreenModelTests: XCTestCase {
     }
 
     /// While the tab is zoomed, a tap moves the focus to another pane, which Herdr then shows zoomed; the
-    /// session's end unzooms the pane focused then, since an unzoom focuses its target.
-    func testTheUnzoomGoesOnThePaneFocusedWhenTheSessionEnds() async throws {
+    /// session's end unzooms naming no pane, so Herdr unzooms the pane focused as it handles it: an unzoom
+    /// focuses its target, and naming one could undo a focus another client made meanwhile.
+    func testTheSessionsEndUnzoomsWithoutNamingAPaneAfterATap() async throws {
         let harness = await makeHarness(settings: Self.zooming)
         let session = try await shownTab(harness, zoomingOnShow: true)
         var index = session.next
@@ -2316,7 +2317,7 @@ final class HerdrScreenModelTests: XCTestCase {
 
         let stopping = Task { await harness.model.stop() }
         let unzoom = try await nextWrite(session.bridge, from: &index, paneZoom)
-        XCTAssertEqual([unzoom.paneID, unzoom.mode], ["w1:p2", "off"])
+        XCTAssertEqual([unzoom.paneID, unzoom.mode], [nil, "off"])
         await session.bridge.serve(HerdrServerScript.zoomReply(id: unzoom.id, changed: true, zoomed: false, panes: Self.places(2)))
         await stopping.value
     }
@@ -2341,7 +2342,7 @@ final class HerdrScreenModelTests: XCTestCase {
         let active = try await harness.nextSurfaceSet(session.bridge, from: &index)
         XCTAssertTrue(active.active, "the end didn't make the surface active for its unzoom")
         let undo = try await nextWrite(session.bridge, from: &index, paneZoom)
-        XCTAssertEqual([undo.paneID, undo.mode], ["w1:p1", "off"])
+        XCTAssertEqual([undo.paneID, undo.mode], [nil, "off"])
         await session.bridge.serve(HerdrServerScript.zoomReply(id: undo.id, changed: true, zoomed: false, panes: Self.places(2)))
         await stopping.value
     }
@@ -2532,7 +2533,7 @@ final class HerdrScreenModelTests: XCTestCase {
             revision: 4, zoomed: true, otherTabs: ["t2"], zoomedOtherTabs: ["t2"], panes: Self.bothTabsPanes
         ))
         let firstUnzoom = try await nextWrite(session.bridge, from: &index, paneZoom)
-        XCTAssertEqual([firstUnzoom.paneID, firstUnzoom.mode], ["w1:p1", "off"])
+        XCTAssertEqual([firstUnzoom.paneID, firstUnzoom.mode], [nil, "off"])
         await session.bridge.serve(HerdrServerScript.zoomReply(id: firstUnzoom.id, changed: true, zoomed: false, panes: Self.places(2)))
         await session.bridge.serve(HerdrServerScript.snapshot(
             revision: 5, otherTabs: ["t2"], zoomedOtherTabs: ["t2"], panes: Self.bothTabsPanes
@@ -2543,7 +2544,7 @@ final class HerdrScreenModelTests: XCTestCase {
         await session.bridge.serve(HerdrConnectionTests.reply(id: back.id, json: #"{"type":"ok"}"#))
         await session.bridge.serve(Self.secondTabOnScreen(revision: 6, zoomed: true))
         let secondUnzoom = try await nextWrite(session.bridge, from: &index, paneZoom)
-        XCTAssertEqual([secondUnzoom.paneID, secondUnzoom.mode], ["w1:p3", "off"])
+        XCTAssertEqual([secondUnzoom.paneID, secondUnzoom.mode], [nil, "off"])
         await session.bridge.serve(
             HerdrServerScript.zoomReply(id: secondUnzoom.id, changed: true, zoomed: false, tab: "t2", panes: Self.secondTabPlaces)
         )
@@ -2915,7 +2916,7 @@ final class HerdrScreenModelTests: XCTestCase {
         let commands = try await harness.writes(session.bridge, from: session.next, count: index + 1 - session.next)
             .compactMap { write -> String? in
                 switch write {
-                case .paneZoom(_, let pane, let mode): "zoom \(pane) \(mode)"
+                case .paneZoom(_, let pane, let mode): (["zoom"] + [pane, mode].compactMap { $0 }).joined(separator: " ")
                 case .paneFocus(_, let pane): "focus \(pane)"
                 case .command(_, let method, _): method
                 default: nil
@@ -4236,7 +4237,7 @@ final class HerdrScreenModelTests: XCTestCase {
 
         let stopping = Task { await harness.model.stop() }
         let unzoom = try await nextWrite(session.bridge, from: &index, paneZoom)
-        XCTAssertEqual([unzoom.paneID, unzoom.mode], ["w1:p1", "off"])
+        XCTAssertEqual([unzoom.paneID, unzoom.mode], [nil, "off"])
         try await Task.sleep(for: .milliseconds(100))
         let closedEarly = await session.bridge.isClosed
         XCTAssertFalse(closedEarly, "the connection closed before Herdr answered the unzoom")
@@ -4295,7 +4296,7 @@ final class HerdrScreenModelTests: XCTestCase {
             let stopping = Task { await harness.model.stop() }
             if undone {
                 let unzoom = try await nextWrite(second, from: &next, paneZoom)
-                XCTAssertEqual([unzoom.paneID, unzoom.mode], ["w1:p1", "off"], boot)
+                XCTAssertEqual([unzoom.paneID, unzoom.mode], [nil, "off"], boot)
                 await second.serve(HerdrServerScript.zoomReply(id: unzoom.id, changed: true, zoomed: false, panes: Self.places(2)))
                 await stopping.value
             } else {
@@ -4491,7 +4492,7 @@ final class HerdrScreenModelTests: XCTestCase {
         harness.model.terminalScreenAdapter.paneSelectionSheetRenderProjection(topLevelID: try topLevel(harness)).isServerZoomed
     }
 
-    private func paneZoom(_ write: ClientWrite) -> (id: String, paneID: String, mode: String)? {
+    private func paneZoom(_ write: ClientWrite) -> (id: String, paneID: String?, mode: String)? {
         if case .paneZoom(let id, let paneID, let mode) = write { (id, paneID, mode) } else { nil }
     }
 

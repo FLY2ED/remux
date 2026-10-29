@@ -1079,9 +1079,13 @@ actor HerdrTerminalEngine {
         zoomKeeper.store.save(ownedZooms, of: zoomKeeper.session)
     }
 
-    /// Remux's zooms coming off as the session ends, one tab at a time: a tab off screen is focused first,
-    /// since Herdr's unzoom focuses its target and the snapshot names only the focused tab's focused pane; the
-    /// tab on screen goes last.
+    /// Remux's zooms coming off as the session ends, one tab at a time: a tab off screen is focused first, and
+    /// the unzoom names no pane, so Herdr takes the pane focused on the tab this client views as it handles
+    /// it (`app/api/panes.rs` `resolve_optional_pane`, on the view `server/headless/client_views.rs`
+    /// `set_default_shell_target_from_client` sets): an unzoom focuses its target, so naming the pane a
+    /// snapshot showed could undo a focus another client made since. The tab on screen at the start goes last.
+    /// The focus moves only this client's view (`apply_shell_navigation_request`), though Herdr sends its focus
+    /// events for each tab visited (`send_shell_navigation_focus_events`).
     private struct Release {
         /// The tabs left, in order, from the release's start: once the lane is free and the newest snapshot
         /// shows where the last step took the session.
@@ -1144,11 +1148,11 @@ actor HerdrTerminalEngine {
                 continue
             }
             let command: HerdrCommandLane.Command
-            if snapshot.focusedTabID == tab, let pane = snapshot.focusedPaneID {
+            if snapshot.focusedTabID == tab {
                 release.tabs?.removeFirst()
                 command = HerdrCommandLane.Command(
                     method: HerdrScreenModel.paneZoomMethod,
-                    params: HerdrScreenModel.zoomParams(pane, zoomed: false),
+                    params: HerdrScreenModel.zoomParams(nil, zoomed: false),
                     purpose: .release(tabID: tab)
                 )
             } else {
