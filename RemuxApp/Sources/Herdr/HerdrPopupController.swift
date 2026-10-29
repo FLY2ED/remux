@@ -168,8 +168,11 @@ final class HerdrPopupController {
     private var viewport: (columns: UInt16, rows: UInt16)?
     /// The grid inside the frame now.
     private(set) var requested: HerdrPopupGrid?
-    /// The grid last sent to Herdr, and when.
-    private var asked: (grid: HerdrPopupGrid, at: ContinuousClock.Instant)?
+    /// The attach's geometry last sent to Herdr, its grid and its cell, which a new grid or cell is compared
+    /// against as one.
+    private var asked: HerdrTerminalAttachment.Geometry?
+    /// When it was sent, until Herdr's frames have its grid.
+    private var askedAt: ContinuousClock.Instant?
     private var attached: Attached?
     private var generation: UInt64 = 0
     /// Popups drawn from their frames, until they close or a reconnect.
@@ -391,10 +394,13 @@ final class HerdrPopupController {
 
     private func planGrid() {
         guard let viewport, cell != nil,
-              let next = HerdrPopupGrid(in: viewport.columns, rows: viewport.rows),
-              next != requested
+              let next = HerdrPopupGrid(in: viewport.columns, rows: viewport.rows)
         else { return }
         requested = next
+        // A cell of another size draws the renderer's grid at that size, as a pane's does.
+        if let surface, let cell {
+            _ = surface.renderer.updateDisplay(metrics: surface.grid.displayMetrics(cell: cell))
+        }
         if attached?.received != nil {
             scheduleResize()
         } else {
@@ -413,9 +419,11 @@ final class HerdrPopupController {
     }
 
     private func resize() {
-        guard let attached, let requested, let cell, requested != asked?.grid else { return }
-        asked = (requested, .now)
+        guard let attached, let requested, let cell else { return }
         let geometry = Self.geometry(requested, cell: cell)
+        guard geometry != asked else { return }
+        asked = geometry
+        askedAt = .now
         Task { await attached.attachment.resize(to: geometry) }
     }
 
@@ -433,7 +441,8 @@ final class HerdrPopupController {
             }
         }
         attached = next
-        asked = (grid, .now)
+        asked = Self.geometry(grid, cell: cell)
+        askedAt = .now
         Task { await attachment.run() }
         GhosttyRuntimeTrace.diagnostics("popup attach terminal=\(terminalID) grid=\(grid)")
     }
@@ -444,8 +453,8 @@ final class HerdrPopupController {
             let grid = HerdrPopupGrid(columns: columns, rows: rows)
             attached?.received = grid
             createAttachedRenderer(terminal: terminal, grid: grid, generation: generation)
-            // The area may have changed while the attach was on its way.
-            if requested != grid { scheduleResize() }
+            // The area or the cell may have changed while the attach was on its way.
+            scheduleResize()
         case .grid(let columns, let rows):
             let grid = HerdrPopupGrid(columns: columns, rows: rows)
             attached?.received = grid
@@ -468,6 +477,7 @@ final class HerdrPopupController {
         attached = nil
         settle?.cancel()
         asked = nil
+        askedAt = nil
         // A renderer still being made for the attach closes once made.
         creating = nil
         let terminalID = popup.terminalID
@@ -519,10 +529,10 @@ final class HerdrPopupController {
         guard let popup, let cell, let surface else { return }
         let received = attached?.received
         var settledIn = "-"
-        if let asked, asked.grid == received {
-            let elapsed = (ContinuousClock.now - asked.at).components
+        if let askedAt, let received, Self.geometry(received, cell: cell) == asked {
+            let elapsed = (ContinuousClock.now - askedAt).components
             settledIn = "\(elapsed.seconds * 1000 + elapsed.attoseconds / 1_000_000_000_000_000)ms"
-            self.asked = nil
+            self.askedAt = nil
         }
         GhosttyRuntimeTrace.diagnostics(
             "popup layout terminal=\(popup.terminalID) viewport=\(viewport.map { "\($0.columns)x\($0.rows)" } ?? "-") "
@@ -690,6 +700,7 @@ final class HerdrPopupController {
         attached.listening?.cancel()
         settle?.cancel()
         asked = nil
+        askedAt = nil
         Task { await attached.attachment.detach() }
     }
 

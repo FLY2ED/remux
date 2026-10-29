@@ -107,7 +107,7 @@ final class HerdrPopupTests: XCTestCase {
         harness.model.prepareViewport(size: CGSize(width: 390, height: 480), scale: 3)
         let shorter = try Self.grid(harness)
         let resized = try await DirectClient.messages(attach, at: before)
-        XCTAssertEqual(resized, [.resize(columns: shorter.columns, rows: shorter.rows)])
+        XCTAssertEqual(resized, [.resize(columns: shorter.columns, rows: shorter.rows, cellWidthPx: cell.pixelWidth, cellHeightPx: cell.pixelHeight)])
         try await Task.sleep(for: .milliseconds(400))
         let writes = await attach.writtenCount
         XCTAssertEqual(writes, before + 1, "a superseded size went too")
@@ -350,6 +350,38 @@ final class HerdrPopupTests: XCTestCase {
         }
     }
 
+    /// A cell of another size on the same grid, as another display scale gives, draws the popup at that size
+    /// and goes to its attach, whose program Herdr tells the cell's pixels, as a pane's does.
+    func testACellOfAnotherSizeOnTheSameGridGoesToThePopup() async throws {
+        // The screen at scale 2 with the grid the tests' screen has at scale 3, found before the model opens
+        // a bridge, as the search holds the main actor.
+        let runtime = try GhosttyKitRuntime(terminalSettings: .default)
+        let viewport = try XCTUnwrap(try runtime.measureTmuxViewportLayout(size: CGSize(width: 390, height: 844), scale: 3)?.controlViewport)
+        let height = try XCTUnwrap(try stride(from: CGFloat(600), through: 1100, by: 1).first {
+            let other = try runtime.measureTmuxViewportLayout(size: CGSize(width: 390, height: $0), scale: 2)?.controlViewport
+            return other?.columns == viewport.columns && other?.rows == viewport.rows
+        }, "no screen at scale 2 has the grid")
+        let harness = await makeHarness()
+        let (_, attach, cell) = try await attachedPopup(harness)
+        let grid = try Self.grid(harness)
+        let before = await attach.writtenCount
+
+        harness.model.prepareViewport(size: CGSize(width: 390, height: height), scale: 2)
+        let next = try XCTUnwrap(harness.model.measurement?.cellMetrics)
+        XCTAssertEqual(try Self.grid(harness), grid, "the scale changed the grid")
+        XCTAssertNotEqual(next.pixelWidth, cell.pixelWidth, "the scale kept the cell's pixels")
+        try await harness.waitUntil("the attach wasn't told the new cell") {
+            var messages: [DirectClient] = []
+            for write in before..<(await attach.writtenCount) {
+                messages += (try? await DirectClient.messages(attach, at: write)) ?? []
+            }
+            return messages.contains(.resize(columns: grid.columns, rows: grid.rows, cellWidthPx: next.pixelWidth, cellHeightPx: next.pixelHeight))
+        }
+        let view = try XCTUnwrap(harness.model.popup.surface?.renderer.view)
+        let drawn = try XCTUnwrap(harness.model.popup.surface?.grid)
+        XCTAssertEqual(view.frame.height, CGFloat(drawn.rows) * CGFloat(next.pixelHeight) / next.contentScale, accuracy: 0.01, "the popup drew its grid at the old cell's size")
+    }
+
     /// The popup's scroll range is its grid's, as Herdr says nothing of an attached popup's history: a grid
     /// that changes, as when the keyboard comes up, leaves no range of the grid before.
     func testThePopupsScrollRangeFollowsItsGrid() async throws {
@@ -363,12 +395,13 @@ final class HerdrPopupTests: XCTestCase {
         let before = await attach.writtenCount
         harness.model.prepareViewport(size: shorter, scale: 3)
         let grid = try Self.grid(harness)
+        let cell = try XCTUnwrap(harness.model.measurement?.cellMetrics)
         try await harness.waitUntil("the popup wasn't resized") {
             var messages: [DirectClient] = []
             for write in before..<(await attach.writtenCount) {
                 messages += (try? await DirectClient.messages(attach, at: write)) ?? []
             }
-            return messages.contains(.resize(columns: grid.columns, rows: grid.rows))
+            return messages.contains(.resize(columns: grid.columns, rows: grid.rows, cellWidthPx: cell.pixelWidth, cellHeightPx: cell.pixelHeight))
         }
         await attach.serve(DirectServer.frame(2, grid, "$ "))
         try await harness.waitUntil("the popup didn't take its new grid") { harness.model.popup.surface?.grid == grid }
@@ -1543,7 +1576,7 @@ enum DirectClient: Equatable {
     case hello(columns: UInt16, rows: UInt16, cellWidthPx: UInt32, cellHeightPx: UInt32)
     case attach(String)
     case input([UInt8])
-    case resize(columns: UInt16, rows: UInt16)
+    case resize(columns: UInt16, rows: UInt16, cellWidthPx: UInt32, cellHeightPx: UInt32)
     case detach
     case scroll(up: Bool, lines: UInt16, column: UInt16?, row: UInt16?)
 
@@ -1561,7 +1594,7 @@ enum DirectClient: Equatable {
             case 1:
                 messages.append(.input(try reader.byteArray()))
             case 3:
-                messages.append(.resize(columns: try reader.u16(), rows: try reader.u16()))
+                messages.append(.resize(columns: try reader.u16(), rows: try reader.u16(), cellWidthPx: try reader.u32(), cellHeightPx: try reader.u32()))
             case 4:
                 messages.append(.detach)
             case 5:
