@@ -1189,6 +1189,9 @@ actor HerdrTerminalEngine {
         var away = false
         /// Whether the focus back to `start` went, the release's last step.
         var returning = false
+        /// Whether Herdr refused the focus back as busy, still handling a step the release gave up on; it goes
+        /// again once Herdr is free (`retryFocusBack`).
+        var backRefused = false
         /// The tab focused for its unzoom, until a snapshot shows the session there.
         var focusing: String?
         /// Once a newer claim on the session's zooms stops the release, the claims waiting for it to end
@@ -1231,7 +1234,10 @@ actor HerdrTerminalEngine {
     /// never come. Once a newer claim stops it, only the focus back goes (`finishRelease`).
     private func advanceRelease(outbox: any HerdrOutbound, in snapshot: HerdrSnapshot) {
         guard var release else { return }
-        guard !release.returning else { return endRelease() }
+        if release.returning {
+            guard release.backRefused else { return endRelease() }
+            return
+        }
         guard release.stopping == nil else { return finishRelease(in: snapshot) }
         guard unshown.isEmpty else { return }
         if release.tabs == nil {
@@ -1287,13 +1293,22 @@ actor HerdrTerminalEngine {
     }
 
     /// The release's last step: the focus back to the tab it started on, when Herdr's answers may have left
-    /// this client's view on another, then its end.
+    /// this client's view on another, with a step's time of its own whatever came before; then its end.
     private func finishRelease(in snapshot: HerdrSnapshot) {
-        guard var release, release.away, !release.returning, let start = release.start, lane.isIdle,
-              methods.contains(HerdrPlace.tab(start).focusMethod)
-        else { return endRelease() }
+        guard var release, release.away, !release.returning, release.start != nil, lane.isIdle else {
+            return endRelease()
+        }
         release.returning = true
         self.release = release
+        startReleaseStep()
+        sendFocusBack(in: snapshot)
+    }
+
+    /// The focus back to the tab the release started on (`finishRelease`).
+    private func sendFocusBack(in snapshot: HerdrSnapshot) {
+        guard let start = release?.start, methods.contains(HerdrPlace.tab(start).focusMethod) else {
+            return endRelease()
+        }
         let place = HerdrPlace.tab(start)
         let back = HerdrCommandLane.Command(
             method: place.focusMethod,
@@ -1301,6 +1316,16 @@ actor HerdrTerminalEngine {
             purpose: .release(.back(tabID: start))
         )
         send(.command(back), params: back.params, in: snapshot)
+    }
+
+    /// Herdr answered a command Remux had given up on, which frees it for the next
+    /// (`server/headless/endpoint_requests.rs`, `shell_endpoint_command_in_flight`): a focus back it refused as
+    /// busy meanwhile goes again, within its step's time.
+    private func retryFocusBack() {
+        guard var release, release.backRefused, lane.isIdle, let snapshot = presentation.snapshot else { return }
+        release.backRefused = false
+        self.release = release
+        sendFocusBack(in: snapshot)
     }
 
     /// Whether the release takes the zoom off `tab`: the snapshot has it zoomed, and Remux's record still has
@@ -1338,9 +1363,9 @@ actor HerdrTerminalEngine {
         self.release = release
     }
 
-    /// A step's time passed, while it is the newest step's: the release goes on to its focus back, with a
-    /// time of its own, giving up the step of its own in flight, whose answer is dropped and whose focus may
-    /// have taken the view away; it ends once the focus back's time passes too.
+    /// A step's time passed, while it is the newest step's: the release goes on to its focus back, giving up
+    /// the step of its own in flight, whose answer is dropped and whose focus may have taken the view away; it
+    /// ends once the focus back's time passes too.
     private func releaseStepExpired(_ step: UInt64, connection: UInt64) {
         guard connection == self.connection, var release, release.step == step else { return }
         guard !release.returning, let snapshot = presentation.snapshot else { return endRelease() }
@@ -1350,7 +1375,6 @@ actor HerdrTerminalEngine {
             self.release = release
             finish(expired, with: .failure(.timedOut(method: command.method)))
         }
-        startReleaseStep()
         finishRelease(in: snapshot)
     }
 
@@ -1484,7 +1508,10 @@ actor HerdrTerminalEngine {
             surfaceSets[chunk.requestID] = nil
             return surfaceSetAnswered(set, data: set.data)
         }
-        guard let (inFlight, data) = lane.receive(chunk) else { return }
+        guard let (inFlight, data) = lane.receive(chunk) else {
+            if chunk.isFinal { retryFocusBack() }
+            return
+        }
         // A step of the session's end has its time from Herdr's answer before it.
         startReleaseStep()
         let answeredAfter = presentation.snapshot?.revision ?? inFlight.sentAfter
@@ -1577,7 +1604,7 @@ actor HerdrTerminalEngine {
                     self.release = release
                 }
             case .release(.back):
-                break
+                if case .failure(.failed(code: "endpoint_busy", _)) = result { release?.backRefused = true }
             case .other(let answered):
                 answered(result)
             }

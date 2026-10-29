@@ -1179,6 +1179,72 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// A newer claim stopping the release near the end of a step's time still gives the focus back a whole
+    /// step's time of its own, so the release ends on the tab it started on.
+    func testTheFocusBackOfAStoppedReleaseHasAStepsTimeOfItsOwn() async throws {
+        let keepers = HerdrZoomKeepers(store: InMemoryHerdrOwnedZoomStore())
+        let session = HerdrZoomSession(serverID: UUID(), session: "s")
+        let old = makeEngine()
+        let updates = UpdateLog(old)
+        let (feed, outbox) = await connect(old)
+        await old.keepOwnedZooms(of: session, from: keepers)
+        try await zoomedOnBothTabs(feed, updates, outbox)
+        let closed = Closed()
+
+        await feed.releaseZooms(within: .seconds(1), done: closed.close)
+        // Herdr answers the focus of the first tab; its snapshot is slow to come.
+        try await answer(feed, outbox)
+        try await Task.sleep(for: .milliseconds(700))
+        let new = makeEngine()
+        Task { await new.keepOwnedZooms(of: session, from: keepers) }
+        try await waitUntil("the stopped release didn't go back") { (try? outbox.lastParams()) == ["tab_id": "t2"] }
+        // Past the end of the step the stop came in.
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertFalse(closed.isClosed, "the focus back had only what was left of the step before")
+        try await answer(feed, outbox)
+        XCTAssertTrue(closed.isClosed)
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "zoom R on", "focus R", "tab.focus", "tab.focus"])
+        await old.stop()
+        await new.stop()
+    }
+
+    /// A focus back Herdr refuses as busy, still handling the step the release gave up on, goes again once
+    /// Herdr's answer to that step shows it free, so the release ends on the tab it started on.
+    func testAFocusBackHerdrRefusesAsBusyGoesAgainOnceHerdrIsFree() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shownZoomed(feed, updates, outbox)
+        // Another client takes the session to the second tab.
+        await feed.receive(try Self.places(revision: 3, focusedPane: "R", zoomed: ["t1"]))
+        let closed = Closed()
+
+        await feed.releaseZooms(within: .milliseconds(200), done: closed.close)
+        try await answer(feed, outbox)
+        await feed.receive(try Self.places(revision: 4, focusedPane: "P", zoomed: ["t1"]))
+        XCTAssertEqual(try outbox.commands().last, "zoom P off")
+        let unzoom = try outbox.lastCommand().id
+        // Herdr doesn't answer the unzoom in time, so the release goes back.
+        try await waitUntil("the end didn't go back once its step's time ran out") {
+            (try? outbox.commands().count) == 4
+        }
+        try await answer(feed, outbox, error: ("endpoint_busy", "this endpoint is still processing another command"))
+        XCTAssertFalse(closed.isClosed, "the end took a focus back Herdr refused as busy for done")
+        XCTAssertEqual(try outbox.commands().count, 4, "the focus back went again while Herdr was busy")
+        // Herdr answers the unzoom it was still handling, which frees it.
+        await feed.receive(try Self.chunk(HerdrServerScript.zoomReply(
+            id: unzoom,
+            changed: true,
+            zoomed: false,
+            panes: [(id: "P", x: 0, y: 0, width: 2, height: 2), (id: "Q", x: 2, y: 0, width: 2, height: 2)]
+        )))
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "tab.focus", "zoom P off", "tab.focus", "tab.focus"])
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t2"])
+        try await answer(feed, outbox)
+        XCTAssertTrue(closed.isClosed)
+        await engine.stop()
+    }
+
     /// The connection's end during the session's end, as when the phone suspends the app and the link drops,
     /// ends the release at once, leaving the zooms not yet taken off and the phone's record of them for a later
     /// attachment.
