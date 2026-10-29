@@ -1024,6 +1024,66 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await new.stop()
     }
 
+    /// Two attachments to the session, one after the other, while its end still takes Remux's zooms off: both
+    /// wait for that end, and only the newer keeps the zooms and saves them. The older, superseded before it got
+    /// them, keeps none, and neither it nor the engine that ended saves again.
+    func testOnlyTheNewestOfTwoAttachmentsDuringTheSessionsEndKeepsItsZooms() async throws {
+        let store = InMemoryHerdrOwnedZoomStore()
+        let keepers = HerdrZoomKeepers(store: store)
+        let session = HerdrZoomSession(serverID: UUID(), session: "s")
+        let old = makeEngine()
+        let updates = UpdateLog(old)
+        let (feed, outbox) = await connect(old)
+        await old.keepOwnedZooms(of: session, from: keepers)
+        try await zoomedOnBothTabs(feed, updates, outbox)
+        let closed = Closed()
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t1"])
+
+        let second = makeEngine()
+        let third = makeEngine()
+        let secondKept = Closed()
+        let thirdKept = Closed()
+        Task {
+            await second.keepOwnedZooms(of: session, from: keepers)
+            secondKept.close()
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        Task {
+            await third.keepOwnedZooms(of: session, from: keepers)
+            thirdKept.close()
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(secondKept.isClosed, "the second attachment went ahead of the end")
+        XCTAssertFalse(thirdKept.isClosed, "the third attachment went ahead of the end")
+        try await answer(feed, outbox)
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t2"])
+        try await answer(feed, outbox)
+        try await waitUntil("the attachments didn't go on once the end was over") {
+            secondKept.isClosed && thirdKept.isClosed
+        }
+        XCTAssertTrue(closed.isClosed)
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "zoom R on", "focus R", "tab.focus", "tab.focus"])
+
+        // Another client unzooms the first tab: the engine that ended saves nothing of it.
+        await feed.receive(try Self.places(revision: 4, focusedPane: "R", zoomed: ["t2"]))
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t1", "t2"], "the engine that ended saved again")
+        // The second attachment zooms the first tab with the zoom button: superseded, it saves nothing.
+        let (secondFeed, secondOutbox) = await connect(second)
+        try await shown(secondFeed, UpdateLog(second), secondOutbox, panes: Self.atP)
+        await secondFeed.setZoom(true, ofPane: "P")
+        XCTAssertEqual(try secondOutbox.commands(), ["zoom P on"])
+        try await answerZoom(secondFeed, secondOutbox, zoomed: true)
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t1", "t2"], "the superseded attachment saved")
+        // The third keeps the zooms and saves what Herdr shows of them.
+        let (thirdFeed, _) = await connect(third)
+        await thirdFeed.receive(try Self.places(revision: 1, focusedPane: "R", zoomed: ["t2"]))
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t2"], "the newest attachment didn't keep the zooms")
+        await old.stop()
+        await second.stop()
+        await third.stop()
+    }
+
     /// The session's end unzooms the pane the snapshot shows focused on the tab, by name, so the unzoom reaches
     /// only that tab. When the pane is gone by the time Herdr handles it, as when another client closed the tab,
     /// Herdr refuses it: no other tab is touched, and Remux's record stays until a snapshot shows the tab gone.

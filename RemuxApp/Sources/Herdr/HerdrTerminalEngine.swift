@@ -255,31 +255,68 @@ struct HerdrZoomPolicy: Equatable, Sendable {
     }
 }
 
-/// Hands each Herdr session's zooms on the phone to one engine at a time. A session ended and attached again
-/// while its end still takes Remux's zooms off has two engines on it: the new one takes the zooms over once
-/// the old one's release has stopped, so nothing is unzoomed under the new attachment, and only the engine
-/// keeping them saves them, so an older record doesn't replace a newer one.
-actor HerdrZoomKeepers {
-    nonisolated let store: any HerdrOwnedZoomStore
-    private var keepers: [HerdrZoomSession: Keeper] = [:]
-
-    private struct Keeper {
-        weak var engine: HerdrTerminalEngine?
+/// Hands each Herdr session's zooms on the phone to one engine at a time, by generation. A session ended and
+/// opened again while its end still takes Remux's zooms off has two engines on it, or more when it is opened
+/// again once more. Each claim is a newer generation, and only the newest saves the session's record, so an
+/// older engine never writes over a newer one's. Every claim waits for the same stop of the release under way
+/// on the engine holding the zooms (`HerdrTerminalEngine.stopRelease`), so nothing is unzoomed under the new
+/// attachment, and only the newest claim, once that stop is over, holds the zooms and gets the record.
+final class HerdrZoomKeepers: @unchecked Sendable {
+    /// A claim on a session's zooms, which saves while no newer claim on the session was made.
+    struct Claim: Sendable {
+        let session: HerdrZoomSession
+        let generation: UInt64
     }
+
+    private struct Keeping {
+        var generation: UInt64 = 0
+        /// The engine whose claim holds the zooms.
+        weak var holder: HerdrTerminalEngine?
+        /// The stop of the holder's release, which every claim made meanwhile waits for.
+        var stopping: Task<Void, Never>?
+    }
+
+    private let store: any HerdrOwnedZoomStore
+    private let lock = NSLock()
+    private var sessions: [HerdrZoomSession: Keeping] = [:]
 
     init(store: any HerdrOwnedZoomStore) {
         self.store = store
     }
 
-    /// The zooms the phone keeps for `session`, which `engine` keeps from now on, once the engine keeping them
-    /// before has handed them over (`HerdrTerminalEngine.handOverOwnedZooms`); nil when a newer engine took the
-    /// session over meanwhile.
-    func takeOver(_ session: HerdrZoomSession, for engine: HerdrTerminalEngine) async -> HerdrOwnedZooms? {
-        let previous = keepers[session]?.engine
-        keepers[session] = Keeper(engine: engine)
-        if let previous, previous !== engine { await previous.handOverOwnedZooms() }
-        guard keepers[session]?.engine === engine else { return nil }
-        return store.zooms(of: session)
+    /// A claim on `session`'s zooms for `engine`, and the zooms the phone keeps for it, once the release under
+    /// way on the engine holding them has stopped; nil when a newer claim was made meanwhile.
+    func claim(_ session: HerdrZoomSession, for engine: HerdrTerminalEngine) async -> (Claim, HerdrOwnedZooms)? {
+        let (generation, stopping) = lock.withLock { () -> (UInt64, Task<Void, Never>?) in
+            var keeping = sessions[session] ?? Keeping()
+            keeping.generation += 1
+            if keeping.stopping == nil, let holder = keeping.holder, holder !== engine {
+                keeping.stopping = Task { await holder.stopRelease() }
+            }
+            sessions[session] = keeping
+            return (keeping.generation, keeping.stopping)
+        }
+        await stopping?.value
+        return lock.withLock {
+            guard var keeping = sessions[session], keeping.generation == generation else { return nil }
+            keeping.holder = engine
+            keeping.stopping = nil
+            sessions[session] = keeping
+            return (Claim(session: session, generation: generation), store.zooms(of: session))
+        }
+    }
+
+    /// Whether `claim` is still the newest on its session.
+    func holds(_ claim: Claim) -> Bool {
+        lock.withLock { sessions[claim.session]?.generation == claim.generation }
+    }
+
+    /// Saves `zooms` for `claim`'s session while it is the newest claim there.
+    func save(_ zooms: HerdrOwnedZooms, for claim: Claim) {
+        lock.withLock {
+            guard sessions[claim.session]?.generation == claim.generation else { return }
+            store.save(zooms, of: claim.session)
+        }
     }
 }
 
@@ -646,10 +683,12 @@ actor HerdrTerminalEngine {
     private var commandIDs: UInt64 = 0
     private var surfaceSets: [String: SurfaceSet] = [:]
     /// The tabs Remux zoomed, which it undoes as the session ends. Kept across connections, and on the
-    /// phone through `zoomKeeper`, so a new connection or a new engine for the session, also after Herdr's
+    /// phone through `zoomClaim`, so a new connection or a new engine for the session, also after Herdr's
     /// server restarted, undoes them all the same.
     private var ownedZooms = HerdrOwnedZooms()
-    private var zoomKeeper: (store: any HerdrOwnedZoomStore, session: HerdrZoomSession)?
+    /// The engine's claim on the session's zooms (`keepOwnedZooms`), made once.
+    private var zoomClaim: (keepers: HerdrZoomKeepers, claim: HerdrZoomKeepers.Claim)?
+    private var claimsZooms = false
     /// Remux's zooms coming off as the session ends (`releaseZooms`).
     private var release: Release?
     /// The newest answered step whose effect Herdr's snapshots don't show yet. Herdr can answer before it
@@ -1093,36 +1132,34 @@ actor HerdrTerminalEngine {
     // MARK: - Zoom ownership
 
     /// The phone keeps Remux's zooms of `session`, which `keepers` hands to one engine at a time: the engine
-    /// takes over those kept for the session once the engine keeping them before has handed them over, checks
-    /// them against each snapshot (`HerdrOwnedZooms.reconcile`), and saves every change.
+    /// claims them once, takes over those kept for the session once the release under way on the engine holding
+    /// them has stopped, checks them against each snapshot (`HerdrOwnedZooms.reconcile`), and saves every change
+    /// while its claim is the newest.
     func keepOwnedZooms(of session: HerdrZoomSession, from keepers: HerdrZoomKeepers) async {
-        guard state != .stopped, zoomKeeper == nil else { return }
-        guard let zooms = await keepers.takeOver(session, for: self), state != .stopped, zoomKeeper == nil
-        else { return }
-        zoomKeeper = (keepers.store, session)
+        guard state != .stopped, !claimsZooms else { return }
+        claimsZooms = true
+        guard let (claim, zooms) = await keepers.claim(session, for: self), state != .stopped else { return }
+        zoomClaim = (keepers, claim)
         ownedZooms = zooms
     }
 
-    /// Another engine takes the session's zooms over (`HerdrZoomKeepers`): the release under way sends nothing
-    /// more, and ends once Herdr answers its command in flight, or the step's time runs out. The zooms are then no longer kept here, so nothing this engine sees later is saved over the other
-    /// engine's record.
-    fileprivate func handOverOwnedZooms() async {
+    /// A newer claim on the session's zooms (`HerdrZoomKeepers`) stops the release under way: it sends no more
+    /// unzooms, finishes the step in flight, goes back to the tab it started on, and ends; this returns once it
+    /// has.
+    fileprivate func stopRelease() async {
+        guard release != nil else { return }
+        if release?.stopping == nil { release?.stopping = [] }
+        dispatch()
         if release != nil {
-            release?.handOver = []
-            dispatch()
-            if release != nil {
-                await withCheckedContinuation { release?.handOver?.append($0) }
-            }
+            await withCheckedContinuation { release?.stopping?.append($0) }
         }
-        zoomKeeper = nil
-        ownedZooms = HerdrOwnedZooms()
     }
 
     private func updateOwnedZooms(_ change: (inout HerdrOwnedZooms) -> Void) {
         let before = ownedZooms
         change(&ownedZooms)
-        guard ownedZooms != before, let zoomKeeper else { return }
-        zoomKeeper.store.save(ownedZooms, of: zoomKeeper.session)
+        guard ownedZooms != before, let zoomClaim else { return }
+        zoomClaim.keepers.save(ownedZooms, for: zoomClaim.claim)
     }
 
     /// Remux's zooms coming off as the session ends, one tab at a time: a tab off screen is focused first,
@@ -1147,9 +1184,9 @@ actor HerdrTerminalEngine {
         var returning = false
         /// The tab focused for its unzoom, until a snapshot shows the session there.
         var focusing: String?
-        /// Once another engine takes the session's zooms over, the hand-over waiting for the release to end
-        /// (`handOverOwnedZooms`).
-        var handOver: [CheckedContinuation<Void, Never>]?
+        /// Once a newer claim on the session's zooms stops the release, the claims waiting for it to end
+        /// (`stopRelease`).
+        var stopping: [CheckedContinuation<Void, Never>]?
         /// Herdr's time for each step, from the ask or Herdr's answer before it.
         let stepTime: Duration
         /// Names the newest step's time, so an older one's end is dropped.
@@ -1165,10 +1202,12 @@ actor HerdrTerminalEngine {
     /// without focus, since Herdr takes commands only from an active one (`endpoint_requests.rs`). Each step has
     /// `stepTime`, Herdr's time for a show, from the ask or Herdr's answer before it; one that takes longer
     /// leaves the zooms left, with the phone's record of them, and the release goes on to its focus back to the
-    /// tab it started on. The connection's end ends it at once. `done` once the release has ended, or at once
-    /// when nothing goes.
+    /// tab it started on. The connection's end ends it at once. An engine whose claim on the zooms a newer one
+    /// replaced takes nothing off (`HerdrZoomKeepers`). `done` once the release has ended, or at once when
+    /// nothing goes.
     fileprivate func releaseZooms(within stepTime: Duration, done: @escaping @Sendable () -> Void, connection: UInt64) {
         guard state == .running, connection == self.connection, outbox != nil, release == nil,
+              zoomClaim.map({ $0.keepers.holds($0.claim) }) ?? true,
               methods.contains(HerdrScreenModel.paneZoomMethod),
               !ownedZooms.tabIDs.isEmpty || lane.inFlight?.item.method == HerdrScreenModel.paneZoomMethod
         else { return done() }
@@ -1182,11 +1221,11 @@ actor HerdrTerminalEngine {
     /// The release's next command against Herdr's newest snapshot, with the lane free: the unzoom of the tab
     /// the session is on, or the focus of the next tab. Each tab is checked again as its turn comes
     /// (`releases`): one no longer Remux's is skipped, also the one being focused, whose snapshot may then
-    /// never come. Once another engine takes the zooms over, nothing more goes.
+    /// never come. Once a newer claim stops it, only the focus back goes (`finishRelease`).
     private func advanceRelease(outbox: any HerdrOutbound, in snapshot: HerdrSnapshot) {
         guard var release else { return }
         guard !release.returning else { return endRelease() }
-        guard release.handOver == nil else { return finishRelease(in: snapshot) }
+        guard release.stopping == nil else { return finishRelease(in: snapshot) }
         guard unshown.isEmpty else { return }
         if release.tabs == nil {
             let tabs = ownedZooms.tabsToRelease(in: snapshot)
@@ -1312,7 +1351,7 @@ actor HerdrTerminalEngine {
         guard let release else { return }
         self.release = nil
         release.deadline?.cancel()
-        release.handOver?.forEach { $0.resume() }
+        release.stopping?.forEach { $0.resume() }
         release.done()
     }
 

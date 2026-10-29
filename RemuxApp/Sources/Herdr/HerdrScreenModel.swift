@@ -267,6 +267,10 @@ final class HerdrScreenModel {
     private let engine: HerdrTerminalEngine
     /// Where the phone keeps the zooms Remux made, for the session's end to take off.
     private let zoomKeepers: HerdrZoomKeepers
+    /// The engine's claim on the session's zooms, made once before the first bridge opens: a release an earlier
+    /// model of the session still has under way stops first (`HerdrZoomKeepers`), so the wait spends none of
+    /// Herdr's time for a hello, and the session opens on the tab that release went back to.
+    private var zoomClaim: Task<Void, Never>?
     private let makeRendererFence: RendererFenceFactory
     private let clipboard: TerminalClipboard
     private var runtime: GhosttyKitRuntime?
@@ -1466,15 +1470,17 @@ final class HerdrScreenModel {
     /// Once the connection is open, the attempt's operations are carried out in order.
     private func run(_ attempt: Attempt) async {
         let feed = HerdrEngineFeed(engine: engine, connection: attempt.id)
-        guard let size = await connectionAndScreenSize(for: attempt, feed: feed),
+        if zoomClaim == nil {
+            let session = HerdrZoomSession(serverID: target.server.id, session: target.workspace.sessionName)
+            zoomClaim = Task { [engine, zoomKeepers] in await engine.keepOwnedZooms(of: session, from: zoomKeepers) }
+        }
+        await zoomClaim?.value
+        guard isCurrent(attempt),
+              let size = await connectionAndScreenSize(for: attempt, feed: feed),
               let connection = attempt.connection
         else { return }
         // Frames can arrive before `open` returns; the engine paints them at the hello's cell size.
         await engine.setCellSize(widthPx: size.cellWidthPx, heightPx: size.cellHeightPx)
-        await engine.keepOwnedZooms(
-            of: HerdrZoomSession(serverID: target.server.id, session: target.workspace.sessionName),
-            from: zoomKeepers
-        )
         await engine.beginConnection(attempt.id, outbox: connection.outbox)
         attempt.helloSent = true
         do {

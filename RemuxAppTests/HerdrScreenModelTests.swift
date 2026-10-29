@@ -33,7 +33,9 @@ final class HerdrScreenModelTests: XCTestCase {
         bridgeOpeningTakes: Duration = .zero,
         producerFailure: ProducerFailure? = nil,
         rendererFenceGate: RendererFenceGate? = nil,
-        switchingCueDelay: Duration = HerdrScreenModel.switchingCueDelay
+        switchingCueDelay: Duration = HerdrScreenModel.switchingCueDelay,
+        zoomKeepers: HerdrZoomKeepers = HerdrZoomKeepers(store: InMemoryHerdrOwnedZoomStore()),
+        server: SavedServer = SavedServer(displayName: "Herdr Host", host: "herdr.example.test", username: "builder")
     ) async -> HerdrModelHarness {
         let harness = await HerdrModelHarness(
             settings: settings,
@@ -43,7 +45,9 @@ final class HerdrScreenModelTests: XCTestCase {
             bridgeOpeningTakes: bridgeOpeningTakes,
             producerFailure: producerFailure,
             rendererFenceGate: rendererFenceGate,
-            switchingCueDelay: switchingCueDelay
+            switchingCueDelay: switchingCueDelay,
+            zoomKeepers: zoomKeepers,
+            server: server
         )
         harnesses.append(harness)
         return harness
@@ -2548,6 +2552,58 @@ final class HerdrScreenModelTests: XCTestCase {
             HerdrServerScript.zoomReply(id: secondUnzoom.id, changed: true, zoomed: false, tab: "t2", panes: Self.secondTabPlaces)
         )
         await stopping.value
+    }
+
+    /// The session opened again while its end still takes Remux's zooms off waits for that end before it opens
+    /// its bridge, so none of Herdr's time for the hello goes on the wait: the end stops after its step in
+    /// flight, goes back to the tab it started on, where Herdr starts the new model's session, and unzooms
+    /// nothing under it.
+    func testOpeningTheSessionAgainDuringItsEndWaitsForTheEndBeforeItsBridgeOpens() async throws {
+        let keepers = HerdrZoomKeepers(store: InMemoryHerdrOwnedZoomStore())
+        let server = SavedServer(displayName: "Herdr Host", host: "herdr.example.test", username: "builder")
+        let harness = await makeHarness(settings: Self.zooming, zoomKeepers: keepers, server: server)
+        let session = try await shownTab(harness, zoomingOnShow: true, secondTab: Self.secondTab)
+        var index = session.next
+
+        harness.model.reveal(.pane("w1:p3"), bootID: "boot")
+        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        await session.bridge.serve(
+            HerdrServerScript.zoomReply(id: zoom.id, changed: true, zoomed: true, tab: "t2", panes: Self.secondTabPlaces)
+        )
+        await session.bridge.serve(Self.secondTabOnScreen(revision: 3, zoomed: true, firstTabZoomed: true))
+        let focus = try await nextWrite(session.bridge, from: &index, paneFocus)
+        await session.bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
+        try await Task.sleep(for: .milliseconds(100))
+
+        let stopping = Task { await harness.model.stop() }
+        let left = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(left.params, ["tab_id": "t1"])
+
+        let reopened = await makeHarness(settings: Self.zooming, zoomKeepers: keepers, server: server)
+        reopened.setScreenSize()
+        try await Task.sleep(for: .milliseconds(200))
+        let openedDuringTheStep = await reopened.bridges.openingsStartedAt.count
+        XCTAssertEqual(openedDuringTheStep, 0, "the bridge opened while the end had a step in flight")
+        await session.bridge.serve(HerdrConnectionTests.reply(id: left.id, json: #"{"type":"ok"}"#))
+        await session.bridge.serve(HerdrServerScript.snapshot(
+            revision: 4, zoomed: true, otherTabs: ["t2"], zoomedOtherTabs: ["t2"], panes: Self.bothTabsPanes
+        ))
+        let back = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(back.params, ["tab_id": "t2"], "the end didn't go back to the tab it started on")
+        let openedBeforeTheEndWentBack = await reopened.bridges.openingsStartedAt.count
+        XCTAssertEqual(openedBeforeTheEndWentBack, 0, "the bridge opened before the end went back")
+        await session.bridge.serve(HerdrConnectionTests.reply(id: back.id, json: #"{"type":"ok"}"#))
+        await stopping.value
+        let written = await session.bridge.writtenCount
+        let end = try await harness.writes(session.bridge, from: index, count: written - index)
+        XCTAssertFalse(end.contains { paneZoom($0) != nil }, "the end unzoomed a tab under the new model: \(end)")
+
+        let bridge = try await reopened.bridge()
+        let hello = try await reopened.writes(bridge, count: 1)
+        guard case .hello? = hello.first else { return XCTFail("the new model didn't say hello first: \(hello)") }
+        let openings = await reopened.bridges.openingsStartedAt
+        let opened = try XCTUnwrap(openings.first)
+        XCTAssertLessThan(ContinuousClock.now - opened, .seconds(1), "the hello waited after the bridge opened")
     }
 
     /// Ending the session gives each step of taking Remux's zooms off Herdr's time for a show, from Herdr's

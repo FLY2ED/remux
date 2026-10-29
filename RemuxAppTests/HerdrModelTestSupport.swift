@@ -660,12 +660,13 @@ final class HerdrModelHarness {
         bridgeOpeningTakes: Duration = .zero,
         producerFailure: ProducerFailure? = nil,
         rendererFenceGate: RendererFenceGate? = nil,
-        switchingCueDelay: Duration = HerdrScreenModel.switchingCueDelay
+        switchingCueDelay: Duration = HerdrScreenModel.switchingCueDelay,
+        zoomKeepers: HerdrZoomKeepers = HerdrZoomKeepers(store: InMemoryHerdrOwnedZoomStore()),
+        server: SavedServer = SavedServer(displayName: "Herdr Host", host: "herdr.example.test", username: "builder")
     ) async {
         let bridges = Bridges(openingTakes: bridgeOpeningTakes)
         let stateLog = StateLog()
         if let openError { await bridges.failNextOpen(with: openError) }
-        let server = SavedServer(displayName: "Herdr Host", host: "herdr.example.test", username: "builder")
         let workspace = SavedWorkspace(serverID: server.id, sessionName: "main")
         let target = SessionTarget(
             server: server,
@@ -694,6 +695,7 @@ final class HerdrModelHarness {
             engine: producerFailure.map {
                 HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1, makeProducer: SwitchableProducer.factory($0))
             } ?? HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1),
+            zoomKeepers: zoomKeepers,
             makeRendererFence: rendererFenceGate?.factory ?? Self.herdrRendererFence,
             clipboard: TerminalClipboard(pasteboard: pasteboard)
         )
