@@ -808,10 +808,43 @@ final class HerdrLiveConnectionTests: XCTestCase {
 
     // MARK: - Pane borders
 
-    /// Herdr's default palette: the focused pane's border in `accent`, the others' in `overlay0`
+    /// Herdr's default palette: the focused pane's border in its accent, the others' in `overlay0`
     /// (`app/state.rs` `Palette::catppuccin`).
-    private static let accent = GhosttyPaneLine.Ink.color(red: 0x89, green: 0xB4, blue: 0xFA)
-    private static let grey = GhosttyPaneLine.Ink.color(red: 0x6C, green: 0x70, blue: 0x86)
+    private static let herdrAccent = (red: 0x89, green: 0xB4, blue: 0xFA)
+    private static let herdrGrey = (red: 0x6C, green: 0x70, blue: 0x86)
+    /// The background of the default theme, Ghostty's own (`TerminalTheme.ghosttyDefault`).
+    private static let background = (red: 0x28, green: 0x2C, blue: 0x34)
+    /// Herdr's grey as drawn: raised to 3:1 against the terminal's background, so a line reads on any theme.
+    private static let raisedGrey = (red: 112, green: 115, blue: 137)
+    /// The lines as drawn: Herdr's colours, each raised to 3:1 where it falls short. The accent reaches it
+    /// already; Herdr's grey is raised.
+    private static let accent = ink(herdrAccent)
+    private static let grey = ink(raisedGrey)
+
+    private static func ink(_ color: (red: Int, green: Int, blue: Int)) -> GhosttyPaneLine.Ink {
+        .color(red: UInt8(color.red), green: UInt8(color.green), blue: UInt8(color.blue))
+    }
+
+    /// The WCAG contrast ratio of two sRGB colours.
+    private static func contrast(_ first: (red: Int, green: Int, blue: Int), _ second: (red: Int, green: Int, blue: Int)) -> Double {
+        func luminance(_ color: (red: Int, green: Int, blue: Int)) -> Double {
+            func channel(_ value: Int) -> Double {
+                let c = Double(value) / 255
+                return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+            }
+            return 0.2126 * channel(color.red) + 0.7152 * channel(color.green) + 0.0722 * channel(color.blue)
+        }
+        let (lighter, darker) = (max(luminance(first), luminance(second)), min(luminance(first), luminance(second)))
+        return (lighter + 0.05) / (darker + 0.05)
+    }
+
+    /// The lines' inks reach 3:1 against the default theme's background, the accent as Herdr has it and
+    /// Herdr's grey only as raised.
+    func testTheLineInksReadOnTheDefaultBackground() {
+        XCTAssertGreaterThanOrEqual(Self.contrast(Self.herdrAccent, Self.background), 3)
+        XCTAssertLessThan(Self.contrast(Self.herdrGrey, Self.background), 3)
+        XCTAssertGreaterThanOrEqual(Self.contrast(Self.raisedGrey, Self.background), 3)
+    }
 
     /// With Herdr's defaults each pane has its own box (`pane_gaps`), around its text area and the
     /// scrollbar's column right of it, and the focused pane's box is Herdr's accent (`ui/panes.rs`).
