@@ -261,6 +261,21 @@ extension HerdrSnapshot {
             ?? "terminal"
     }
 
+    /// What runs in the pane: its agent, by kind, else a terminal.
+    func program(ofPane paneID: String) -> TerminalProgram {
+        guard let agent = agents.first(where: { $0.paneID == paneID }) else { return .terminal }
+        return .agent(agent.kind ?? agent.listName)
+    }
+
+    /// What the pane is doing: what its agent says it is doing, else the agent's name; for a pane without
+    /// an agent, its name, else its folder's.
+    func activity(ofPane paneID: String) -> String {
+        if let agent = agents.first(where: { $0.paneID == paneID }) { return agent.activity ?? agent.listName }
+        guard let pane = panes.first(where: { $0.paneID == paneID }) else { return "terminal" }
+        if let label = pane.label, !label.isEmpty { return label }
+        return (pane.foregroundCWD ?? pane.cwd).map { ($0 as NSString).lastPathComponent } ?? "terminal"
+    }
+
     /// What the rename alert for `place` starts with: its name, and Herdr's automatic name as the
     /// placeholder. A tab's automatic name is its number in its workspace (`workspace.rs`
     /// `tab_display_name`); a pane's field starts empty without a manual label. Herdr's snapshot doesn't

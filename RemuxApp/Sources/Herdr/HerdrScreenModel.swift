@@ -552,6 +552,18 @@ final class HerdrScreenModel {
         terminalScreenAdapter.presentFailure(label)
     }
 
+    /// What runs in a pane and what it is doing, as the Tabs sheet's rows say, read from the newest snapshot
+    /// when the sheet is drawn (`HerdrSnapshot.program(ofPane:)`, `activity(ofPane:)`). A change to them alone
+    /// tells no view: agents retitle themselves often, and each change would redraw the whole screen for text
+    /// only the open sheet shows.
+    func program(ofPane paneID: String) -> TerminalProgram {
+        snapshot?.program(ofPane: paneID) ?? .terminal
+    }
+
+    func activity(ofPane paneID: String) -> String {
+        snapshot?.activity(ofPane: paneID) ?? "terminal"
+    }
+
     /// What the rename alert for `place` starts with (`HerdrSnapshot.renameField(for:)`).
     func renameField(for place: HerdrPlace) -> HerdrRenameField? {
         snapshot?.renameField(for: place)

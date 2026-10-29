@@ -81,7 +81,7 @@ final class HerdrAgentPresentation {
             let tab = tabs.first { $0.tabID == agent.tabID }.flatMap { tabs.count > 1 || $0.customLabel ? $0 : nil }
             return (
                 agent,
-                agent.displayAgent ?? agent.name ?? agent.agent ?? agent.title ?? "agent",
+                agent.listName,
                 [workspace?.label, tab?.label].compactMap { $0 }.joined(separator: " › ")
             )
         }
@@ -150,6 +150,91 @@ final class HerdrAgentPresentation {
             return status
         }
     }
+}
+
+extension HerdrSnapshot.Agent {
+    /// The agent's name as Herdr's agent list names it (`client/shell/agent_sidebar.rs` `agent_row`).
+    var listName: String {
+        displayAgent ?? name ?? agent ?? title ?? "agent"
+    }
+
+    /// The agent's kind: Herdr's name for an agent it knows, found from any name Herdr takes for it
+    /// (`detect/mod.rs` `parse_agent_label`), else the name its hooks report.
+    var kind: String? {
+        guard let label = agent?.trimmingCharacters(in: .whitespaces), !label.isEmpty else { return nil }
+        var name = label.lowercased()
+        if let suffix = Self.launcherSuffixes.first(where: name.hasSuffix) {
+            name.removeLast(suffix.count)
+        }
+        name = name.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? name
+        return Self.knownKinds[name] ?? label
+    }
+
+    /// What Herdr drops from the end of a name before it looks the name up (`normalized_agent_lookup_name`).
+    private static let launcherSuffixes = [".exe", ".cmd", ".bat", ".ps1", ".js"]
+
+    /// Herdr's names for the agents it knows, by each name it takes for them (`detect/mod.rs` `lookup_agent`).
+    private static let knownKinds: [String: String] = {
+        let names: [String: [String]] = [
+            "pi": ["pi"],
+            "claude": ["claude", "claude-code"],
+            "codex": ["codex"],
+            "gemini": ["gemini"],
+            "cursor": ["cursor", "cursor-agent"],
+            "devin": ["devin", "devin-cli", "devin cli"],
+            "agy": ["agy", "antigravity", "antigravity-cli"],
+            "cline": ["cline", ".cline"],
+            "omp": ["omp"],
+            "mastracode": ["mastracode", "mastra-code", "mastra code"],
+            "opencode": ["opencode", "opencode2", "open-code"],
+            "copilot": ["copilot", "github-copilot", "ghcs"],
+            "kimi": ["kimi", "kimi-code", "kimi code"],
+            "kiro": ["kiro", "kiro-cli"],
+            "droid": ["droid"],
+            "amp": ["amp", "amp-local"],
+            "grok": ["grok", "grok-build"],
+            "hermes": ["hermes", "hermes-agent"],
+            "kilo": ["kilo", "kilo-code", "kilo code"],
+            "qodercli": ["qodercli", "qoderclicn", "qoder", "qodercn"],
+            "qwen": ["qwen", "qwen-code", "qwen code"],
+            "letta": ["letta", "letta-code", "letta code"],
+            "maki": ["maki"],
+            "muse": ["muse", "muse-code", "muse-cli"],
+        ]
+        return Dictionary(uniqueKeysWithValues: names.flatMap { kind, names in names.map { ($0, kind) } })
+    }()
+
+    /// What the agent says it is doing: its terminal title, from after a part that only names its kind, as
+    /// Codex titles itself "codex | " and then its thread, else the title its hooks report. Codex names its
+    /// session by its id until it names the thread, and an id says nothing of the work.
+    var activity: String? {
+        let kinds = [agent, kind, displayAgent].compactMap { $0 }.filter { !$0.isEmpty }
+        let shown = terminalTitleStripped.flatMap { title -> String? in
+            guard let rest = kinds.lazy.compactMap({ Self.remainder(of: title, after: $0) }).first else { return title }
+            return UUID(uuidString: rest) == nil ? rest : nil
+        }
+        return [shown, title].lazy
+            .compactMap { $0?.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty }
+    }
+
+    /// What follows `kind` and a separator in `title`, where `kind` starts the title or follows a separator,
+    /// as Codex puts "[ ! ] Action Required | " before "codex | " while it waits for the user.
+    private static func remainder(of title: String, after kind: String) -> String? {
+        var searched = title.startIndex..<title.endIndex
+        while let found = title.range(of: kind, options: .caseInsensitive, range: searched) {
+            searched = found.upperBound..<title.endIndex
+            let before = title[..<found.lowerBound].reversed().first { !$0.isWhitespace }
+            guard before.map(titleSeparators.contains) ?? true else { continue }
+            let rest = title[found.upperBound...].drop(while: \.isWhitespace)
+            guard let separator = rest.first, titleSeparators.contains(separator) else { continue }
+            let remainder = rest.dropFirst().trimmingCharacters(in: .whitespaces)
+            if !remainder.isEmpty { return remainder }
+        }
+        return nil
+    }
+
+    private static let titleSeparators: Set<Character> = ["|", ":", "-", "–", "—", "·"]
 }
 
 extension HerdrAgentStatus {

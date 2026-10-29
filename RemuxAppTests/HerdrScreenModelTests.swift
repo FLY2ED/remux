@@ -4843,6 +4843,84 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(windows.map(\.agentStatus), [nil, .blocked])
     }
 
+    /// The Tabs sheet's rows say what each tab holds. The tab on screen's row puts Herdr's focused pane in
+    /// front, here a shell, by the folder its program is in; another tab's row puts its most urgent agent's
+    /// pane in front, with what the agent says it is doing, then two of its other panes; a tab without
+    /// agents shows its first pane, by its name. Each row names its tab as the user did, and shows its most
+    /// urgent agent: work as a spinner, other states as a dot. When Herdr's focus moves to the agent, the row
+    /// on screen follows.
+    func testTheTabsSheetsRowsSayWhatEachTabHolds() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        let panes = [
+            HerdrServerScript.snapshotPane("w1:p1", cwd: "/home/me/remux", foregroundCWD: "/home/me/remux/app"),
+            HerdrServerScript.snapshotPane("w1:p2"),
+            HerdrServerScript.snapshotPane("w1:p3", tab: "t2", label: "logs"),
+            HerdrServerScript.snapshotPane("w1:p4", tab: "t2"),
+            HerdrServerScript.snapshotPane("w1:p6", tab: "t2"),
+            HerdrServerScript.snapshotPane("w1:p7", tab: "t2"),
+            HerdrServerScript.snapshotPane("w1:p5", tab: "t3", label: "server", cwd: "/srv"),
+        ]
+        let agents = [
+            HerdrServerScript.snapshotAgent("w1:p2", terminalTitleStripped: "Fix the tests", agent: "claude", stateChange: 2),
+            HerdrServerScript.snapshotAgent(
+                "w1:p4", terminalTitleStripped: "codex | Review the diff", agent: "codex", tab: "t2", status: .blocked,
+                stateChange: 2
+            ),
+            HerdrServerScript.snapshotAgent("w1:p6", terminalTitleStripped: "Draft", agent: "opencode", tab: "t2", stateChange: 2),
+        ]
+        await session.bridge.serve(HerdrServerScript.snapshot(
+            revision: 2, workspaceLabel: "remux", otherTabs: ["t2", "t3"], panes: panes, agents: agents
+        ))
+        let adapter = harness.model.terminalScreenAdapter
+        try await harness.waitUntil("the tabs' rows weren't listed") {
+            adapter.windowSelectionSheetRenderProjection(group: nil).windows.compactMap(\.contents).count == 3
+        }
+
+        let windows = adapter.windowSelectionSheetRenderProjection(group: nil).windows
+        XCTAssertEqual(windows.map(\.contents), [
+            .init(name: "main", programs: [.terminal, .agent("claude")], activity: "app"),
+            .init(name: "t2", programs: [.agent("codex"), .terminal, .agent("opencode")], activity: "Review the diff"),
+            .init(name: "t3", programs: [.terminal], activity: "server"),
+        ])
+        XCTAssertEqual(windows.map(\.rowAgentMark), [.spinner, .dot(.blocked), nil])
+
+        await session.bridge.serve(HerdrServerScript.snapshot(
+            revision: 3, workspaceLabel: "remux", otherTabs: ["t2", "t3"], focusedPane: "w1:p2", panes: panes,
+            agents: agents
+        ))
+        try await harness.waitUntil("the row on screen didn't follow Herdr's focus") {
+            adapter.windowSelectionSheetRenderProjection(group: nil).windows.first?.contents
+                == .init(name: "main", programs: [.agent("claude"), .terminal], activity: "Fix the tests")
+        }
+    }
+
+    /// A tab Herdr names by its number shows only what its focused pane is doing, and a pane without a
+    /// name or a folder reads as a terminal. Another workspace's tab puts its agent's pane in front; an agent
+    /// saying nothing of what it does shows its name.
+    func testTheTabsSheetsRowsLeaveOutHerdrsNumbers() async throws {
+        let harness = await makeHarness()
+        let session = try await shownWorkspaces(harness, zoomingOnShow: false)
+        await session.bridge.serve(Self.twoWorkspaces(revision: 2, customTabLabels: false, agents: [
+            HerdrServerScript.snapshotAgent("w1:p4", agent: "claude-code", tab: "t2", status: .idle),
+            HerdrServerScript.snapshotAgent("w2:p7", title: "Plan the release", agent: "pi", workspace: "w2", tab: "t4"),
+        ]))
+        let adapter = harness.model.terminalScreenAdapter
+        try await harness.waitUntil("the tabs' names weren't left out") {
+            adapter.windowSelectionSheetRenderProjection(group: nil).windows.first?.contents?.name == nil
+        }
+
+        XCTAssertEqual(adapter.windowSelectionSheetRenderProjection(group: nil).windows.map(\.contents), [
+            .init(name: nil, programs: [.terminal, .terminal], activity: "terminal"),
+            .init(name: nil, programs: [.agent("claude"), .terminal], activity: "claude-code"),
+        ])
+        let beta = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).grouping?.groups[1].id)
+        XCTAssertEqual(adapter.windowSelectionSheetRenderProjection(group: beta).windows.map(\.contents), [
+            .init(name: nil, programs: [.terminal], activity: "terminal"),
+            .init(name: nil, programs: [.agent("pi"), .terminal], activity: "Plan the release"),
+        ])
+    }
+
     /// A tab shows its agent done until a frame drawn after it finished shows the agent's pane, as Herdr's
     /// client rolls its tabs up from the statuses it shows.
     func testATabShowsItsAgentDoneUntilItsPaneIsSeen() async throws {

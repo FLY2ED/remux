@@ -267,10 +267,12 @@ struct GhosttyTopLevelNoun: Equatable, Sendable {
 protocol GhosttyTerminalSelectionModeling: ObservableObject {
     var topLevelNoun: GhosttyTopLevelNoun { get }
 
+    /// The window sheet's previews of `leafIDs`; nil for a backend whose sheet lists its windows as rows
+    /// saying what each holds.
     func makePanePreviewSession(
         leafIDs: [UUID],
         pixelBudget: GhosttyPanePreviewSession.PixelBudget
-    ) -> GhosttyPanePreviewSession
+    ) -> GhosttyPanePreviewSession?
 
     // MARK: Selection sheets
 

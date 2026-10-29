@@ -579,6 +579,18 @@ struct GhosttyWindowSelectionSheetRenderProjection: Equatable, Sendable {
         var agentStatus: TerminalAgentStatus?
         /// What closing the window asks the user first; nil when it closes at once.
         var closeConfirmation: GhosttyCloseConfirmation?
+        /// What the window holds, for a backend whose sheet lists its windows as rows.
+        var contents: Contents?
+    }
+
+    /// What a window holds, as its row in the sheet says it.
+    struct Contents: Equatable, Sendable {
+        /// The window's name, when the user gave it one.
+        let name: String?
+        /// What its focused pane runs, then what up to two of its other panes run.
+        let programs: [TerminalProgram]
+        /// What its focused pane is doing.
+        let activity: String
     }
 
     /// The groups a backend keeps its top-levels in, as Herdr's workspaces hold its tabs.
