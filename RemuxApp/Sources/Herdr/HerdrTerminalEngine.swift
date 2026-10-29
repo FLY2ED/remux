@@ -1130,12 +1130,21 @@ actor HerdrTerminalEngine {
     /// reaches only its tab (`app/api/panes.rs` `resolve_optional_pane`); a pane gone meanwhile is refused.
     /// Herdr's unzoom focuses its target (`app/actions.rs` `apply_pane_zoom`), so a focus another client made
     /// in that tab during the round trip goes back to the pane the snapshot showed. The tab on screen at the
-    /// start goes last. The focus moves only this client's view (`apply_shell_navigation_request`), though
-    /// Herdr sends its focus events for each tab visited (`send_shell_navigation_focus_events`).
+    /// start goes last, and the release ends there: Herdr's next client starts where this one leaves its view
+    /// (`server/headless.rs`, `ClientShellLocation::from_snapshot`), since each command moves Herdr's default
+    /// to this client's view (`server/headless/client_views.rs` `set_default_shell_target_from_client`). The
+    /// focus moves only this client's view (`apply_shell_navigation_request`), though Herdr sends its focus
+    /// events for each tab visited (`send_shell_navigation_focus_events`).
     private struct Release {
         /// The tabs left, in order, from the release's start: once the lane is free and the newest snapshot
         /// shows where the last step took the session.
         var tabs: [String]?
+        /// The tab on screen as the release starts, where it ends.
+        var start: String?
+        /// Whether Herdr's answers may have left this client's view on another tab than `start`.
+        var away = false
+        /// Whether the focus back to `start` went, the release's last step.
+        var returning = false
         /// The tab focused for its unzoom, until a snapshot shows the session there.
         var focusing: String?
         /// Once another engine takes the session's zooms over, the hand-over waiting for the release to end
@@ -1152,12 +1161,12 @@ actor HerdrTerminalEngine {
     /// Takes Remux's zooms off as the session ends. Nothing else goes from here on: the steps and commands not
     /// sent yet are dropped. A command in flight goes first, since Herdr takes one command at a time, and the
     /// release waits for the snapshots showing the commands Herdr answered, since it goes over the tabs a
-    /// snapshot shows zoomed, from where the session is. A hidden
-    /// session's surface is made active first, without focus, since Herdr takes commands only from an active
-    /// one (`endpoint_requests.rs`). Each step has `stepTime`, Herdr's time for a show, from the ask or Herdr's
-    /// answer before it; one that takes longer ends the release and leaves the zooms left, with the phone's
-    /// record of them, as does the connection's end. `done` once the last unzoom is answered, the release
-    /// can't go on, or at once when nothing goes.
+    /// snapshot shows zoomed, from where the session is. A hidden session's surface is made active first,
+    /// without focus, since Herdr takes commands only from an active one (`endpoint_requests.rs`). Each step has
+    /// `stepTime`, Herdr's time for a show, from the ask or Herdr's answer before it; one that takes longer
+    /// leaves the zooms left, with the phone's record of them, and the release goes on to its focus back to the
+    /// tab it started on. The connection's end ends it at once. `done` once the release has ended, or at once
+    /// when nothing goes.
     fileprivate func releaseZooms(within stepTime: Duration, done: @escaping @Sendable () -> Void, connection: UInt64) {
         guard state == .running, connection == self.connection, outbox != nil, release == nil,
               methods.contains(HerdrScreenModel.paneZoomMethod),
@@ -1176,11 +1185,13 @@ actor HerdrTerminalEngine {
     /// never come. Once another engine takes the zooms over, nothing more goes.
     private func advanceRelease(outbox: any HerdrOutbound, in snapshot: HerdrSnapshot) {
         guard var release else { return }
-        guard release.handOver == nil else { return endRelease() }
+        guard !release.returning else { return endRelease() }
+        guard release.handOver == nil else { return finishRelease(in: snapshot) }
         guard unshown.isEmpty else { return }
         if release.tabs == nil {
             let tabs = ownedZooms.tabsToRelease(in: snapshot)
             release.tabs = tabs
+            release.start = snapshot.focusedTabID
             if !tabs.isEmpty, request.map({ $0.kind == .hide }) ?? true,
                let message = surfaceSet(active: true, show: nil, in: snapshot) {
                 outbox.send([message])
@@ -1226,7 +1237,24 @@ actor HerdrTerminalEngine {
             return
         }
         self.release = release
-        endRelease()
+        finishRelease(in: snapshot)
+    }
+
+    /// The release's last step: the focus back to the tab it started on, when Herdr's answers may have left
+    /// this client's view on another, then its end.
+    private func finishRelease(in snapshot: HerdrSnapshot) {
+        guard var release, release.away, !release.returning, let start = release.start, lane.isIdle,
+              methods.contains(HerdrPlace.tab(start).focusMethod)
+        else { return endRelease() }
+        release.returning = true
+        self.release = release
+        let place = HerdrPlace.tab(start)
+        let back = HerdrCommandLane.Command(
+            method: place.focusMethod,
+            params: place.focusParams,
+            purpose: .release(.back(tabID: start))
+        )
+        send(.command(back), params: back.params, in: snapshot)
     }
 
     /// Whether the release takes the zoom off `tab`: the snapshot has it zoomed, and Remux's record still has
@@ -1236,11 +1264,17 @@ actor HerdrTerminalEngine {
         ownedZooms.tabIDs.contains(tab) && snapshot.tabs.contains { $0.tabID == tab && $0.zoomed }
     }
 
-    /// Herdr answered the release's focus of `tab`: one that failed leaves that tab's zoom.
+    /// Herdr answered the release's focus of `tab`: one that went took this client's view there, and one that
+    /// failed leaves that tab's zoom.
     private func releaseFocusAnswered(_ tab: String, failed: Bool) {
-        guard failed, release?.focusing == tab else { return }
-        release?.focusing = nil
-        release?.tabs?.removeAll { $0 == tab }
+        guard var release else { return }
+        if !failed {
+            release.away = tab != release.start
+        } else if release.focusing == tab {
+            release.focusing = nil
+            release.tabs?.removeAll { $0 == tab }
+        }
+        self.release = release
     }
 
     /// The release's next step has Herdr's time for a show from now.
@@ -1258,10 +1292,20 @@ actor HerdrTerminalEngine {
         self.release = release
     }
 
-    /// A step's time passed: it ends the release only while it is the newest step's.
+    /// A step's time passed, while it is the newest step's: the release goes on to its focus back, with a
+    /// time of its own, giving up the step of its own in flight, whose answer is dropped and whose focus may
+    /// have taken the view away; it ends once the focus back's time passes too.
     private func releaseStepExpired(_ step: UInt64, connection: UInt64) {
-        guard connection == self.connection, release?.step == step else { return }
-        endRelease()
+        guard connection == self.connection, var release, release.step == step else { return }
+        guard !release.returning, let snapshot = presentation.snapshot else { return endRelease() }
+        if let inFlight = lane.inFlight, case .command(let command) = inFlight.item,
+           case .release(let given) = command.purpose, let expired = lane.expire(inFlight.id) {
+            if case .focus = given { release.away = true }
+            self.release = release
+            finish(expired, with: .failure(.timedOut(method: command.method)))
+        }
+        startReleaseStep()
+        finishRelease(in: snapshot)
     }
 
     private func endRelease() {
@@ -1481,6 +1525,13 @@ actor HerdrTerminalEngine {
                 releaseFocusAnswered(tab, failed: (try? result.get()) == nil)
             case .release(.unzoom):
                 zoomAnswered(result, seen: inFlight.snapshots, reportsFailure: false)
+                // The pane named may have moved to another tab meanwhile, which the unzoom then took the view to.
+                if var release, case .success(let reply) = result, let zoom = try? HerdrPaneZoomResult(reply: reply.json) {
+                    release.away = zoom.layout.tabID != release.start
+                    self.release = release
+                }
+            case .release(.back):
+                break
             case .other(let answered):
                 answered(result)
             }

@@ -73,6 +73,8 @@ struct HerdrCommandLane {
             case focus(tabID: String)
             /// The unzoom of the tab `tabID`, on the pane the snapshot shows focused there.
             case unzoom(tabID: String)
+            /// The focus back to the tab `tabID` the session was on as the release started, its last step.
+            case back(tabID: String)
         }
 
         let method: String
