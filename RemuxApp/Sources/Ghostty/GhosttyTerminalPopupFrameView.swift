@@ -4,7 +4,8 @@ import UIKit
 /// A popup the backend shows over the terminal area, framed as Herdr's client frames one: a box of lines on
 /// the outer cells of the panes' grid, drawn as the panes' lines are, the popup's title in its top line, and
 /// the popup's terminal in the cells inside, at the panes' font. Remux adds the tab it is open over at the
-/// top line's other end. A tap brings up the keyboard and a swipe scrolls, as on a pane.
+/// top line's other end. A tap brings up the keyboard and, for a program that reads the mouse, clicks there,
+/// and a swipe scrolls, as on a pane.
 struct GhosttyTerminalPopupFrameView: View {
     let popup: GhosttyTerminalViewportPresentationProjection.Popup
     /// The panes' grid and cell, which the frame is laid out on.
@@ -16,6 +17,8 @@ struct GhosttyTerminalPopupFrameView: View {
     let keyboardMode: GhosttyKeyboardChromeMode
     let submitScroll: ((UUID, GhosttySurfaceMouseScrollEvent) -> GhosttyMouseInputSubmissionOutcome)?
     let submitPointer: ((UUID, CGPoint, GhosttySurfaceKeyEvent.Mods) -> GhosttyMouseInputSubmissionOutcome)?
+    let isMouseCaptured: ((UUID) -> Bool)?
+    let submitMouseButton: ((UUID, GhosttySurfaceMouseButtonEvent) -> GhosttyMouseInputSubmissionOutcome)?
     let onTap: () -> Void
 
     var body: some View {
@@ -41,6 +44,8 @@ struct GhosttyTerminalPopupFrameView: View {
                         keyboardMode: keyboardMode,
                         submitScroll: submitScroll,
                         submitPointer: submitPointer,
+                        isMouseCaptured: isMouseCaptured,
+                        submitMouseButton: submitMouseButton,
                         onTap: onTap
                     )
                     .frame(width: contentFrame.width, height: contentFrame.height)
@@ -186,6 +191,8 @@ private struct GhosttyTerminalPopupHost: UIViewRepresentable {
     let keyboardMode: GhosttyKeyboardChromeMode
     let submitScroll: ((UUID, GhosttySurfaceMouseScrollEvent) -> GhosttyMouseInputSubmissionOutcome)?
     let submitPointer: ((UUID, CGPoint, GhosttySurfaceKeyEvent.Mods) -> GhosttyMouseInputSubmissionOutcome)?
+    let isMouseCaptured: ((UUID) -> Bool)?
+    let submitMouseButton: ((UUID, GhosttySurfaceMouseButtonEvent) -> GhosttyMouseInputSubmissionOutcome)?
     let onTap: () -> Void
 
     func makeUIView(context: Context) -> GhosttyTerminalPopupHostView {
@@ -194,6 +201,9 @@ private struct GhosttyTerminalPopupHost: UIViewRepresentable {
 
     func updateUIView(_ view: GhosttyTerminalPopupHostView, context: Context) {
         view.onTap = onTap
+        view.isMouseCaptured = isMouseCaptured
+        view.submitPointer = submitPointer
+        view.submitMouseButton = submitMouseButton
         view.keyboardMode = keyboardMode
         view.update(
             popup: popup,
@@ -210,12 +220,17 @@ private struct GhosttyTerminalPopupHost: UIViewRepresentable {
 
 /// The popup's terminal, in the cells inside the frame. It draws the grid of Herdr's frames at its cells'
 /// size from the cells' top left: while Herdr's frames catch up with a new grid, the grid drawn has more or
-/// fewer cells than there are, as the panes' canvas does. A tap brings up the keyboard; the scroll container
-/// forwards swipes. Each new placement is recorded in the diagnostics, for the popup's layout record.
+/// fewer cells than there are, as the panes' canvas does. A tap does what it does on a pane
+/// (`GhosttySurfaceTapGesture`); the scroll container forwards swipes. Each new placement is recorded in the
+/// diagnostics, for the popup's layout record.
 final class GhosttyTerminalPopupHostView: UIView {
     var onTap: (() -> Void)?
+    var isMouseCaptured: ((UUID) -> Bool)?
+    var submitPointer: ((UUID, CGPoint, GhosttySurfaceKeyEvent.Mods) -> GhosttyMouseInputSubmissionOutcome)?
+    var submitMouseButton: ((UUID, GhosttySurfaceMouseButtonEvent) -> GhosttyMouseInputSubmissionOutcome)?
     var keyboardMode: GhosttyKeyboardChromeMode = .hidden
     private let container = GhosttyPaneScrollContainerView()
+    private var surface: GhosttyManagedSurface?
     private var drawable: CGSize?
     private var recorded: (cells: CGRect, drawable: CGSize)?
 
@@ -223,7 +238,7 @@ final class GhosttyTerminalPopupHostView: UIView {
         super.init(frame: frame)
         clipsToBounds = true
         container.backgroundColor = .clear
-        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
+        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped(_:))))
     }
 
     @available(*, unavailable)
@@ -241,6 +256,7 @@ final class GhosttyTerminalPopupHostView: UIView {
             detachSurface()
             return
         }
+        self.surface = surface
         drawable = CGSize(
             width: Double(grid.columns) * Double(cell.pixelWidth) / cell.contentScale,
             height: Double(grid.rows) * Double(cell.pixelHeight) / cell.contentScale
@@ -258,9 +274,13 @@ final class GhosttyTerminalPopupHostView: UIView {
     func dismantle() {
         detachSurface()
         onTap = nil
+        isMouseCaptured = nil
+        submitPointer = nil
+        submitMouseButton = nil
     }
 
     private func detachSurface() {
+        surface = nil
         drawable = nil
         container.detachCurrentSurfaceForRemoval()
         container.removeFromSuperview()
@@ -302,7 +322,25 @@ final class GhosttyTerminalPopupHostView: UIView {
         setNeedsLayout()
     }
 
-    @objc private func tapped() {
-        onTap?()
+    @objc private func tapped(_ recognizer: UITapGestureRecognizer) {
+        guard let surface else {
+            onTap?()
+            return
+        }
+        // A tap that catches a fling only stops it.
+        if container.consumeMomentumCatchTap() { return }
+        for action in GhosttySurfaceTapGesture.actions(
+            forLocalPoint: recognizer.location(in: surface.view),
+            mouseCaptured: isMouseCaptured?(surface.id) ?? false
+        ) {
+            switch action {
+            case .activateInput, .focusPane:
+                onTap?()
+            case .mousePosition(let position):
+                _ = submitPointer?(surface.id, position, [])
+            case .mouseButton(let event):
+                _ = submitMouseButton?(surface.id, event)
+            }
+        }
     }
 }

@@ -371,6 +371,8 @@ final class HerdrScreenModel {
     private var popupPointer: CGPoint?
     /// The scroll travel over the popup not yet a whole row.
     private var popupWheelRemainder: Double?
+    /// The button held over the popup, until its release.
+    private var popupPress: HerdrMouseEvent.Button?
     private var notices = HerdrNoticePolicy(visibleFor: GhosttyTerminalNotice.failureDuration)
     private var creatingTerminals: Set<ObjectIdentifier> = []
     /// Ghostty gives a terminal one renderer at a time, so a replacement waits for these to close.
@@ -1032,10 +1034,49 @@ final class HerdrScreenModel {
         let travel = (popupWheelRemainder ?? 0) + event.deltaY
         let steps = (travel / cellHeight).rounded(.towardZero)
         popupWheelRemainder = travel - steps * cellHeight
-        let point = popupPointer ?? .zero
-        let column = UInt16(clamping: Int((Double(point.x) / Double(max(cell.pointWidth, 1))).rounded(.down)))
-        let row = UInt16(clamping: Int((Double(point.y) / Double(max(cell.pointHeight, 1))).rounded(.down)))
-        return popup.scroll(rows: Int(steps), column: column, row: row)
+        guard let at = popupCell(at: popupPointer ?? .zero) else { return false }
+        return popup.scroll(rows: Int(steps), column: at.column, row: at.row)
+    }
+
+    /// Whether the popup's program reads the mouse, as Herdr's surface says.
+    var popupReportsMouse: Bool {
+        popup.popup?.mouseReporting == true
+    }
+
+    /// A button pressed or released at the pointer over the popup, as Herdr's client sends one to a popup
+    /// whose program reads the mouse (`client/shell/mouse.rs`): the press, and then its release. Herdr writes
+    /// either to the program only while it reads the mouse (`server/pane_input.rs`). Returns false when the
+    /// event doesn't go.
+    func sendPopupMouseButton(_ event: GhosttySurfaceMouseButtonEvent) -> Bool {
+        guard let button = HerdrInputTranslator.mouseButton(event.button) else { return false }
+        let modifiers = HerdrInputTranslator.modifiers(for: event.mods)
+        switch event.state {
+        case .press:
+            guard popupPress == nil, popupReportsMouse, let cell = popupCell(at: popupPointer ?? .zero),
+                  popup.sendMouse(.down(button), column: cell.column, row: cell.row, modifiers: modifiers)
+            else { return false }
+            popupPress = button
+            return true
+        case .release:
+            guard popupPress == button else { return false }
+            popupPress = nil
+            guard let cell = popupCell(at: popupPointer ?? .zero) else { return false }
+            return popup.sendMouse(.up(button), column: cell.column, row: cell.row, modifiers: modifiers)
+        }
+    }
+
+    /// The popup's cell at `point`, in its terminal's points, within the grid it draws.
+    private func popupCell(at point: CGPoint) -> PaneCell? {
+        guard let cell = popup.displayed?.cell ?? measurement?.cellMetrics else { return nil }
+        let grid = popup.displayed?.grid
+        func index(_ points: CGFloat, size: CGFloat, count: UInt16?) -> UInt16 {
+            let index = max(Int((points / max(size, 1)).rounded(.down)), 0)
+            return UInt16(clamping: count.map { min(index, Int(max($0, 1)) - 1) } ?? index)
+        }
+        return PaneCell(
+            column: index(point.x, size: cell.pointWidth, count: grid?.columns),
+            row: index(point.y, size: cell.pointHeight, count: grid?.rows)
+        )
     }
 
     /// Typing into the popup, read as Herdr's client reads a terminal's: Herdr says whether the popup's

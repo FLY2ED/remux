@@ -32,6 +32,8 @@ struct HerdrPaneLayout: Equatable, Sendable {
         let title: String
         let columns: UInt16
         let rows: UInt16
+        /// Whether its program reads the mouse.
+        var mouseReporting = false
     }
 
     let bootID: String
@@ -2052,7 +2054,13 @@ actor HerdrTerminalEngine {
             },
             borders: borders,
             popup: surface.popup.map {
-                HerdrPaneLayout.Popup(terminalID: $0.terminalID, title: $0.title, columns: $0.frame.width, rows: $0.frame.height)
+                HerdrPaneLayout.Popup(
+                    terminalID: $0.terminalID,
+                    title: $0.title,
+                    columns: $0.frame.width,
+                    rows: $0.frame.height,
+                    mouseReporting: $0.mouseReporting
+                )
             }
         )
     }

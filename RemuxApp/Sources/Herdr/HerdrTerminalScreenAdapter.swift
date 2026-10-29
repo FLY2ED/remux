@@ -438,7 +438,9 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func isMouseCaptured(for surfaceID: UUID) -> Bool {
-        guard let model, let paneID = paneID(for: surfaceID) else { return false }
+        guard let model else { return false }
+        if popupTerminalID(for: surfaceID) != nil { return model.popupReportsMouse }
+        guard let paneID = paneID(for: surfaceID) else { return false }
         return model.reportsMouse(inPane: paneID)
     }
 
@@ -446,7 +448,11 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         to surfaceID: UUID,
         _ event: GhosttySurfaceMouseButtonEvent
     ) -> GhosttyMouseInputSubmissionOutcome {
-        guard let model, let paneID = paneID(for: surfaceID) else { return .missingTarget(surfaceID) }
+        guard let model else { return .missingTarget(surfaceID) }
+        if popupTerminalID(for: surfaceID) != nil {
+            return model.sendPopupMouseButton(event) ? .sent : .surfaceRejected
+        }
+        guard let paneID = paneID(for: surfaceID) else { return .missingTarget(surfaceID) }
         return model.sendMouseButton(event, inPane: paneID) ? .sent : .surfaceRejected
     }
 

@@ -324,6 +324,29 @@ final class HerdrPopupTests: XCTestCase {
         try await assertNoInput(session.bridge, from: typedFrom)
     }
 
+    /// A tap on a popup whose program reads the mouse is a click there, as on a pane: a press and its release
+    /// at the cell tapped, as popup input. On a program that doesn't, a tap only brings the keyboard up.
+    func testATapOnThePopupClicksForAProgramThatReadsTheMouse() async throws {
+        for reads in [true, false] {
+            let harness = await makeHarness()
+            let (session, _, cell) = try await attachedPopup(harness, mouseReporting: reads)
+            var index = await session.bridge.writtenCount
+            let adapter = harness.model.terminalScreenAdapter
+            let target = try XCTUnwrap(popup(harness)?.id)
+            XCTAssertEqual(adapter.isMouseCaptured(for: target), reads)
+            guard reads else { continue }
+
+            let point = CGPoint(x: 2.5 * cell.pointWidth, y: 1.5 * cell.pointHeight)
+            _ = adapter.sendMousePosition(to: target, point, mods: [])
+            XCTAssertEqual(adapter.sendMouseButton(to: target, GhosttySurfaceMouseButtonEvent(state: .press, button: .left)), .sent)
+            XCTAssertEqual(adapter.sendMouseButton(to: target, GhosttySurfaceMouseButtonEvent(state: .release, button: .left)), .sent)
+            let press = try await nextInput(session.bridge, from: &index)
+            let release = try await nextInput(session.bridge, from: &index)
+            XCTAssertEqual(press, popupInput([.mouse(HerdrMouseEvent(kind: .down(.left), column: 2, row: 1))]))
+            XCTAssertEqual(release, popupInput([.mouse(HerdrMouseEvent(kind: .up(.left), column: 2, row: 1))]))
+        }
+    }
+
     // MARK: - A surface too small for Herdr to box the popup
 
     /// Herdr leaves the popup out of a surface under 6 x 4 cells, where it can't box it, though the popup is
@@ -1012,10 +1035,11 @@ final class HerdrPopupTests: XCTestCase {
     /// A session shown with a popup over its tab, attached at the tests' area and drawn.
     private func attachedPopup(
         _ harness: HerdrModelHarness,
-        otherTab: Bool = false
+        otherTab: Bool = false,
+        mouseReporting: Bool = false
     ) async throws -> (session: (bridge: FakeBridgeTransport, next: Int), attach: FakeBridgeTransport, cell: GhosttyTerminalCellDisplayMetrics) {
         let session = try await shownSession(harness, otherTab: otherTab)
-        await session.bridge.serve(popupSurface(revision: 3))
+        await session.bridge.serve(popupSurface(revision: 3, mouseReporting: mouseReporting))
         try await harness.waitUntil("the popup wasn't laid out") { harness.model.layout?.popup != nil }
         let cell = try XCTUnwrap(harness.model.measurement?.cellMetrics)
         let attach = try await harness.bridge(1)
@@ -1079,7 +1103,8 @@ final class HerdrPopupTests: XCTestCase {
         revision: UInt64,
         title: String = "popup",
         lines: [String] = ["ab", "cd"],
-        terminalID: String = popupID
+        terminalID: String = popupID,
+        mouseReporting: Bool = false
     ) -> [UInt8] {
         HerdrServerScript.surface(
             projection: projection,
@@ -1088,7 +1113,8 @@ final class HerdrPopupTests: XCTestCase {
             panes: Self.panes,
             popup: terminalID,
             popupTitle: title,
-            popupLines: lines
+            popupLines: lines,
+            popupMouseReporting: mouseReporting
         )
     }
 

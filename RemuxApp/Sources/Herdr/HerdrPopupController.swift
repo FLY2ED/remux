@@ -331,6 +331,12 @@ final class HerdrPopupController {
         return input.send(Array(repeating: .mouse(wheel), count: Int(rows.magnitude))) == .accepted
     }
 
+    /// A button pressed or released at a cell of the popup's terminal.
+    func sendMouse(_ kind: HerdrMouseEvent.Kind, column: UInt16, row: UInt16, modifiers: HerdrKeyModifiers) -> Bool {
+        guard takesInput else { return false }
+        return input.send([.mouse(HerdrMouseEvent(kind: kind, column: column, row: row, modifiers: modifiers))]) == .accepted
+    }
+
     // MARK: - Holding the popup
 
     private func reconcile() {

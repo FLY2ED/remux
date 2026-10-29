@@ -2541,7 +2541,8 @@ final class RemuxAppUITests: XCTestCase {
     /// popup's terminal takes the phone's grid, which the keyboard and a rotation change by rows and columns,
     /// not text size, and keeps it while the other client types, and through a quiet minute; Home gives it
     /// back. Typing, the composer and swipes go into it: an arrow reaches a program asking for application
-    /// cursor keys as one, a shell's history scrolls, and a program reporting the mouse gets wheel steps.
+    /// cursor keys as one, a shell's history scrolls, and a program reporting the mouse gets wheel steps and a
+    /// tap as a click.
     /// btop says the grid it has is too small, with its size; Claude Code takes the phone's keys. Each
     /// popup closes when its program exits. Screens in dark, then Latte.
     /// The harness answers each `<step>.request` with `<step>.done`, and `<step>.out` for what it read:
@@ -2771,6 +2772,10 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertTrue(try screen(containing: "wheel up at"), "A swipe didn't reach the program as the wheel.")
         content.swipeUp()
         XCTAssertTrue(try screen(containing: "wheel down at"), "A swipe didn't reach the program as the wheel.")
+        // A tap is a click there, as on a pane: a press and its release.
+        content.tap()
+        XCTAssertTrue(try screen(containing: "press at"), "A tap didn't reach the program as a click.")
+        XCTAssertTrue(try screen(containing: "release at"), "A tap's release didn't reach the program.")
         capture("f7-popup-light-wheel")
         typeIntoPopup("q")
         XCTAssertTrue(popup.waitForNonExistence(timeout: 15), "The wheel probe's popup stayed after it quit.")

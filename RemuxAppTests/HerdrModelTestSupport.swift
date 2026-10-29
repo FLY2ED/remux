@@ -306,6 +306,7 @@ enum HerdrServerScript {
         popup: String? = nil,
         popupTitle: String = "popup",
         popupLines: [String] = ["p"],
+        popupMouseReporting: Bool = false,
         foreground: [Character: UInt32] = [:]
     ) -> [UInt8] {
         var writer = HerdrWireWriter()
@@ -347,7 +348,7 @@ enum HerdrServerScript {
             writer.optional(nil as UInt8?) { $0.u8($1) }
             writer.optional(nil as UInt8?) { $0.u8($1) }
             frame(popupLines, to: &writer)
-            writer.bool(false)
+            writer.bool(popupMouseReporting)
             writer.bool(false)
             writer.u32(0)
             writer.u32(0)

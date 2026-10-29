@@ -304,6 +304,12 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
                                 submitPointer: { surfaceID, position, mods in
                                     model.sendMousePosition(to: surfaceID, position, mods: mods)
                                 },
+                                isMouseCaptured: { surfaceID in
+                                    model.isMouseCaptured(for: surfaceID)
+                                },
+                                submitMouseButton: { surfaceID, event in
+                                    model.sendMouseButton(to: surfaceID, event)
+                                },
                                 onTap: handlePopupTap
                             )
                             .frame(
