@@ -103,9 +103,9 @@ final class HerdrScreenModel {
         let ask: UInt64
         /// The pane it goes to; nil for a tab, a workspace or a creation, whose pane Herdr names once there.
         let pane: String?
-        /// The tab it goes to when it leaves the tab on screen, by its id, or by the name the screen gives a tab
-        /// Herdr is making, whose id is known only once Herdr made it.
-        let switchesTo: (tabID: String?, name: String)?
+        /// The tab it goes to, by its id, or by the name the screen gives a tab Herdr is making, whose id is
+        /// known only once Herdr made it; nil for a close, which goes wherever Herdr shows the session then.
+        let goesTo: (tabID: String?, name: String)?
         /// The engine's request that takes the session there, once the engine has the move.
         var request: UInt64?
     }
@@ -306,6 +306,8 @@ final class HerdrScreenModel {
         let layout: HerdrPaneLayout
         let projectionRevision: UInt64
         let connection: UInt64
+        /// The screen's grid changed after Herdr drew it, while it waited off screen.
+        var isFromBeforeResize = false
 
         /// What the frame shows once on screen, whose agents the user then sees (`presentedFrame`).
         var presented: (connection: UInt64, bootID: String, projectionRevision: UInt64, paneIDs: Set<String>) {
@@ -690,10 +692,15 @@ final class HerdrScreenModel {
         }
         guard let measured, measured != measurement else { return }
         if measurement == nil { sizeKnownSince = .now }
+        let previousGrid = measurement.map { ($0.controlViewport.columns, $0.controlViewport.rows) }
         measurement = measured
         if let geometry { attempt?.ask(.resize(geometry)) }
         resumeSizeWaiter()
-        // The panes of a frame held off screen take the new size there, and the frame on screen keeps its
+        // A frame held off screen was drawn for the grid before; Herdr draws the next at the new one.
+        if let previousGrid, previousGrid != (measured.controlViewport.columns, measured.controlViewport.rows) {
+            pendingFrame?.isFromBeforeResize = true
+        }
+        // The panes of a frame held off screen take a new cell size there, and the frame on screen keeps its
         // picture until they have drawn at it.
         for (paneID, surface) in pendingFrame == nil ? surfaces : stagedSurfaces {
             guard let metrics = displayMetrics(for: paneID) else { continue }
@@ -866,6 +873,12 @@ final class HerdrScreenModel {
         pendingFrame == nil && layout?.panes.contains { $0.paneID == paneID && $0.hasTextArea } == true
     }
 
+    /// Whether the screen shows where Herdr has the session: the pane Herdr has focused is drawn, so an action
+    /// on what the user sees can go to Herdr's focus.
+    private var showsHerdrsFocus: Bool {
+        focusedPaneID.map(isDrawn) ?? false
+    }
+
     private var inputTarget: (attempt: Attempt, paneID: String)? {
         userPaneID.flatMap(inputTarget(forPane:))
     }
@@ -993,24 +1006,24 @@ final class HerdrScreenModel {
     private func move(_ attempt: Attempt, to destination: HerdrDestination) {
         var fromAnotherTab = false
         var pane: String?
-        var switchesTo: (tabID: String?, name: String)?
+        var goesTo: (tabID: String?, name: String)?
         switch destination {
         case .place(let place):
             let reached = tab(reachedBy: place)
-            fromAnotherTab = reached.map { $0 != onScreenTab } == true
+            fromAnotherTab = reached.map { $0 != herdrTab } == true
             if case .pane(let id) = place { pane = id }
-            if let reached, reached.tabID != layout?.tab?.tabID, let name = switchName(ofTab: reached.tabID) {
-                switchesTo = (reached.tabID, name)
-            }
+            goesTo = reached.map { ($0.tabID, switchName(ofTab: $0.tabID) ?? $0.tabID) }
         case .creation(.tab):
-            switchesTo = (nil, Self.newTabName)
+            goesTo = (nil, Self.newTabName)
         case .creation(.workspace):
-            switchesTo = (nil, Self.newWorkspaceName)
-        case .creation(.split), .closing:
+            goesTo = (nil, Self.newWorkspaceName)
+        case .creation(let split):
+            goesTo = split.tabPlace.flatMap(tab(reachedBy:)).map { ($0.tabID, switchName(ofTab: $0.tabID) ?? $0.tabID) }
+        case .closing:
             break
         }
         attempt.moveAsks += 1
-        attempt.move = PendingMove(ask: attempt.moveAsks, pane: pane, switchesTo: switchesTo)
+        attempt.move = PendingMove(ask: attempt.moveAsks, pane: pane, goesTo: goesTo)
         attempt.ask(.move(destination, fromAnotherTab: fromAnotherTab, ask: attempt.moveAsks))
         reconcilePresentationActivity()
         didChange()
@@ -1035,6 +1048,8 @@ final class HerdrScreenModel {
         guard attempt.move != nil else { return }
         attempt.move = nil
         reconcilePresentationActivity()
+        // A frame held while the move went elsewhere is the newest Herdr sent, as when the move was refused.
+        showPreparedFrameIfReady()
         didChange()
     }
 
@@ -1046,8 +1061,9 @@ final class HerdrScreenModel {
         )
     }
 
-    /// The tab on screen, as the newest snapshot has it.
-    private var onScreenTab: HerdrTabKey? {
+    /// The tab Herdr has the session on, as the newest snapshot has it. While a newer frame waits off screen,
+    /// the screen still shows the tab before it (`layout`).
+    private var herdrTab: HerdrTabKey? {
         guard let snapshot, let tabID = snapshot.focusedTabID else { return nil }
         return HerdrTabKey(bootID: snapshot.bootID, tabID: tabID)
     }
@@ -1091,10 +1107,13 @@ final class HerdrScreenModel {
     /// The pane sheet's zoom button: Herdr zooms or unzooms the focused pane's tab, through the engine's
     /// lane after the commands already asked for. Every `pane.zoom` focuses its target first, so it goes
     /// only while no request is in progress, on the pane the session is on, as the engine checks when it
-    /// goes. A tab the user unzooms isn't zoomed again as the session comes back on screen, as tmux keeps
-    /// a user's choice for a window. Returns false when the session can't take it.
+    /// goes, and only while the screen shows that pane (`showsHerdrsFocus`): the sheet describes the tab on
+    /// screen, so the button is refused, as keys are, while the screen still shows the tab before Herdr's.
+    /// A tab the user unzooms isn't zoomed again as the session comes back on screen, as tmux keeps a user's
+    /// choice for a window. Returns false when the session can't take it.
     func setFocusedPaneZoomed(_ zoomed: Bool) -> Bool {
-        guard let attempt, isCurrent(attempt), attempt.isSettled, let paneID = focusedPaneID, let tab = onScreenTab
+        guard let attempt, isCurrent(attempt), attempt.isSettled, showsHerdrsFocus,
+              let paneID = focusedPaneID, let tab = herdrTab
         else { return false }
         if zoomed {
             tabsUnzoomedByUser.remove(tab)
@@ -1113,7 +1132,7 @@ final class HerdrScreenModel {
     /// engine's lane, which lets it go only while no request is in progress, since the zoom focuses its
     /// pane; one that doesn't go is asked again at the next opening.
     func fillTabMapIfNeeded() {
-        guard let attempt, isCurrent(attempt), attempt.isSettled,
+        guard let attempt, isCurrent(attempt), attempt.isSettled, showsHerdrsFocus,
               let layout, let tab = layout.tab, tab.zoomed, let snapshot, snapshot.bootID == layout.bootID,
               snapshot.focusedTabID == tab.tabID, let paneID = snapshot.focusedPaneID
         else { return }
@@ -1771,6 +1790,8 @@ final class HerdrScreenModel {
             isReconnecting = false
             cancelRecovery()
         }
+        // A frame held while the attempt's move went elsewhere is the newest Herdr sent.
+        showPreparedFrameIfReady()
         reconcilePresentationActivity()
         didChange()
     }
@@ -1982,6 +2003,14 @@ final class HerdrScreenModel {
         return true
     }
 
+    /// Whether Remux's move under way goes to another tab than `frame`'s, or to one Herdr hasn't made yet, or
+    /// wherever a close takes the session.
+    private func isPassedOver(_ frame: DrawnFrame) -> Bool {
+        guard let attempt, isCurrent(attempt), let move = attempt.move else { return false }
+        guard let tabID = move.goesTo?.tabID else { return true }
+        return tabID != frame.layout.tab?.tabID
+    }
+
     /// Whether the frame on screen stays while `next`'s panes draw their first pictures off screen: `next`
     /// draws a pane whose terminal has no renderer yet, as another tab's panes or a restarted server's do,
     /// and none of the panes on screen goes on in it. A pane that goes on, as in a split, was painted for
@@ -2018,9 +2047,12 @@ final class HerdrScreenModel {
     }
 
     /// Shows the frame held off screen once every pane it draws has its first picture, or failed: one pane
-    /// for a zoomed tab, each of a split one.
+    /// for a zoomed tab, each of a split one. The newest intent wins: while Remux's move goes elsewhere, the
+    /// frame waits for the move's own, or for the move's end. A frame drawn before a resize waits for Herdr's
+    /// next, as Herdr's client drops the surface it holds when the screen's size changes
+    /// (`endpoint/activation.rs` `update_resize`).
     private func showPreparedFrameIfReady() {
-        guard let frame = pendingFrame else { return }
+        guard let frame = pendingFrame, !frame.isFromBeforeResize, !isPassedOver(frame) else { return }
         for paneID in frame.layout.textPaneIDs where presentationFailures[paneID] == nil && terminals[paneID] != nil {
             guard let surface = stagedSurfaces[paneID], surface.terminal === terminals[paneID] else { return }
             switch surface.renderer.presentation {
@@ -2265,16 +2297,16 @@ final class HerdrScreenModel {
     // MARK: - Switching tabs
 
     /// The tab the screen is going to while it still shows another, by its id, once known, and its name: the
-    /// tab of a frame whose panes draw off screen, or the tab Remux's move goes to.
+    /// newest intent, so the tab Remux's move goes to while it is under way, else the tab of a frame whose
+    /// panes draw off screen.
     private var switchTarget: (tabID: String?, name: String)? {
         let shownTab = layout?.tab?.tabID
-        if let tab = pendingFrame?.layout.tab {
-            return tab.tabID == shownTab ? nil : (tab.tabID, switchName(ofTab: tab.tabID) ?? tab.label)
+        if let attempt, isCurrent(attempt), let move = attempt.move, let target = move.goesTo {
+            guard target.tabID == nil || target.tabID != shownTab else { return nil }
+            return (target.tabID, target.tabID.flatMap(switchName(ofTab:)) ?? target.name)
         }
-        guard let attempt, isCurrent(attempt), let target = attempt.move?.switchesTo,
-              target.tabID == nil || target.tabID != shownTab
-        else { return nil }
-        return (target.tabID, target.tabID.flatMap(switchName(ofTab:)) ?? target.name)
+        guard let tab = pendingFrame?.layout.tab, tab.tabID != shownTab else { return nil }
+        return (tab.tabID, switchName(ofTab: tab.tabID) ?? tab.label)
     }
 
     /// What the switching cue calls a tab, as the newest snapshot has it: the user's name for it, else "tab"

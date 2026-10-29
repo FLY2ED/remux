@@ -3262,6 +3262,154 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(adapter.terminalScreenPresentationProjection.statusOverlay, .ready, "the cue stayed after the switch")
     }
 
+    /// The newest move wins over a tab waiting off screen: a tab passed over whose panes finish drawing before
+    /// the next tab's frame arrives never comes on screen, the cue names the tab the move goes to, and a swipe
+    /// meanwhile goes on from there.
+    func testATabPassedOverNeverComesOnScreen() async throws {
+        let gate = RendererFenceGate()
+        let harness = await makeHarness(rendererFenceGate: gate, switchingCueDelay: .milliseconds(100))
+        let session = try await shownFourTabs(harness)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        var drawnTabs: [String?] = []
+        let watch = adapter.objectWillChange.sink { [harness] in drawnTabs.append(harness.model.layout?.tab?.tabID) }
+        defer { watch.cancel() }
+
+        gate.holdsRegistrations = true
+        XCTAssertEqual(adapter.focusAdjacentTopLevel(.next), .queued)
+        let toSecond = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(toSecond.params, ["tab_id": "t2"])
+        await session.bridge.serve(HerdrConnectionTests.reply(id: toSecond.id, json: #"{"type":"ok"}"#))
+        await session.bridge.serve(Self.fourTabs(revision: 2, focusedTab: "t2", focusedPane: "w1:p3"))
+        await session.bridge.serve(try harness.shownSurface(projection: 2, revision: 2, lines: ["thr fou"], panes: Self.secondTabDrawn()))
+        try await harness.waitUntil("the second tab's panes weren't drawing off screen") { gate.heldRegistrationCount == 2 }
+
+        // The user goes on to the third tab; the second tab's panes finish drawing before its frame arrives.
+        XCTAssertEqual(adapter.focusAdjacentTopLevel(.next), .queued)
+        let toThird = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(toThird.params, ["tab_id": "t3"])
+        gate.releaseRegistrations()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(harness.model.layout?.tab?.tabID, "t1", "the tab passed over came on screen")
+        XCTAssertEqual(adapter.terminalScreenPresentationProjection.statusOverlay, .switching("t3"))
+
+        XCTAssertEqual(adapter.focusAdjacentTopLevel(.next), .queued)
+        await session.bridge.serve(HerdrConnectionTests.reply(id: toThird.id, json: #"{"type":"ok"}"#))
+        await session.bridge.serve(Self.fourTabs(revision: 3, focusedTab: "t3", focusedPane: "w1:p5"))
+        let toFourth = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(toFourth.params, ["tab_id": "t4"], "the swipe went on from the tab passed over")
+        await session.bridge.serve(HerdrConnectionTests.reply(id: toFourth.id, json: #"{"type":"ok"}"#))
+        await session.bridge.serve(Self.fourTabs(revision: 4, focusedTab: "t4", focusedPane: "w1:p6"))
+        await session.bridge.serve(try harness.shownSurface(
+            projection: 4, revision: 3, lines: ["six"], panes: [.init(id: "w1:p6", x: 0, width: 7, height: 1, focused: true)]
+        ))
+        try await harness.waitUntil("the fourth tab wasn't drawn") { harness.model.layout?.tab?.tabID == "t4" }
+        XCTAssertFalse(drawnTabs.contains("t2"), "the tab passed over came on screen: \(drawnTabs)")
+        XCTAssertEqual(adapter.terminalScreenPresentationProjection.statusOverlay, .ready)
+    }
+
+    /// A move refused after a frame of another tab arrived leaves that frame the newest Herdr sent: it comes
+    /// on screen once drawn, so the screen never stays behind Herdr.
+    func testAFrameHeldForARefusedMoveComesOnScreen() async throws {
+        let gate = RendererFenceGate()
+        let harness = await makeHarness(rendererFenceGate: gate)
+        let session = try await shownFourTabs(harness)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+
+        gate.holdsRegistrations = true
+        XCTAssertEqual(adapter.focusAdjacentTopLevel(.next), .queued)
+        let toSecond = try await nextWrite(session.bridge, from: &index, command)
+        await session.bridge.serve(HerdrConnectionTests.reply(id: toSecond.id, json: #"{"type":"ok"}"#))
+        await session.bridge.serve(Self.fourTabs(revision: 2, focusedTab: "t2", focusedPane: "w1:p3"))
+        await session.bridge.serve(try harness.shownSurface(projection: 2, revision: 2, lines: ["thr fou"], panes: Self.secondTabDrawn()))
+        try await harness.waitUntil("the second tab's panes weren't drawing off screen") { gate.heldRegistrationCount == 2 }
+
+        XCTAssertEqual(adapter.focusAdjacentTopLevel(.next), .queued)
+        let toThird = try await nextWrite(session.bridge, from: &index, command)
+        gate.releaseRegistrations()
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(harness.model.layout?.tab?.tabID, "t1")
+        await session.bridge.serve(HerdrConnectionTests.reply(id: toThird.id, error: ("tab_not_found", "tab not found")))
+        try await harness.waitUntil("the frame Herdr sent last didn't come on screen") {
+            harness.model.layout?.tab?.tabID == "t2"
+        }
+        XCTAssertEqual(drawnPanes(harness), Self.secondTab)
+    }
+
+    /// A resize while a tab waits off screen keeps it off screen until Herdr draws it at the new grid, also
+    /// when its panes finish drawing before that frame arrives, so it never comes on screen at the grid
+    /// before.
+    func testAResizeWhileATabWaitsShowsItOnlyAtTheNewGrid() async throws {
+        let gate = RendererFenceGate()
+        let harness = await makeHarness(rendererFenceGate: gate)
+        let session = try await shownTab(harness, secondTab: Self.secondTab)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        var shownColumns: [UInt16] = []
+        let watch = adapter.objectWillChange.sink { [harness] in
+            if harness.model.layout?.tab?.tabID == "t2", let columns = harness.model.layout?.columns { shownColumns.append(columns) }
+        }
+        defer { watch.cancel() }
+
+        gate.holdsRegistrations = true
+        harness.model.reveal(.pane("w1:p3"), bootID: "boot")
+        let focus = try await nextWrite(session.bridge, from: &index, paneFocus)
+        await session.bridge.serve(Self.secondTabOnScreen(revision: 3))
+        await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 2, lines: ["thr fou"], panes: Self.secondTabDrawn()))
+        await session.bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
+        try await harness.waitUntil("the move didn't complete") { harness.model.stateTraceLabel == "shown" }
+        try await harness.waitUntil("the tab reached's panes weren't drawing off screen") { gate.heldRegistrationCount == 2 }
+
+        // The screen narrows, and the panes finish drawing before Herdr's frame at the new grid arrives.
+        harness.setScreenSize(CGSize(width: 300, height: 844))
+        gate.releaseRegistrations()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(drawnPanes(harness), ["w1:p1", "w1:p2"], "the tab reached came on screen at the grid before")
+
+        let narrower: [HerdrServerScript.Pane] = [
+            .init(id: "w1:p3", x: 0, width: 2, height: 1, focused: true),
+            .init(id: "w1:p4", x: 3, width: 2, height: 1),
+        ]
+        await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 3, lines: ["th fo"], panes: narrower))
+        try await harness.waitUntil("the tab reached wasn't drawn at the new grid") { self.drawnPanes(harness) == Self.secondTab }
+        let grid = try XCTUnwrap(harness.model.measurement?.controlViewport.columns)
+        XCTAssertEqual(Set(shownColumns), [grid], "the tab reached came on screen at another grid: \(shownColumns)")
+    }
+
+    /// The zoom button acts on the tab the pane sheet shows: while the screen still shows the tab before the
+    /// one Herdr is on, it is refused, as keys are, so it zooms neither tab; once the tab reached is on
+    /// screen, it zooms that one.
+    func testTheZoomButtonIsRefusedWhileATabWaitsOffScreen() async throws {
+        let gate = RendererFenceGate()
+        let harness = await makeHarness(rendererFenceGate: gate)
+        let session = try await shownTab(harness, secondTab: Self.secondTab)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+
+        gate.holdsRegistrations = true
+        harness.model.reveal(.pane("w1:p3"), bootID: "boot")
+        let focus = try await nextWrite(session.bridge, from: &index, paneFocus)
+        await session.bridge.serve(Self.secondTabOnScreen(revision: 3))
+        await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 2, lines: ["thr fou"], panes: Self.secondTabDrawn()))
+        await session.bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
+        try await harness.waitUntil("the move didn't complete") { harness.model.stateTraceLabel == "shown" }
+        try await harness.waitUntil("the tab reached's panes weren't drawing off screen") { gate.heldRegistrationCount == 2 }
+
+        XCTAssertEqual(adapter.setFocusedPaneZoomed(true), .missingTarget(.focusedPane), "the zoom went while the tab before was on screen")
+        try await Task.sleep(for: .milliseconds(100))
+        let written = await session.bridge.writtenCount
+        let zooms = try await harness.writes(session.bridge, from: index, count: written - index).compactMap(paneZoom)
+        XCTAssertTrue(zooms.isEmpty, "a zoom went to the tab not on screen: \(zooms)")
+        index = written
+
+        gate.releaseRegistrations()
+        try await harness.waitUntil("the tab reached wasn't drawn") { self.drawnPanes(harness) == Self.secondTab }
+        XCTAssertEqual(adapter.setFocusedPaneZoomed(true), .queued)
+        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        XCTAssertEqual([zoom.paneID, zoom.mode], ["w1:p3", "on"])
+    }
+
     /// The switching cue calls a tab without a name of the user's by its number, as the toolbar counts tabs:
     /// Herdr's own name for such a tab is its number alone.
     func testTheSwitchingCueCallsATabWithoutItsOwnNameByItsNumber() async throws {
@@ -3765,6 +3913,39 @@ final class HerdrScreenModelTests: XCTestCase {
         showInWindow(harness, panes: drawnIDs)
         try await harness.waitUntil("input wasn't offered") { harness.model.isInputAvailable }
         if zoomingOnShow { try await waitForMap(harness, panes: panes.count) }
+        return (bridge, index)
+    }
+
+    /// Workspace `w1` with tab `t1` (`w1:p1`, `w1:p2`), `t2` (`w1:p3`, `w1:p4`), `t3` (`w1:p5`) and `t4` (`w1:p6`),
+    /// each named after its id, this phone at `focusedTab` and `focusedPane`.
+    private static func fourTabs(revision: UInt64, focusedTab: String = "t1", focusedPane: String = "w1:p1") -> [UInt8] {
+        HerdrServerScript.snapshot(
+            revision: revision,
+            workspaces: [HerdrServerScript.Workspace(
+                id: "w1", label: "work",
+                tabs: [("t1", ["w1:p1", "w1:p2"]), ("t2", ["w1:p3", "w1:p4"]), ("t3", ["w1:p5"]), ("t4", ["w1:p6"])]
+            )],
+            focusedTab: focusedTab,
+            focusedPane: focusedPane
+        )
+    }
+
+    /// A session on tab `t1` of `fourTabs`, shown and taking input.
+    private func shownFourTabs(_ harness: HerdrModelHarness) async throws -> (bridge: FakeBridgeTransport, next: Int) {
+        let bridge = try await harness.bridge()
+        await bridge.serve(try HerdrServerScript.welcome() + Self.fourTabs(revision: 1))
+        harness.setScreenSize()
+        harness.model.setSelected(true)
+        var index = 0
+        let show = try await harness.nextSurfaceSet(bridge, from: &index)
+        index += 1
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        await bridge.serve(try harness.shownSurface(projection: 1, revision: 1, lines: ["one two"], panes: Self.twoPanes))
+        try await harness.waitUntil("the panes' renderers weren't created") {
+            harness.model.paneSurface("w1:p1") != nil && harness.model.paneSurface("w1:p2") != nil
+        }
+        showInWindow(harness, panes: ["w1:p1", "w1:p2"])
+        try await harness.waitUntil("input wasn't offered") { harness.model.isInputAvailable }
         return (bridge, index)
     }
 
