@@ -1117,7 +1117,9 @@ actor HerdrTerminalEngine {
     }
 
     /// The release's next command against Herdr's newest snapshot, with the lane free: the unzoom of the tab
-    /// the session is on, or the focus of the next tab, skipping a tab no longer zoomed or gone.
+    /// the session is on, or the focus of the next tab. Each tab is checked again as its turn comes
+    /// (`releases`): one no longer Remux's is skipped, also the one being focused, whose snapshot may then
+    /// never come.
     private func advanceRelease(outbox: any HerdrOutbound, in snapshot: HerdrSnapshot) {
         guard var release, unsettled == nil else { return }
         if release.tabs == nil {
@@ -1130,14 +1132,14 @@ actor HerdrTerminalEngine {
             }
         }
         if let focusing = release.focusing {
-            guard snapshot.focusedTabID == focusing else {
+            guard snapshot.focusedTabID == focusing || !releases(focusing, in: snapshot) else {
                 self.release = release
                 return
             }
             release.focusing = nil
         }
         while let tab = release.tabs?.first {
-            guard snapshot.tabs.contains(where: { $0.tabID == tab && $0.zoomed }) else {
+            guard releases(tab, in: snapshot) else {
                 release.tabs?.removeFirst()
                 continue
             }
@@ -1164,6 +1166,13 @@ actor HerdrTerminalEngine {
         }
         self.release = release
         endRelease()
+    }
+
+    /// Whether the release takes the zoom off `tab`: the snapshot has it zoomed, and Remux's record still has
+    /// it, which each snapshot keeps in step with Herdr's tabs (`HerdrOwnedZooms.reconcile`), so a zoom another
+    /// client made again on the tab isn't taken off.
+    private func releases(_ tab: String, in snapshot: HerdrSnapshot) -> Bool {
+        ownedZooms.tabIDs.contains(tab) && snapshot.tabs.contains { $0.tabID == tab && $0.zoomed }
     }
 
     /// Herdr answered the release's focus of `tab`: one that failed leaves that tab's zoom.

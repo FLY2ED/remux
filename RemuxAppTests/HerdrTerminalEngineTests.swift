@@ -907,6 +907,50 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// The session's end skips a tab closed while the end focuses it: Herdr's snapshot never shows the session
+    /// there, so the end goes on to the next tab instead of waiting for it.
+    func testTheSessionsEndSkipsATabClosedWhileItIsFocused() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await zoomedOnBothTabs(feed, updates, outbox)
+        let closed = Closed()
+
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        XCTAssertEqual(try outbox.commands().last, "tab.focus")
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t1"])
+        // Another client closes the tab before Herdr's answer to the focus comes.
+        await feed.receive(try Self.places(revision: 4, focusedPane: "R", zoomed: ["t2"], gone: ["t1"]))
+        try await answer(feed, outbox)
+        XCTAssertEqual(try outbox.commands().last, "zoom R off", "the end waited for the closed tab")
+        try await answerZoom(feed, outbox, zoomed: false, tab: "t2", panes: ["R", "S"])
+        XCTAssertTrue(closed.isClosed)
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "zoom R on", "focus R", "tab.focus", "zoom R off"])
+        await engine.stop()
+    }
+
+    /// A tab whose zoom stops being Remux's while the end goes over the tabs keeps it: another client unzoomed
+    /// it and zoomed it again, so the zoom it has is that client's.
+    func testTheSessionsEndLeavesAZoomThatStoppedBeingRemuxsDuringIt() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await zoomedOnBothTabs(feed, updates, outbox)
+        let closed = Closed()
+
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t1"])
+        // Another client unzooms the tab the session was on, then zooms it again.
+        await feed.receive(try Self.places(revision: 4, focusedPane: "P", zoomed: ["t1"]))
+        await feed.receive(try Self.places(revision: 5, focusedPane: "P", zoomed: ["t1", "t2"]))
+        try await answer(feed, outbox)
+        XCTAssertEqual(try outbox.commands().last, "zoom P off")
+        try await answerZoom(feed, outbox, zoomed: false)
+        XCTAssertTrue(closed.isClosed, "the end went on to a zoom that isn't Remux's")
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "zoom R on", "focus R", "tab.focus", "zoom P off"])
+        await engine.stop()
+    }
+
     /// The setting's zoom waiting behind a command doesn't go once another client zoomed its tab meanwhile:
     /// the tab shows its pane zoomed already, and the move's focus still takes the session there. That zoom
     /// isn't Remux's.
