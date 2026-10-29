@@ -1148,8 +1148,15 @@ final class HerdrScreenModel {
                 self?.terminalScreenAdapter.presentInformation(Self.popupHeldElsewhereMessage, for: GhosttyTerminalNotice.failureDuration)
             },
             onSurface: { [weak self] in self?.terminalScreenAdapter.makeScreenSurface(forPopup: $0) },
-            onChange: { [weak self] in self?.didChange() }
+            onChange: { [weak self] in self?.popupChanged() }
         )
+    }
+
+    /// The popup's renderer changed, or the popup went by itself, as one Herdr leaves out goes with its
+    /// attach: the panes it covered are drawn again.
+    private func popupChanged() {
+        reconcilePresentationActivity()
+        didChange()
     }
 
     /// All input over the session's connection goes this way. Input other than the wheel ends the selection
@@ -2321,7 +2328,7 @@ final class HerdrScreenModel {
             }
         }
         learnPopupAccent(from: layout)
-        popup.update(layout.popup, surfaceColumns: layout.columns, surfaceRows: layout.rows)
+        popup.update(from: layout)
         presentedFrame = frame.presented
         acknowledgeShownAgents()
         reconcilePresentationActivity()

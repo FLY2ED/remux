@@ -385,25 +385,56 @@ final class HerdrPopupTests: XCTestCase {
         XCTAssertNil(harness.model.popup.surface)
     }
 
-    /// A popup Herdr leaves out goes when the phone lets it go, as when the session is hidden: nothing else
-    /// shows it.
-    func testAPopupLeftOutOfATinySurfaceGoesWhenThePhoneLetsItGo() async throws {
+    /// The phone lets a popup Herdr leaves out go when the session leaves the screen, but keeps which popup it
+    /// is: Herdr still has it open and takes the tab's input for it, and still leaves it out of the phone's
+    /// surface. Back on screen at the same size, the phone attaches to it again, and typing goes to it.
+    func testAPopupLeftOutOfATinySurfaceIsAttachedAgainWhenTheSessionComesBack() async throws {
         let tiny = try HerdrModelHarness.screenSize(columns: 5, rows: 2)
         let harness = await makeHarness()
         let (session, attach, _) = try await attachedPopup(harness)
         try await leaveOut(harness, session, screen: tiny, columns: 5, rows: 2)
-        let before = await attach.writtenCount
+        let again = try await leaveAndComeBack(harness, session, attach, columns: 5, rows: 2)
 
-        harness.model.setSelected(false)
+        let opening = try await DirectClient.messages(again, at: 0)
+        XCTAssertEqual(opening.last, .attach(Self.popupID))
+        await again.serve(DirectServer.welcome() + DirectServer.frame(1, try Self.grid(harness), "$ "))
+        try await harness.waitUntil("the popup's renderer wasn't made again") { harness.model.popup.surface != nil }
+        var index = await session.bridge.writtenCount
+        XCTAssertTrue(harness.model.terminalScreenAdapter.sendInputToFocusedSurface("k").isAccepted)
+        let typed = try await nextInput(session.bridge, from: &index)
+        XCTAssertEqual(typed, popupInput(HerdrInputTranslator.events(forText: "k", reportsAllKeys: false)))
+    }
+
+    /// A popup left out that closed while the session was away can't be attached again: the phone forgets it,
+    /// and the panes it covered are drawn and take the input again.
+    func testAPopupLeftOutThatClosedWhileTheSessionWasAwayIsForgotten() async throws {
+        let tiny = try HerdrModelHarness.screenSize(columns: 5, rows: 2)
+        let harness = await makeHarness()
+        let (session, attach, _) = try await attachedPopup(harness)
+        try await leaveOut(harness, session, screen: tiny, columns: 5, rows: 2)
+        let again = try await leaveAndComeBack(harness, session, attach, columns: 5, rows: 2)
+
+        await again.serve(DirectServer.welcome() + DirectServer.shutdown("terminal attach failed: terminal \(Self.popupID) not found"))
+        try await harness.waitUntil("the closed popup was kept") { harness.model.popup.popup == nil }
         XCTAssertNil(popup(harness))
-        XCTAssertNil(harness.model.popup.popup)
-        try await harness.waitUntil("the popup wasn't let go") {
-            var messages: [DirectClient] = []
-            for write in before..<(await attach.writtenCount) {
-                messages += (try? await DirectClient.messages(attach, at: write)) ?? []
-            }
-            return messages.contains(.detach)
+        try await harness.waitUntil("the pane wasn't drawn again") {
+            harness.model.paneSurface("w1:p1")?.renderer.managedSurface?.isVisible == true
         }
+    }
+
+    /// The panes a popup Herdr leaves out covered are drawn again once it exits, though the layout, which
+    /// leaves the popup out already, doesn't change.
+    func testThePanesAreDrawnAgainWhenAPopupLeftOutExits() async throws {
+        let tiny = try HerdrModelHarness.screenSize(columns: 5, rows: 2)
+        let harness = await makeHarness()
+        let (session, attach, _) = try await attachedPopup(harness)
+        try await leaveOut(harness, session, screen: tiny, columns: 5, rows: 2)
+        let pane = try XCTUnwrap(harness.model.paneSurface("w1:p1")?.renderer.managedSurface)
+        XCTAssertFalse(pane.isVisible, "the pane was drawn under the popup")
+
+        await attach.serve(DirectServer.shutdown("terminal attach ended: terminal \(Self.popupID) not found"))
+        try await harness.waitUntil("the exited popup stayed") { self.popup(harness) == nil }
+        try await harness.waitUntil("the pane wasn't drawn again") { pane.isVisible && pane.isFocused }
     }
 
     /// Back on a surface Herdr can box the popup in, its frame returns, on the same attach.
@@ -1165,6 +1196,38 @@ final class HerdrPopupTests: XCTestCase {
             panes: [.init(id: "w1:p1", x: 0, width: columns, height: rows, focused: true)]
         ))
         try await harness.waitUntil("the small surface wasn't laid out") { harness.model.layout?.columns == columns }
+    }
+
+    /// The session leaves the screen, which lets the popup's attach go, and comes back on a surface of
+    /// `columns` x `rows` that leaves the popup out; returns the bridge of the attach that follows.
+    private func leaveAndComeBack(
+        _ harness: HerdrModelHarness,
+        _ session: (bridge: FakeBridgeTransport, next: Int),
+        _ attach: FakeBridgeTransport,
+        columns: UInt16,
+        rows: UInt16
+    ) async throws -> FakeBridgeTransport {
+        var index = await session.bridge.writtenCount
+        let before = await attach.writtenCount
+        harness.model.setSelected(false)
+        try await harness.waitUntil("the popup wasn't let go") {
+            var messages: [DirectClient] = []
+            for write in before..<(await attach.writtenCount) {
+                messages += (try? await DirectClient.messages(attach, at: write)) ?? []
+            }
+            return messages.contains(.detach)
+        }
+        harness.model.setSelected(true)
+        var show = try await harness.nextSurfaceSet(session.bridge, from: &index)
+        while !show.active { show = try await harness.nextSurfaceSet(session.bridge, from: &index) }
+        await session.bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
+        await session.bridge.serve(try harness.shownSurface(
+            projection: 1,
+            revision: 40,
+            lines: ["ab"],
+            panes: [.init(id: "w1:p1", x: 0, width: columns, height: rows, focused: true)]
+        ))
+        return try await harness.bridge(2)
     }
 
     /// The next pane or popup input from `index` on, then Herdr's answer to the ping after it, which tells

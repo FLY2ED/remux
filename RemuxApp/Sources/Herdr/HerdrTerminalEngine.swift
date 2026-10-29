@@ -49,6 +49,11 @@ struct HerdrPaneLayout: Equatable, Sendable {
     /// The popup open over the tab, which Herdr leaves out of a surface too small to box it. It takes the
     /// tab's input meanwhile: Herdr drops pane input from a client on that tab.
     let popup: Popup?
+
+    /// Whether Herdr could box a popup on this surface: it leaves an open popup out of a surface under
+    /// 6 x 4 cells (`popup_size.rs` `resolve_popup_geometry`), so only a surface this size or more that
+    /// comes without the popup says it closed.
+    var couldShowPopup: Bool { columns >= 6 && rows >= 4 }
 }
 
 /// A terminal of the tab's, which the engine paints from Herdr's frame and Remux sends input to: a pane's
@@ -742,9 +747,9 @@ actor HerdrTerminalEngine {
     private var bordersMayHaveChanged = true
     private var paintsPopup = false
     private var paintsPopupRevision: UInt64 = 0
-    /// The popup the frames drawn last showed, and the tab of the frame that showed it: Herdr sends a popup
-    /// only to a client on the tab it was opened on (`server/headless/render.rs`), and takes its input only
-    /// from one there (`takesInput`).
+    /// The popup open as the frames drawn last tell, and the tab of the frame that showed it: Herdr sends a
+    /// popup only to a client on the tab it was opened on (`server/headless/render.rs`), and takes its input
+    /// only from one there (`takesInput`). It is forgotten on a frame that could show it but doesn't.
     private var popupTab: (terminalID: String, tabID: String?)?
     private var cellWidthPx: UInt32
     private var cellHeightPx: UInt32
@@ -1928,7 +1933,11 @@ actor HerdrTerminalEngine {
         }
         let frame = PresentedFrame(bootID: surface.bootID, projectionRevision: surface.projectionRevision, paneIDs: listed)
         let next = layout(of: surface, snapshot: snapshot)
-        if let popup = next.popup { popupTab = (popup.terminalID, next.tab?.tabID) }
+        if let popup = next.popup {
+            popupTab = (popup.terminalID, next.tab?.tabID)
+        } else if next.couldShowPopup {
+            popupTab = nil
+        }
         if madeTerminal || next != layout || frame != presentedFrame {
             layout = next
             presentedFrame = frame

@@ -404,6 +404,28 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// A frame Herdr could box the popup in that comes without it says the popup closed, and input for it
+    /// doesn't go; a frame too small for the popup, which Herdr leaves it out of, says nothing of it.
+    func testPopupInputStopsWithAFrameThatCouldShowThePopupButDoesnt() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shown(feed, updates, outbox, panes: Self.atP)
+        func goes() async -> Bool {
+            if case .sent = await feed.send([.paste("fix it")], to: .popup("pop")) { true } else { false }
+        }
+        await feed.receive(.surface(try Self.surface(revision: 2, lines: ["one ", "two "], panes: Self.atP, popup: "pop")))
+        let goesWhenShown = await goes()
+        XCTAssertTrue(goesWhenShown)
+        await feed.receive(.surface(try Self.surface(revision: 3, lines: ["one ", "two "], panes: Self.atP)))
+        let goesWhenLeftOut = await goes()
+        XCTAssertTrue(goesWhenLeftOut, "input stopped for a popup Herdr only left out of a small frame")
+        await feed.receive(.surface(try Self.surface(revision: 4, lines: ["one   ", "two   ", "      ", "      "], panes: Self.atP)))
+        let goesWhenClosed = await goes()
+        XCTAssertFalse(goesWhenClosed, "input went for a popup a frame that could show it left out")
+        await engine.stop()
+    }
+
     /// As in Herdr's client, a move completes once its focus is answered on a frame showing its pane, also
     /// one that came before the answer: Herdr can send the snapshot and frame first, and sends nothing
     /// more for a move it has already made.
