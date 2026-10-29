@@ -997,7 +997,7 @@ final class HerdrScreenModel {
 
     private func sendAwaitingDelivery(_ events: [HerdrInputEvent], toPane paneID: String) async -> Bool {
         // Herdr drops pane input while a popup is open over the tab, and still answers the ping.
-        guard let target = inputTarget(forPane: paneID), layout?.hasPopup == false,
+        guard let target = inputTarget(forPane: paneID), popup.popup == nil,
               (try? HerdrConnection.checkLimits(events)) != nil
         else { return false }
         return await withCheckedContinuation { delivered in
@@ -1055,7 +1055,7 @@ final class HerdrScreenModel {
 
     /// The popup's input, as Herdr's client sends a popup's: in the order typed, within Herdr's limits.
     private func sendPopupInput(_ events: [HerdrInputEvent]) -> FocusedTerminalInputSubmissionResult {
-        guard let attempt = shownAttempt, let terminalID = layout?.popup?.terminalID else { return .transportUnavailable }
+        guard let attempt = shownAttempt, let terminalID = popup.popup?.terminalID else { return .transportUnavailable }
         let messages = HerdrInputTranslator.messages(events)
         do {
             try messages.forEach(HerdrConnection.checkLimits)
@@ -1070,7 +1070,7 @@ final class HerdrScreenModel {
     }
 
     private func deliverPopupInput(_ events: [HerdrInputEvent], to terminalID: String) async -> Bool {
-        guard let attempt = shownAttempt, layout?.popup?.terminalID == terminalID,
+        guard let attempt = shownAttempt, popup.popup?.terminalID == terminalID,
               (try? HerdrConnection.checkLimits(events)) != nil
         else { return false }
         return await withCheckedContinuation { delivered in
@@ -1082,7 +1082,7 @@ final class HerdrScreenModel {
     /// app isn't in the background, and no move of Remux's is taking the session elsewhere.
     private func reconcilePopupHold() {
         let attempt = shownAttempt
-        popup.setHeld(!stopped && isSelected && appPhase != .background && layout?.popup != nil
+        popup.setHeld(!stopped && isSelected && appPhase != .background && popup.popup != nil
             && attempt != nil && attempt?.move == nil)
     }
 
@@ -2287,7 +2287,7 @@ final class HerdrScreenModel {
             }
         }
         learnPopupAccent(from: layout)
-        popup.update(layout.popup)
+        popup.update(layout.popup, surfaceColumns: layout.columns, surfaceRows: layout.rows)
         presentedFrame = frame.presented
         acknowledgeShownAgents()
         reconcilePresentationActivity()
@@ -2446,7 +2446,7 @@ final class HerdrScreenModel {
         let sceneActive = appPhase == .active
         let live = failure == nil && isConnectionOpen
         // A popup covers the panes and has the only cursor, so they aren't drawn under it.
-        let popupShown = layout?.popup != nil
+        let popupShown = popup.popup != nil
         for (paneID, surface) in surfaces {
             let inLayout = layout?.panes.contains { $0.paneID == paneID } == true
             surface.renderer.setSceneActive(sceneActive)

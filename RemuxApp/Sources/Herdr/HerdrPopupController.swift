@@ -133,7 +133,10 @@ final class HerdrPopupController {
 
     private var runtime: GhosttyKitRuntime?
     private var theme: TerminalTheme
+    /// The popup open over the tab, which takes the tab's input.
     private(set) var popup: HerdrPaneLayout.Popup?
+    /// Herdr leaves the popup out of its surface, which is too small to box it, and only the attach shows it.
+    private var omitted = false
     private var held = false
     private var activity = RendererActivity()
     private var cell: GhosttyTerminalCellDisplayMetrics?
@@ -192,8 +195,16 @@ final class HerdrPopupController {
         reconcile()
     }
 
-    /// The layout's popup. Another terminal id is another popup.
-    func update(_ next: HerdrPaneLayout.Popup?) {
+    /// The layout's popup, on a surface of `surfaceColumns` x `surfaceRows`. Another terminal id is another
+    /// popup. Herdr leaves a popup out of a surface under 6 x 4 cells, where it can't box it, though the popup
+    /// is still open and takes the tab's input (`popup_size.rs` `resolve_popup_geometry`): an attached popup
+    /// stays then, until its attach ends or a surface Herdr could box it in comes without it.
+    func update(_ next: HerdrPaneLayout.Popup?, surfaceColumns: UInt16, surfaceRows: UInt16) {
+        if next == nil, popup != nil, attached != nil, surfaceColumns < 6 || surfaceRows < 4 {
+            omitted = true
+            return
+        }
+        omitted = false
         guard next != popup else { return }
         let replaced = next?.terminalID != popup?.terminalID
         popup = next
@@ -417,6 +428,12 @@ final class HerdrPopupController {
         // A renderer still being made for the attach closes once made.
         creating = nil
         let terminalID = popup.terminalID
+        if omitted {
+            // Nothing else shows a popup Herdr leaves out of its surface.
+            GhosttyRuntimeTrace.diagnostics("popup attach ended while left out terminal=\(terminalID) ending=\(ending)")
+            release()
+            return
+        }
         switch ending {
         case .detached:
             return
@@ -632,14 +649,19 @@ final class HerdrPopupController {
         Task { await attached.attachment.detach() }
     }
 
-    /// The phone lets the popup go: Herdr gives its size back, and its renderer closes.
+    /// The phone lets the popup go: Herdr gives its size back, and its renderer closes. A popup Herdr leaves
+    /// out goes with its attach.
     private func release() {
-        let holding = attached != nil || surface != nil || creating != nil || frameTerminal != nil
+        let holding = attached != nil || surface != nil || creating != nil || frameTerminal != nil || omitted
         detach()
         creating = nil
         closeSurface()
         setPaintsFrames(false)
         frameTerminal = nil
+        if omitted {
+            omitted = false
+            popup = nil
+        }
         if holding { onChange() }
     }
 

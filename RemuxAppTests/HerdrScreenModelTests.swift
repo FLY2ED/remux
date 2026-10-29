@@ -4766,7 +4766,7 @@ final class HerdrScreenModelTests: XCTestCase {
             ],
             popup: "popup-terminal"
         ))
-        try await harness.waitUntil("the popup wasn't seen") { harness.model.layout?.hasPopup == true }
+        try await harness.waitUntil("the popup wasn't seen") { harness.model.layout?.popup != nil }
         let underPopup = await adapter.sendPasteAwaitingCommandCompletion("x", to: pane)
         XCTAssertFalse(underPopup)
         harness.model.setSelected(false)

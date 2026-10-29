@@ -74,7 +74,7 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
 
     /// The popup on screen's terminal id, when `id` is its surface.
     private func popupTerminalID(for id: UUID) -> String? {
-        guard let terminalID = model?.layout?.popup?.terminalID, popupSurfaceIDs[terminalID] == id else { return nil }
+        guard let terminalID = model?.popup.popup?.terminalID, popupSurfaceIDs[terminalID] == id else { return nil }
         return terminalID
     }
 
@@ -212,7 +212,7 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
             focusedSurfaceID: presentedSurfaceID,
             isServerZoomed: zoomed,
             windowCount: workspaceOnScreen?.tabs.count ?? 1,
-            popup: layout.popup.map { popup in
+            popup: model.popup.popup.map { popup in
                 let displayed = model.popup.surface?.terminalID == popup.terminalID ? model.popup.displayed : nil
                 let colors = model.terminalColors
                 return GhosttyTerminalViewportPresentationProjection.Popup(
@@ -534,7 +534,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     /// only on that boot, through the model's one way to ask something of the session. None goes while a
     /// popup is open over the tab, as Herdr's client keeps its tabs and panes inert under a popup.
     private func ask(_ request: HerdrRequest) -> Bool {
-        guard let model, let layout = model.layout, !layout.hasPopup else { return false }
+        guard let model, let layout = model.layout, model.popup.popup == nil else { return false }
         return model.ask(request, bootID: layout.bootID)
     }
 
@@ -600,7 +600,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func setFocusedPaneZoomed(_ zoomed: Bool) -> GhosttyTerminalActionOutcome {
-        guard model?.layout?.hasPopup == false, model?.setFocusedPaneZoomed(zoomed) == true else {
+        guard model?.popup.popup == nil, model?.setFocusedPaneZoomed(zoomed) == true else {
             return .missingTarget(.focusedPane)
         }
         return .queued

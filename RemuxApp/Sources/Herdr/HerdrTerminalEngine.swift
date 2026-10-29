@@ -44,11 +44,9 @@ struct HerdrPaneLayout: Equatable, Sendable {
     let panes: [Pane]
     /// The lines Herdr draws around and between the panes, which the crop leaves out of the panes.
     let borders: [HerdrBorderLine]
-    /// The popup open over the tab. It takes the tab's input meanwhile: Herdr drops pane input from a
-    /// client on that tab.
+    /// The popup open over the tab, which Herdr leaves out of a surface too small to box it. It takes the
+    /// tab's input meanwhile: Herdr drops pane input from a client on that tab.
     let popup: Popup?
-
-    var hasPopup: Bool { popup != nil }
 }
 
 /// A terminal of the tab's, which the engine paints from Herdr's frame and Remux sends input to: a pane's
