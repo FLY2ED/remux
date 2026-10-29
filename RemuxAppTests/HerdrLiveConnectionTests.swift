@@ -849,8 +849,18 @@ final class HerdrLiveConnectionTests: XCTestCase {
     /// With Herdr's defaults each pane has its own box (`pane_gaps`), around its text area and the
     /// scrollbar's column right of it, and the focused pane's box is Herdr's accent (`ui/panes.rs`).
     @MainActor
-    func testEachPaneHasHerdrsBoxWithHerdrsDefaults() async throws {
-        let viewport = try await threePaneViewport(ui: [], settled: { viewport in
+    func testEachPaneHasHerdrsBoxWithHerdrsDefaultsOnHerdr093() async throws {
+        try await checkEachPaneHasHerdrsBox(version: "0.9.3")
+    }
+
+    @MainActor
+    func testEachPaneHasHerdrsBoxWithHerdrsDefaultsOnHerdr095() async throws {
+        try await checkEachPaneHasHerdrsBox(version: "0.9.5")
+    }
+
+    @MainActor
+    private func checkEachPaneHasHerdrsBox(version: String) async throws {
+        let viewport = try await threePaneViewport(version: version, ui: [], settled: { viewport in
             Set(viewport.paneLines.map(Self.describe)) == Set(viewport.panes.flatMap { pane in
                 Self.box(around: pane.normalFrame, ink: pane.isFocused ? Self.accent : Self.grey)
             }.map(Self.describe))
@@ -862,8 +872,18 @@ final class HerdrLiveConnectionTests: XCTestCase {
     /// its grey along the other's (`line_touches_pane`). The top line runs the window's width, under the
     /// labels too.
     @MainActor
-    func testNeighboursShareOneLineWithHerdrsGapsOff() async throws {
-        let viewport = try await threePaneViewport(ui: ["pane_gaps = false"], settled: Self.hasOneSharedDivider)
+    func testNeighboursShareOneLineWithHerdrsGapsOffOnHerdr093() async throws {
+        try await checkNeighboursShareOneLine(version: "0.9.3")
+    }
+
+    @MainActor
+    func testNeighboursShareOneLineWithHerdrsGapsOffOnHerdr095() async throws {
+        try await checkNeighboursShareOneLine(version: "0.9.5")
+    }
+
+    @MainActor
+    private func checkNeighboursShareOneLine(version: String) async throws {
+        let viewport = try await threePaneViewport(version: version, ui: ["pane_gaps = false"], settled: Self.hasOneSharedDivider)
         XCTAssertTrue(Self.hasOneSharedDivider(viewport))
         let top = viewport.paneLines.filter { $0.orientation == .horizontal && $0.position == 0.5 }
             .sorted { $0.start < $1.start }
@@ -898,8 +918,18 @@ final class HerdrLiveConnectionTests: XCTestCase {
     /// `pane_borders = "off"`: Herdr draws no lines and leaves a blank cell between panes; the picker
     /// maps every pane.
     @MainActor
-    func testNoLinesWithHerdrsBordersOff() async throws {
-        let viewport = try await threePaneViewport(ui: [#"pane_borders = "off""#], settled: { _ in true })
+    func testNoLinesWithHerdrsBordersOffOnHerdr093() async throws {
+        try await checkNoLinesWithBordersOff(version: "0.9.3")
+    }
+
+    @MainActor
+    func testNoLinesWithHerdrsBordersOffOnHerdr095() async throws {
+        try await checkNoLinesWithBordersOff(version: "0.9.5")
+    }
+
+    @MainActor
+    private func checkNoLinesWithBordersOff(version: String) async throws {
+        let viewport = try await threePaneViewport(version: version, ui: [#"pane_borders = "off""#], settled: { _ in true })
         XCTAssertEqual(viewport.paneLines, [])
         let (left, top, _) = try Self.leftTopAndBottom(viewport)
         XCTAssertEqual(left.normalFrame.x + left.normalFrame.columns + 2, top.normalFrame.x, "the scrollbar's column and the gap")
@@ -908,8 +938,19 @@ final class HerdrLiveConnectionTests: XCTestCase {
     /// `pane_borders = "off"` and `pane_gaps = false`: the panes' rectangles touch, with only the
     /// scrollbar's column between the text areas, and no lines; the picker maps every pane.
     @MainActor
-    func testTouchingPanesWithHerdrsBordersAndGapsOff() async throws {
+    func testTouchingPanesWithHerdrsBordersAndGapsOffOnHerdr093() async throws {
+        try await checkTouchingPanesWithBordersAndGapsOff(version: "0.9.3")
+    }
+
+    @MainActor
+    func testTouchingPanesWithHerdrsBordersAndGapsOffOnHerdr095() async throws {
+        try await checkTouchingPanesWithBordersAndGapsOff(version: "0.9.5")
+    }
+
+    @MainActor
+    private func checkTouchingPanesWithBordersAndGapsOff(version: String) async throws {
         let viewport = try await threePaneViewport(
+            version: version,
             ui: [#"pane_borders = "off""#, "pane_gaps = false"],
             settled: { _ in true }
         )
@@ -919,15 +960,16 @@ final class HerdrLiveConnectionTests: XCTestCase {
         XCTAssertEqual(top.normalFrame.y + top.normalFrame.rows, bottom.normalFrame.y, "no row between")
     }
 
-    /// A tab split into a pane on the left and two on the right on a fresh server with the `ui` settings,
-    /// the left and the top right pane labelled, once `settled` holds for the screen's projection (or
-    /// after 15 s). The pane picker's map has a tile for each pane.
+    /// A tab split into a pane on the left and two on the right on a fresh server of Herdr `version` with the
+    /// `ui` settings, the left and the top right pane labelled, once `settled` holds for the screen's
+    /// projection (or after 15 s). The pane picker's map has a tile for each pane.
     @MainActor
     private func threePaneViewport(
+        version: String,
         ui: [String],
         settled: (GhosttyTerminalViewportPresentationProjection) -> Bool
     ) async throws -> GhosttyTerminalViewportPresentationProjection {
-        let session = try await openShownSession(version: "0.9.3", ui: ui, through: { $0 })
+        let session = try await openShownSession(version: version, ui: ui, through: { $0 })
         let model = session.model
         let adapter = model.terminalScreenAdapter
         let trace = RemuxTransportStartupTrace(flowID: "herdr-live-borders")
@@ -960,7 +1002,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(100))
             viewport = adapter.terminalScreenPresentationProjection.viewport
         }
-        XCTAssertTrue(settled(viewport), "\(viewport.panes.map(\.normalFrame)) \(viewport.paneLines)")
+        XCTAssertTrue(settled(viewport), "Herdr \(version): \(viewport.panes.map(\.normalFrame)) \(viewport.paneLines)")
 
         let tab = try XCTUnwrap(adapter.selectedPaneSheetPresentationProjection()).topLevelID
         let picker = adapter.paneSelectionSheetRenderProjection(topLevelID: tab)
