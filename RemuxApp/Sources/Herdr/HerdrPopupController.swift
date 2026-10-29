@@ -32,57 +32,24 @@ struct HerdrPopupGrid: Equatable, Sendable, CustomStringConvertible {
     }
 }
 
-/// Writes an attached popup's input in order. Ghostty encodes keys, text and pastes into bytes on the
-/// main actor, for the terminal's modes as the program set them; one task writes them and the wheel's
-/// steps, so nothing overtakes what came before it. A tracked write learns when its bytes are written.
+/// Sends an attached popup's wheel steps through its attach, in order: one task writes them all.
 @MainActor
-final class HerdrPopupInputWriter {
-    private enum Message: Sendable {
-        case input([UInt8], completion: (@Sendable (Bool) -> Void)?)
-        case scroll(HerdrDirectTerminalClientMessage.ScrollDirection, column: UInt16?, row: UInt16?)
-    }
-
-    private let continuation: AsyncStream<Message>.Continuation
-    private var tracked: (@Sendable (Bool) -> Void)?
+final class HerdrPopupWheel {
+    private let continuation: AsyncStream<(HerdrDirectTerminalClientMessage.ScrollDirection, UInt16?, UInt16?)>.Continuation
 
     init(attachment: HerdrTerminalAttachment) {
-        let (messages, continuation) = AsyncStream.makeStream(of: Message.self)
+        let (steps, continuation) = AsyncStream.makeStream(of: (HerdrDirectTerminalClientMessage.ScrollDirection, UInt16?, UInt16?).self)
         self.continuation = continuation
         Task {
-            for await message in messages {
-                switch message {
-                case .input(let bytes, let completion):
-                    let written = await attachment.send(bytes)
-                    completion?(written)
-                case .scroll(let direction, let column, let row):
-                    await attachment.scroll(direction, lines: 1, column: column, row: row)
-                }
+            for await (direction, column, row) in steps {
+                await attachment.scroll(direction, lines: 1, column: column, row: row)
             }
         }
     }
 
-    /// The renderer's input callback.
-    func write(_ data: Data) -> Bool {
-        let completion = tracked
-        tracked = nil
-        continuation.yield(.input(Array(data), completion: completion))
-        return true
-    }
-
-    /// One wheel step of one row.
+    /// One step of one row.
     func scroll(_ direction: HerdrDirectTerminalClientMessage.ScrollDirection, column: UInt16?, row: UInt16?) {
-        continuation.yield(.scroll(direction, column: column, row: row))
-    }
-
-    /// Runs `operation`; `completion` learns whether the bytes it encoded were written, false when it wrote
-    /// none.
-    func performTracked(completion: @escaping @Sendable (Bool) -> Void, _ operation: () -> Bool) {
-        precondition(tracked == nil)
-        tracked = completion
-        _ = operation()
-        guard tracked != nil else { return }
-        tracked = nil
-        completion(false)
+        continuation.yield((direction, column, row))
     }
 
     func finish() {
@@ -91,19 +58,21 @@ final class HerdrPopupInputWriter {
 }
 
 /// The renderer of the popup over the tab: over its attachment's terminal, or over the terminal the engine
-/// paints from Herdr's popup frame when it can't be attached.
+/// paints from Herdr's popup frame when it can't be attached. Either way its input goes as Herdr's client
+/// sends a popup's (`HerdrPopupController.Input`).
 @MainActor
 final class HerdrPopupTerminalSurface: TerminalPaneInputSink {
     enum Source {
-        case attachment(HerdrPopupInputWriter)
-        /// Input goes as Herdr's client sends a popup's; `deliver` says whether Herdr has it.
-        case frame(deliver: ([HerdrInputEvent]) async -> Bool)
+        case attachment(HerdrPopupWheel)
+        case frame
     }
 
     let terminalID: String
     let terminal: HerdrRetainedTerminal
     let renderer: TerminalPaneRenderer
     let source: Source
+    /// The composer's input for this popup's terminal, which learns whether Herdr has it.
+    private let deliver: ([HerdrInputEvent]) async -> Bool
     /// The grid the renderer draws.
     fileprivate(set) var grid: HerdrPopupGrid
 
@@ -112,12 +81,14 @@ final class HerdrPopupTerminalSurface: TerminalPaneInputSink {
         terminal: HerdrRetainedTerminal,
         renderer: TerminalPaneRenderer,
         source: Source,
+        deliver: @escaping ([HerdrInputEvent]) async -> Bool,
         grid: HerdrPopupGrid
     ) {
         self.terminalID = terminalID
         self.terminal = terminal
         self.renderer = renderer
         self.source = source
+        self.deliver = deliver
         self.grid = grid
     }
 
@@ -131,29 +102,12 @@ final class HerdrPopupTerminalSurface: TerminalPaneInputSink {
 
     func sendPasteAwaitingCommandCompletion(_ text: String) async -> Bool {
         guard !text.isEmpty else { return false }
-        switch source {
-        case .attachment(let writer):
-            return await tracked(writer) { $0.sendPaste(text) }
-        case .frame(let deliver):
-            return await deliver([.paste(text)])
-        }
+        return await deliver([.paste(text)])
     }
 
     func sendKeyEventAwaitingCommandCompletion(_ event: GhosttySurfaceKeyEvent) async -> Bool {
-        switch source {
-        case .attachment(let writer):
-            return await tracked(writer) { $0.sendKeyEvent(event) }
-        case .frame(let deliver):
-            guard let event = HerdrInputTranslator.event(for: event) else { return false }
-            return await deliver([event])
-        }
-    }
-
-    private func tracked(_ writer: HerdrPopupInputWriter, _ operation: (GhosttyKitControlSurface) -> Bool) async -> Bool {
-        guard let control = renderer.inputControlSurface else { return false }
-        return await withCheckedContinuation { continuation in
-            writer.performTracked(completion: { continuation.resume(returning: $0) }) { operation(control) }
-        }
+        guard let event = HerdrInputTranslator.event(for: event) else { return false }
+        return await deliver([event])
     }
 }
 
@@ -162,8 +116,9 @@ final class HerdrPopupTerminalSurface: TerminalPaneInputSink {
 /// attach` does, at the grid that fills the terminal area at the panes' font. Herdr's resize lock then keeps
 /// the popup at the phone's size whatever other clients do, until the phone lets it go and Herdr gives the
 /// size back, so the phone holds the popup only while it is on the phone's screen. When Herdr refuses the
-/// attach or it fails, the popup's frame is drawn as Herdr sends it to this client, at the panes' font, and
-/// its input goes as Herdr's client sends a popup's.
+/// attach or it fails, the popup's frame is drawn as Herdr sends it to this client, at the panes' font.
+/// Its input goes as Herdr's client sends a popup's either way, which Herdr encodes for the program's modes
+/// and which makes the phone the client Herdr sends the program's clipboard writes to.
 ///
 /// Three grids are kept apart: the one the area holds, which goes to Herdr once the area settles; the one
 /// Herdr's frames have; and the one the renderer draws, which follows the frames', so the screen always
@@ -173,7 +128,10 @@ final class HerdrPopupController {
     typealias AttachmentFactory = @MainActor (_ terminalID: String, HerdrTerminalAttachment.Geometry) -> HerdrTerminalAttachment
     typealias FrameFenceFactory = @MainActor (_ terminalID: String, HerdrRetainedTerminal) -> any TerminalPaneRendererFence
 
-    struct FrameInput {
+    /// The popup's input, as Herdr's client sends a popup's.
+    struct Input {
+        /// Typing, read as Herdr's client reads a terminal's for the popup's keyboard modes.
+        let text: (String) -> FocusedTerminalInputSubmissionResult
         /// Input in the order it is typed.
         let send: ([HerdrInputEvent]) -> FocusedTerminalInputSubmissionResult
         /// The composer's input for one popup terminal, which learns whether Herdr has it; false when that
@@ -199,7 +157,7 @@ final class HerdrPopupController {
     private let makeFrameFence: FrameFenceFactory
     /// Tells the engine whether to paint the popup's frames, with a revision that orders the calls.
     private let paintFrames: (Bool, UInt64) -> Void
-    private let frameInput: FrameInput
+    private let input: Input
     /// Herdr refused the attach because another device holds the popup.
     private let onHeldElsewhere: () -> Void
     /// A new renderer, which the screen gives its surface.
@@ -229,17 +187,22 @@ final class HerdrPopupController {
     private var creating: ObjectIdentifier?
     private var failure: TerminalDisconnectReason?
     private var settle: Task<Void, Never>?
+    /// The popup Herdr asked to attach to again, once (`Ending.busy`), and the wait before it.
+    private var retried: String?
+    private var retry: Task<Void, Never>?
 
     /// How long the area must stay put before its grid goes to Herdr: the keyboard and rotation move the
     /// area, and each resize makes the program redraw.
     static let settleDelay: Duration = .milliseconds(150)
+    /// How long to wait before attaching again when Herdr asks to try again.
+    static let retryDelay: Duration = .milliseconds(250)
 
     init(
         theme: TerminalTheme,
         makeAttachment: @escaping AttachmentFactory,
         makeFrameFence: @escaping FrameFenceFactory,
         paintFrames: @escaping (Bool, UInt64) -> Void,
-        frameInput: FrameInput,
+        input: Input,
         onHeldElsewhere: @escaping () -> Void,
         onSurface: @escaping (HerdrPopupTerminalSurface) -> Void,
         onChange: @escaping () -> Void
@@ -248,7 +211,7 @@ final class HerdrPopupController {
         self.makeAttachment = makeAttachment
         self.makeFrameFence = makeFrameFence
         self.paintFrames = paintFrames
-        self.frameInput = frameInput
+        self.input = input
         self.onHeldElsewhere = onHeldElsewhere
         self.onSurface = onSurface
         self.onChange = onChange
@@ -269,6 +232,7 @@ final class HerdrPopupController {
         if replaced {
             release()
             framed = framed.filter { $0 == next?.terminalID }
+            retried = nil
             failure = nil
         } else {
             followFrameGrid()
@@ -329,8 +293,9 @@ final class HerdrPopupController {
     }
 
     /// A reconnect tries a popup that couldn't be attached again.
-    func retry() {
+    func retryAttach() {
         framed.removeAll()
+        retried = nil
         failure = nil
         reconcile()
     }
@@ -361,23 +326,20 @@ final class HerdrPopupController {
 
     func sendText(_ text: String) -> FocusedTerminalInputSubmissionResult {
         guard takesInput else { return .transportUnavailable }
-        if let managed = attachedManagedSurface { return managed.sendInput(text) }
-        return frameInput.send(HerdrInputTranslator.events(forText: text, reportsAllKeys: false))
+        return input.text(text)
     }
 
     func sendPaste(_ text: String) -> FocusedTerminalInputSubmissionResult {
         guard takesInput else { return .transportUnavailable }
-        if let managed = attachedManagedSurface { return managed.sendPaste(text) }
-        return frameInput.send([.paste(text)])
+        return input.send([.paste(text)])
     }
 
     func sendKey(_ key: GhosttySurfaceKeyEvent) -> FocusedTerminalInputSubmissionResult {
         guard takesInput else { return .transportUnavailable }
-        if let managed = attachedManagedSurface { return managed.sendKeyEvent(key) }
         guard let event = HerdrInputTranslator.event(for: key) else {
             return key.action == .release ? .accepted : .surfaceRejected
         }
-        return frameInput.send([event])
+        return input.send([event])
     }
 
     /// A swipe's wheel steps, a row each, up for positive `rows`: an attached popup's go through Herdr's
@@ -386,9 +348,9 @@ final class HerdrPopupController {
         guard takesInput else { return false }
         guard rows != 0 else { return true }
         let direction: HerdrDirectTerminalClientMessage.ScrollDirection = rows > 0 ? .up : .down
-        if let surface, case .attachment(let writer) = surface.source {
+        if let surface, case .attachment(let wheel) = surface.source {
             for _ in 0..<rows.magnitude {
-                writer.scroll(direction, column: column, row: row)
+                wheel.scroll(direction, column: column, row: row)
             }
             return true
         }
@@ -399,12 +361,7 @@ final class HerdrPopupController {
             modifiers: [],
             lines: 1
         )
-        return frameInput.send(Array(repeating: .mouse(wheel), count: Int(rows.magnitude))) == .accepted
-    }
-
-    private var attachedManagedSurface: GhosttyManagedSurface? {
-        guard let surface, surface.isAttached else { return nil }
-        return surface.renderer.managedSurface
+        return input.send(Array(repeating: .mouse(wheel), count: Int(rows.magnitude))) == .accepted
     }
 
     // MARK: - Holding the popup
@@ -420,7 +377,7 @@ final class HerdrPopupController {
             createFramedRendererIfPossible(popup)
         } else {
             setPaintsFrames(false)
-            if attached == nil, let requested, let cell {
+            if attached == nil, retry == nil, let requested, let cell {
                 attach(popup.terminalID, grid: requested, cell: cell)
             }
         }
@@ -516,7 +473,19 @@ final class HerdrPopupController {
         case .held(let reason):
             GhosttyRuntimeTrace.diagnostics("popup attach held elsewhere terminal=\(terminalID) reason=\(reason)")
             onHeldElsewhere()
-        case .refused(let reason):
+        case .busy(let reason) where retried != terminalID:
+            // Once: Herdr asks to try again while an agent reads the terminal, which takes a moment.
+            GhosttyRuntimeTrace.diagnostics("popup attach busy terminal=\(terminalID) reason=\(reason)")
+            retried = terminalID
+            closeSurface()
+            retry = Task { [weak self] in
+                try? await Task.sleep(for: Self.retryDelay)
+                guard !Task.isCancelled, let self else { return }
+                self.retry = nil
+                self.reconcile()
+            }
+            return
+        case .busy(let reason), .refused(let reason):
             GhosttyRuntimeTrace.diagnostics("popup attach refused terminal=\(terminalID) reason=\(reason)")
         case .failed(let reason):
             GhosttyRuntimeTrace.diagnostics("popup attach failed terminal=\(terminalID) reason=\(reason)")
@@ -554,14 +523,15 @@ final class HerdrPopupController {
     private func createAttachedRenderer(terminal: HerdrRetainedTerminal, grid: HerdrPopupGrid, generation: UInt64) {
         guard let runtime, let cell, let popup, let attached, attached.generation == generation else { return }
         closeSurface()
-        let writer = HerdrPopupInputWriter(attachment: attached.attachment)
+        let wheel = HerdrPopupWheel(attachment: attached.attachment)
         let terminalID = popup.terminalID
+        let deliver = input.deliver
         creating = ObjectIdentifier(terminal)
         TerminalPaneRenderer.create(
             app: runtime.appHandle,
             terminal: terminal,
             fence: HerdrTerminalAttachmentFence(attachment: attached.attachment, terminal: terminal),
-            writeInput: { writer.write($0) },
+            writeInput: nil,
             baseConfig: runtime.makeTmuxBaseSurfaceConfig(),
             metrics: grid.displayMetrics(cell: cell),
             theme: theme,
@@ -569,7 +539,7 @@ final class HerdrPopupController {
             onRendererFailure: { [weak self] in self?.rendererFailed(terminal) }
         ) { [weak self, runtime] result in
             guard let self, self.creating == ObjectIdentifier(terminal), self.attached?.generation == generation else {
-                writer.finish()
+                wheel.finish()
                 if case .success(let renderer) = result {
                     renderer.close { withExtendedLifetime(runtime) {} }
                 }
@@ -587,7 +557,8 @@ final class HerdrPopupController {
                     terminalID: terminalID,
                     terminal: terminal,
                     renderer: renderer,
-                    source: .attachment(writer),
+                    source: .attachment(wheel),
+                    deliver: { await deliver(terminalID, $0) },
                     grid: current
                 )
                 self.surface = surface
@@ -595,7 +566,7 @@ final class HerdrPopupController {
                 self.applyActivity()
                 self.logLayout()
             case .failure:
-                writer.finish()
+                wheel.finish()
                 self.failure = Self.rendererFailure
             }
             self.onChange()
@@ -608,7 +579,7 @@ final class HerdrPopupController {
         else { return }
         let terminal = frameTerminal.terminal
         let grid = HerdrPopupGrid(columns: popup.columns, rows: popup.rows)
-        let deliver = frameInput.deliver
+        let deliver = input.deliver
         let terminalID = popup.terminalID
         closeSurface()
         creating = ObjectIdentifier(terminal)
@@ -638,7 +609,8 @@ final class HerdrPopupController {
                     terminalID: popup.terminalID,
                     terminal: terminal,
                     renderer: renderer,
-                    source: .frame(deliver: { await deliver(terminalID, $0) }),
+                    source: .frame,
+                    deliver: { await deliver(terminalID, $0) },
                     grid: grid
                 )
                 self.surface = surface
@@ -693,11 +665,13 @@ final class HerdrPopupController {
     private func closeSurface() {
         guard let surface else { return }
         self.surface = nil
-        if case .attachment(let writer) = surface.source { writer.finish() }
+        if case .attachment(let wheel) = surface.source { wheel.finish() }
         surface.renderer.close { [runtime] in withExtendedLifetime(runtime) {} }
     }
 
     private func detach() {
+        retry?.cancel()
+        retry = nil
         guard let attached else { return }
         self.attached = nil
         attached.listening?.cancel()

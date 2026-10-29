@@ -22,6 +22,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
             using: try await fixture.claimRoot(trace: trace),
             herdrExecutable: fixture.executable,
             session: fixture.session,
+            kind: .session,
             trace: trace
         )
         let connection = try await HerdrConnection.open(
@@ -1652,11 +1653,12 @@ final class HerdrLiveConnectionTests: XCTestCase {
                 terminalSettings: settings
             ),
             sessionInstanceID: UUID(),
-            openBridge: {
+            openBridge: { kind in
                 wrap(try await HerdrSSHBridge.open(
                     using: try await fixture.claimRoot(trace: trace),
                     herdrExecutable: fixture.executable,
                     session: fixture.session,
+                    kind: kind,
                     trace: trace
                 ))
             },
@@ -1815,6 +1817,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
             using: try await fixture.claimRoot(trace: trace),
             herdrExecutable: fixture.executable,
             session: fixture.session,
+            kind: .session,
             trace: trace
         )
         let connection = try await HerdrConnection.open(

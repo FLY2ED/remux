@@ -2539,8 +2539,9 @@ final class RemuxAppUITests: XCTestCase {
     /// Mac. The phone attaches to the popup's terminal and shows it in a frame filling the terminal area at
     /// the panes' font, with its title and the tab it is over; Tabs and Panes are held, Sessions isn't. The
     /// popup's terminal takes the phone's grid, which the keyboard and a rotation change by rows and columns,
-    /// not text size, and keeps it while the other client types; Home gives it back. Typing, the composer
-    /// and swipes go into it: a shell's history scrolls, and a program reporting the mouse gets wheel steps.
+    /// not text size, and keeps it while the other client types, and through a quiet minute; Home gives it
+    /// back. Typing, the composer and swipes go into it: an arrow reaches a program asking for application
+    /// cursor keys as one, a shell's history scrolls, and a program reporting the mouse gets wheel steps.
     /// btop says the grid it has is too small, with its size; Claude Code takes the phone's keys. Each
     /// popup closes when its program exits. Screens in dark, then Latte.
     /// The harness answers each `<step>.request` with `<step>.done`, and `<step>.out` for what it read:
@@ -2548,7 +2549,8 @@ final class RemuxAppUITests: XCTestCase {
     /// `mac-claims` and `mac-types` type there, `read` captures its screen, `winsize` reads the popup's
     /// terminal size as "rows columns", and `end-claude` ends Claude Code (its first-run screens don't quit on
     /// Control-C). The other client draws the popup's terminal in its own popup box, which shows only its top
-    /// rows while the phone's grid is taller, so what the test reads there is written after a `clear`.
+    /// rows while the phone's grid is taller, so what the test reads there is written after a `clear`. The
+    /// harness puts `key_probe.py` in the server's home, which shows the bytes of each key it gets.
     func testLiveHerdrPopupFrameWhenConfigured() throws {
         app.launchEnvironment["REMUX_TRACE_GHOSTTY_DIAGNOSTICS"] = "1"
         let configuration = try launchLiveHerdrApp(requiringSteps: true)
@@ -2654,6 +2656,22 @@ final class RemuxAppUITests: XCTestCase {
         capture("f2-popup-dark-keyboard")
         hideKeyboard()
         XCTAssertNotNil(try popupGrid("with the keyboard down again") { $0 == full })
+
+        // A quiet popup keeps its attach past Herdr's minute for an idle background bridge.
+        RunLoop.current.run(until: Date().addingTimeInterval(65))
+        XCTAssertNotNil(try popupGrid("after a quiet minute") { $0 == full })
+        typeIntoPopup("clear; echo still-$((6*7))\n")
+        XCTAssertTrue(try screen(containing: "still-42"), "Typing after a quiet minute didn't reach the popup.")
+        hideKeyboard()
+
+        // Herdr encodes the phone's keys for the program's modes: an arrow reaches a program asking for
+        // application cursor keys as one.
+        typeIntoPopup("clear; python3 -I ~/key_probe.py decckm ~/decckm.log\n")
+        XCTAssertTrue(try screen(containing: "probe decckm ready"), "The key probe didn't start.")
+        app.typeKey(.upArrow, modifierFlags: [])
+        XCTAssertTrue(try screen(containing: #"b'\x1bOA'"#), "An arrow didn't reach the program as an application cursor key.")
+        app.typeText("QQ")
+        hideKeyboard()
 
         // A swipe scrolls the shell's history, and back.
         typeIntoPopup("clear; seq 1 200\n")

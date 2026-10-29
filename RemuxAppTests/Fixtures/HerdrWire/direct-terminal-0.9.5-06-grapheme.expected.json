@@ -1,0 +1,100 @@
+{
+  "client": [
+    {
+      "TerminalHello": {
+        "cell_height_px": 0,
+        "cell_width_px": 0,
+        "cols": 40,
+        "pixel_mouse": false,
+        "rows": 12,
+        "version": 22
+      },
+      "hex": "0016280c000000",
+      "tag": 0
+    },
+    {
+      "AttachTerminal": {
+        "takeover": false,
+        "terminal_id": "term_65ef8df51c54d2"
+      },
+      "hex": "05137465726d5f363565663864663531633534643200",
+      "tag": 5
+    },
+    {
+      "Input": {
+        "data": "clear; printf '\\360\\237\\221\\250\\342\\200\\215\\360\\237\\221\\251\\342\\200\\215\\360\\237\\221\\247 X'; echo\r"
+      },
+      "hex": "0161636c6561723b207072696e746620275c3336305c3233375c3232315c3235305c3334325c3230305c3231355c3336305c3233375c3232315c3235315c3334325c3230305c3231355c3336305c3233375c3232315c3234372058273b206563686f0d",
+      "tag": 1
+    },
+    {
+      "Detach": null,
+      "hex": "04",
+      "tag": 4
+    }
+  ],
+  "server": [
+    {
+      "Welcome": {
+        "encoding": "TerminalAnsi",
+        "error": null,
+        "version": 22
+      },
+      "length": 4,
+      "offset": 0,
+      "tag": 0
+    },
+    {
+      "MouseCapture": {
+        "enabled": false,
+        "sgr_pixels": false
+      },
+      "length": 3,
+      "offset": 8,
+      "tag": 8
+    },
+    {
+      "DirectTerminalKeyboardProtocol": {
+        "flags": 0,
+        "modify_other_keys_level": 0
+      },
+      "length": 3,
+      "offset": 15,
+      "tag": 16
+    },
+    {
+      "Terminal": {
+        "bytes": 626,
+        "full": true,
+        "height": 12,
+        "seq": 1,
+        "sha256": "75af0099e24b7ec283fbb9c5595eb51987daf321fd860a15c7b392404bcd40eb",
+        "width": 40
+      },
+      "length": 634,
+      "offset": 22,
+      "tag": 1
+    },
+    {
+      "Terminal": {
+        "bytes": 115,
+        "full": false,
+        "height": 12,
+        "seq": 2,
+        "sha256": "3a6a90b6e0b4dcaf936c2693c4f9f6ba0cfc964a3ac36f6eee6102a475c52d67",
+        "width": 40
+      },
+      "length": 121,
+      "offset": 660,
+      "tag": 1
+    },
+    {
+      "ServerShutdown": {
+        "reason": "detached"
+      },
+      "length": 11,
+      "offset": 785,
+      "tag": 3
+    }
+  ]
+}

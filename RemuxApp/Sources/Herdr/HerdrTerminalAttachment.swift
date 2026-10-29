@@ -7,8 +7,10 @@ import GhosttyKit
 /// the attach as failed, and its owner shows the terminal another way.
 /// While attached the terminal runs at this client's size, and Herdr's resize lock keeps it there whatever
 /// other clients do; when this client leaves, Herdr gives the size back (`server/headless.rs`
-/// `attach_terminal_client`, `remove_client`). Frames are terminal bytes, fed into a terminal of its own
-/// whose renderer this wakes, as the engine does for panes.
+/// `attach_terminal_client`, `remove_client`). Frames are terminal bytes, written for a terminal as Herdr's
+/// client draws in, fed into a terminal of its own whose renderer this wakes, as the engine does for panes.
+/// The attach carries the terminal's size and Herdr's wheel steps; typing goes to the terminal another
+/// way, which Herdr encodes for the program's modes.
 actor HerdrTerminalAttachment {
     enum Event: Sendable {
         /// The first frame's terminal; later frames of another size come as `grid`.
@@ -23,8 +25,9 @@ actor HerdrTerminalAttachment {
         /// Another direct client holds the terminal, and Herdr refuses another without a takeover, which is
         /// never asked for.
         case held(String)
-        /// Herdr refused the attach for another reason, as when the terminal is gone or an agent is reading
-        /// it.
+        /// Herdr asks to try again, as while an agent reads the terminal.
+        case busy(String)
+        /// Herdr refused the attach for another reason, as when the terminal is gone.
         case refused(String)
         /// The terminal is gone, as when its program exits.
         case closed(String)
@@ -41,11 +44,12 @@ actor HerdrTerminalAttachment {
     }
 
     typealias ProducerFactory = @Sendable (_ columns: UInt16, _ rows: UInt16) throws -> any HerdrPaneProducing
+    typealias BridgeOpener = @Sendable () async throws -> any HerdrBridgeTransport
 
     nonisolated let updates: AsyncStream<Event>
     nonisolated let terminalID: String
     private let continuation: AsyncStream<Event>.Continuation
-    private let openBridge: HerdrScreenModel.BridgeOpener
+    private let openBridge: BridgeOpener
     private let makeProducer: ProducerFactory
     private let welcomeDeadline: Duration
     private var geometry: Geometry
@@ -56,7 +60,6 @@ actor HerdrTerminalAttachment {
     private var terminal: HerdrRetainedTerminal?
     private var grid: (columns: UInt16, rows: UInt16)?
     private var renderer: HerdrRendererSurface?
-    private var keyboard = KeyboardProtocol()
     private var sentGeometry: Geometry?
     /// The sizes asked for, oldest first, that Herdr's frames may still have: frames for an earlier one can
     /// be on their way when a resize goes.
@@ -68,7 +71,7 @@ actor HerdrTerminalAttachment {
     init(
         terminalID: String,
         geometry: Geometry,
-        openBridge: @escaping HerdrScreenModel.BridgeOpener,
+        openBridge: @escaping BridgeOpener,
         welcomeDeadline: Duration = .seconds(10),
         makeProducer: @escaping ProducerFactory = { try HerdrPaneProducer(columns: $0, rows: $1) }
     ) {
@@ -123,12 +126,6 @@ actor HerdrTerminalAttachment {
         } catch {
             end(.failed(Self.describe(error)))
         }
-    }
-
-    /// True once the bytes are written to the bridge; Herdr doesn't acknowledge input.
-    func send(_ bytes: [UInt8]) async -> Bool {
-        guard !bytes.isEmpty else { return true }
-        return await write(.input(bytes))
     }
 
     func scroll(_ direction: HerdrDirectTerminalClientMessage.ScrollDirection, lines: UInt16, column: UInt16?, row: UInt16?) async {
@@ -202,28 +199,25 @@ actor HerdrTerminalAttachment {
             }
         case .frame(let frame):
             show(frame)
-        case .keyboardProtocol(let kittyFlags, let modifyOtherKeysLevel):
-            let sequences = keyboard.change(kittyFlags: kittyFlags, modifyOtherKeysLevel: modifyOtherKeysLevel)
-            if let producer, !sequences.isEmpty, producer.feed(sequences) != GHOSTTY_TERMINAL_PRODUCER_RESULT_OK {
-                end(.failed("The terminal couldn't be drawn."))
-            }
         case .shutdown(let reason):
             // Herdr's reasons: "detached" after a detach and "terminal attach failed: …" for a refused attach,
-            // "… already has an attached client …" when another client holds the terminal
-            // (`server/headless.rs`), "terminal attach ended: …" once the terminal is gone
-            // (`server/headless/render.rs`).
+            // "… already has an attached client …" when another client holds the terminal and "… has a read
+            // in progress; retry" while an agent reads it (`server/headless.rs`), "terminal attach ended: …"
+            // once the terminal is gone (`server/headless/render.rs`).
             if reason == Self.detachedReason {
                 end(.detached)
             } else if let reason, reason.hasPrefix(Self.endedPrefix) {
                 end(.closed(reason))
             } else if terminal == nil, let reason, reason.contains(Self.heldReason) {
                 end(.held(reason))
+            } else if terminal == nil, let reason, reason.hasSuffix(Self.retrySuffix) {
+                end(.busy(reason))
             } else if terminal == nil {
                 end(.refused(reason ?? "Herdr refused the attach."))
             } else {
                 end(.failed(reason ?? "Herdr ended the attach."))
             }
-        case .mouseCapture, .skipped:
+        case .mouseCapture, .keyboardProtocol, .skipped:
             break
         }
     }
@@ -271,15 +265,13 @@ actor HerdrTerminalAttachment {
                 end(.failed("The terminal couldn't be drawn."))
                 return
             }
-            // Pastes go bracketed, which Herdr unwraps and pastes the way the program asks; the keyboard
-            // protocol may have come before the first frame.
-            let setup = Self.bracketedPaste + keyboard.current
+            // Herdr's client draws in a terminal that clusters graphemes, as Ghostty's do.
             guard producer.resizeAndFeed(
                 columns: frame.columns,
                 rows: frame.rows,
                 cellWidthPx: geometry.cellWidthPx,
                 cellHeightPx: geometry.cellHeightPx,
-                bytes: setup + frame.bytes
+                bytes: HerdrPanePainter.graphemeClustering + frame.bytes
             ) == GHOSTTY_TERMINAL_PRODUCER_RESULT_OK else {
                 end(.failed("The terminal couldn't be drawn."))
                 return
@@ -335,41 +327,10 @@ actor HerdrTerminalAttachment {
     private static let detachedReason = "detached"
     private static let endedPrefix = "terminal attach ended"
     private static let heldReason = "already has an attached client"
-    private static let bracketedPaste = Array("\u{1b}[?2004h".utf8)
+    private static let retrySuffix = "; retry"
 
     private static func describe(_ error: Error) -> String {
         (error as? LocalizedError)?.errorDescription ?? String(describing: error)
-    }
-
-    /// The keyboard protocol on the attachment's terminal, changed with the sequences Herdr's client
-    /// writes to its own terminal (`terminal_modes.rs` `set_direct_host_keyboard_protocol`), so the
-    /// renderer encodes keys the way the program asked.
-    struct KeyboardProtocol: Equatable {
-        private(set) var kittyFlags: UInt16?
-        private(set) var modifyOtherKeysLevel: UInt8 = 0
-
-        /// The sequences that set the protocol now in effect on a new terminal.
-        var current: [UInt8] {
-            var bytes: [UInt8] = []
-            if let kittyFlags { bytes += Array("\u{1b}[>\(kittyFlags)u".utf8) }
-            if modifyOtherKeysLevel != 0 { bytes += Array("\u{1b}[>4;\(modifyOtherKeysLevel)m".utf8) }
-            return bytes
-        }
-
-        mutating func change(kittyFlags flags: UInt16, modifyOtherKeysLevel level: UInt8) -> [UInt8] {
-            let nextFlags = flags == 0 ? nil : flags
-            var bytes: [UInt8] = []
-            if kittyFlags != nextFlags {
-                if kittyFlags != nil { bytes += Array("\u{1b}[<1u".utf8) }
-                if let nextFlags { bytes += Array("\u{1b}[>\(nextFlags)u".utf8) }
-            }
-            if modifyOtherKeysLevel != level {
-                bytes += Array("\u{1b}[>4;\(level)m".utf8)
-            }
-            kittyFlags = nextFlags
-            modifyOtherKeysLevel = level
-            return bytes
-        }
     }
 }
 

@@ -3,7 +3,7 @@ import Foundation
 /// The messages of Herdr's direct terminal connection, the one `herdr terminal attach` makes: a
 /// `TerminalHello` instead of the endpoint hello, then one terminal's stream as terminal bytes (Herdr
 /// v0.9.3 and v0.9.5 `src/protocol/wire.rs`, protocol 22; the variant order is the tag, as on the
-/// endpoint connection).
+/// endpoint connection). Remux sends no input this way (`HerdrTerminalAttachment`).
 enum HerdrDirectTerminalClientMessage: Equatable, Sendable {
     enum ScrollDirection: UInt32, Equatable, Sendable {
         case up = 0
@@ -12,9 +12,6 @@ enum HerdrDirectTerminalClientMessage: Equatable, Sendable {
 
     /// Must be the first message: the client's terminal size, which an attach gives the terminal.
     case hello(columns: UInt16, rows: UInt16, cellWidthPx: UInt32, cellHeightPx: UInt32)
-    /// Bytes as a terminal sends them; Herdr writes them to the terminal, except that a complete
-    /// bracketed paste is pasted the way the program asked for (`server/pane_input.rs`).
-    case input([UInt8])
     case resize(columns: UInt16, rows: UInt16, cellWidthPx: UInt32, cellHeightPx: UInt32)
     case detach
     /// Without `takeover`, Herdr refuses a terminal another direct client already holds.
@@ -40,9 +37,6 @@ enum HerdrDirectTerminalClientMessage: Equatable, Sendable {
             writer.u32(cellWidthPx)
             writer.u32(cellHeightPx)
             writer.bool(false)
-        case .input(let bytes):
-            writer.variant(1)
-            writer.byteArray(bytes)
         case .resize(let columns, let rows, let cellWidthPx, let cellHeightPx):
             writer.variant(3)
             writer.u16(columns)

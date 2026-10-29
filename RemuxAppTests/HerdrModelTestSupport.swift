@@ -91,7 +91,8 @@ enum HerdrServerScript {
     /// `panes` and `agents` are the snapshot's JSON entries, made with `snapshotPane` and
     /// `snapshotAgent`. Without `panes` it lists the panes of its tabs in the scripted session
     /// (`sessionPanes`), as Herdr lists every pane, but those `closed` names.
-    /// The focused tab is labelled `tabLabel` and is `zoomed` or not; `otherTabs` are further tabs of
+    /// The focused tab is labelled `tabLabel`, a name of the user's unless `customTabLabel` is false, and is
+    /// `zoomed` or not; `otherTabs` are further tabs of
     /// workspace `w1`, by id, each named after its id, and zoomed when in `zoomedOtherTabs`. Workspace `w1`
     /// is listed when it has a label.
     static func snapshot(
@@ -99,6 +100,7 @@ enum HerdrServerScript {
         boot: String = "boot",
         workspaceLabel: String? = nil,
         tabLabel: String = "main",
+        customTabLabel: Bool = true,
         zoomed: Bool = false,
         focusedTab: String = "t1",
         otherTabs: [String] = [],
@@ -113,7 +115,7 @@ enum HerdrServerScript {
         }
         let tabs = ([(focusedTab, tabLabel, true)] + otherTabs.map { ($0, $0, false) }).enumerated().map { index, tab in
             """
-            {"tab_id":"\(tab.0)","workspace_id":"w1","number":\(index + 1),"label":"\(tab.1)","custom_label":true,
+            {"tab_id":"\(tab.0)","workspace_id":"w1","number":\(index + 1),"label":"\(tab.1)","custom_label":\(!tab.2 || customTabLabel),
              "zoomed":\(tab.2 ? zoomed : zoomedOtherTabs.contains(tab.0)),"focused":\(tab.2),"agent_status":"idle"}
             """
         }
@@ -618,6 +620,8 @@ private final class GatedRendererFence: TerminalPaneRendererFence {
 final class HerdrModelHarness {
     actor Bridges {
         private(set) var opened: [FakeBridgeTransport] = []
+        /// What each opened bridge is for.
+        private(set) var kinds: [HerdrBridgeKind] = []
         /// When each opening started.
         private(set) var openingsStartedAt: [ContinuousClock.Instant] = []
         private let openingTakes: Duration
@@ -631,7 +635,7 @@ final class HerdrModelHarness {
             failure = error
         }
 
-        func open() async throws -> FakeBridgeTransport {
+        func open(_ kind: HerdrBridgeKind) async throws -> FakeBridgeTransport {
             openingsStartedAt.append(.now)
             if let failure {
                 self.failure = nil
@@ -640,6 +644,7 @@ final class HerdrModelHarness {
             if openingTakes > .zero { try await Task.sleep(for: openingTakes) }
             let transport = FakeBridgeTransport()
             opened.append(transport)
+            kinds.append(kind)
             return transport
         }
     }
@@ -689,7 +694,7 @@ final class HerdrModelHarness {
         model = HerdrScreenModel(
             target: target,
             sessionInstanceID: UUID(),
-            openBridge: { try await bridges.open() },
+            openBridge: { kind in try await bridges.open(kind) },
             onRuntimeStateChange: { stateLog.updates.append($0) },
             onNotification: { stateLog.notifications.append($0) },
             connectionTiming: timing,

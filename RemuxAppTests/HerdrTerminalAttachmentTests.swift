@@ -8,7 +8,7 @@ import XCTest
 /// attachment over a recorded stream shows its terminal and ends as Herdr ended it.
 final class HerdrTerminalAttachmentTests: XCTestCase {
     private static let versions = ["0.9.3", "0.9.5"]
-    private static let scenarios = ["01-shell", "02-refused", "03-missing", "04-exit", "05-keyboard"]
+    private static let scenarios = ["01-shell", "02-refused", "03-missing", "04-exit", "05-keyboard", "06-grapheme"]
     /// The recorded client sent no cell size, which GhosttyKit's terminals need; the attachments here send one.
     private static let geometry = HerdrTerminalAttachment.Geometry(columns: 40, rows: 12, cellWidthPx: 8, cellHeightPx: 16)
     private static let resized = HerdrTerminalAttachment.Geometry(columns: 44, rows: 14, cellWidthPx: 8, cellHeightPx: 16)
@@ -54,8 +54,8 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
         }
     }
 
-    /// Herdr accepted these bytes: the popup's pty took the hello's and the resize's sizes, the input ran
-    /// and the wheel scrolled its history.
+    /// Herdr accepted these messages: the popup's pty took the hello's and the resize's sizes, and the wheel
+    /// scrolled its history. The recorded client also typed, which Remux doesn't do this way.
     func testRemuxEncodesWhatTheRecordedClientSent() throws {
         for version in Self.versions {
             let fixture = try DirectTerminalFixture(version: version, scenario: "01-shell")
@@ -63,13 +63,13 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
             let messages: [HerdrDirectTerminalClientMessage] = [
                 .hello(columns: 40, rows: 12, cellWidthPx: 0, cellHeightPx: 0),
                 .attach(terminalID: terminalID, takeover: false),
-                .input(Array("echo wire\r".utf8)),
                 .resize(columns: 44, rows: 14, cellWidthPx: 0, cellHeightPx: 0),
                 .scroll(.up, lines: 3, column: nil, row: nil),
                 .scroll(.down, lines: 3, column: nil, row: nil),
                 .detach,
             ]
-            XCTAssertEqual(messages.flatMap(\.frame), fixture.client, fixture.name)
+            let recorded = fixture.expected.client.filter { $0.tag != Self.inputTag }.map(\.hex)
+            XCTAssertEqual(messages.map { Self.hex($0.payload) }, recorded, fixture.name)
         }
     }
 
@@ -114,9 +114,9 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
                 }
             }
             XCTAssertEqual(events, ["terminal 40x12", "grid 44x14", "ended detached"], fixture.name)
-            // Pastes go bracketed, which Herdr unwraps and pastes the way the program asks.
+            // Herdr's client draws in a terminal that clusters graphemes.
             let first = try XCTUnwrap(producers.fed.first, fixture.name)
-            XCTAssertTrue(first.starts(with: Array("\u{1b}[?2004h".utf8)), fixture.name)
+            XCTAssertTrue(first.starts(with: Array("\u{1b}[?2027h".utf8)), fixture.name)
         }
     }
 
@@ -175,32 +175,17 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
         XCTAssertEqual(ending, .failed("Herdr sent a 44x14 frame for another size."))
     }
 
-    /// The protocol the program asked for, sent before the first frame, is on the terminal the renderer
-    /// encodes keys for.
-    func testTheProgramsKeyboardProtocolIsOnTheAttachmentsTerminal() async throws {
-        for version in Self.versions {
-            let fixture = try DirectTerminalFixture(version: version, scenario: "05-keyboard")
-            let bridge = FakeBridgeTransport()
-            let producers = RecordingProducers()
-            let attachment = Self.attachment(fixture, bridge: bridge, producers: producers)
-            Task { await attachment.run() }
-            await bridge.serve(fixture.server)
-            for await _ in attachment.updates {}
-            let first = try XCTUnwrap(producers.fed.first, fixture.name)
-            XCTAssertEqual(Array(first.prefix(13)), Array("\u{1b}[?2004h\u{1b}[>1u".utf8), fixture.name)
-        }
-    }
-
-    func testKeyboardProtocolChangesAsHerdrsClientSetsItsTerminal() {
-        var keyboard = HerdrTerminalAttachment.KeyboardProtocol()
-        XCTAssertEqual(keyboard.change(kittyFlags: 0, modifyOtherKeysLevel: 0), [])
-        XCTAssertEqual(String(decoding: keyboard.change(kittyFlags: 1, modifyOtherKeysLevel: 0), as: UTF8.self), "\u{1b}[>1u")
-        XCTAssertEqual(
-            String(decoding: keyboard.change(kittyFlags: 3, modifyOtherKeysLevel: 2), as: UTF8.self),
-            "\u{1b}[<1u\u{1b}[>3u\u{1b}[>4;2m"
-        )
-        XCTAssertEqual(String(decoding: keyboard.current, as: UTF8.self), "\u{1b}[>3u\u{1b}[>4;2m")
-        XCTAssertEqual(String(decoding: keyboard.change(kittyFlags: 0, modifyOtherKeysLevel: 0), as: UTF8.self), "\u{1b}[<1u\u{1b}[>4;0m")
+    /// Herdr asks to try again while an agent reads the terminal: the attach ends busy, after the recorded
+    /// welcome.
+    func testAReadInProgressEndsTheAttachBusy() async throws {
+        let fixture = try DirectTerminalFixture(version: "0.9.5", scenario: "01-shell")
+        let welcome = try XCTUnwrap(try fixture.serverPayloads().first)
+        let reason = "terminal attach failed: terminal term has a read in progress; retry"
+        var shutdown = HerdrWireWriter()
+        shutdown.variant(3)
+        shutdown.optional(reason) { $0.string($1) }
+        let ending = try await Self.ending(of: HerdrWire.frame(welcome) + HerdrWire.frame(shutdown.bytes), fixture)
+        XCTAssertEqual(ending, .busy(reason))
     }
 
     func testAnAttachHerdrNeverAnswersFailsAndClosesItsBridge() async throws {
@@ -238,7 +223,7 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
         guard case .failed = ending else { return XCTFail("ended \(String(describing: ending))") }
     }
 
-    func testInputScrollsAndAResizeGoAsWrittenOnceAttached() async throws {
+    func testScrollsAndAResizeGoAsWrittenOnceAttached() async throws {
         let fixture = try DirectTerminalFixture(version: "0.9.5", scenario: "01-shell")
         let payloads = try fixture.serverPayloads()
         let bridge = FakeBridgeTransport()
@@ -246,8 +231,6 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
         Task { await attachment.run() }
         _ = try await bridge.written(0)
         await bridge.serve(payloads.prefix(4).flatMap(HerdrWire.frame))
-        let sent = await attachment.send(Array("echo wire\r".utf8))
-        XCTAssertTrue(sent)
         await attachment.resize(to: Self.resized)
         // The size already asked for doesn't go again.
         await attachment.resize(to: Self.resized)
@@ -259,7 +242,6 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
         let expected: [HerdrDirectTerminalClientMessage] = [
             .hello(columns: 40, rows: 12, cellWidthPx: 8, cellHeightPx: 16),
             .attach(terminalID: terminalID, takeover: false),
-            .input(Array("echo wire\r".utf8)),
             .resize(columns: 44, rows: 14, cellWidthPx: 8, cellHeightPx: 16),
             .scroll(.up, lines: 3, column: nil, row: nil),
             .scroll(.down, lines: 3, column: nil, row: nil),
@@ -267,10 +249,10 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
         ]
         // The hello and the attach go in one write.
         var written: [UInt8] = []
-        for index in 0..<6 { written += try await bridge.written(index) }
+        for index in 0..<5 { written += try await bridge.written(index) }
         XCTAssertEqual(written, expected.flatMap(\.frame))
         let writes = await bridge.writtenCount
-        XCTAssertEqual(writes, 6)
+        XCTAssertEqual(writes, 5)
         let closed = await bridge.isClosed
         XCTAssertTrue(closed)
     }
@@ -313,6 +295,13 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
             if case .ended(let reason) = event { ending = reason }
         }
         return ending
+    }
+
+    /// Herdr's `Input`, which the recorded client sent and Remux doesn't.
+    private static let inputTag: UInt32 = 1
+
+    private static func hex(_ bytes: [UInt8]) -> String {
+        bytes.map { String(format: "%02x", $0) }.joined()
     }
 
     private static func sha256(_ bytes: [UInt8]) -> String {

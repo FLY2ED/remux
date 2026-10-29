@@ -34,7 +34,7 @@ final class HerdrPaneSurface: TerminalPaneInputSink {
 /// owns their renderers.
 @MainActor
 final class HerdrScreenModel {
-    typealias BridgeOpener = @Sendable () async throws -> any HerdrBridgeTransport
+    typealias BridgeOpener = @Sendable (HerdrBridgeKind) async throws -> any HerdrBridgeTransport
     typealias RendererFenceFactory = @MainActor (
         HerdrTerminalEngine,
         _ paneID: String,
@@ -750,7 +750,7 @@ final class HerdrScreenModel {
         isReconnecting = false
         failuresInARow = 0
         failure = nil
-        popup.retry()
+        popup.retryAttach()
         restart()
         return true
     }
@@ -1017,6 +1017,13 @@ final class HerdrScreenModel {
         popup.presentation
     }
 
+    /// What the popup's frame calls the tab it is over, as the newest snapshot has it: the user's name for
+    /// it, else "tab" and its number, as the toolbar counts tabs; Herdr's own name for a tab is its number.
+    func popupTabName(ofTab tabID: String) -> String? {
+        guard let tab = snapshot?.tabs.first(where: { $0.tabID == tabID }) else { return nil }
+        return tab.customLabel ? tab.label : "tab \(tab.number)"
+    }
+
     /// Where the pointer is over the popup, in its terminal's points: the place of a scroll gesture.
     func movePopupPointer(to point: CGPoint) {
         popupPointer = point
@@ -1044,8 +1051,16 @@ final class HerdrScreenModel {
         return popup.scroll(rows: Int(steps), column: column, row: row)
     }
 
-    /// A framed popup's input, as Herdr's client sends a popup's: in the order typed, within Herdr's limits.
-    private func sendFramedPopupInput(_ events: [HerdrInputEvent]) -> FocusedTerminalInputSubmissionResult {
+    /// Typing into the popup, read as Herdr's client reads a terminal's: Herdr says whether the popup's
+    /// program asks for every key (`ClientShellKeyboardReportAll` follows the popup, `render.rs`
+    /// `shell_focused_runtime`).
+    private func sendPopupText(_ text: String) -> FocusedTerminalInputSubmissionResult {
+        guard let attempt = shownAttempt else { return .transportUnavailable }
+        return sendPopupInput(HerdrInputTranslator.events(forText: text, reportsAllKeys: attempt.reportsAllKeys))
+    }
+
+    /// The popup's input, as Herdr's client sends a popup's: in the order typed, within Herdr's limits.
+    private func sendPopupInput(_ events: [HerdrInputEvent]) -> FocusedTerminalInputSubmissionResult {
         guard let attempt = shownAttempt, let terminalID = layout?.popup?.terminalID else { return .transportUnavailable }
         let messages = HerdrInputTranslator.messages(events)
         do {
@@ -1060,7 +1075,7 @@ final class HerdrScreenModel {
         return .accepted
     }
 
-    private func deliverFramedPopupInput(_ events: [HerdrInputEvent], to terminalID: String) async -> Bool {
+    private func deliverPopupInput(_ events: [HerdrInputEvent], to terminalID: String) async -> Bool {
         guard let attempt = shownAttempt, layout?.popup?.terminalID == terminalID,
               (try? HerdrConnection.checkLimits(events)) != nil
         else { return false }
@@ -1089,16 +1104,17 @@ final class HerdrScreenModel {
         let openBridge = openBridge
         let engine = engine
         let makeAttachment = makePopupAttachment ?? { terminalID, geometry in
-            HerdrTerminalAttachment(terminalID: terminalID, geometry: geometry, openBridge: openBridge)
+            HerdrTerminalAttachment(terminalID: terminalID, geometry: geometry, openBridge: { try await openBridge(.terminal) })
         }
         return HerdrPopupController(
             theme: currentTerminalSettings.theme,
             makeAttachment: makeAttachment,
             makeFrameFence: { HerdrPaneRendererFence(engine: engine, target: .popup($0), terminal: $1) },
             paintFrames: { paints, revision in Task { await engine.setPaintsPopup(paints, revision: revision) } },
-            frameInput: HerdrPopupController.FrameInput(
-                send: { [weak self] in self?.sendFramedPopupInput($0) ?? .transportUnavailable },
-                deliver: { [weak self] in await self?.deliverFramedPopupInput($1, to: $0) ?? false }
+            input: HerdrPopupController.Input(
+                text: { [weak self] in self?.sendPopupText($0) ?? .transportUnavailable },
+                send: { [weak self] in self?.sendPopupInput($0) ?? .transportUnavailable },
+                deliver: { [weak self] in await self?.deliverPopupInput($1, to: $0) ?? false }
             ),
             onHeldElsewhere: { [weak self] in
                 self?.terminalScreenAdapter.presentInformation(Self.popupHeldElsewhereMessage, for: GhosttyTerminalNotice.failureDuration)
@@ -1653,7 +1669,7 @@ final class HerdrScreenModel {
             let deadline = ContinuousClock.now + Self.helloDeadline
             let transport: any HerdrBridgeTransport
             do {
-                transport = try await openBridge()
+                transport = try await openBridge(.session)
             } catch {
                 // A cancelled opening releases what it claimed.
                 if isCurrent(attempt) {

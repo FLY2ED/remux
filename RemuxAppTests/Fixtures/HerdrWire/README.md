@@ -43,6 +43,8 @@ a client-shell surface of the same server; the popup's pty size was read on the 
 - `03-missing`: attach to a terminal id the server doesn't have.
 - `04-exit`: attach, then type `exit`, which ends the popup's shell.
 - `05-keyboard`: attach to a popup whose program asked for the kitty keyboard protocol (flags 1).
+- `06-grapheme`: attach to a shell popup at 40x12, clear it and print a joined emoji (man, ZWJ, woman, ZWJ,
+  girl) followed by ` X`, detach. Herdr writes the emoji as one cell's text, then moves to the next cell.
 
 `.expected.json` lists each server message's offset, payload length, tag and fields (a terminal frame's bytes
 as their SHA-256), and each client message's bytes in hex with its fields, decoded by an independent

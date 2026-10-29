@@ -41,8 +41,12 @@ enum HerdrPanePainter {
         let cursor: HerdrCursor?
     }
 
-    /// Autowrap off and grapheme clustering (mode 2027) on.
-    static let terminalSetup: [UInt8] = Array("\u{1B}[?2027h\u{1B}[?7l".utf8)
+    /// Grapheme clustering (mode 2027), which Herdr's terminals have: Herdr lays out a cluster such as a
+    /// joined emoji as one character, and writes it as one cell.
+    static let graphemeClustering: [UInt8] = Array("\u{1B}[?2027h".utf8)
+
+    /// Autowrap off and grapheme clustering on.
+    static let terminalSetup: [UInt8] = graphemeClustering + Array("\u{1B}[?7l".utf8)
 
     /// The cursor the panes show: the frame's, unless a popup is open, which then has the only cursor,
     /// as Herdr's client composes them.

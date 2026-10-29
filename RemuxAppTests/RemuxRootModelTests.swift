@@ -4467,6 +4467,7 @@ final class RemuxRootModelTests: XCTestCase {
         publicKeyInstaller: SSHPublicKeyInstaller? = nil,
         herdrBridgeOpener: (@Sendable (
             SessionTarget,
+            HerdrBridgeKind,
             TrustedHostStore,
             RemuxSSHRootService
         ) async throws -> any HerdrBridgeTransport)? = nil,
@@ -4528,7 +4529,7 @@ final class RemuxRootModelTests: XCTestCase {
                 )
             },
             sshAccessVerifier: sshAccessVerifier ?? { _, _, _ in },
-            herdrBridgeOpener: herdrBridgeOpener ?? { _, _, _ in
+            herdrBridgeOpener: herdrBridgeOpener ?? { _, _, _, _ in
                 throw HerdrBridgeError.channel("this test opens no Herdr bridge")
             },
             debugConnectionSeeder: { _, _ in false }
@@ -4727,7 +4728,7 @@ final class RemuxRootModelTests: XCTestCase {
             transportFactory: { target, trustedHostStore, _ in
                 transportFactory.makeTransport(target: target, trustedHostStore: trustedHostStore)
             },
-            herdrBridgeOpener: { target, _, _ in await opener.open(target) }
+            herdrBridgeOpener: { target, _, _, _ in await opener.open(target) }
         )
         try await harness.credentialHelper.savePassword("secret", for: pair.server.id)
         await harness.model.load()
@@ -4771,7 +4772,7 @@ final class RemuxRootModelTests: XCTestCase {
             servers: [pair.server],
             workspaces: [workspace],
             identities: [pair.identity],
-            herdrBridgeOpener: { target, _, _ in await opener.open(target) }
+            herdrBridgeOpener: { target, _, _, _ in await opener.open(target) }
         )
         try await harness.credentialHelper.savePassword("secret", for: pair.server.id)
         await harness.model.load()
@@ -4805,7 +4806,7 @@ final class RemuxRootModelTests: XCTestCase {
             servers: [pair.server],
             workspaces: [workspace],
             identities: [pair.identity],
-            herdrBridgeOpener: { target, _, _ in await opener.open(target) }
+            herdrBridgeOpener: { target, _, _, _ in await opener.open(target) }
         )
         try await harness.credentialHelper.savePassword("secret", for: pair.server.id)
         await harness.model.load()
@@ -4840,7 +4841,7 @@ final class RemuxRootModelTests: XCTestCase {
             servers: [pair.server],
             workspaces: [workspace],
             identities: [pair.identity],
-            herdrBridgeOpener: { target, _, _ in await opener.open(target) }
+            herdrBridgeOpener: { target, _, _, _ in await opener.open(target) }
         )
         try await harness.credentialStore.saveCredential(
             .password("demo-password"),
@@ -5085,7 +5086,7 @@ final class RemuxRootModelTests: XCTestCase {
             servers: [pair.server],
             workspaces: [workspace],
             identities: [pair.identity],
-            herdrBridgeOpener: { target, _, _ in await opener.open(target) }
+            herdrBridgeOpener: { target, _, _, _ in await opener.open(target) }
         )
         try await harness.credentialHelper.savePassword("secret", for: pair.server.id)
         await harness.model.load()
@@ -5130,7 +5131,7 @@ final class RemuxRootModelTests: XCTestCase {
             tmuxSessionDiscoverer: { target, _, _ in
                 await discoverer.discover(target)
             },
-            herdrBridgeOpener: { target, _, _ in await opener.open(target) }
+            herdrBridgeOpener: { target, _, _, _ in await opener.open(target) }
         )
         try await harness.credentialHelper.savePassword("secret", for: pair.server.id)
         await harness.model.load()

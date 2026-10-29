@@ -70,6 +70,9 @@ final class HerdrPopupTests: XCTestCase {
         XCTAssertEqual(popup.grid, GhosttyTerminalGridSize(columns: UInt32(grid.columns), rows: UInt32(grid.rows)))
         XCTAssertEqual(popup.cell, cell, "the popup isn't at the panes' font")
         XCTAssertTrue(adapter.terminalInteractionProjection.isInputAvailable)
+        // The attach is quiet while the popup is, so Herdr mustn't end it for that.
+        let kinds = await harness.bridges.kinds
+        XCTAssertEqual(kinds, [.session, .terminal])
     }
 
     /// The screen learns when the popup's renderer has drawn, as it does for a pane's: what it reads on its
@@ -208,8 +211,8 @@ final class HerdrPopupTests: XCTestCase {
     }
 
     /// Anything on the attach Remux doesn't expect, as a newer Herdr might send, ends it, as does a refusal
-    /// for another reason than another device holding the popup; the popup is drawn from the frame Herdr
-    /// sends this client, without saying another device has it.
+    /// for another reason than another device holding the popup or Herdr asking to try again; the popup is
+    /// drawn from the frame Herdr sends this client, without saying another device has it.
     func testAnAttachThatFailsDrawsThePopupAsHerdrSendsIt() async throws {
         var unknown = HerdrWireWriter()
         unknown.variant(21)
@@ -217,8 +220,8 @@ final class HerdrPopupTests: XCTestCase {
             ("an unknown message type", { DirectServer.frame(1, $0, "$ ") + HerdrWire.frame(unknown.bytes) }),
             ("a truncated frame", { HerdrWire.frame(Array(DirectServer.frame(1, $0, "$ ").dropFirst(4).dropLast(2))) }),
             ("a frame of a size not asked for", { DirectServer.frame(1, HerdrPopupGrid(columns: $0.columns + 1, rows: $0.rows), "$ ") }),
-            ("a refusal while an agent reads the popup", { _ in
-                DirectServer.shutdown("terminal attach failed: terminal \(Self.popupID) has a read in progress; retry")
+            ("a refusal for a terminal Herdr doesn't have", { _ in
+                DirectServer.shutdown("terminal attach failed: terminal \(Self.popupID) not found")
             }),
         ]
         for (name, stream) in cases {
@@ -245,6 +248,42 @@ final class HerdrPopupTests: XCTestCase {
         }
     }
 
+    /// Herdr asks to try again while an agent reads the popup's terminal: the phone attaches again, once,
+    /// after a moment, and a second refusal draws the popup from its frame.
+    func testAReadInProgressIsTriedAgainOnce() async throws {
+        let busy = DirectServer.shutdown("terminal attach failed: terminal \(Self.popupID) has a read in progress; retry")
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        await session.bridge.serve(popupSurface(revision: 3, lines: ["abcd", "efgh"]))
+        try await harness.waitUntil("the popup wasn't laid out") { harness.model.layout?.popup != nil }
+        harness.model.terminalScreenAdapter.preparePopupArea(widthPx: Self.area.widthPx, heightPx: Self.area.heightPx)
+        let grid = Self.grid(try XCTUnwrap(harness.model.measurement?.cellMetrics))
+        let first = try await harness.bridge(1)
+        await first.serve(DirectServer.welcome() + busy)
+        let refusedAt = ContinuousClock.now
+        let second = try await harness.bridge(2)
+        let waited = ContinuousClock.now - refusedAt
+        XCTAssertGreaterThanOrEqual(waited, HerdrPopupController.retryDelay - .milliseconds(20), "the attach went again at once")
+        await second.serve(DirectServer.welcome() + DirectServer.frame(1, grid, "$ "))
+        try await harness.waitUntil("the second attach wasn't drawn") { harness.model.popup.surface?.isAttached == true }
+
+        let again = await makeHarness()
+        let other = try await shownSession(again)
+        await other.bridge.serve(popupSurface(revision: 3, lines: ["abcd", "efgh"]))
+        try await again.waitUntil("the popup wasn't laid out") { again.model.layout?.popup != nil }
+        again.model.terminalScreenAdapter.preparePopupArea(widthPx: Self.area.widthPx, heightPx: Self.area.heightPx)
+        let firstAgain = try await again.bridge(1)
+        await firstAgain.serve(DirectServer.welcome() + busy)
+        let secondAgain = try await again.bridge(2)
+        await secondAgain.serve(DirectServer.welcome() + busy)
+        try await again.waitUntil("the popup wasn't drawn from its frame") {
+            self.popup(again)?.grid == GhosttyTerminalGridSize(columns: 4, rows: 2)
+        }
+        try await Task.sleep(for: HerdrPopupController.retryDelay * 2)
+        let opened = await again.bridges.opened.count
+        XCTAssertEqual(opened, 3, "the popup was attached a third time")
+    }
+
     /// Herdr ends the attach once the popup's program exits; nothing of the popup is drawn after, and the
     /// layout without it brings the panes back.
     func testAPopupWhoseProgramExitsLeavesNothingBehind() async throws {
@@ -260,62 +299,102 @@ final class HerdrPopupTests: XCTestCase {
 
     // MARK: - Input
 
-    /// Typing, pastes and keys go through the attach, as the terminal encodes them; none goes to a pane.
-    func testTypingPastesAndKeysGoThroughTheAttach() async throws {
+    /// Typing, pastes and keys go as Herdr's client sends a popup's, over the session's connection: Herdr
+    /// encodes each for the program's modes, as an arrow for application cursor keys, and makes the phone
+    /// the client it sends the program's clipboard writes to. The attach carries none.
+    func testTypingPastesAndKeysGoAsHerdrsClientSendsAPopups() async throws {
         let harness = await makeHarness()
         let (session, attach, _) = try await attachedPopup(harness)
+        var index = session.next
         let adapter = harness.model.terminalScreenAdapter
-        let before = await attach.writtenCount
-        let mainBefore = await session.bridge.writtenCount
+        let attachWrites = await attach.writtenCount
 
         XCTAssertTrue(adapter.sendInputToFocusedSurface("ls").isAccepted)
         XCTAssertTrue(adapter.sendPasteToFocusedSurface("echo hi").isAccepted)
-        XCTAssertTrue(adapter.sendKeyEventToFocusedSurface(GhosttySurfaceKeyEvent(keyCode: .enter)).isAccepted)
-        var bytes: [UInt8] = []
-        var index = before
-        while !String(decoding: bytes, as: UTF8.self).hasSuffix("\r") {
-            for message in try await DirectClient.messages(attach, at: index) {
-                guard case .input(let input) = message else { return XCTFail("\(message)") }
-                bytes += input
-            }
-            index += 1
-        }
-        XCTAssertEqual(String(decoding: bytes, as: UTF8.self), "ls\u{1b}[200~echo hi\u{1b}[201~\r")
-        let mainAfter = await session.bridge.writtenCount
-        for write in mainBefore..<mainAfter {
-            var reader = HerdrWireReader(Array(try await session.bridge.written(write).dropFirst(4)))
-            XCTAssertFalse([13, 14].contains(try reader.variant()), "input went over the session's connection")
-        }
+        XCTAssertTrue(adapter.sendKeyEventToFocusedSurface(GhosttySurfaceKeyEvent(keyCode: .arrowUp)).isAccepted)
+        let typed = try await nextInput(session.bridge, from: &index)
+        XCTAssertEqual(typed, popupInput(HerdrInputTranslator.events(forText: "ls", reportsAllKeys: false)))
+        let pasted = try await nextInput(session.bridge, from: &index)
+        XCTAssertEqual(pasted, popupInput([.paste("echo hi")]))
+        let key = try await nextInput(session.bridge, from: &index)
+        XCTAssertEqual(key, popupInput([.key(HerdrKeyEvent(code: .up, tracksRelease: true))]))
+        let after = await attach.writtenCount
+        XCTAssertEqual(after, attachWrites, "input went over the attach")
     }
 
-    /// The composer's message and its Enter go to the popup it was written in, each sent once written.
-    func testTheComposersMessageGoesToItsPopup() async throws {
+    /// Herdr says when the popup's program asks for every key (`ClientShellKeyboardReportAll` follows the
+    /// popup), and typing then goes as Herdr's client sends it for such a program.
+    func testTypingFollowsHerdrsReportOfEveryKey() async throws {
         let harness = await makeHarness()
-        let (_, attach, _) = try await attachedPopup(harness)
+        let (session, _, _) = try await attachedPopup(harness)
+        var index = session.next
+        await session.bridge.serve(HerdrServerScript.keyboardReportAll(true) + popupSurface(revision: 4, title: "every key"))
+        try await harness.waitUntil("the popup's title didn't follow") { self.popup(harness)?.title == "every key" }
+        XCTAssertNotEqual(
+            HerdrInputTranslator.events(forText: "é", reportsAllKeys: true),
+            HerdrInputTranslator.events(forText: "é", reportsAllKeys: false)
+        )
+
+        XCTAssertTrue(harness.model.terminalScreenAdapter.sendInputToFocusedSurface("é").isAccepted)
+        let typed = try await nextInput(session.bridge, from: &index)
+        XCTAssertEqual(typed, popupInput(HerdrInputTranslator.events(forText: "é", reportsAllKeys: true)))
+    }
+
+    /// A swipe over the attached popup goes as Herdr's attach wheel, a step a row, at the cell under the
+    /// finger; nothing of it goes over the session's connection.
+    func testASwipeGoesAsTheAttachsWheel() async throws {
+        let harness = await makeHarness()
+        let (session, attach, cell) = try await attachedPopup(harness)
         let adapter = harness.model.terminalScreenAdapter
         let target = try XCTUnwrap(popup(harness)?.id)
         let before = await attach.writtenCount
+        let mainWrites = await session.bridge.writtenCount
 
-        let pasted = await adapter.sendPasteAwaitingCommandCompletion("fix it", to: target)
-        XCTAssertTrue(pasted)
-        let entered = await adapter.sendKeyEventAwaitingCommandCompletion(GhosttySurfaceKeyEvent(keyCode: .enter), to: target)
-        XCTAssertTrue(entered)
-        let paste = try await DirectClient.messages(attach, at: before)
-        XCTAssertEqual(paste, [.input(Array("\u{1b}[200~fix it\u{1b}[201~".utf8))])
-        let enter = try await DirectClient.messages(attach, at: before + 1)
-        XCTAssertEqual(enter, [.input([0x0d])])
+        _ = adapter.sendMousePosition(to: target, CGPoint(x: cell.pointWidth * 2.5, y: cell.pointHeight * 3.5), mods: [])
+        let swipe = GhosttySurfaceMouseScrollEvent(deltaX: 0, deltaY: Double(cell.pixelHeight) * 2, mods: .init(precision: true, momentum: .began))
+        XCTAssertEqual(adapter.sendMouseScroll(to: target, swipe), .sent)
+        for step in 0..<2 {
+            let wheel = try await DirectClient.messages(attach, at: before + step)
+            XCTAssertEqual(wheel, [.scroll(up: true, lines: 1, column: 2, row: 3)])
+        }
+        try await assertNoInput(session.bridge, from: mainWrites)
+    }
+
+    /// The composer's message and its Enter go to the popup it was written in, each once Herdr has it.
+    func testTheComposersMessageGoesToItsPopup() async throws {
+        let harness = await makeHarness()
+        let (session, attach, _) = try await attachedPopup(harness)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let target = try XCTUnwrap(popup(harness)?.id)
+        let attachWrites = await attach.writtenCount
+
+        let paste = Task { await adapter.sendPasteAwaitingCommandCompletion("fix it", to: target) }
+        let pasted = try await nextDeliveredInput(session.bridge, from: &index)
+        XCTAssertEqual(pasted, popupInput([.paste("fix it")]))
+        let pasteDelivered = await paste.value
+        XCTAssertTrue(pasteDelivered)
+        let enter = Task { await adapter.sendKeyEventAwaitingCommandCompletion(GhosttySurfaceKeyEvent(keyCode: .enter), to: target) }
+        let entered = try await nextDeliveredInput(session.bridge, from: &index)
+        XCTAssertEqual(entered, popupInput([.key(HerdrKeyEvent(code: .enter, tracksRelease: true))]))
+        let enterDelivered = await enter.value
+        XCTAssertTrue(enterDelivered)
+        let after = await attach.writtenCount
+        XCTAssertEqual(after, attachWrites, "the message went over the attach")
     }
 
     /// A popup that closes after the composer's paste, as one that exits on its input does, takes the rest
     /// of the message with it: the Enter goes nowhere, not to the pane under it.
     func testTheComposersEnterIsDroppedWhenItsPopupClosesAfterThePaste() async throws {
         let harness = await makeHarness()
-        let (session, attach, _) = try await attachedPopup(harness)
+        let (session, _, _) = try await attachedPopup(harness)
+        var index = session.next
         let adapter = harness.model.terminalScreenAdapter
         let target = try XCTUnwrap(popup(harness)?.id)
-        let pasted = await adapter.sendPasteAwaitingCommandCompletion("y", to: target)
+        let paste = Task { await adapter.sendPasteAwaitingCommandCompletion("y", to: target) }
+        _ = try await nextDeliveredInput(session.bridge, from: &index)
+        let pasted = await paste.value
         XCTAssertTrue(pasted)
-        let attachWrites = await attach.writtenCount
 
         await session.bridge.serve(HerdrServerScript.surface(projection: 1, revision: 9, lines: ["one two"], panes: Self.panes))
         try await harness.waitUntil("the popup didn't close") { harness.model.layout?.popup == nil }
@@ -324,17 +403,18 @@ final class HerdrPopupTests: XCTestCase {
         XCTAssertFalse(entered)
         try await Task.sleep(for: .milliseconds(100))
         try await assertNoInput(session.bridge, from: mainWrites)
-        let after = await attach.writtenCount
-        XCTAssertEqual(after, attachWrites + 1, "only the detach went after the paste")
     }
 
     /// A popup replacing the one the message was written in doesn't take its Enter.
     func testTheComposersEnterDoesntGoToAPopupThatReplacedItsOwn() async throws {
         let harness = await makeHarness()
         let (session, _, _) = try await attachedPopup(harness)
+        var index = session.next
         let adapter = harness.model.terminalScreenAdapter
         let target = try XCTUnwrap(popup(harness)?.id)
-        let pasted = await adapter.sendPasteAwaitingCommandCompletion("y", to: target)
+        let paste = Task { await adapter.sendPasteAwaitingCommandCompletion("y", to: target) }
+        _ = try await nextDeliveredInput(session.bridge, from: &index)
+        let pasted = await paste.value
         XCTAssertTrue(pasted)
 
         await session.bridge.serve(popupSurface(revision: 9, terminalID: "another-popup"))
@@ -344,6 +424,25 @@ final class HerdrPopupTests: XCTestCase {
         XCTAssertFalse(entered)
         XCTAssertNotEqual(popup(harness)?.id, target)
         try await assertNoInput(session.bridge, from: mainWrites)
+    }
+
+    /// A composer message over Herdr's limit doesn't go, and the composer learns it didn't; nothing of it
+    /// reaches the popup, which Herdr would refuse.
+    func testAComposerMessageOverHerdrsLimitDoesntGo() async throws {
+        let harness = await makeHarness()
+        let (session, attach, _) = try await attachedPopup(harness)
+        let adapter = harness.model.terminalScreenAdapter
+        let target = try XCTUnwrap(popup(harness)?.id)
+        let mainWrites = await session.bridge.writtenCount
+        let attachWrites = await attach.writtenCount
+
+        let message = String(repeating: "x", count: HerdrConnection.maxInputBytes + 1)
+        let pasted = await adapter.sendPasteAwaitingCommandCompletion(message, to: target)
+        XCTAssertFalse(pasted)
+        try await Task.sleep(for: .milliseconds(100))
+        try await assertNoInput(session.bridge, from: mainWrites)
+        let after = await attach.writtenCount
+        XCTAssertEqual(after, attachWrites)
     }
 
     /// A popup opening between a message's paste into a pane and its Enter doesn't take the Enter.
@@ -405,6 +504,23 @@ final class HerdrPopupTests: XCTestCase {
     }
 
     /// A new title for the same popup is shown at once.
+    /// The frame names the tab it is over as the user named it, else "tab" and its number, as Herdr's own
+    /// name for a tab is its number; a rename shows while the popup is on screen.
+    func testTheFrameNamesItsTabAsTheToolbarCountsTabs() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        await session.bridge.serve(
+            HerdrServerScript.snapshot(revision: 2, tabLabel: "1", customTabLabel: false, focusedPane: "w1:p1", panes: ["w1:p1", "w1:p2"].map { HerdrServerScript.snapshotPane($0) })
+                + popupSurface(projection: 2, revision: 3)
+        )
+        try await harness.waitUntil("the popup didn't say its tab") { self.popup(harness)?.tabLabel == "tab 1" }
+        await session.bridge.serve(
+            HerdrServerScript.snapshot(revision: 3, tabLabel: "notes", focusedPane: "w1:p1", panes: ["w1:p1", "w1:p2"].map { HerdrServerScript.snapshotPane($0) })
+                + popupSurface(projection: 3, revision: 4)
+        )
+        try await harness.waitUntil("the popup didn't follow the tab's name") { self.popup(harness)?.tabLabel == "notes" }
+    }
+
     func testThePopupsTitleFollowsHerdr() async throws {
         let harness = await makeHarness()
         let (session, _, _) = try await attachedPopup(harness)
@@ -554,6 +670,39 @@ final class HerdrPopupTests: XCTestCase {
         XCTAssertEqual(placed(rows: 50).origin, settled.origin, "a grid from before the keyboard came up moved")
     }
 
+    /// Herdr's terminals cluster graphemes, and its frames write a joined emoji as one cell's text for a
+    /// terminal that clusters them as Ghostty's do; the attach's terminal does too, so the emoji keeps its
+    /// cell and the text after it its own (recorded from Herdr v0.9.5).
+    func testAJoinedEmojiKeepsItsCellOnTheAttachsTerminal() async throws {
+        let fixture = try DirectTerminalFixture(version: "0.9.5", scenario: "06-grapheme")
+        let payloads = try fixture.serverPayloads()
+        let bridge = FakeBridgeTransport()
+        let attachment = HerdrTerminalAttachment(
+            terminalID: fixture.expected.client.compactMap(\.AttachTerminal).first?.terminal_id ?? "term",
+            geometry: .init(columns: 40, rows: 12, cellWidthPx: 8, cellHeightPx: 16),
+            openBridge: { bridge }
+        )
+        Task { await attachment.run() }
+        // Up to Herdr's end of the attach, which would end the renderer's registration with it.
+        let shutdown = try XCTUnwrap(payloads.lastIndex { $0.first == 3 })
+        await bridge.serve(payloads[..<shutdown].flatMap(HerdrWire.frame))
+        var updates = attachment.updates.makeAsyncIterator()
+        var terminal: HerdrRetainedTerminal?
+        while terminal == nil {
+            guard let event = await updates.next() else { return XCTFail("the attach ended") }
+            if case .terminal(let made, _, _) = event { terminal = made }
+        }
+        let attached = try XCTUnwrap(terminal)
+        let renderer = try await makeRenderer(
+            terminal: attached,
+            fence: HerdrTerminalAttachmentFence(attachment: attachment, terminal: attached),
+            columns: 40,
+            rows: 2
+        )
+        XCTAssertEqual(RendererText.rows(of: renderer, columns: 40, rows: 2), ["\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} X", "sh-3.2$"])
+        await attachment.detach()
+    }
+
     // MARK: - Engine
 
     /// The engine paints a popup's frame only while it is drawn from its frames; turned on, it paints the
@@ -587,7 +736,13 @@ final class HerdrPopupTests: XCTestCase {
             XCTAssertEqual(terminalID, Self.popupID)
             terminal = next
         }
-        let renderer = try await makeRenderer(engine: engine, terminal: try XCTUnwrap(terminal), columns: 4, rows: 2)
+        let painted = try XCTUnwrap(terminal)
+        let renderer = try await makeRenderer(
+            terminal: painted,
+            fence: HerdrPaneRendererFence(engine: engine, target: .popup(Self.popupID), terminal: painted),
+            columns: 4,
+            rows: 2
+        )
         XCTAssertEqual(RendererText.rows(of: renderer, columns: 4, rows: 2), ["hi", "ok"])
         await feed.receive(.surface(try Self.engineSurface(revision: 2, popup: (Self.popupID, "notes", ["hi  ", "yes "]))))
         XCTAssertEqual(RendererText.rows(of: renderer, columns: 4, rows: 2), ["hi", "yes"])
@@ -673,13 +828,14 @@ final class HerdrPopupTests: XCTestCase {
     }
 
     private func popupSurface(
+        projection: UInt64 = 1,
         revision: UInt64,
         title: String = "popup",
         lines: [String] = ["ab", "cd"],
         terminalID: String = popupID
     ) -> [UInt8] {
         HerdrServerScript.surface(
-            projection: 1,
+            projection: projection,
             revision: revision,
             lines: ["one two"],
             panes: Self.panes,
@@ -717,6 +873,15 @@ final class HerdrPopupTests: XCTestCase {
             let tag = try reader.variant()
             if tag == 13 || tag == 14 { return frame }
         }
+    }
+
+    /// The next pane or popup input from `index` on, then Herdr's answer to the ping after it, which tells
+    /// the composer Herdr has it.
+    private func nextDeliveredInput(_ bridge: FakeBridgeTransport, from index: inout Int) async throws -> [UInt8] {
+        let input = try await nextInput(bridge, from: &index)
+        let ping = try await nextPing(bridge, from: &index)
+        await bridge.serve(HerdrConnectionTests.pong(ping))
+        return input
     }
 
     private func assertNoInput(_ bridge: FakeBridgeTransport, from index: Int, file: StaticString = #filePath, line: UInt = #line) async throws {
@@ -772,8 +937,8 @@ final class HerdrPopupTests: XCTestCase {
     }
 
     private func makeRenderer(
-        engine: HerdrTerminalEngine,
         terminal: HerdrRetainedTerminal,
+        fence: any TerminalPaneRendererFence,
         columns: Int,
         rows: Int
     ) async throws -> TerminalPaneRenderer {
@@ -785,7 +950,7 @@ final class HerdrPopupTests: XCTestCase {
             TerminalPaneRenderer.create(
                 app: runtime.appHandleForTesting,
                 terminal: terminal,
-                fence: HerdrPaneRendererFence(engine: engine, target: .popup(Self.popupID), terminal: terminal),
+                fence: fence,
                 writeInput: nil,
                 baseConfig: runtime.makeTmuxBaseSurfaceConfig(),
                 metrics: metrics,
@@ -837,7 +1002,7 @@ enum DirectClient: Equatable {
     case input([UInt8])
     case resize(columns: UInt16, rows: UInt16)
     case detach
-    case scroll(up: Bool, lines: UInt16)
+    case scroll(up: Bool, lines: UInt16, column: UInt16?, row: UInt16?)
 
     /// The messages of the write at `index`, waiting for it.
     static func messages(_ bridge: FakeBridgeTransport, at index: Int) async throws -> [DirectClient] {
@@ -860,7 +1025,9 @@ enum DirectClient: Equatable {
                 messages.append(.attach(try reader.string()))
             case 6:
                 _ = try reader.variant()
-                messages.append(.scroll(up: try reader.variant() == 0, lines: try reader.u16()))
+                let up = try reader.variant() == 0
+                let lines = try reader.u16()
+                messages.append(.scroll(up: up, lines: lines, column: try reader.optional { try $0.u16() }, row: try reader.optional { try $0.u16() }))
             case let tag:
                 XCTFail("unexpected client message \(tag)")
             }
