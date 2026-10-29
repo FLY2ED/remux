@@ -3212,6 +3212,140 @@ final class HerdrScreenModelTests: XCTestCase {
         XCTAssertEqual(inputs, [frame("w1:p3", [typed("c")])], "a key went during the switch")
     }
 
+    /// Input for the tab left, asked once a switch is asked but before Herdr's snapshot shows it, is refused:
+    /// the switch reaches Herdr first, on the same connection, and Herdr drops input for a pane outside the tab
+    /// it shows the phone. So the composer keeps its message, and keys typed meanwhile are dropped.
+    func testInputForTheTabLeftIsRefusedOnceASwitchIsAsked() async throws {
+        let harness = await makeHarness()
+        let session = try await shownTab(harness, secondTab: Self.secondTab)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let left = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
+
+        harness.model.reveal(.tab("t2"), bootID: "boot")
+        let toSecond = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(toSecond.params, ["tab_id": "t2"])
+        let pasted = AnswerBox()
+        let paste = Task { await pasted.set(await adapter.sendPasteAwaitingCommandCompletion("ship it", to: left)) }
+        try await Task.sleep(for: .milliseconds(200))
+        let answer = await pasted.value
+        XCTAssertEqual(answer, false, "the composer's message went to the tab left")
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("a"), .transportUnavailable, "a key went during the switch")
+        try await Task.sleep(for: .milliseconds(100))
+        let written = await session.bridge.writtenCount
+        let inputs = try await harness.writes(session.bridge, from: index, count: written - index).compactMap(paneInput)
+        XCTAssertEqual(inputs, [], "input went to the tab left")
+        paste.cancel()
+    }
+
+    /// A switch asked between a composer message's paste and its Enter refuses the Enter, which Herdr would
+    /// drop, so the composer keeps the message; the Enter goes to no other pane either.
+    func testASwitchBetweenAComposerPasteAndItsEnterRefusesTheEnter() async throws {
+        let harness = await makeHarness()
+        let session = try await shownTab(harness, secondTab: Self.secondTab)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let left = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
+
+        let pasted = AnswerBox()
+        let paste = Task { await pasted.set(await adapter.sendPasteAwaitingCommandCompletion("ship it", to: left)) }
+        let pasteInput = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(pasteInput, frame("w1:p1", [.paste("ship it")]))
+        let pastePing = try await nextWrite(session.bridge, from: &index, ping)
+        await session.bridge.serve(HerdrConnectionTests.pong(pastePing))
+        await paste.value
+        let pasteAnswer = await pasted.value
+        XCTAssertEqual(pasteAnswer, true)
+
+        harness.model.reveal(.tab("t2"), bootID: "boot")
+        _ = try await nextWrite(session.bridge, from: &index, command)
+        let entered = AnswerBox()
+        let enter = Task {
+            await entered.set(
+                await adapter.sendKeyEventAwaitingCommandCompletion(GhosttySurfaceKeyEvent(keyCode: .enter), to: left)
+            )
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        let enterAnswer = await entered.value
+        XCTAssertEqual(enterAnswer, false, "the Enter went to the tab left")
+        let written = await session.bridge.writtenCount
+        let inputs = try await harness.writes(session.bridge, from: session.next, count: written - session.next)
+            .compactMap(paneInput)
+        XCTAssertEqual(inputs, [frame("w1:p1", [.paste("ship it")])], "input other than the paste went")
+        enter.cancel()
+    }
+
+    /// A move to another pane of an unzoomed tab keeps input going for the tab's panes, as Herdr takes input
+    /// for every pane of the tab it shows: the composer's message for the pane left and the keys for the pane
+    /// reached go as they are asked.
+    func testAPaneMoveWithinAnUnzoomedTabKeepsInputForItsPanes() async throws {
+        let harness = await makeHarness()
+        let session = try await shownTab(harness)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let left = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
+
+        harness.model.reveal(.pane("w1:p2"), bootID: "boot")
+        _ = try await nextWrite(session.bridge, from: &index, paneFocus)
+        let pasted = AnswerBox()
+        let paste = Task { await pasted.set(await adapter.sendPasteAwaitingCommandCompletion("ship it", to: left)) }
+        let pasteInput = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(pasteInput, frame("w1:p1", [.paste("ship it")]))
+        let pastePing = try await nextWrite(session.bridge, from: &index, ping)
+        await session.bridge.serve(HerdrConnectionTests.pong(pastePing))
+        await paste.value
+        let pasteAnswer = await pasted.value
+        XCTAssertEqual(pasteAnswer, true)
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("a"), .accepted)
+        let typedInput = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(typedInput, frame("w1:p2", [typed("a")]))
+    }
+
+    /// A new tab asked refuses input for the tab left until Herdr shows where the session went, as Herdr moves
+    /// the phone to the tab it makes: the composer keeps its message.
+    func testInputForTheTabLeftIsRefusedOnceANewTabIsAsked() async throws {
+        let harness = await makeHarness()
+        let session = try await shownWorkspaces(harness, zoomingOnShow: false)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let left = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
+
+        XCTAssertTrue(harness.model.create(.tab(workspaceID: "w1"), bootID: "boot"))
+        let created = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(created.method, "tab.create")
+        let pasted = AnswerBox()
+        let paste = Task { await pasted.set(await adapter.sendPasteAwaitingCommandCompletion("ship it", to: left)) }
+        try await Task.sleep(for: .milliseconds(200))
+        let answer = await pasted.value
+        XCTAssertEqual(answer, false, "the composer's message went to the tab left")
+        let written = await session.bridge.writtenCount
+        let inputs = try await harness.writes(session.bridge, from: index, count: written - index).compactMap(paneInput)
+        XCTAssertEqual(inputs, [], "input went to the tab left")
+        paste.cancel()
+    }
+
+    /// A move to another pane of a zoomed tab refuses input for the pane left, which Herdr stops taking once it
+    /// shows the pane reached zoomed: the composer keeps its message.
+    func testAPaneMoveWithinAZoomedTabRefusesInputForThePaneLeft() async throws {
+        let harness = await makeHarness()
+        let session = try await shownTab(harness, zoomed: true)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let left = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
+
+        harness.model.reveal(.pane("w1:p2"), bootID: "boot")
+        _ = try await nextWrite(session.bridge, from: &index, paneFocus)
+        let pasted = AnswerBox()
+        let paste = Task { await pasted.set(await adapter.sendPasteAwaitingCommandCompletion("ship it", to: left)) }
+        try await Task.sleep(for: .milliseconds(200))
+        let answer = await pasted.value
+        XCTAssertEqual(answer, false, "the composer's message went to the pane left")
+        let written = await session.bridge.writtenCount
+        let inputs = try await harness.writes(session.bridge, from: index, count: written - index).compactMap(paneInput)
+        XCTAssertEqual(inputs, [], "input went to the pane left")
+        paste.cancel()
+    }
+
     /// The switching cue says where a switch goes only once it has taken longer than its delay from the tap,
     /// and goes as the tab reached comes on screen; a quick switch shows none.
     func testTheSwitchingCueShowsOnlyOnceASwitchTakesLong() async throws {
@@ -3932,7 +4066,7 @@ final class HerdrScreenModelTests: XCTestCase {
             + (1..<count).map { ("w1:p\($0 + 1)", 40, UInt16($0 - 1) * 24 / rest, 40, 24 / rest) }
     }
 
-    /// A session on tab `t1` with `panes`, the first focused, shown and taking input, its snapshot saying
+    /// A session on tab `t1` with `panes`, the first focused, shown, drawn and taking input, its snapshot saying
     /// whether the tab is `zoomed`, and its frame drawing every pane, or only the first while zoomed. With
     /// `zoomingOnShow`, Herdr zooms the tab behind the show as it does: the zoomed snapshot and frame, then
     /// its answer, which changed the zoom unless the tab was zoomed already. `secondTab` lists the panes of
@@ -3977,6 +4111,10 @@ final class HerdrScreenModelTests: XCTestCase {
         }
         showInWindow(harness, panes: drawnIDs)
         try await harness.waitUntil("input wasn't offered") { harness.model.isInputAvailable }
+        // Input is offered before the panes' first pictures are in; a test starts from a tab drawn whole.
+        try await harness.waitUntil("the tab's panes didn't draw") {
+            harness.model.terminalScreenAdapter.terminalScreenPresentationProjection.statusOverlay == .ready
+        }
         if zoomingOnShow { try await waitForMap(harness, panes: panes.count) }
         return (bridge, index)
     }
@@ -4463,6 +4601,32 @@ final class HerdrScreenModelTests: XCTestCase {
     }
 
     // MARK: - Mouse
+
+    /// A button held as a switch is asked is released in the pane it was pressed in, as Herdr takes the release
+    /// of a press it took whatever tab it shows the phone (`server/headless.rs`
+    /// `client_pane_input_releases_press`): the program never keeps the button down.
+    func testAButtonHeldAsASwitchIsAskedIsReleasedInItsPane() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness, mouseReporting: true, otherTabs: ["t2"])
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let pane = try paneSurfaceID(harness, "w1:p1")
+
+        XCTAssertEqual(adapter.sendMousePosition(to: pane, try point(harness, column: 2), mods: []), .sent)
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .press, button: .left)), .sent)
+        harness.model.reveal(.tab("t2"), bootID: "boot")
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .release, button: .left)), .sent)
+
+        var sent: [[UInt8]] = []
+        for _ in 0..<3 {
+            sent.append(try await nextWrite(session.bridge, from: &index, paneInput))
+        }
+        XCTAssertEqual(sent, [
+            frame("w1:p1", [mouse(.moved, column: 2)]),
+            frame("w1:p1", [mouse(.down(.left), column: 2)]),
+            frame("w1:p1", [mouse(.up(.left), column: 2)]),
+        ])
+    }
 
     /// A tap in a pane whose program reads the mouse is a left click at the tap's cell, after the pointer's
     /// move there, each reported relative to the pane's text area as Herdr's client reports them. A pane
@@ -4952,7 +5116,8 @@ final class HerdrScreenModelTests: XCTestCase {
         _ harness: HerdrModelHarness,
         focusedPane: String = "w1:p1",
         mouseReporting: Bool = false,
-        takingRightClicks: Set<String> = []
+        takingRightClicks: Set<String> = [],
+        otherTabs: [String] = []
     ) async throws -> (bridge: FakeBridgeTransport, next: Int) {
         let bridge = try await harness.bridge()
         let snapshotPanes = ["w1:p1", "w1:p2"].map {
@@ -4960,7 +5125,7 @@ final class HerdrScreenModelTests: XCTestCase {
         }
         await bridge.serve(
             try HerdrServerScript.welcome()
-                + HerdrServerScript.snapshot(revision: 1, focusedPane: focusedPane, panes: snapshotPanes)
+                + HerdrServerScript.snapshot(revision: 1, otherTabs: otherTabs, focusedPane: focusedPane, panes: snapshotPanes)
         )
         let panes: [HerdrServerScript.Pane] = [
             .init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true, mouseReporting: mouseReporting),

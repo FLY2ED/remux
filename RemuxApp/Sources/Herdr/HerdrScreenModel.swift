@@ -170,7 +170,8 @@ final class HerdrScreenModel {
 
         /// Ready and shown, with no show in progress: the session takes input. A session shown again keeps
         /// its last frame and reads as connected meanwhile, but takes no input, as Herdr's client freezes
-        /// input while a show is in progress. A move doesn't freeze it, as in Herdr's client.
+        /// input while a show is in progress. A move doesn't freeze it, as in Herdr's client; only input for
+        /// the panes the move leaves is refused (`isLeftByMove`).
         var isActivated: Bool {
             guard isReady, wantsShown, !visibilityPending, let request, request.kind != .hide else { return false }
             return !request.showing || activatedRequest == request.id
@@ -878,12 +879,27 @@ final class HerdrScreenModel {
         userPaneID.flatMap(inputTarget(forPane:))
     }
 
-    /// Where input for `paneID` goes, the one rule for every input: Herdr takes it (`herdrInputTarget`), and
-    /// the frame on screen draws the pane (`isDrawn`), so nothing typed goes to a pane the user doesn't see,
-    /// as one on the tab a move is going to while the tab left is still on screen.
+    /// Where input for `paneID` goes, the one rule for every input: Herdr takes it (`herdrInputTarget`), the
+    /// frame on screen draws the pane (`isDrawn`), so nothing typed goes to a pane the user doesn't see, as one
+    /// on the tab a move is going to while the tab left is still on screen, and Remux's move under way doesn't
+    /// leave the pane (`isLeftByMove`).
     private func inputTarget(forPane paneID: String) -> (attempt: Attempt, paneID: String)? {
-        guard isDrawn(paneID) else { return nil }
+        guard isDrawn(paneID), !isLeftByMove(paneID) else { return nil }
         return herdrInputTarget(forPane: paneID)
+    }
+
+    /// Whether Remux's move under way takes the session where Herdr takes no input for `paneID`: to another
+    /// tab, to one Herdr hasn't made yet or wherever a close goes, or to another pane of a zoomed tab. Input
+    /// asked after the move reaches Herdr after it, on the same connection, and Herdr drops input for a pane
+    /// outside the tab the client views (`server/headless.rs` `ClientShellPaneInput`,
+    /// `shell_client_views_pane`). So input for the pane left would be lost while Herdr's snapshot still has
+    /// the session there; refused, a composer message stays to be sent again.
+    private func isLeftByMove(_ paneID: String) -> Bool {
+        guard let attempt, isCurrent(attempt), let move = attempt.move, paneID != move.pane else { return false }
+        guard let tabID = move.goesTo?.tabID, let snapshot,
+              snapshot.panes.contains(where: { $0.paneID == paneID && $0.tabID == tabID })
+        else { return true }
+        return snapshot.tabs.first { $0.tabID == tabID }?.zoomed != false
     }
 
     /// Whether Herdr takes input for `paneID`: the session is shown with no show in progress, and Herdr takes
@@ -1290,9 +1306,12 @@ final class HerdrScreenModel {
         case .release:
             guard let gesture = mouseGesture, gesture.button == button else { return false }
             mouseGesture = nil
-            guard let target = inputTarget(forPane: gesture.paneID) else { return false }
+            // Herdr takes the release of a press it took whatever tab it shows the phone
+            // (`server/headless.rs` `client_pane_input_releases_press`), so it goes to the press's pane while the
+            // session is shown, also once a move leaves that pane: the program never keeps the button down.
+            guard let attempt = shownAttempt else { return false }
             let cell = pointers[gesture.paneID].flatMap { paneCell(at: $0, inPane: gesture.paneID) } ?? gesture.cell
-            return send([mouseEvent(.up(button), at: cell, mods: event.mods)], to: target) == .accepted
+            return send([mouseEvent(.up(button), at: cell, mods: event.mods)], to: (attempt, gesture.paneID)) == .accepted
         }
     }
 
