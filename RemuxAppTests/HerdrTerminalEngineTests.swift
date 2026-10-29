@@ -1084,6 +1084,47 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await third.stop()
     }
 
+    /// The session opened again while a zoom Remux asked for is still in flight as the session ends: the engine
+    /// that ended keeps saving until its release has stopped, so Herdr's answer to that zoom makes it Remux's,
+    /// the new attachment takes it over, and the new attachment's own end takes it off.
+    func testAZoomAnsweredAsTheSessionIsOpenedAgainIsTakenOverAndTakenOff() async throws {
+        let store = InMemoryHerdrOwnedZoomStore()
+        let keepers = HerdrZoomKeepers(store: store)
+        let session = HerdrZoomSession(serverID: UUID(), session: "s")
+        let old = makeEngine()
+        let updates = UpdateLog(old)
+        let (feed, outbox) = await connect(old)
+        await old.keepOwnedZooms(of: session, from: keepers)
+        try await shown(feed, updates, outbox, panes: Self.atP)
+        await feed.setZoom(true, ofPane: "P")
+        let closed = Closed()
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+
+        let new = makeEngine()
+        let kept = Closed()
+        Task {
+            await new.keepOwnedZooms(of: session, from: keepers)
+            kept.close()
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(kept.isClosed, "the new attachment went ahead of the end")
+        try await answerZoom(feed, outbox, zoomed: true)
+        try await waitUntil("the new attachment didn't go on once the end stopped") { kept.isClosed }
+        XCTAssertTrue(closed.isClosed)
+        XCTAssertEqual(try outbox.commands(), ["zoom P on"], "the end unzoomed after the session was opened again")
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t1"], "the zoom Herdr answered wasn't saved")
+
+        let (newFeed, newOutbox) = await connect(new)
+        await newFeed.receive(try Self.places(revision: 1, zoomed: ["t1"]))
+        let newClosed = Closed()
+        await newFeed.releaseZooms(within: Self.releaseStepTime, done: newClosed.close)
+        XCTAssertEqual(try newOutbox.commands(), ["zoom P off"], "the new attachment didn't take the zoom over")
+        try await answerZoom(newFeed, newOutbox, zoomed: false)
+        XCTAssertTrue(newClosed.isClosed)
+        await old.stop()
+        await new.stop()
+    }
+
     /// The session's end unzooms the pane the snapshot shows focused on the tab, by name, so the unzoom reaches
     /// only that tab. When the pane is gone by the time Herdr handles it, as when another client closed the tab,
     /// Herdr refuses it: no other tab is touched, and Remux's record stays until a snapshot shows the tab gone.

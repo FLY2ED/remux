@@ -257,10 +257,10 @@ struct HerdrZoomPolicy: Equatable, Sendable {
 
 /// Hands each Herdr session's zooms on the phone to one engine at a time, by generation. A session ended and
 /// opened again while its end still takes Remux's zooms off has two engines on it, or more when it is opened
-/// again once more. Each claim is a newer generation, and only the newest saves the session's record, so an
-/// older engine never writes over a newer one's. Every claim waits for the same stop of the release under way
-/// on the engine holding the zooms (`HerdrTerminalEngine.stopRelease`), so nothing is unzoomed under the new
-/// attachment, and only the newest claim, once that stop is over, holds the zooms and gets the record.
+/// again once more. Every claim waits for the same stop of the release under way on the engine holding the
+/// zooms (`HerdrTerminalEngine.stopRelease`), so nothing is unzoomed under the new attachment, and that engine
+/// saves until it has stopped, so a zoom Herdr answers meanwhile is kept. Only the newest claim then holds the
+/// zooms, as a newer generation, and reads the record; an engine whose generation is older never saves again.
 final class HerdrZoomKeepers: @unchecked Sendable {
     /// A claim on a session's zooms, which saves while no newer claim on the session was made.
     struct Claim: Sendable {
@@ -269,7 +269,10 @@ final class HerdrZoomKeepers: @unchecked Sendable {
     }
 
     private struct Keeping {
+        /// The generation of the claim holding the zooms, the one that saves.
         var generation: UInt64 = 0
+        /// The newest claim made, which holds the zooms once the stop under way is over.
+        var newest: UInt64 = 0
         /// The engine whose claim holds the zooms.
         weak var holder: HerdrTerminalEngine?
         /// The stop of the holder's release, which every claim made meanwhile waits for.
@@ -289,16 +292,17 @@ final class HerdrZoomKeepers: @unchecked Sendable {
     func claim(_ session: HerdrZoomSession, for engine: HerdrTerminalEngine) async -> (Claim, HerdrOwnedZooms)? {
         let (generation, stopping) = lock.withLock { () -> (UInt64, Task<Void, Never>?) in
             var keeping = sessions[session] ?? Keeping()
-            keeping.generation += 1
+            keeping.newest += 1
             if keeping.stopping == nil, let holder = keeping.holder, holder !== engine {
                 keeping.stopping = Task { await holder.stopRelease() }
             }
             sessions[session] = keeping
-            return (keeping.generation, keeping.stopping)
+            return (keeping.newest, keeping.stopping)
         }
         await stopping?.value
         return lock.withLock {
-            guard var keeping = sessions[session], keeping.generation == generation else { return nil }
+            guard var keeping = sessions[session], keeping.newest == generation else { return nil }
+            keeping.generation = generation
             keeping.holder = engine
             keeping.stopping = nil
             sessions[session] = keeping
@@ -306,12 +310,12 @@ final class HerdrZoomKeepers: @unchecked Sendable {
         }
     }
 
-    /// Whether `claim` is still the newest on its session.
+    /// Whether `claim` still holds its session's zooms.
     func holds(_ claim: Claim) -> Bool {
         lock.withLock { sessions[claim.session]?.generation == claim.generation }
     }
 
-    /// Saves `zooms` for `claim`'s session while it is the newest claim there.
+    /// Saves `zooms` for `claim`'s session while the claim holds its zooms.
     func save(_ zooms: HerdrOwnedZooms, for claim: Claim) {
         lock.withLock {
             guard sessions[claim.session]?.generation == claim.generation else { return }
@@ -689,6 +693,8 @@ actor HerdrTerminalEngine {
     /// The engine's claim on the session's zooms (`keepOwnedZooms`), made once.
     private var zoomClaim: (keepers: HerdrZoomKeepers, claim: HerdrZoomKeepers.Claim)?
     private var claimsZooms = false
+    /// A newer claim on the session's zooms stopped the release here (`stopRelease`): none starts again.
+    private var releaseStopped = false
     /// Remux's zooms coming off as the session ends (`releaseZooms`).
     private var release: Release?
     /// The newest answered step whose effect Herdr's snapshots don't show yet. Herdr can answer before it
@@ -1147,6 +1153,7 @@ actor HerdrTerminalEngine {
     /// unzooms, finishes the step in flight, goes back to the tab it started on, and ends; this returns once it
     /// has.
     fileprivate func stopRelease() async {
+        releaseStopped = true
         guard release != nil else { return }
         if release?.stopping == nil { release?.stopping = [] }
         dispatch()
@@ -1202,11 +1209,11 @@ actor HerdrTerminalEngine {
     /// without focus, since Herdr takes commands only from an active one (`endpoint_requests.rs`). Each step has
     /// `stepTime`, Herdr's time for a show, from the ask or Herdr's answer before it; one that takes longer
     /// leaves the zooms left, with the phone's record of them, and the release goes on to its focus back to the
-    /// tab it started on. The connection's end ends it at once. An engine whose claim on the zooms a newer one
-    /// replaced takes nothing off (`HerdrZoomKeepers`). `done` once the release has ended, or at once when
+    /// tab it started on. The connection's end ends it at once. An engine a newer claim on the zooms stopped, or
+    /// replaced, takes nothing off (`HerdrZoomKeepers`). `done` once the release has ended, or at once when
     /// nothing goes.
     fileprivate func releaseZooms(within stepTime: Duration, done: @escaping @Sendable () -> Void, connection: UInt64) {
-        guard state == .running, connection == self.connection, outbox != nil, release == nil,
+        guard state == .running, connection == self.connection, outbox != nil, release == nil, !releaseStopped,
               zoomClaim.map({ $0.keepers.holds($0.claim) }) ?? true,
               methods.contains(HerdrScreenModel.paneZoomMethod),
               !ownedZooms.tabIDs.isEmpty || lane.inFlight?.item.method == HerdrScreenModel.paneZoomMethod
