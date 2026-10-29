@@ -740,6 +740,10 @@ actor HerdrTerminalEngine {
     private var bordersMayHaveChanged = true
     private var paintsPopup = false
     private var paintsPopupRevision: UInt64 = 0
+    /// The popup the frames drawn last showed, and the tab of the frame that showed it: Herdr sends a popup
+    /// only to a client on the tab it was opened on (`server/headless/render.rs`), and takes its input only
+    /// from one there (`takesInput`).
+    private var popupTab: (terminalID: String, tabID: String?)?
     private var cellWidthPx: UInt32
     private var cellHeightPx: UInt32
     private let makeProducer: ProducerFactory
@@ -774,26 +778,31 @@ actor HerdrTerminalEngine {
 
     /// Whether Herdr takes input for `target` that goes now. Herdr applies each command the moment it reads
     /// it, in the connection's order with input (`server/headless/client_views.rs`
-    /// `handle_client_shell_api_request`), and drops a pane's input while it doesn't show this client the pane
-    /// (`server/headless.rs` `ClientShellPaneInput`). The view input meets is the newest snapshot's, moved by
-    /// the commands Herdr answered that no snapshot shows yet, in their order. The commands still to come
-    /// (`changesToCome`) may fail, which leaves the view as it was, so input must be taken in each view they
-    /// lead through. Where Remux can't tell where a command takes the view, input is refused.
+    /// `handle_client_shell_api_request`). It drops a pane's input while it doesn't show this client the pane
+    /// (`server/headless.rs` `ClientShellPaneInput`), and a popup's while this client isn't on the popup's tab
+    /// (`ClientShellPopupInput`, `popup_owner_tab_id`), the tab of the frame that showed it (`popupTab`). The
+    /// view input meets is the newest snapshot's, moved by the commands Herdr answered that no snapshot shows
+    /// yet, in their order. The commands still to come (`changesToCome`) may fail, which leaves the view as it
+    /// was, so input must be taken in each view they lead through. Where Remux can't tell where a command
+    /// takes the view, input is refused.
     private func takesInput(_ target: HerdrTerminalTarget) -> Bool {
         guard let snapshot = presentation.snapshot else { return false }
+        let takes: (InputView) -> Bool
         switch target {
         case .pane(let pane):
-            var view = InputView(snapshot)
-            for effect in unshown { view.apply(effect.change, in: snapshot) }
-            guard view.takes(pane, in: snapshot) else { return false }
-            for change in changesToCome {
-                view.apply(change, in: snapshot)
-                guard view.takes(pane, in: snapshot) else { return false }
-            }
-            return true
-        case .popup:
-            return true
+            takes = { $0.takes(pane, in: snapshot) }
+        case .popup(let terminalID):
+            guard let popupTab, popupTab.terminalID == terminalID, let tabID = popupTab.tabID else { return false }
+            takes = { $0.tabID == tabID }
         }
+        var view = InputView(snapshot)
+        for effect in unshown { view.apply(effect.change, in: snapshot) }
+        guard takes(view) else { return false }
+        for change in changesToCome {
+            view.apply(change, in: snapshot)
+            guard takes(view) else { return false }
+        }
+        return true
     }
 
     /// The view changes of the commands Herdr hasn't answered, in the order it applies them: the command in
@@ -1891,6 +1900,7 @@ actor HerdrTerminalEngine {
             // Pane and terminal ids belong to one server boot.
             terminals.removeAll()
             failedTerminals.removeAll()
+            popupTab = nil
             bootID = surface.bootID
         }
         let cursor = HerdrPanePainter.paneCursor(of: surface)
@@ -1916,6 +1926,7 @@ actor HerdrTerminalEngine {
         }
         let frame = PresentedFrame(bootID: surface.bootID, projectionRevision: surface.projectionRevision, paneIDs: listed)
         let next = layout(of: surface, snapshot: snapshot)
+        if let popup = next.popup { popupTab = (popup.terminalID, next.tab?.tabID) }
         if madeTerminal || next != layout || frame != presentedFrame {
             layout = next
             presentedFrame = frame

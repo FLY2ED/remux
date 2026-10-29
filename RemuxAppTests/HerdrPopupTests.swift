@@ -301,6 +301,29 @@ final class HerdrPopupTests: XCTestCase {
         XCTAssertEqual(harness.model.terminalScreenAdapter.terminalScreenPresentationProjection.viewport.panes.count, 2)
     }
 
+    /// While a move to another tab is on its way, as a pick in Sessions makes, the phone lets the popup go,
+    /// and Herdr, which takes a popup's input only from a client on the popup's tab (`server/headless.rs`
+    /// `ClientShellPopupInput`), would drop what is typed into it: nothing typed goes, and the composer's
+    /// message for the popup says it didn't.
+    func testInputForThePopupDoesntGoWhileAMoveTakesTheSessionToAnotherTab() async throws {
+        let harness = await makeHarness()
+        let (session, _, _) = try await attachedPopup(harness, otherTab: true)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let target = try XCTUnwrap(popup(harness)?.id)
+
+        XCTAssertTrue(harness.model.reveal(.tab("t2"), bootID: "boot"))
+        let away = try await nextCommand(session.bridge, from: &index)
+        guard case .command(_, _, let params) = away else { return XCTFail("no move to t2: \(away)") }
+        XCTAssertEqual(params["tab_id"], "t2")
+        let typedFrom = await session.bridge.writtenCount
+        _ = adapter.sendInputToFocusedSurface("k")
+        let pasted = await adapter.sendPasteAwaitingCommandCompletion("fix it", to: target)
+        XCTAssertFalse(pasted, "the composer's message went while Herdr was switching tabs")
+        try await Task.sleep(for: .milliseconds(100))
+        try await assertNoInput(session.bridge, from: typedFrom)
+    }
+
     // MARK: - A surface too small for Herdr to box the popup
 
     /// Herdr leaves the popup out of a surface under 6 x 4 cells, where it can't box it, though the popup is
@@ -988,9 +1011,10 @@ final class HerdrPopupTests: XCTestCase {
 
     /// A session shown with a popup over its tab, attached at the tests' area and drawn.
     private func attachedPopup(
-        _ harness: HerdrModelHarness
+        _ harness: HerdrModelHarness,
+        otherTab: Bool = false
     ) async throws -> (session: (bridge: FakeBridgeTransport, next: Int), attach: FakeBridgeTransport, cell: GhosttyTerminalCellDisplayMetrics) {
-        let session = try await shownSession(harness)
+        let session = try await shownSession(harness, otherTab: otherTab)
         await session.bridge.serve(popupSurface(revision: 3))
         try await harness.waitUntil("the popup wasn't laid out") { harness.model.layout?.popup != nil }
         let cell = try XCTUnwrap(harness.model.measurement?.cellMetrics)
@@ -1003,16 +1027,19 @@ final class HerdrPopupTests: XCTestCase {
         return (session, attach, cell)
     }
 
-    /// A session shown with panes `w1:p1` and `w1:p2`, both drawn, `w1:p1` focused; returns its bridge and
-    /// the index of the first write after the show.
-    private func shownSession(_ harness: HerdrModelHarness) async throws -> (bridge: FakeBridgeTransport, next: Int) {
+    /// A session shown with panes `w1:p1` and `w1:p2` of tab `t1`, both drawn, `w1:p1` focused, and with
+    /// `otherTab`, a tab `t2` of pane `w1:p3`; returns its bridge and the index of the first write after the
+    /// show.
+    private func shownSession(_ harness: HerdrModelHarness, otherTab: Bool = false) async throws -> (bridge: FakeBridgeTransport, next: Int) {
         let bridge = try await harness.bridge()
         await bridge.serve(
             try HerdrServerScript.welcome()
                 + HerdrServerScript.snapshot(
                     revision: 1,
+                    otherTabs: otherTab ? ["t2"] : [],
                     focusedPane: "w1:p1",
                     panes: ["w1:p1", "w1:p2"].map { HerdrServerScript.snapshotPane($0) }
+                        + (otherTab ? [HerdrServerScript.snapshotPane("w1:p3", tab: "t2")] : [])
                 )
         )
         await bridge.serve(HerdrServerScript.surface(projection: 1, revision: 1, lines: ["one two"], panes: Self.panes))
