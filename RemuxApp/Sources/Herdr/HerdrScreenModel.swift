@@ -266,7 +266,7 @@ final class HerdrScreenModel {
     private let onNotification: (NotificationEvent) -> Void
     private let engine: HerdrTerminalEngine
     /// Where the phone keeps the zooms Remux made, for the session's end to take off.
-    private let ownedZoomStore: any HerdrOwnedZoomStore
+    private let zoomKeepers: HerdrZoomKeepers
     private let makeRendererFence: RendererFenceFactory
     private let clipboard: TerminalClipboard
     private var runtime: GhosttyKitRuntime?
@@ -383,7 +383,7 @@ final class HerdrScreenModel {
         recoveryTiming: RecoveryTiming = RecoveryTiming(),
         switchingCueDelay: Duration = HerdrScreenModel.switchingCueDelay,
         engine: HerdrTerminalEngine = HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1),
-        ownedZoomStore: any HerdrOwnedZoomStore = InMemoryHerdrOwnedZoomStore(),
+        zoomKeepers: HerdrZoomKeepers = HerdrZoomKeepers(store: InMemoryHerdrOwnedZoomStore()),
         makeRendererFence: @escaping RendererFenceFactory = {
             HerdrPaneRendererFence(engine: $0, paneID: $1, terminal: $2)
         },
@@ -398,7 +398,7 @@ final class HerdrScreenModel {
         self.recoveryTiming = recoveryTiming
         self.switchingCueDelay = switchingCueDelay
         self.engine = engine
-        self.ownedZoomStore = ownedZoomStore
+        self.zoomKeepers = zoomKeepers
         self.makeRendererFence = makeRendererFence
         self.clipboard = clipboard
         currentTerminalSettings = target.terminalSettings
@@ -1476,8 +1476,8 @@ final class HerdrScreenModel {
         // Frames can arrive before `open` returns; the engine paints them at the hello's cell size.
         await engine.setCellSize(widthPx: size.cellWidthPx, heightPx: size.cellHeightPx)
         await engine.keepOwnedZooms(
-            in: ownedZoomStore,
-            of: HerdrZoomSession(serverID: target.server.id, session: target.workspace.sessionName)
+            of: HerdrZoomSession(serverID: target.server.id, session: target.workspace.sessionName),
+            from: zoomKeepers
         )
         await engine.beginConnection(attempt.id, outbox: connection.outbox)
         attempt.helloSent = true

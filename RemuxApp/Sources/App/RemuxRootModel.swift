@@ -2538,7 +2538,7 @@ final class RemuxRootModel: ObservableObject {
                 onNotification: { [weak self] event in
                     self?.handleHerdrNotification(event, from: key)
                 },
-                ownedZoomStore: dependencies.herdrOwnedZoomStore
+                zoomKeepers: dependencies.herdrZoomKeepers
             ))
         }
         terminalRuntimes[key] = runtime

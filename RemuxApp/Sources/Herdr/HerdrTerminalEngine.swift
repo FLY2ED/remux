@@ -255,6 +255,34 @@ struct HerdrZoomPolicy: Equatable, Sendable {
     }
 }
 
+/// Hands each Herdr session's zooms on the phone to one engine at a time. A session ended and attached again
+/// while its end still takes Remux's zooms off has two engines on it: the new one takes the zooms over once
+/// the old one's release has stopped, so nothing is unzoomed under the new attachment, and only the engine
+/// keeping them saves them, so an older record doesn't replace a newer one.
+actor HerdrZoomKeepers {
+    nonisolated let store: any HerdrOwnedZoomStore
+    private var keepers: [HerdrZoomSession: Keeper] = [:]
+
+    private struct Keeper {
+        weak var engine: HerdrTerminalEngine?
+    }
+
+    init(store: any HerdrOwnedZoomStore) {
+        self.store = store
+    }
+
+    /// The zooms the phone keeps for `session`, which `engine` keeps from now on, once the engine keeping them
+    /// before has handed them over (`HerdrTerminalEngine.handOverOwnedZooms`); nil when a newer engine took the
+    /// session over meanwhile.
+    func takeOver(_ session: HerdrZoomSession, for engine: HerdrTerminalEngine) async -> HerdrOwnedZooms? {
+        let previous = keepers[session]?.engine
+        keepers[session] = Keeper(engine: engine)
+        if let previous, previous !== engine { await previous.handOverOwnedZooms() }
+        guard keepers[session]?.engine === engine else { return nil }
+        return store.zooms(of: session)
+    }
+}
+
 enum HerdrRendererRegistrationError: Error, Equatable {
     case engineEnded
     /// The pane was dropped, or shows a newer terminal than the renderer's.
@@ -1064,13 +1092,31 @@ actor HerdrTerminalEngine {
 
     // MARK: - Zoom ownership
 
-    /// The phone keeps Remux's zooms of `session` in `store`: the engine takes over those it kept for the
-    /// session, which each snapshot checks against Herdr's tabs (`HerdrOwnedZooms.reconcile`), and saves
-    /// every change.
-    func keepOwnedZooms(in store: any HerdrOwnedZoomStore, of session: HerdrZoomSession) {
+    /// The phone keeps Remux's zooms of `session`, which `keepers` hands to one engine at a time: the engine
+    /// takes over those kept for the session once the engine keeping them before has handed them over, checks
+    /// them against each snapshot (`HerdrOwnedZooms.reconcile`), and saves every change.
+    func keepOwnedZooms(of session: HerdrZoomSession, from keepers: HerdrZoomKeepers) async {
         guard state != .stopped, zoomKeeper == nil else { return }
-        zoomKeeper = (store, session)
-        ownedZooms = store.zooms(of: session)
+        guard let zooms = await keepers.takeOver(session, for: self), state != .stopped, zoomKeeper == nil
+        else { return }
+        zoomKeeper = (keepers.store, session)
+        ownedZooms = zooms
+    }
+
+    /// Another engine takes the session's zooms over (`HerdrZoomKeepers`): the release under way sends nothing
+    /// more than a zoom it puts back, and ends once Herdr answers its command in flight, or the step's time runs
+    /// out. The zooms are then no longer kept here, so nothing this engine sees later is saved over the other
+    /// engine's record.
+    fileprivate func handOverOwnedZooms() async {
+        if release != nil {
+            release?.handOver = []
+            dispatch()
+            if release != nil {
+                await withCheckedContinuation { release?.handOver?.append($0) }
+            }
+        }
+        zoomKeeper = nil
+        ownedZooms = HerdrOwnedZooms()
     }
 
     private func updateOwnedZooms(_ change: (inout HerdrOwnedZooms) -> Void) {
@@ -1096,6 +1142,9 @@ actor HerdrTerminalEngine {
         /// The pane to put a zoom back on, which an unzoom took off another tab than the one it was meant for
         /// (`releaseUnzoomAnswered`).
         var restoring: String?
+        /// Once another engine takes the session's zooms over, the hand-over waiting for the release to end
+        /// (`handOverOwnedZooms`).
+        var handOver: [CheckedContinuation<Void, Never>]?
         /// Herdr's time for each step, from the ask or Herdr's answer before it.
         let stepTime: Duration
         /// Names the newest step's time, so an older one's end is dropped.
@@ -1128,18 +1177,10 @@ actor HerdrTerminalEngine {
     /// The release's next command against Herdr's newest snapshot, with the lane free: a zoom put back that an
     /// unzoom took off another tab, the unzoom of the tab the session is on, or the focus of the next tab. Each
     /// tab is checked again as its turn comes (`releases`): one no longer Remux's is skipped, also the one being
-    /// focused, whose snapshot may then never come.
+    /// focused, whose snapshot may then never come. Once another engine takes the zooms over, only a zoom put
+    /// back goes.
     private func advanceRelease(outbox: any HerdrOutbound, in snapshot: HerdrSnapshot) {
-        guard var release, unshown.isEmpty else { return }
-        if release.tabs == nil {
-            let tabs = ownedZooms.tabsToRelease(in: snapshot)
-            release.tabs = tabs
-            if !tabs.isEmpty, request.map({ $0.kind == .hide }) ?? true,
-               let message = surfaceSet(active: true, show: nil, in: snapshot) {
-                outbox.send([message])
-                outbox.setSurfaceActive(true)
-            }
-        }
+        guard var release else { return }
         if let pane = release.restoring {
             release.restoring = nil
             let restore = HerdrCommandLane.Command(
@@ -1150,6 +1191,17 @@ actor HerdrTerminalEngine {
             self.release = release
             send(.command(restore), params: restore.params, in: snapshot)
             return
+        }
+        guard release.handOver == nil else { return endRelease() }
+        guard unshown.isEmpty else { return }
+        if release.tabs == nil {
+            let tabs = ownedZooms.tabsToRelease(in: snapshot)
+            release.tabs = tabs
+            if !tabs.isEmpty, request.map({ $0.kind == .hide }) ?? true,
+               let message = surfaceSet(active: true, show: nil, in: snapshot) {
+                outbox.send([message])
+                outbox.setSurfaceActive(true)
+            }
         }
         if let focusing = release.focusing {
             guard snapshot.focusedTabID == focusing || !releases(focusing, in: snapshot) else {
@@ -1248,6 +1300,7 @@ actor HerdrTerminalEngine {
         guard let release else { return }
         self.release = nil
         release.deadline?.cancel()
+        release.handOver?.forEach { $0.resume() }
         release.done()
     }
 

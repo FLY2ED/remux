@@ -705,7 +705,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let (feed, outbox) = await connect(engine)
         let store = InMemoryHerdrOwnedZoomStore()
         let session = HerdrZoomSession(serverID: UUID(), session: "s")
-        await engine.keepOwnedZooms(in: store, of: session)
+        await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
         try await shownZoomed(feed, updates, outbox)
         let closed = Closed()
         let stepTime: Duration = .milliseconds(200)
@@ -800,7 +800,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let (feed, outbox) = await connect(engine)
         let store = InMemoryHerdrOwnedZoomStore()
         let session = HerdrZoomSession(serverID: UUID(), session: "s")
-        await engine.keepOwnedZooms(in: store, of: session)
+        await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
         try await shownZoomed(feed, updates, outbox)
         let closed = Closed()
         let stepTime: Duration = .milliseconds(200)
@@ -879,7 +879,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let (feed, outbox) = await connect(engine)
         let store = InMemoryHerdrOwnedZoomStore()
         let session = HerdrZoomSession(serverID: UUID(), session: "s")
-        await engine.keepOwnedZooms(in: store, of: session)
+        await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
         try await shownZoomed(feed, updates, outbox)
         let closed = Closed()
 
@@ -982,7 +982,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let (feed, outbox) = await connect(engine)
         let store = InMemoryHerdrOwnedZoomStore()
         let session = HerdrZoomSession(serverID: UUID(), session: "s")
-        await engine.keepOwnedZooms(in: store, of: session)
+        await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
         try await shownZoomed(feed, updates, outbox)
         // Another client zooms the second tab.
         await feed.receive(try Self.places(revision: 3, zoomed: ["t1", "t2"]))
@@ -1010,7 +1010,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let (feed, outbox) = await connect(engine)
         let store = InMemoryHerdrOwnedZoomStore()
         let session = HerdrZoomSession(serverID: UUID(), session: "s")
-        await engine.keepOwnedZooms(in: store, of: session)
+        await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
         try await shownZoomed(feed, updates, outbox)
         await feed.receive(try Self.places(revision: 3, zoomed: ["t1", "t2"]))
         let closed = Closed()
@@ -1029,6 +1029,44 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// The session attached again while its end still takes Remux's zooms off: the new attachment takes the
+    /// zooms over once Herdr answers the end's step in flight, after which the end sends nothing more and saves
+    /// nothing more, so no tab is unzoomed under the new attachment, which keeps the zooms not taken off yet.
+    func testAttachingAgainDuringTheSessionsEndTakesItsZoomsOver() async throws {
+        let store = InMemoryHerdrOwnedZoomStore()
+        let keepers = HerdrZoomKeepers(store: store)
+        let session = HerdrZoomSession(serverID: UUID(), session: "s")
+        let old = makeEngine()
+        let updates = UpdateLog(old)
+        let (feed, outbox) = await connect(old)
+        await old.keepOwnedZooms(of: session, from: keepers)
+        try await zoomedOnBothTabs(feed, updates, outbox)
+        let closed = Closed()
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t1"])
+
+        let new = makeEngine()
+        let takingOver = Task { await new.keepOwnedZooms(of: session, from: keepers) }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(closed.isClosed, "the end stopped with its step in flight")
+        try await answer(feed, outbox)
+        await takingOver.value
+        XCTAssertTrue(closed.isClosed, "the end went on after the session was attached again")
+        await feed.receive(try Self.places(revision: 4, focusedPane: "P", zoomed: ["t1", "t2"]))
+        // Another client unzooms the second tab; the old engine saves nothing of it.
+        await feed.receive(try Self.places(revision: 5, focusedPane: "P", zoomed: ["t1"]))
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "zoom R on", "focus R", "tab.focus"], "a tab was unzoomed under the new attachment")
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t1", "t2"], "the old engine saved after the new attachment took over")
+
+        let (newFeed, newOutbox) = await connect(new)
+        await newFeed.receive(try Self.places(revision: 1, focusedPane: "P", zoomed: ["t1", "t2"]))
+        let newClosed = Closed()
+        await newFeed.releaseZooms(within: Self.releaseStepTime, done: newClosed.close)
+        XCTAssertEqual(try newOutbox.commands(), ["tab.focus"], "the new attachment didn't take the zooms over")
+        await old.stop()
+        await new.stop()
+    }
+
     /// The connection's end during the session's end, as when the phone suspends the app and the link drops,
     /// ends the release at once, leaving the zooms not yet taken off and the phone's record of them for a later
     /// attachment.
@@ -1038,7 +1076,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let (feed, outbox) = await connect(engine)
         let store = InMemoryHerdrOwnedZoomStore()
         let session = HerdrZoomSession(serverID: UUID(), session: "s")
-        await engine.keepOwnedZooms(in: store, of: session)
+        await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
         try await zoomedOnBothTabs(feed, updates, outbox)
         let closed = Closed()
 
@@ -1066,7 +1104,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let (feed, outbox) = await connect(engine)
         let store = InMemoryHerdrOwnedZoomStore()
         let session = HerdrZoomSession(serverID: UUID(), session: "s")
-        await engine.keepOwnedZooms(in: store, of: session)
+        await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
         try await shown(feed, updates, outbox, panes: Self.atP)
         let answers = Answers()
 
@@ -1098,7 +1136,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let store = InMemoryHerdrOwnedZoomStore()
         let session = HerdrZoomSession(serverID: UUID(), session: "s")
         let first = makeEngine()
-        await first.keepOwnedZooms(in: store, of: session)
+        await first.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
         let firstUpdates = UpdateLog(first)
         let (firstFeed, firstOutbox) = await connect(first)
         try await shownZoomed(firstFeed, firstUpdates, firstOutbox)
@@ -1107,7 +1145,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await first.stop()
 
         let second = makeEngine()
-        await second.keepOwnedZooms(in: store, of: session)
+        await second.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
         let (feed, outbox) = await connect(second)
         await feed.receive(try Self.places(revision: 1, boot: "boot2", zoomed: ["t1"]))
         XCTAssertEqual(store.zooms(of: session).tabIDs, ["t1"])
@@ -1122,7 +1160,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         // A record of tab t1 with panes the server no longer has: the tab of that id now is another one.
         let stale = try StaleZoomStore(tabID: "t1", panes: ["X", "Y"])
         let third = makeEngine()
-        await third.keepOwnedZooms(in: stale, of: session)
+        await third.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: stale))
         let (thirdFeed, thirdOutbox) = await connect(third)
         await thirdFeed.receive(try Self.places(revision: 1, boot: "boot3", zoomed: ["t1"]))
         XCTAssertEqual(stale.zooms(of: session).tabIDs, [], "the phone kept a record of another tab")

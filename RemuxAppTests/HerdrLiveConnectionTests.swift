@@ -211,8 +211,8 @@ final class HerdrLiveConnectionTests: XCTestCase {
     /// the session ends, as Herdr itself reports.
     @MainActor
     func testAZoomOutlivingTheAppIsUndoneAfterAServerRestartOnHerdr095() async throws {
-        let store = InMemoryHerdrOwnedZoomStore()
-        let first = try await openShownSession(version: "0.9.5", settings: Self.zooming, ownedZoomStore: store, through: { $0 })
+        let keepers = HerdrZoomKeepers(store: InMemoryHerdrOwnedZoomStore())
+        let first = try await openShownSession(version: "0.9.5", settings: Self.zooming, zoomKeepers: keepers, through: { $0 })
         let panes = try await split(first)
         first.model.setSelected(false)
         first.model.setSelected(true)
@@ -227,7 +227,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
         XCTAssertEqual(stop.exitStatus, 0, String(decoding: stop.stderr, as: UTF8.self))
 
         let second = try await openShownSession(
-            version: "0.9.5", settings: Self.zooming, ownedZoomStore: store, after: first, through: { $0 }
+            version: "0.9.5", settings: Self.zooming, zoomKeepers: keepers, after: first, through: { $0 }
         )
         XCTAssertNotEqual(second.model.places.outline?.bootID, boot, "Herdr's server didn't restart")
         try await zoomState(second, pane: panes.focused, is: true)
@@ -1610,14 +1610,14 @@ final class HerdrLiveConnectionTests: XCTestCase {
 
     /// A Herdr session model with Remux's terminal `settings`, on a fresh isolated server for Herdr
     /// `version` with the `ui` settings, or on an earlier session's fixture and saved server, shown, with its
-    /// first pane drawn in a window as on the screen. The phone keeps Remux's zooms in `ownedZoomStore`.
+    /// first pane drawn in a window as on the screen. The phone keeps Remux's zooms through `zoomKeepers`.
     /// `through` can put a transport between the model's connection and the bridge.
     @MainActor
     private func openShownSession(
         version: String,
         settings: TerminalSettings = .default,
         ui: [String] = [],
-        ownedZoomStore: any HerdrOwnedZoomStore = InMemoryHerdrOwnedZoomStore(),
+        zoomKeepers: HerdrZoomKeepers = HerdrZoomKeepers(store: InMemoryHerdrOwnedZoomStore()),
         after earlier: ShownSession? = nil,
         through wrap: @escaping @Sendable (any HerdrBridgeTransport) -> any HerdrBridgeTransport
     ) async throws -> ShownSession {
@@ -1662,7 +1662,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
             },
             onRuntimeStateChange: { _ in },
             onNotification: { _ in },
-            ownedZoomStore: ownedZoomStore
+            zoomKeepers: zoomKeepers
         )
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 600))
         window.rootViewController = UIViewController()
