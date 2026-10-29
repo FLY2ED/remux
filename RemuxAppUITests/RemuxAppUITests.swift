@@ -2542,7 +2542,7 @@ final class RemuxAppUITests: XCTestCase {
     /// not text size, and keeps it while the other client types, and through a quiet minute; Home gives it
     /// back. Typing, the composer and swipes go into it: an arrow reaches a program asking for application
     /// cursor keys as one, a shell's history scrolls, and a program reporting the mouse gets wheel steps and a
-    /// tap as a click.
+    /// tap as a click. A long press on a word selects it, and Copy copies it.
     /// btop says the grid it has is too small, with its size; Claude Code takes the phone's keys. Each
     /// popup closes when its program exits. Screens in dark, then Latte.
     /// The harness answers each `<step>.request` with `<step>.done`, and `<step>.out` for what it read:
@@ -2678,6 +2678,21 @@ final class RemuxAppUITests: XCTestCase {
         typeIntoPopup("clear; echo still-$((6*7))\n")
         XCTAssertTrue(try screen(containing: "still-42"), "Typing after a quiet minute didn't reach the popup.")
         hideKeyboard()
+
+        // A long press selects a word of the popup's terminal, as on a pane, and Copy copies it.
+        UIPasteboard.general.string = "REMUX_HERDR_POPUP_COPY_SENTINEL"
+        typeIntoPopup("clear; echo popupword-$((6*7))\n")
+        XCTAssertTrue(try screen(containing: "popupword-42"), "echo didn't run in the popup.")
+        hideKeyboard()
+        content.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 20, dy: 8)).press(forDuration: 0.7)
+        let popupCopy = waitForCopyMenuItem(timeout: 5)
+        capture("f2c-popup-dark-selected")
+        popupCopy.tap()
+        XCTAssertEqual(pasteIntoEmptyComposer(), "popupword-42", "A word of the popup didn't copy as itself.")
+        clearAndCloseComposer()
+        hideKeyboard()
+        // A tap ends the selection, as on a pane; the next brings up the keyboard.
+        content.tap()
 
         // Herdr encodes the phone's keys for the program's modes: an arrow reaches a program asking for
         // application cursor keys as one.

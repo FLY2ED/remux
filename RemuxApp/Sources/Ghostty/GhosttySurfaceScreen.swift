@@ -290,35 +290,6 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
                             )
                             .background(presentation.terminalTheme.terminalSurfaceBackground)
 
-                        if let popup = screenProjection.viewport.popup {
-                            GhosttyTerminalPopupFrameView(
-                                popup: popup,
-                                windowGrid: screenProjection.viewport.windowGrid,
-                                cellMetrics: screenProjection.viewport.cellMetrics,
-                                surfaceLookup: model.terminalManagedSurfaceLookup,
-                                terminalTheme: presentation.terminalTheme,
-                                keyboardMode: renderedKeyboardMode,
-                                submitScroll: { surfaceID, event in
-                                    model.sendMouseScroll(to: surfaceID, event)
-                                },
-                                submitPointer: { surfaceID, position, mods in
-                                    model.sendMousePosition(to: surfaceID, position, mods: mods)
-                                },
-                                isMouseCaptured: { surfaceID in
-                                    model.isMouseCaptured(for: surfaceID)
-                                },
-                                submitMouseButton: { surfaceID, event in
-                                    model.sendMouseButton(to: surfaceID, event)
-                                },
-                                onTap: handlePopupTap
-                            )
-                            .frame(
-                                width: terminalViewportSize.width,
-                                height: terminalViewportSize.height,
-                                alignment: .topLeading
-                            )
-                        }
-
                         GhosttyTerminalResponderRepresentable(
                             isEnabled: terminalResponderFocusPolicy.isResponderEnabled,
                             wantsFirstResponder: terminalResponderFocusPolicy.wantsFirstResponder,
@@ -844,6 +815,10 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
         _ surfaceID: UUID,
         shouldShowKeyboard: Bool
     ) {
+        if surfaceID == model.terminalScreenPresentationProjection.viewport.popup?.id {
+            handlePopupTap()
+            return
+        }
         GhosttyRuntimeTrace.flowBegin(
             "terminal.input",
             event: "ui.tap.surface",

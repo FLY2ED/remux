@@ -76,21 +76,20 @@ final class GhosttyPaneLinesViewTests: XCTestCase {
             grid: nil,
             cell: nil
         )
-        let (window, host) = show(GhosttyTerminalPopupFrameView(
-            popup: popup,
+        var projection = GhosttyTerminalViewportPresentationProjection(
             windowGrid: grid,
             cellMetrics: cell,
-            surfaceLookup: .empty,
-            terminalTheme: TerminalTheme.allCases[0],
-            keyboardMode: .hidden,
-            submitScroll: nil,
-            submitPointer: nil,
-            isMouseCaptured: nil,
-            submitMouseButton: nil,
-            onTap: {}
-        ))
+            panes: [],
+            paneLines: [],
+            focusedSurfaceID: nil,
+            isServerZoomed: false,
+            windowCount: 1
+        )
+        projection.popup = popup
+        let (window, host) = show(viewport(projection, theme: TerminalTheme.allCases[0]))
         defer { hide(window) }
-        let lines = try XCTUnwrap(descendant(of: host.view, named: "GhosttyPaneLinesUIView"), "no view of the lines")
+        let frame = try XCTUnwrap(descendant(of: host.view, named: "GhosttyTerminalPopupFrameView"), "no popup")
+        let lines = try XCTUnwrap(descendant(of: frame, named: "GhosttyPaneLinesUIView"), "no view of the frame's lines")
         assertSize(lines.bounds.size, canvas(in: tall).size)
         let origin = lines.convert(CGPoint.zero, to: host.view)
 

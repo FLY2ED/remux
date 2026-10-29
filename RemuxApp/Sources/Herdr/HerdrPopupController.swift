@@ -44,9 +44,13 @@ final class HerdrPopupTerminalSurface: TerminalPaneInputSink {
     let isAttached: Bool
     /// The composer's input for this popup's terminal, which learns whether Herdr has it.
     private let deliver: ([HerdrInputEvent]) async -> Bool
-    /// The grid the renderer draws, which is also its scroll range (`applyScrollRange`).
+    /// The grid the renderer draws, which is also its scroll range (`applyScrollRange`). Another width ends
+    /// the selection, as a pane's does: Herdr draws the popup again at that width, and its lines move.
     fileprivate(set) var grid: HerdrPopupGrid {
-        didSet { applyScrollRange() }
+        didSet {
+            applyScrollRange()
+            if grid.columns != oldValue.columns { renderer.managedSurface?.endSelection() }
+        }
     }
 
     fileprivate init(
