@@ -73,6 +73,7 @@
 		2CC93B0F7B15C422B91559A6 /* TmuxSessionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6264B24DDF73BB7A9ACA1D7 /* TmuxSessionController.swift */; };
 		2DE24C9556828D7A16BD82A3 /* GhosttyTerminalScreenModeling.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8421B86729F6E46ABD20CBD5 /* GhosttyTerminalScreenModeling.swift */; };
 		2FF96B49786DDDEE44042064 /* herdr-graphics-placements-A.s2c.bin in Resources */ = {isa = PBXBuildFile; fileRef = 4B6419A1FAE1643804E12428 /* herdr-graphics-placements-A.s2c.bin */; };
+		31BDDB138653ED4B6CB6B67D /* HerdrOwnedZoomStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55ACC373B1F1013D94660C2F /* HerdrOwnedZoomStore.swift */; };
 		31FA4F4D3F831DE0DEAB770F /* TerminalPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B695C926DA594038E2C6144 /* TerminalPreviewView.swift */; };
 		3266F0AE9A1F836618FF115D /* DeterministicTmuxControlTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = E509784BCB04CA957763EB32 /* DeterministicTmuxControlTransport.swift */; };
 		338BB72DDA774589D60E8D0D /* RemuxLibrarySSHPrewarmCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7313F7C3049C269572F59B5 /* RemuxLibrarySSHPrewarmCoordinatorTests.swift */; };
@@ -510,6 +511,7 @@
 		542D6FAA23D669DBE51E5E89 /* HerdrWireTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HerdrWireTests.swift; sourceTree = "<group>"; };
 		549C1F236116B0F5DD5921F1 /* herdr-15-cells-A.s2c.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = "herdr-15-cells-A.s2c.bin"; sourceTree = "<group>"; };
 		54A901C9EDD38BD7A800F09D /* HerdrSessionDiscoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HerdrSessionDiscoveryTests.swift; sourceTree = "<group>"; };
+		55ACC373B1F1013D94660C2F /* HerdrOwnedZoomStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HerdrOwnedZoomStore.swift; sourceTree = "<group>"; };
 		55CCA5E86DBC218305F7FCFE /* herdr-13-bell-clipboard-B.expected.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "herdr-13-bell-clipboard-B.expected.json"; sourceTree = "<group>"; };
 		575EDAA61B2B7A0B241A5E4D /* TmuxSessionLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TmuxSessionLink.swift; sourceTree = "<group>"; };
 		592AA53C09D889D5E3DB7EAD /* TmuxZoomOwnershipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TmuxZoomOwnershipTests.swift; sourceTree = "<group>"; };
@@ -1018,6 +1020,7 @@
 			children = (
 				AE5B67646A0F14933B3FD8D8 /* ApplicationStorage.swift */,
 				48AC2CE228C16D7E9DCD09BE /* ConnectionProfileRepository.swift */,
+				55ACC373B1F1013D94660C2F /* HerdrOwnedZoomStore.swift */,
 				0C7EBCE00319FF2879275BDD /* JSONFileStore.swift */,
 				DA9987EA1F7B5FDC3A50ECEA /* ShortcutStore.swift */,
 				AD50E6815BED6CB2E3B793C9 /* SSHCredentialStore.swift */,
@@ -1558,6 +1561,7 @@
 				6C118ECAF235EE91F69AE2C5 /* HerdrNoticePolicy.swift in Sources */,
 				54D21982C400C7EBBAFB2A4E /* HerdrNotificationBanner.swift in Sources */,
 				A14B24396C6C670E3B8D3544 /* HerdrNotificationPolicy.swift in Sources */,
+				31BDDB138653ED4B6CB6B67D /* HerdrOwnedZoomStore.swift in Sources */,
 				8620C4D7CE5B8ABA4E3C9B47 /* HerdrPaneImages.swift in Sources */,
 				659293520728E04920748852 /* HerdrPanePainter.swift in Sources */,
 				19C0E0E9C8313BDBB3CB09BF /* HerdrPaneTerminal.swift in Sources */,

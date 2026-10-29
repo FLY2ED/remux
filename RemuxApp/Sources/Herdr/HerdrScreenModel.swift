@@ -266,6 +266,8 @@ final class HerdrScreenModel {
     private let onRuntimeStateChange: (TerminalRuntimeStateUpdate) -> Void
     private let onNotification: (NotificationEvent) -> Void
     private let engine: HerdrTerminalEngine
+    /// Where the phone keeps the zooms Remux made, for the session's end to take off.
+    private let ownedZoomStore: any HerdrOwnedZoomStore
     private let makeRendererFence: RendererFenceFactory
     private let clipboard: TerminalClipboard
     private var runtime: GhosttyKitRuntime?
@@ -382,6 +384,7 @@ final class HerdrScreenModel {
         recoveryTiming: RecoveryTiming = RecoveryTiming(),
         switchingCueDelay: Duration = HerdrScreenModel.switchingCueDelay,
         engine: HerdrTerminalEngine = HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1),
+        ownedZoomStore: any HerdrOwnedZoomStore = InMemoryHerdrOwnedZoomStore(),
         makeRendererFence: @escaping RendererFenceFactory = {
             HerdrPaneRendererFence(engine: $0, paneID: $1, terminal: $2)
         },
@@ -396,6 +399,7 @@ final class HerdrScreenModel {
         self.recoveryTiming = recoveryTiming
         self.switchingCueDelay = switchingCueDelay
         self.engine = engine
+        self.ownedZoomStore = ownedZoomStore
         self.makeRendererFence = makeRendererFence
         self.clipboard = clipboard
         currentTerminalSettings = target.terminalSettings
@@ -445,9 +449,9 @@ final class HerdrScreenModel {
     }
 
     /// New Tab, New Workspace or a split of a pane, with the command Herdr's client sends, focused, which
-    /// goes to the pane Herdr makes (`ask(_:bootID:)`). Remux's zoom comes off a tab the session leaves for
-    /// a new one. Herdr's split unzooms the tab it splits (`workspace/tab.rs`), so the setting zooms the
-    /// new pane, as tmux keeps a window zoomed through a split; a tab the user unzoomed stays unzoomed.
+    /// goes to the pane Herdr makes (`ask(_:bootID:)`). A tab the session leaves for a new one keeps its
+    /// zoom. Herdr's split unzooms the tab it splits (`workspace/tab.rs`), so the setting zooms the new pane,
+    /// as tmux keeps a window zoomed through a split; a tab the user unzoomed stays unzoomed.
     @discardableResult
     func create(_ creation: HerdrCreation, bootID: String?) -> Bool {
         ask(.go(.creation(creation)), bootID: bootID)
@@ -734,20 +738,20 @@ final class HerdrScreenModel {
     /// renderers still being created, then closes every renderer, which unregisters it from the engine
     /// before freeing it, and releases the Ghostty app once every renderer closed anywhere is freed.
     ///
-    /// A session on screen first takes off the zoom Remux made, as leaving the screen does, and waits for
-    /// Herdr's answer within Herdr's time for a show, so the unzoom isn't lost with the connection. A new
-    /// attempt can't take the zoom over, since Herdr's zoom has no owner. Closing the connection then hides
-    /// the session on the server.
-    func stop() async {
+    /// The session's end first takes off the zooms Remux made, as tmux's does, and waits for Herdr's answers
+    /// within Herdr's time for a show, so the unzooms aren't lost with the connection. A runtime replaced by a
+    /// new attempt leaves them: the new attempt takes them over from the phone's record of them. Closing the
+    /// connection then hides the session on the server.
+    func stop(_ reason: TerminalRuntimeStopReason = .sessionEnded) async {
         guard !stopped else { return }
         let feed = attempt.flatMap { isCurrent($0) && $0.isOpen ? HerdrEngineFeed(engine: engine, connection: $0.id) : nil }
         stopped = true
         cancelRecovery()
         switchingCueTimer?.cancel()
-        if let feed {
+        if let feed, reason == .sessionEnded {
             let once = HerdrOnce()
             await withCheckedContinuation { (closed: CheckedContinuation<Void, Never>) in
-                Task { await feed.unzoomBeforeClosing { if once.claim() { closed.resume() } } }
+                Task { await feed.releaseZooms { if once.claim() { closed.resume() } } }
                 Task { [deadline = connectionTiming.activation] in
                     try? await Task.sleep(for: deadline)
                     if once.claim() { closed.resume() }
@@ -996,11 +1000,10 @@ final class HerdrScreenModel {
     /// wins, and as in Herdr's client, a move while a show is in progress takes that show over. It goes
     /// with the command Herdr's client sends for the place or creation. Herdr's zoom is a flag on a tab,
     /// which shows its focused pane, so a move within the tab on screen is a `pane.focus`, as Herdr's
-    /// client sends on a click. A move to another tab changes the tab: Remux's zoom comes off the tab left
-    /// while it is still on screen, since an unzoom focuses its target; the setting zooms the tab reached;
-    /// and a pane's `pane.focus` marks the tab's agents seen. The engine holds the frames meanwhile, so only
-    /// the tab reached shows, as it ends up. A tab another client moves the session to stays as it is:
-    /// unzooming a tab off screen would focus it and take the session back.
+    /// client sends on a click. A move to another tab changes the tab: the tab left keeps its zoom, Remux's
+    /// included; the setting zooms the tab reached unless it is zoomed already; and a pane's `pane.focus`
+    /// marks the tab's agents seen. The engine holds the frames meanwhile, so only the tab reached shows, as
+    /// it ends up. A tab another client moves the session to stays as it is.
     ///
     /// The user is in the move's pane from this moment (`userPaneID`), so keys typed right after a tap go
     /// to the pane tapped.
@@ -1082,7 +1085,7 @@ final class HerdrScreenModel {
         case .focus(let place): label = place.focusFailureLabel
         case .create(let creation): label = creation.failureLabel
         case .close(let place, let group): return changeAnswered(.close(place, group: group), failure: failure)
-        case .leave, .zoom, .zoomReached: return
+        case .zoom, .zoomReached: return
         }
         if let failure {
             presentFailure(of: step.method, label: label, failure)
@@ -1471,6 +1474,10 @@ final class HerdrScreenModel {
         else { return }
         // Frames can arrive before `open` returns; the engine paints them at the hello's cell size.
         await engine.setCellSize(widthPx: size.cellWidthPx, heightPx: size.cellHeightPx)
+        await engine.keepOwnedZooms(
+            in: ownedZoomStore,
+            of: HerdrZoomSession(serverID: target.server.id, session: target.workspace.sessionName)
+        )
         await engine.beginConnection(attempt.id, outbox: connection.outbox)
         attempt.helloSent = true
         do {

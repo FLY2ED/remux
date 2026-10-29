@@ -56,43 +56,51 @@ struct HerdrPaneZoomResult: Equatable, Sendable {
     }
 }
 
-/// The zoom Remux made on a Herdr session. Herdr's zoom is a flag on the tab with no owner, so
-/// Remux remembers the tab it zoomed, from Herdr's answer saying the zoom changed to on, until a snapshot
-/// shows that tab unzoomed or gone, or Herdr's answer to Remux's own unzoom says so. Tabs belong to one
-/// server boot, so another boot forgets it; a reconnect to the same boot keeps it.
+/// The zooms Remux made on a Herdr session. Herdr's zoom is a flag on the tab with no owner
+/// (`api/schema/panes.rs`), so Remux remembers each tab it zoomed, from Herdr's answers saying a zoom changed
+/// to on, until a snapshot shows the tab unzoomed or gone, or Herdr's answer to Remux's own unzoom says so.
+/// Remux keeps its zooms while the session moves between tabs and leaves the screen, as it keeps tmux's, and
+/// takes them off as the session ends.
 ///
-/// Remux zooms only the tab on screen, and takes its zoom off a tab before it moves the session to
-/// another, so it records one tab. When another client moves the session, the record stays with the tab
-/// left, and Remux undoes that zoom only while its tab is on screen, since an unzoom focuses its target.
-struct HerdrOwnedZoom: Equatable {
-    private var tab: HerdrTabKey?
+/// The phone keeps them (`HerdrOwnedZoomStore`), so an attachment after the app ended without ending the
+/// session takes them over, also across a restart of Herdr's server: Herdr restores a tab's zoom with the
+/// session (`persist/restore.rs`, `zoomed: snap.zoomed`), while each server process has a boot of its own
+/// (`server/headless.rs`, the process id and its start time). Tab ids can name another tab after a restart,
+/// so a record holds the tab's panes too, and a tab is Remux's only while it is zoomed and still has one of
+/// them; the record follows the tab's panes as they change.
+struct HerdrOwnedZooms: Equatable, Codable, Sendable {
+    /// The panes of each tab Remux zoomed, by tab id.
+    private(set) var panesByTab: [String: Set<String>] = [:]
 
-    /// The tab Remux zoomed, if any.
-    var tabID: String? { tab?.tabID }
+    var tabIDs: Set<String> { Set(panesByTab.keys) }
 
-    mutating func record(_ answer: HerdrPaneZoomResult, bootID: String) {
+    mutating func record(_ answer: HerdrPaneZoomResult) {
         guard answer.zoomChanged else { return }
-        let answered = HerdrTabKey(bootID: bootID, tabID: answer.layout.tabID)
         if answer.zoomed {
-            tab = answered
-        } else if tab == answered {
-            tab = nil
+            panesByTab[answer.layout.tabID] = Set(answer.layout.panes.map(\.paneID))
+        } else {
+            panesByTab[answer.layout.tabID] = nil
         }
     }
 
+    /// Keeps the tabs `snapshot` has zoomed that still have one of their recorded panes, with their panes now.
     mutating func reconcile(with snapshot: HerdrSnapshot) {
-        guard let tab else { return }
-        if tab.bootID != snapshot.bootID || !snapshot.tabs.contains(where: { $0.tabID == tab.tabID && $0.zoomed }) {
-            self.tab = nil
+        guard !panesByTab.isEmpty else { return }
+        var reconciled: [String: Set<String>] = [:]
+        for (tab, panes) in panesByTab where snapshot.tabs.contains(where: { $0.tabID == tab && $0.zoomed }) {
+            let current = Set(snapshot.panes.lazy.filter { $0.tabID == tab }.map(\.paneID))
+            if !current.isDisjoint(with: panes) { reconciled[tab] = current }
         }
+        panesByTab = reconciled
     }
 
-    /// The pane to unzoom the tab with as the session leaves it: the tab's focused pane, since an unzoom
-    /// focuses its target. Nil unless the newest snapshot has the tab Remux zoomed on screen: unzooming
-    /// another would take the session there.
-    func paneToUnzoom(in snapshot: HerdrSnapshot) -> String? {
-        guard let tab, tab.bootID == snapshot.bootID, tab.tabID == snapshot.focusedTabID else { return nil }
-        return snapshot.focusedPaneID
+    /// The tabs to take Remux's zoom off as the session ends, as `snapshot` has them: those off screen
+    /// first, then the tab on screen, so the session ends where it was when it can.
+    func tabsToRelease(in snapshot: HerdrSnapshot) -> [String] {
+        var owned = self
+        owned.reconcile(with: snapshot)
+        let zoomed = snapshot.tabs.lazy.map(\.tabID).filter { owned.panesByTab[$0] != nil }
+        return zoomed.filter { $0 != snapshot.focusedTabID } + zoomed.filter { $0 == snapshot.focusedTabID }
     }
 }
 

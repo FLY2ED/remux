@@ -84,7 +84,8 @@ struct TerminalRuntimeAttemptKey: Hashable, Sendable {
 
 /// Why a runtime attempt stops. Ending the session undoes what Remux left on
 /// the server (its zooms); a replacement leaves it for the new attempt, which
-/// adopts it from the server.
+/// adopts it: from tmux's marks on the server, or from the phone's record of
+/// Herdr's.
 enum TerminalRuntimeStopReason: Equatable, Sendable {
     case sessionEnded
     case replacedByNewAttempt
@@ -144,12 +145,10 @@ enum TerminalRuntime {
         }
     }
 
-    /// A Herdr stop undoes Remux's zoom for either reason: Herdr's zoom has no owner, so a new attempt
-    /// can't take it over.
     func stop(_ reason: TerminalRuntimeStopReason) async {
         switch self {
         case .tmux(let model): await model.stop(reason)
-        case .herdr(let model): await model.stop()
+        case .herdr(let model): await model.stop(reason)
         }
     }
 }
@@ -2538,7 +2537,8 @@ final class RemuxRootModel: ObservableObject {
                 onRuntimeStateChange: onRuntimeStateChange,
                 onNotification: { [weak self] event in
                     self?.handleHerdrNotification(event, from: key)
-                }
+                },
+                ownedZoomStore: dependencies.herdrOwnedZoomStore
             ))
         }
         terminalRuntimes[key] = runtime

@@ -35,6 +35,8 @@ struct RemuxAppDependencies: Sendable {
     let credentialStore: any SSHCredentialStore
     let trustedHostStore: TrustedHostStore
     let publicKeyInstaller: SSHPublicKeyInstaller
+    /// The zooms Remux made on Herdr servers, which a session's end takes off.
+    let herdrOwnedZoomStore: any HerdrOwnedZoomStore
     private let sshRootService: RemuxSSHRootService
     private let transportFactory: @Sendable (
         _ target: SessionTarget,
@@ -83,6 +85,7 @@ struct RemuxAppDependencies: Sendable {
         credentialStore: any SSHCredentialStore,
         trustedHostStore: TrustedHostStore,
         publicKeyInstaller: SSHPublicKeyInstaller,
+        herdrOwnedZoomStore: any HerdrOwnedZoomStore = InMemoryHerdrOwnedZoomStore(),
         sshRootService: RemuxSSHRootService = RemuxSSHRootService(),
         transportFactory: @escaping @Sendable (
             _ target: SessionTarget,
@@ -130,6 +133,7 @@ struct RemuxAppDependencies: Sendable {
         self.credentialStore = credentialStore
         self.trustedHostStore = trustedHostStore
         self.publicKeyInstaller = publicKeyInstaller
+        self.herdrOwnedZoomStore = herdrOwnedZoomStore
         self.sshRootService = sshRootService
         self.transportFactory = transportFactory
         self.sshConnectionPrewarmer = sshConnectionPrewarmer
@@ -187,7 +191,8 @@ struct RemuxAppDependencies: Sendable {
             trustedHostStore: trustedHostStore,
             publicKeyInstaller: try SSHPublicKeyInstaller(
                 trustedHostStore: trustedHostStore
-            )
+            ),
+            herdrOwnedZoomStore: FileBackedHerdrOwnedZoomStore(rootURL: root)
         )
     }
 

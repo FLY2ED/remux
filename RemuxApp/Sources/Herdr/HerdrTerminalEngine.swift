@@ -156,7 +156,7 @@ struct HerdrEngineFeed: Sendable {
         await engine.receive(chunk, connection: connection)
     }
 
-    /// The connection ended: its commands fail, and a close waiting for an unzoom goes.
+    /// The connection ended: its commands fail, and an end waiting for Remux's zooms to come off goes.
     func ended() async {
         await engine.endConnection(connection)
     }
@@ -196,10 +196,10 @@ struct HerdrEngineFeed: Sendable {
         await engine.enqueue(Self.zoom(pane, zoomed: true, purpose: .layout(pane: pane)), connection: connection)
     }
 
-    /// Remux's zoom off the tab on screen before the connection closes, if Herdr can take it at once;
-    /// `done` once it is answered, or at once when it doesn't go.
-    func unzoomBeforeClosing(done: @escaping @Sendable () -> Void) async {
-        await engine.unzoomBeforeClosing(done: done, connection: connection)
+    /// Remux's zooms off as the session ends, before the connection closes, if Herdr can take them at once;
+    /// `done` once the last is answered, or at once when none goes (`HerdrTerminalEngine.releaseZooms`).
+    func releaseZooms(done: @escaping @Sendable () -> Void) async {
+        await engine.releaseZooms(done: done, connection: connection)
     }
 
     func resize(columns: UInt16, rows: UInt16) async {
@@ -241,14 +241,16 @@ enum HerdrViewKind: Sendable {
     case hide
 }
 
-/// Which tabs the setting zooms as the session comes to them: a tab with more than one pane, unless the
-/// user unzoomed it with the zoom button.
+/// Which tabs the setting zooms as the session comes to them: a tab with more than one pane that isn't
+/// zoomed yet, unless the user unzoomed it with the zoom button. Remux zooms a tab only as the session comes
+/// to it, never others ahead: a zoom focuses its target, and a tab's pane focus is shared with every client.
 struct HerdrZoomPolicy: Equatable, Sendable {
     var zoomsMultipaneTabs: Bool
     var unzoomedByUser: Set<HerdrTabKey>
 
     func zooms(_ tabID: String, in snapshot: HerdrSnapshot) -> Bool {
         zoomsMultipaneTabs && snapshot.panes.count(where: { $0.tabID == tabID }) > 1
+            && !snapshot.tabs.contains { $0.tabID == tabID && $0.zoomed }
             && !unzoomedByUser.contains(HerdrTabKey(bootID: snapshot.bootID, tabID: tabID))
     }
 }
@@ -323,8 +325,7 @@ actor HerdrTerminalEngine {
         /// its zoom keeps.
         let kept: String?
         /// Whether the setting zooms the tab it ends on, as it does when the session comes to a tab: on a
-        /// show, and on a move from another tab. A move carries on the zoom of the request it took over,
-        /// whose leave may already have undone Remux's zoom.
+        /// show, and on a move from another tab. A move carries on the zoom of the request it took over.
         let zooms: Bool
         /// What a snapshot and the frame drawn against it show once its steps are answered; nil when it
         /// waits for nothing in particular.
@@ -472,24 +473,22 @@ actor HerdrTerminalEngine {
         /// The pane closed, its tab unzoomed (`workspace/tab.rs` `detach_pane`), or gone with its last pane.
         case close(String)
         /// A tab or workspace made, or the tab or workspace on screen closed: the tab Herdr shows then is
-        /// one Remux can't tell.
+        /// one Remux can't tell. Also Remux's zooms coming off as the session ends, after which no input goes.
         case elsewhere
 
-        /// The change a lane command makes: the zoom button's zoom, and Remux's zoom off the tab on screen. The
+        /// The change a lane command makes: the zoom button's zoom, and a step of Remux's zooms coming off. The
         /// layout question zooms the tab as it is, and the other commands move nothing.
         init?(_ command: HerdrCommandLane.Command) {
             switch command.purpose {
             case .zoom(let pane, let zoomed): self = .zoom(pane: pane, on: zoomed)
-            case .unzoom(let pane, _): self = .zoom(pane: pane, on: false)
+            case .release: self = .elsewhere
             case .layout, .other: return nil
             }
         }
 
-        /// The change a step sends, where it moves the view; Remux's zoom off the tab left moves nothing
-        /// input could go to, since only a step to another tab follows it.
+        /// The change a step sends, where it moves the view.
         init?(sent step: HerdrCommandLane.Step) {
             switch step {
-            case .leave: return nil
             case .zoom(let pane, _): self = .zoom(pane: pane, on: true)
             case .zoomReached(let policy): self = .zoomReached(policy)
             case .focus(let place): self = .focus(place)
@@ -618,12 +617,16 @@ actor HerdrTerminalEngine {
     private var commandTimeout: Duration = .seconds(60)
     private var commandIDs: UInt64 = 0
     private var surfaceSets: [String: SurfaceSet] = [:]
-    /// The tab Remux zoomed, which it undoes as the session leaves it. Kept across connections: a new
-    /// one to the same server boot undoes it all the same.
-    private var ownedZoom = HerdrOwnedZoom()
+    /// The tabs Remux zoomed, which it undoes as the session ends. Kept across connections, and on the
+    /// phone through `zoomKeeper`, so a new connection or a new engine for the session, also after Herdr's
+    /// server restarted, undoes them all the same.
+    private var ownedZooms = HerdrOwnedZooms()
+    private var zoomKeeper: (store: any HerdrOwnedZoomStore, session: HerdrZoomSession)?
+    /// Remux's zooms coming off as the session ends (`releaseZooms`).
+    private var release: Release?
     /// The newest answered step whose effect Herdr's snapshots don't show yet. Herdr can answer before it
     /// sends the snapshot showing the answer, so the next step waits for that snapshot, going from where the
-    /// step before it took the session, and a leave unzooms nothing meanwhile.
+    /// step before it took the session, and the session's end unzooms nothing meanwhile.
     private var unsettled: StepEffect?
     /// The commands Herdr answered whose effect no snapshot shows yet, the steps and the zoom button's zooms, in
     /// the order Herdr applied them, which is the order of their answers, since one command is in flight at a
@@ -773,15 +776,15 @@ actor HerdrTerminalEngine {
         let (inFlight, waiting) = lane.takeAll()
         if case .command(let command)? = inFlight?.item { fail(command, .connectionEnded) }
         waiting.forEach { fail($0, .connectionEnded) }
+        endRelease()
     }
 
     // MARK: - Showing
 
     /// Frames are drawn as they come, except while hidden and during a view request. Frames Herdr sends
-    /// as a hide goes out show what leaving did, such as undoing the zoom, so the frame from before the
-    /// hide stays until the next show; and a show's frame from before its zoom would flash the unzoomed
-    /// tab, as a move's would flash the tab left and the tab reached unzoomed, so a request draws only the
-    /// frame that completes it.
+    /// as a hide goes out show what leaving did, so the frame from before the hide stays until the next
+    /// show; and a show's frame from before its zoom would flash the unzoomed tab, as a move's would flash
+    /// the tab reached unzoomed, so a request draws only the frame that completes it.
     private var holdsFrames: Bool {
         guard let request else { return false }
         return request.kind == .hide || !request.completed
@@ -909,16 +912,16 @@ actor HerdrTerminalEngine {
         return snapshot?.isAt(place) == true
     }
 
-    /// The steps that take the session to `destination`: Remux's zoom off the tab left, if it leaves one
-    /// Remux zoomed; then, for a pane, the setting's zoom of its tab when the request zooms, which takes the
-    /// session there, and the pane's focus, which marks its tab's agents seen, as Herdr's client goes to a
+    /// The steps that take the session to `destination`. The tab left keeps its zoom, Remux's included, as
+    /// tmux's windows do. For a pane: the setting's zoom of its tab when the request zooms, which takes the
+    /// session there, then the pane's focus, which marks its tab's agents seen, as Herdr's client goes to a
     /// pane. A tab or workspace shows a pane the snapshot doesn't name before the session is there, so its
     /// focus goes first and the setting's zoom follows on the pane it shows. A creation's command goes, and
     /// the setting's zoom follows on the pane it made whether or not the request zooms, since Herdr gives its
-    /// tab a new pane. A close of what is on screen goes, and the setting's zoom follows on the tab Herdr shows
-    /// then: Herdr unzooms a tab it takes a pane from (`workspace/tab.rs` `detach_pane`), and the tab or
-    /// workspace closed takes Remux's zoom with it, so nothing leaves first. A place the session is at
-    /// already still gets its focus.
+    /// tab a new pane. A close of what is on screen goes, and the setting's zoom follows on the tab Herdr
+    /// shows then: Herdr unzooms a tab it takes a pane from (`workspace/tab.rs` `detach_pane`). The setting
+    /// zooms only a tab not zoomed yet (`HerdrZoomPolicy`). A place the session is at already still gets its
+    /// focus.
     private func plan(
         to destination: HerdrDestination,
         zooms: Bool,
@@ -927,7 +930,7 @@ actor HerdrTerminalEngine {
     ) -> [HerdrCommandLane.Step] {
         switch destination {
         case .place(let place):
-            var steps: [HerdrCommandLane.Step] = [.leave(to: place)]
+            var steps: [HerdrCommandLane.Step] = []
             switch place {
             case .pane(let pane):
                 if zooms, let snapshot, let tabID = snapshot.tabID(reachedBy: place), policy.zooms(tabID, in: snapshot) {
@@ -940,19 +943,18 @@ actor HerdrTerminalEngine {
             }
             return steps
         case .creation(let creation):
-            return [.leave(to: creation.tabPlace), .create(creation), .zoomReached(policy)]
+            return [.create(creation), .zoomReached(policy)]
         case .closing(let place, let group):
             return [.close(place, group: group), .zoomReached(policy)]
         }
     }
 
     /// Hides the session at once: the request in progress ends, its steps not yet sent don't go, and the
-    /// commands waiting fail, since Herdr refuses commands from a hidden session. Remux's zoom comes off first
-    /// if it can go now, while Herdr still takes commands from this client; otherwise it stays, so the leave
-    /// never waits. Focus goes before the hide, while still active: deactivation keeps the stored focus, so
-    /// without it the next show's focus would be ignored.
+    /// commands waiting fail, since Herdr refuses commands from a hidden session. Remux's zooms stay, as
+    /// tmux's do while the session is off screen, so the leave sends nothing first. Focus goes before the
+    /// hide, while still active: deactivation keeps the stored focus, so without it the next show's focus
+    /// would be ignored.
     private func hide(outbox: any HerdrOutbound, snapshot: HerdrSnapshot?) {
-        if let snapshot { unzoomIfIdle(in: snapshot, closed: nil) }
         lane.dropSteps()
         lane.takeWaiting().forEach { fail($0, .notSent) }
         let id = nextRequest()
@@ -966,24 +968,6 @@ actor HerdrTerminalEngine {
         }
         outbox.setSurfaceActive(false)
         continuation.yield(.started(request: id, kind: .hide, showing: false, connection: connection))
-    }
-
-    /// Remux's zoom off the tab on screen as the session leaves, if it can go now: nothing is in flight, the
-    /// newest snapshot shows where the last step took the session, and it has the tab Remux zoomed on
-    /// screen, since an unzoom focuses its target. Otherwise the zoom stays. `closed` once Herdr has
-    /// answered it. Returns whether it went.
-    @discardableResult
-    private func unzoomIfIdle(in snapshot: HerdrSnapshot, closed: (@Sendable () -> Void)?) -> Bool {
-        guard lane.isIdle, unsettled == nil, methods.contains(HerdrScreenModel.paneZoomMethod),
-              let pane = ownedZoom.paneToUnzoom(in: snapshot)
-        else { return false }
-        let unzoom = HerdrCommandLane.Command(
-            method: HerdrScreenModel.paneZoomMethod,
-            params: HerdrScreenModel.zoomParams(pane, zoomed: false),
-            purpose: .unzoom(pane: pane, closed: closed)
-        )
-        send(.command(unzoom), params: unzoom.params, in: snapshot)
-        return true
     }
 
     /// Whether `destination` is on another tab than the one `snapshot` shows: a place on another tab, or a
@@ -1075,13 +1059,105 @@ actor HerdrTerminalEngine {
         dispatch()
     }
 
-    /// Remux's zoom off the tab on screen before the connection closes, if it can go now, as for a hide, so
-    /// the close isn't held back; `done` once Herdr has answered it, or at once.
-    fileprivate func unzoomBeforeClosing(done: @escaping @Sendable () -> Void, connection: UInt64) {
-        guard state == .running, connection == self.connection, outbox != nil,
-              request.map({ $0.kind != .hide }) == true, let snapshot = presentation.snapshot,
-              unzoomIfIdle(in: snapshot, closed: done)
+    // MARK: - Zoom ownership
+
+    /// The phone keeps Remux's zooms of `session` in `store`: the engine takes over those it kept for the
+    /// session, which each snapshot checks against Herdr's tabs (`HerdrOwnedZooms.reconcile`), and saves
+    /// every change.
+    func keepOwnedZooms(in store: any HerdrOwnedZoomStore, of session: HerdrZoomSession) {
+        guard state != .stopped, zoomKeeper == nil else { return }
+        zoomKeeper = (store, session)
+        ownedZooms = store.zooms(of: session)
+    }
+
+    private func updateOwnedZooms(_ change: (inout HerdrOwnedZooms) -> Void) {
+        let before = ownedZooms
+        change(&ownedZooms)
+        guard ownedZooms != before, let zoomKeeper else { return }
+        zoomKeeper.store.save(ownedZooms, of: zoomKeeper.session)
+    }
+
+    /// Remux's zooms coming off as the session ends, one tab at a time: a tab off screen is focused first,
+    /// since Herdr's unzoom focuses its target and the snapshot names only the focused tab's focused pane, so
+    /// unzooming that pane changes no one's focus; the tab on screen goes last.
+    private struct Release {
+        var tabs: [String]
+        /// The tab focused for its unzoom, until a snapshot shows the session there.
+        var focusing: String?
+        let done: @Sendable () -> Void
+    }
+
+    /// Takes Remux's zooms off as the session ends, if Herdr can take a command at once: nothing is in flight
+    /// and the newest snapshot shows where the last step took the session. Otherwise they stay, and so does
+    /// the phone's record of them, so the end never waits. A hidden session's surface is made active first,
+    /// without focus, since Herdr takes commands only from an active one (`endpoint_requests.rs`). `done`
+    /// once the last unzoom is answered, the release can't go on, or at once when nothing goes.
+    fileprivate func releaseZooms(done: @escaping @Sendable () -> Void, connection: UInt64) {
+        guard state == .running, connection == self.connection, let outbox, release == nil,
+              lane.isIdle, unsettled == nil, let snapshot = presentation.snapshot,
+              methods.contains(HerdrScreenModel.paneZoomMethod)
         else { return done() }
+        let tabs = ownedZooms.tabsToRelease(in: snapshot)
+        guard !tabs.isEmpty else { return done() }
+        lane.dropSteps()
+        lane.takeWaiting().forEach { fail($0, .notSent) }
+        if request.map({ $0.kind == .hide }) ?? true, let message = surfaceSet(active: true, show: nil, in: snapshot) {
+            outbox.send([message])
+            outbox.setSurfaceActive(true)
+        }
+        release = Release(tabs: tabs, done: done)
+        advanceRelease()
+    }
+
+    /// The release's next command against Herdr's newest snapshot: the unzoom of the tab the session is on,
+    /// or the focus of the next tab, skipping a tab no longer zoomed or gone.
+    private func advanceRelease() {
+        guard var release, lane.isIdle, let snapshot = presentation.snapshot else { return }
+        if let focusing = release.focusing {
+            guard snapshot.focusedTabID == focusing else { return }
+            release.focusing = nil
+        }
+        while let tab = release.tabs.first {
+            guard snapshot.tabs.contains(where: { $0.tabID == tab && $0.zoomed }) else {
+                release.tabs.removeFirst()
+                continue
+            }
+            let command: HerdrCommandLane.Command
+            if snapshot.focusedTabID == tab, let pane = snapshot.focusedPaneID {
+                release.tabs.removeFirst()
+                command = HerdrCommandLane.Command(
+                    method: HerdrScreenModel.paneZoomMethod,
+                    params: HerdrScreenModel.zoomParams(pane, zoomed: false),
+                    purpose: .release(tabID: tab)
+                )
+            } else {
+                let place = HerdrPlace.tab(tab)
+                guard methods.contains(place.focusMethod) else {
+                    release.tabs.removeFirst()
+                    continue
+                }
+                release.focusing = tab
+                command = HerdrCommandLane.Command(method: place.focusMethod, params: place.focusParams, purpose: .release(tabID: tab))
+            }
+            self.release = release
+            send(.command(command), params: command.params, in: snapshot)
+            return
+        }
+        self.release = release
+        endRelease()
+    }
+
+    /// Herdr answered the release's focus of `tab`: one that failed leaves that tab's zoom.
+    private func releaseFocusAnswered(_ tab: String, failed: Bool) {
+        guard failed, release?.focusing == tab else { return }
+        release?.focusing = nil
+        release?.tabs.removeAll { $0 == tab }
+    }
+
+    private func endRelease() {
+        guard let release else { return }
+        self.release = nil
+        release.done()
     }
 
     /// The one place a command is let go: whenever the lane is free, its next item goes, in the lane's
@@ -1123,8 +1199,7 @@ actor HerdrTerminalEngine {
         completeIfReady()
     }
 
-    /// What a step sends against Herdr's newest snapshot, as it goes, or nil when it doesn't go. The leave
-    /// unzooms the tab Remux zoomed while the session is on it and the request goes to another tab; a
+    /// What a step sends against Herdr's newest snapshot, as it goes, or nil when it doesn't go. A
     /// show's zoom goes while the pane it zooms is still focused; the zoom of a tab reached goes as a show's
     /// zoom of the pane Herdr focused there, while the snapshot shows the request's target and the setting
     /// zooms that tab; a step that takes the session somewhere goes as long as the request isn't overtaken.
@@ -1134,11 +1209,6 @@ actor HerdrTerminalEngine {
         in snapshot: HerdrSnapshot
     ) -> (HerdrCommandLane.Step, any Encodable & Sendable)? {
         switch step {
-        case .leave(let destination):
-            guard let pane = ownedZoom.paneToUnzoom(in: snapshot),
-                  ownedZoom.tabID != destination.flatMap(snapshot.tabID(reachedBy:))
-            else { return nil }
-            return (step, HerdrScreenModel.zoomParams(pane, zoomed: false))
         case .zoom(let pane, let navigates):
             guard navigates || snapshot.focusedPaneID == pane else { return nil }
             return (step, HerdrScreenModel.zoomParams(pane, zoomed: true))
@@ -1167,7 +1237,7 @@ actor HerdrTerminalEngine {
         case .layout(let pane):
             let zoomed = snapshot.tabs.contains { $0.tabID == snapshot.focusedTabID && $0.zoomed }
             return request.inProgress || snapshot.focusedPaneID != pane || !zoomed ? .notSent : nil
-        case .unzoom, .other:
+        case .release, .other:
             return nil
         }
     }
@@ -1240,7 +1310,7 @@ actor HerdrTerminalEngine {
             }
             guard var request, request.id == id, request.inProgress else { return }
             switch (step, result) {
-            case (.leave, _), (.zoomReached, _):
+            case (.zoomReached, _):
                 break
             case (.zoom, .success), (.create, .success), (.close, .success):
                 if !step.isZoom {
@@ -1286,17 +1356,21 @@ actor HerdrTerminalEngine {
                 }
             case .layout:
                 zoomAnswered(result, seen: inFlight.snapshots, reportsFailure: false)
-            case .unzoom(_, let closed):
-                zoomAnswered(result, seen: inFlight.snapshots, reportsFailure: false)
-                closed?()
+            case .release(let tab):
+                if command.method == HerdrScreenModel.paneZoomMethod {
+                    zoomAnswered(result, seen: inFlight.snapshots, reportsFailure: false)
+                } else {
+                    releaseFocusAnswered(tab, failed: (try? result.get()) == nil)
+                }
+                advanceRelease()
             case .other(let answered):
                 answered(result)
             }
         }
     }
 
-    /// Where a step's answer took the session, if anywhere: Remux's zoom off the tab left takes it nowhere,
-    /// a creation to the pane Herdr made, and a close wherever Herdr shows the session without the place.
+    /// Where a step's answer took the session, if anywhere: a creation to the pane Herdr made, and a close
+    /// wherever Herdr shows the session without the place.
     private static func effect(
         of step: HerdrCommandLane.Step,
         _ result: Result<HerdrCommandReply, HerdrCommandError>
@@ -1304,7 +1378,7 @@ actor HerdrTerminalEngine {
         guard case .success(let reply) = result else { return nil }
         let target: Target
         switch step {
-        case .leave, .zoomReached:
+        case .zoomReached:
             return nil
         case .zoom(let pane, _):
             guard let zoom = try? HerdrPaneZoomResult(reply: reply.json) else { return nil }
@@ -1348,10 +1422,12 @@ actor HerdrTerminalEngine {
             Result { try HerdrPaneZoomResult(reply: reply.json) }.mapError { HerdrCommandError.failed(code: "invalid_response", message: $0.localizedDescription) }
         }) {
         case .success(let zoom):
-            ownedZoom.record(zoom, bootID: bootID)
-            if seen.contains(where: { $0.tabs.contains { $0.tabID == zoom.layout.tabID && $0.zoomed == zoom.zoomed } }),
-               let snapshot = presentation.snapshot {
-                ownedZoom.reconcile(with: snapshot)
+            updateOwnedZooms { owned in
+                owned.record(zoom)
+                if seen.contains(where: { $0.tabs.contains { $0.tabID == zoom.layout.tabID && $0.zoomed == zoom.zoomed } }),
+                   let snapshot = presentation.snapshot {
+                    owned.reconcile(with: snapshot)
+                }
             }
             continuation.yield(.zoomAnswered(zoom, bootID: bootID, failure: nil, reportsFailure: reportsFailure, connection: connection))
         case .failure(let failure):
@@ -1423,7 +1499,7 @@ actor HerdrTerminalEngine {
         guard state == .running, connection == self.connection else { return }
         presentation.receive(snapshot)
         lane.record(snapshot)
-        ownedZoom.reconcile(with: snapshot)
+        updateOwnedZooms { $0.reconcile(with: snapshot) }
         unsettled?.note(snapshot)
         if unsettled?.isSettled(by: snapshot) == true { unsettled = nil }
         for index in unshown.indices { unshown[index].note(snapshot) }
@@ -1433,6 +1509,7 @@ actor HerdrTerminalEngine {
         checkOvertaken()
         paintPresented()
         dispatch()
+        if release?.focusing != nil { advanceRelease() }
     }
 
     fileprivate func receive(_ output: HerdrSurfaceDecoder.Output, connection: UInt64) {
