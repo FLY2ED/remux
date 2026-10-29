@@ -348,7 +348,7 @@ private final class GhosttyCompositeViewportContainerView: UIView,
             container.backgroundColor = .clear
             _ = container.update(
                 surface: surface,
-                displayScale: effectiveScale,
+                displayScale: paneDisplayScale,
                 submitRouteForwardedMouseScroll: submitMouseScroll,
                 submitRouteForwardedMousePosition: submitMousePosition
             )
@@ -840,10 +840,6 @@ private final class GhosttyCompositeViewportContainerView: UIView,
         )
     }
 
-    private var effectiveScale: CGFloat {
-        max(window?.screen.scale ?? UIScreen.main.scale, 1)
-    }
-
     private func visibleSurface(
         at point: CGPoint
     ) -> (UUID, GhosttyManagedSurface, GhosttyPaneScrollContainerView)? {
@@ -1009,8 +1005,7 @@ final class GhosttyPaneLinesUIView: UIView {
         guard let layout, let context = UIGraphicsGetCurrentContext() else { return }
         // The lines are laid out from the area's origin; the view sits at the canvas's.
         context.translateBy(x: -layout.origin.x, y: -layout.origin.y)
-        let scale = max(window?.screen.scale ?? traitCollection.displayScale, 1)
-        GhosttyPaneLine.draw(lines, in: context, layout: layout, scale: scale) { ink in
+        GhosttyPaneLine.draw(lines, in: context, layout: layout, scale: paneDisplayScale) { ink in
             switch ink {
             case .separator:
                 inks.separator.cgColor
@@ -1020,6 +1015,14 @@ final class GhosttyPaneLinesUIView: UIView {
                 UIColor(red: CGFloat(red) / 255, green: CGFloat(green) / 255, blue: CGFloat(blue) / 255, alpha: 1).cgColor
             }
         }
+    }
+}
+
+private extension UIView {
+    /// The scale the panes' cells and lines are laid out on, so the two meet on the same pixels: the window's
+    /// screen's, or the main screen's before the view is in a window.
+    var paneDisplayScale: CGFloat {
+        max(window?.screen.scale ?? UIScreen.main.scale, 1)
     }
 }
 

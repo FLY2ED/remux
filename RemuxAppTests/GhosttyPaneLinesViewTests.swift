@@ -104,6 +104,159 @@ final class GhosttyPaneLinesViewTests: XCTestCase {
         XCTAssertEqual(lines.layer.animationKeys() ?? [], [], "the frame's lines' geometry animated")
     }
 
+    /// A new theme reaches the lines: the area's theme sets the inks, and the lines are drawn again in the new
+    /// theme's separator and accent.
+    func testANewThemeDrawsThePanesLinesInItsInks() throws {
+        let (first, second) = try XCTUnwrap(Self.themesOfOtherInks())
+        let projection = twoPanes(focusingLeft: true)
+        let (window, host) = show(viewport(projection, theme: first))
+        defer { hide(window) }
+        let lines = try XCTUnwrap(descendant(of: host.view, named: "GhosttyPaneLinesUIView"), "no view of the lines")
+        assertLines(lines, left: Self.focus(first), right: Self.separator(first))
+
+        host.rootView = viewport(projection, theme: second)
+        settle(host)
+
+        assertLines(lines, left: Self.focus(second), right: Self.separator(second))
+    }
+
+    /// The focus moving to another pane changes only the lines, no pane's frame: the lines are drawn again, the
+    /// accent on the newly focused pane's sides.
+    func testTheFocusMovingToAnotherPaneDrawsThePanesLinesAgain() throws {
+        let theme = TerminalTheme.allCases[0]
+        let (window, host) = show(viewport(twoPanes(focusingLeft: true), theme: theme))
+        defer { hide(window) }
+        let lines = try XCTUnwrap(descendant(of: host.view, named: "GhosttyPaneLinesUIView"), "no view of the lines")
+        assertLines(lines, left: Self.focus(theme), right: Self.separator(theme))
+
+        host.rootView = viewport(twoPanes(focusingLeft: false), theme: theme)
+        settle(host)
+
+        assertLines(lines, left: Self.separator(theme), right: Self.focus(theme))
+    }
+
+    /// Two panes side by side, the left one's left side and the right one's right side lined, in the accent on
+    /// the focused pane's side and the separator on the other's.
+    private func twoPanes(focusingLeft: Bool) -> GhosttyTerminalViewportPresentationProjection {
+        let rows = grid.rows - 2
+        let left = GhosttyTerminalGridRect(x: 1, y: 1, columns: 23, rows: rows)
+        let right = GhosttyTerminalGridRect(x: 26, y: 1, columns: 23, rows: rows)
+        let panes = [(left, focusingLeft), (right, !focusingLeft)].map { frame, focused in
+            GhosttyTerminalViewportPresentationProjection.Pane(
+                id: UUID(), normalFrame: frame, visibleFrame: frame, isFocused: focused, currentCommand: "", currentPath: ""
+            )
+        }
+        let end = CGFloat(grid.rows) - 0.5
+        return GhosttyTerminalViewportPresentationProjection(
+            windowGrid: grid,
+            cellMetrics: cell,
+            panes: panes,
+            paneLines: [
+                GhosttyPaneLine(orientation: .vertical, position: 0.5, start: 0.5, end: end,
+                                ink: focusingLeft ? .focus : .separator, width: 1, cap: .square),
+                GhosttyPaneLine(orientation: .vertical, position: CGFloat(grid.columns) - 0.5, start: 0.5, end: end,
+                                ink: focusingLeft ? .separator : .focus, width: 1, cap: .square),
+            ],
+            focusedSurfaceID: nil,
+            isServerZoomed: false,
+            windowCount: 1
+        )
+    }
+
+    private func viewport(
+        _ projection: GhosttyTerminalViewportPresentationProjection,
+        theme: TerminalTheme
+    ) -> GhosttyCompositeViewportView {
+        GhosttyCompositeViewportView(
+            surfaceLookup: .empty,
+            projection: projection,
+            terminalTheme: theme,
+            trackpadDriver: GhosttyKeyboardCursorTrackpadDriver(),
+            onSurfaceTap: nil,
+            onPreviewSelection: nil,
+            onWindowSwipe: nil,
+            sendKeyEventToSurface: { _, _ in false },
+            onTrackpadFeedbackChange: { _ in },
+            isMouseCaptured: { _ in false },
+            submitMouseButton: nil,
+            submitMousePosition: nil,
+            submitMouseScroll: nil,
+            selectionSource: nil
+        )
+    }
+
+    private static func separator(_ theme: TerminalTheme) -> UIColor {
+        theme.terminalCompositeSeparatorUIColor
+    }
+
+    private static func focus(_ theme: TerminalTheme) -> UIColor {
+        UIColor(theme.terminalChromeStyle.accent)
+    }
+
+    /// Two themes whose separators and accents both differ.
+    private static func themesOfOtherInks() -> (TerminalTheme, TerminalTheme)? {
+        for first in TerminalTheme.allCases {
+            for second in TerminalTheme.allCases where second != first {
+                if sRGB(of: separator(first)) != sRGB(of: separator(second)),
+                   sRGB(of: focus(first)) != sRGB(of: focus(second)),
+                   sRGB(of: focus(first)) != sRGB(of: separator(second)),
+                   sRGB(of: separator(first)) != sRGB(of: focus(second)) {
+                    return (first, second)
+                }
+            }
+        }
+        return nil
+    }
+
+    /// The lines view shows `left` along the canvas's left line and `right` along its right one, once drawn.
+    private func assertLines(_ lines: UIView, left: UIColor, right: UIColor, file: StaticString = #filePath, line: UInt = #line) {
+        lines.layer.displayIfNeeded()
+        let scale = lines.window?.screen.scale ?? 3
+        let middle = lines.bounds.midY
+        for (position, expected) in [(CGFloat(0.5), left), (CGFloat(grid.columns) - 0.5, right)] {
+            // The middle of the line's pixels, in the view: the canvas's lines are laid out from the area's origin.
+            let layout = GhosttyCompositeViewportLayout(bounds: CGRect(origin: .zero, size: tall), grid: grid, cellMetrics: cell)!
+            let x = layout.origin.x + position * layout.cellSize.width - lines.frame.minX
+            let shown = Self.sRGB(of: lines.layer, at: CGPoint(x: x, y: middle), scale: scale)
+            let want = Self.sRGB(of: expected.resolvedColor(with: lines.traitCollection))
+            XCTAssertTrue(zip(shown, want).allSatisfy { abs(Int($0) - Int($1)) <= 2 }, "\(shown) at \(position), wanted \(want)", file: file, line: line)
+        }
+    }
+
+    /// The colour `layer` shows at `point`, in its own coordinates, as sRGB bytes.
+    private static func sRGB(of layer: CALayer, at point: CGPoint, scale: CGFloat) -> [UInt8] {
+        pixel { context in
+            context.scaleBy(x: scale, y: scale)
+            context.translateBy(x: -point.x + 0.5 / scale, y: -point.y + 0.5 / scale)
+            layer.render(in: context)
+        }
+    }
+
+    private static func sRGB(of color: UIColor) -> [UInt8] {
+        pixel { context in
+            context.setFillColor(color.cgColor)
+            context.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+    }
+
+    private static func pixel(_ draw: (CGContext) -> Void) -> [UInt8] {
+        var bytes = [UInt8](repeating: 0, count: 4)
+        bytes.withUnsafeMutableBytes { buffer in
+            let context = CGContext(
+                data: buffer.baseAddress, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )!
+            draw(context)
+        }
+        return Array(bytes[0..<3])
+    }
+
+    /// SwiftUI hands a new root view to its views on its next update.
+    private func settle(_ host: UIViewController) {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        host.view.layoutIfNeeded()
+    }
+
     /// A box on the grid's outer cells, as Herdr draws a pane's or a popup's.
     private func box(ink: GhosttyPaneLine.Ink) -> [GhosttyPaneLine] {
         let columns = CGFloat(grid.columns), rows = CGFloat(grid.rows)
