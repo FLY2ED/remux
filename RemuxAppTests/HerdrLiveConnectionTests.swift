@@ -814,10 +814,16 @@ final class HerdrLiveConnectionTests: XCTestCase {
     private static let herdrGrey = (red: 0x6C, green: 0x70, blue: 0x86)
     /// The background of the default theme, Ghostty's own (`TerminalTheme.ghosttyDefault`).
     private static let background = (red: 0x28, green: 0x2C, blue: 0x34)
-    /// The lines as drawn: Herdr's colours, each raised to 3:1 against the terminal's background where it
-    /// falls short, so a line reads on any theme. The accent reaches it already; Herdr's grey is raised.
-    private static let accent = GhosttyPaneLine.Ink.color(red: 0x89, green: 0xB4, blue: 0xFA)
-    private static let grey = GhosttyPaneLine.Ink.color(red: 112, green: 115, blue: 137)
+    /// Herdr's grey as drawn: raised to 3:1 against the terminal's background, so a line reads on any theme.
+    private static let raisedGrey = (red: 112, green: 115, blue: 137)
+    /// The lines as drawn: Herdr's colours, each raised to 3:1 where it falls short. The accent reaches it
+    /// already; Herdr's grey is raised.
+    private static let accent = ink(herdrAccent)
+    private static let grey = ink(raisedGrey)
+
+    private static func ink(_ color: (red: Int, green: Int, blue: Int)) -> GhosttyPaneLine.Ink {
+        .color(red: UInt8(color.red), green: UInt8(color.green), blue: UInt8(color.blue))
+    }
 
     /// The WCAG contrast ratio of two sRGB colours.
     private static func contrast(_ first: (red: Int, green: Int, blue: Int), _ second: (red: Int, green: Int, blue: Int)) -> Double {
@@ -837,7 +843,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
     func testTheLineInksReadOnTheDefaultBackground() {
         XCTAssertGreaterThanOrEqual(Self.contrast(Self.herdrAccent, Self.background), 3)
         XCTAssertLessThan(Self.contrast(Self.herdrGrey, Self.background), 3)
-        XCTAssertGreaterThanOrEqual(Self.contrast((112, 115, 137), Self.background), 3)
+        XCTAssertGreaterThanOrEqual(Self.contrast(Self.raisedGrey, Self.background), 3)
     }
 
     /// With Herdr's defaults each pane has its own box (`pane_gaps`), around its text area and the
