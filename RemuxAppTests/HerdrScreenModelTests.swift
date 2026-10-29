@@ -3528,6 +3528,67 @@ final class HerdrScreenModelTests: XCTestCase {
         }
     }
 
+    /// The zoom button's zoom, then a tap on the tab's other pane, both answered before a snapshot shows either:
+    /// Herdr zoomed the first pane and then focused the one tapped, which its zoom now shows. Input for the pane
+    /// tapped goes, and the composer's message for the pane zoomed first is refused.
+    func testAZoomThenATapBothAnsweredLeaveInputToThePaneTapped() async throws {
+        let harness = await makeHarness()
+        let session = try await shownTab(harness)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let zoomedFirst = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
+
+        XCTAssertEqual(adapter.setFocusedPaneZoomed(true), .queued)
+        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        XCTAssertEqual([zoom.paneID, zoom.mode], ["w1:p1", "on"])
+        await session.bridge.serve(HerdrServerScript.zoomReply(id: zoom.id, changed: true, zoomed: true, panes: Self.places(2)))
+        harness.model.reveal(.pane("w1:p2"), bootID: "boot")
+        let focus = try await nextWrite(session.bridge, from: &index, paneFocus)
+        XCTAssertEqual(focus.paneID, "w1:p2")
+        await session.bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
+        try await Task.sleep(for: .milliseconds(100))
+
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("b"), .accepted)
+        let typedInput = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(typedInput, frame("w1:p2", [typed("b")]))
+        let pasted = AnswerBox()
+        let paste = Task { await pasted.set(await adapter.sendPasteAwaitingCommandCompletion("ship it", to: zoomedFirst)) }
+        try await Task.sleep(for: .milliseconds(200))
+        let answer = await pasted.value
+        XCTAssertEqual(answer, false, "the composer's message went to the pane zoomed before the tap")
+        let written = await session.bridge.writtenCount
+        let inputs = try await harness.writes(session.bridge, from: index, count: written - index).compactMap(paneInput)
+        XCTAssertEqual(inputs, [], "input went to the pane zoomed before the tap")
+        paste.cancel()
+    }
+
+    /// The zoom button's zoom still in flight once snapshots have shown it and then another client focusing the
+    /// tab's other pane: Herdr applied the zoom already, so input for the pane Herdr shows now goes.
+    func testAZoomInFlightThatSnapshotsShowAlreadyLeavesInputToThePaneShownSince() async throws {
+        let harness = await makeHarness()
+        let session = try await shownTab(harness)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+
+        XCTAssertEqual(adapter.setFocusedPaneZoomed(true), .queued)
+        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        XCTAssertEqual([zoom.paneID, zoom.mode], ["w1:p1", "on"])
+        await session.bridge.serve(HerdrServerScript.snapshot(revision: 2, zoomed: true, panes: Self.tabPanes(["w1:p1", "w1:p2"])))
+        await session.bridge.serve(
+            HerdrServerScript.snapshot(revision: 3, zoomed: true, focusedPane: "w1:p2", panes: Self.tabPanes(["w1:p1", "w1:p2"]))
+        )
+        await session.bridge.serve(try harness.shownSurface(
+            projection: 3, revision: 3, lines: ["two"], panes: [.init(id: "w1:p2", x: 0, width: 7, height: 1, focused: true)]
+        ))
+        try await harness.waitUntil("the other client's focus wasn't drawn") { self.drawnPanes(harness) == ["w1:p2"] }
+
+        try await harness.waitUntil("input for the pane shown didn't go") {
+            adapter.sendInputToFocusedSurface("b") == .accepted
+        }
+        let typedInput = try await nextWrite(session.bridge, from: &index, paneInput)
+        XCTAssertEqual(typedInput, frame("w1:p2", [typed("b")]))
+    }
+
     /// The switching cue says where a switch goes only once it has taken longer than its delay from the tap,
     /// and goes as the tab reached comes on screen; a quick switch shows none.
     func testTheSwitchingCueShowsOnlyOnceASwitchTakesLong() async throws {

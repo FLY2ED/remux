@@ -625,9 +625,10 @@ actor HerdrTerminalEngine {
     /// sends the snapshot showing the answer, so the next step waits for that snapshot, going from where the
     /// step before it took the session, and a leave unzooms nothing meanwhile.
     private var unsettled: StepEffect?
-    /// The zoom button's zoom Herdr answered that no snapshot shows yet, which input that goes now reaches Herdr
-    /// after (`takesInput`).
-    private var answeredZoom: StepEffect?
+    /// The commands Herdr answered whose effect no snapshot shows yet, the steps and the zoom button's zooms, in
+    /// the order Herdr applied them, which is the order of their answers, since one command is in flight at a
+    /// time. Input that goes now reaches Herdr after them (`takesInput`).
+    private var unshown: [StepEffect] = []
     private var layout: HerdrPaneLayout?
     private var paneScrolls: [String: HerdrPaneScroll] = [:]
     /// Herdr's border lines in the frame painted last. A patch never changes them, since
@@ -668,16 +669,18 @@ actor HerdrTerminalEngine {
     /// Whether Herdr takes input for `target` that goes now. Herdr applies each command the moment it reads
     /// it, in the connection's order with input (`server/headless/client_views.rs`
     /// `handle_client_shell_api_request`), and drops a pane's input while it doesn't show this client the pane
-    /// (`server/headless.rs` `ClientShellPaneInput`). So the newest snapshot has to show the pane, and so does
-    /// the view after each command ahead of the input (`changesAhead`). Where Remux can't tell where a command
-    /// takes the view, input is refused.
+    /// (`server/headless.rs` `ClientShellPaneInput`). The view input meets is the newest snapshot's, moved by
+    /// the commands Herdr answered that no snapshot shows yet, in their order. The commands still to come
+    /// (`changesToCome`) may fail, which leaves the view as it was, so input must be taken in each view they
+    /// lead through. Where Remux can't tell where a command takes the view, input is refused.
     private func takesInput(_ target: HerdrTerminalTarget) -> Bool {
         guard let snapshot = presentation.snapshot else { return false }
         switch target {
         case .pane(let pane):
             var view = InputView(snapshot)
+            for effect in unshown { view.apply(effect.change, in: snapshot) }
             guard view.takes(pane, in: snapshot) else { return false }
-            for change in changesAhead {
+            for change in changesToCome {
                 view.apply(change, in: snapshot)
                 guard view.takes(pane, in: snapshot) else { return false }
             }
@@ -685,23 +688,41 @@ actor HerdrTerminalEngine {
         }
     }
 
-    /// The view changes ahead of input that goes now, in the order Herdr applies them: a step or zoom Herdr
-    /// answered that no snapshot shows yet, the command in flight, and the current request's steps not yet sent,
+    /// The view changes of the commands Herdr hasn't answered, in the order it applies them: the command in
+    /// flight unless a snapshot since it went shows its effect, and the current request's steps not yet sent,
     /// which take the session where the user goes.
-    private var changesAhead: [ViewChange] {
-        var changes = [unsettled, answeredZoom].compactMap { $0?.change }
-        switch lane.inFlight?.item {
-        case .step(_, let step)?:
-            if let change = ViewChange(sent: step) { changes.append(change) }
-        case .command(let command)?:
-            if let change = ViewChange(command) { changes.append(change) }
-        case nil:
-            break
-        }
+    private var changesToCome: [ViewChange] {
+        var changes = lane.inFlight.flatMap(inFlightChange).map { [$0] } ?? []
         if let request, request.inProgress, !request.overtaken {
             changes += lane.steps.compactMap(ViewChange.init(sent:))
         }
         return changes
+    }
+
+    /// The change the command in flight makes, unless a snapshot that came while it was in flight shows its
+    /// effect already, as the reply's does (`unsettledEffect`): Herdr applied it, and the newest snapshot tells
+    /// what became of it since, as another client may have moved the session on.
+    private func inFlightChange(_ inFlight: HerdrCommandLane.InFlight) -> ViewChange? {
+        let change: ViewChange?
+        switch inFlight.item {
+        case .step(_, let step): change = ViewChange(sent: step)
+        case .command(let command): change = ViewChange(command)
+        }
+        guard let change else { return nil }
+        let shown = inFlight.snapshots.contains { snapshot in
+            switch change {
+            case .focus(let place):
+                Target.place(place).isShown(in: snapshot)
+            case .zoom(let pane, let on):
+                snapshot.panes.first { $0.paneID == pane }
+                    .map { Target.zoom(pane: pane, tabID: $0.tabID, zoomed: on).isShown(in: snapshot) } ?? false
+            case .close(let pane):
+                Target.closed(.pane(pane)).isShown(in: snapshot)
+            case .zoomReached, .split, .elsewhere:
+                false
+            }
+        }
+        return shown ? nil : change
     }
 
     // MARK: - Frames
@@ -748,7 +769,7 @@ actor HerdrTerminalEngine {
         outbox = nil
         surfaceSets.removeAll()
         unsettled = nil
-        answeredZoom = nil
+        unshown.removeAll()
         let (inFlight, waiting) = lane.takeAll()
         if case .command(let command)? = inFlight?.item { fail(command, .connectionEnded) }
         waiting.forEach { fail($0, .connectionEnded) }
@@ -1213,7 +1234,10 @@ actor HerdrTerminalEngine {
             var effect = Self.effect(of: step, result)
             // A pane a creation made may be listed by the snapshots that came while it was in flight.
             for snapshot in inFlight.snapshots { effect?.note(snapshot) }
-            if let effect { hold(until: effect, seen: inFlight.snapshots) }
+            if let effect, let held = unsettledEffect(effect, seen: inFlight.snapshots) {
+                unsettled = held
+                unshown.append(held)
+            }
             guard var request, request.id == id, request.inProgress else { return }
             switch (step, result) {
             case (.leave, _), (.zoomReached, _):
@@ -1249,13 +1273,14 @@ actor HerdrTerminalEngine {
             switch command.purpose {
             case .zoom(let pane, _):
                 zoomAnswered(result, seen: inFlight.snapshots, reportsFailure: true)
-                if case .success(let reply) = result, let zoom = try? HerdrPaneZoomResult(reply: reply.json) {
-                    answeredZoom = unsettledEffect(StepEffect(
-                        target: .zoom(pane: pane, tabID: zoom.layout.tabID, zoomed: zoom.zoomed),
-                        sentAfter: reply.sentAfter,
-                        answeredAfter: reply.answeredAfter,
-                        change: .zoom(pane: pane, on: zoom.zoomed)
-                    ), seen: inFlight.snapshots)
+                if case .success(let reply) = result, let zoom = try? HerdrPaneZoomResult(reply: reply.json),
+                   let effect = unsettledEffect(StepEffect(
+                       target: .zoom(pane: pane, tabID: zoom.layout.tabID, zoomed: zoom.zoomed),
+                       sentAfter: reply.sentAfter,
+                       answeredAfter: reply.answeredAfter,
+                       change: .zoom(pane: pane, on: zoom.zoomed)
+                   ), seen: inFlight.snapshots) {
+                    unshown.append(effect)
                 }
             case .layout:
                 zoomAnswered(result, seen: inFlight.snapshots, reportsFailure: false)
@@ -1294,13 +1319,8 @@ actor HerdrTerminalEngine {
         return StepEffect(target: target, sentAfter: reply.sentAfter, answeredAfter: reply.answeredAfter, change: change)
     }
 
-    /// The lane waits for a snapshot showing the step's effect, unless one already did while it was in
-    /// flight or the newest does.
-    private func hold(until effect: StepEffect, seen: [HerdrSnapshot]) {
-        if let effect = unsettledEffect(effect, seen: seen) { unsettled = effect }
-    }
-
-    /// `effect`, unless a snapshot that came while its command was in flight, or the newest, shows it.
+    /// `effect`, unless a snapshot that came while its command was in flight, or the newest, shows it. The lane
+    /// waits for a step's effect that no snapshot shows yet (`unsettled`).
     private func unsettledEffect(_ effect: StepEffect, seen: [HerdrSnapshot]) -> StepEffect? {
         guard !seen.contains(where: effect.target.isShown(in:)), let snapshot = presentation.snapshot,
               !effect.isSettled(by: snapshot)
@@ -1404,7 +1424,8 @@ actor HerdrTerminalEngine {
         ownedZoom.reconcile(with: snapshot)
         unsettled?.note(snapshot)
         if unsettled?.isSettled(by: snapshot) == true { unsettled = nil }
-        if answeredZoom?.isSettled(by: snapshot) == true { answeredZoom = nil }
+        for index in unshown.indices { unshown[index].note(snapshot) }
+        unshown.removeAll { $0.isSettled(by: snapshot) }
         request?.record(snapshot)
         bordersMayHaveChanged = true
         checkOvertaken()
