@@ -12,7 +12,7 @@ final class HerdrBridgeTests: XCTestCase {
         let executable = "/home/owner's tools/herdr; touch pwned"
         let session = "work'; rm -rf ~"
 
-        let command = HerdrSSHBridge.command(herdrExecutable: executable, session: session)
+        let command = HerdrSSHBridge.command(herdrExecutable: executable, session: session, kind: .session)
 
         XCTAssertTrue(command.hasPrefix("exec /bin/sh -c '"))
         XCTAssertFalse(command.contains(executable))
@@ -23,10 +23,19 @@ final class HerdrBridgeTests: XCTestCase {
     }
 
     func testCommandAsksForTheIdleTimeoutOnlyWhereHerdrReportsIt() {
-        let command = HerdrSSHBridge.command(herdrExecutable: "herdr", session: "default")
+        let command = HerdrSSHBridge.command(herdrExecutable: "herdr", session: "default", kind: .session)
         XCTAssertTrue(command.contains(#""$resolved" status client --json"#))
         XCTAssertTrue(command.contains(#"remote_bridge_idle_timeout\": *true"#))
         XCTAssertTrue(command.contains(#"--session "$session" remote-client-bridge --idle-timeout-v1"#))
+        XCTAssertTrue(command.contains(#"exec "$resolved" --session "$session" remote-client-bridge' sh"#))
+    }
+
+    /// A terminal's bridge is quiet while the terminal is, so it never asks for the idle timeout, as Herdr's
+    /// client runs its interactive attach.
+    func testATerminalsBridgeNeverAsksForTheIdleTimeout() {
+        let command = HerdrSSHBridge.command(herdrExecutable: "herdr", session: "default", kind: .terminal)
+        XCTAssertFalse(command.contains("--idle-timeout-v1"))
+        XCTAssertFalse(command.contains("remote_bridge_idle_timeout"))
         XCTAssertTrue(command.contains(#"exec "$resolved" --session "$session" remote-client-bridge' sh"#))
     }
 
@@ -190,6 +199,7 @@ final class HerdrBridgeTests: XCTestCase {
                 using: try await prepared.claim(root, trace: trace),
                 herdrExecutable: "herdr",
                 session: "pool",
+                kind: .session,
                 trace: trace
             )
             await bridge.close(cause)
@@ -229,6 +239,7 @@ final class HerdrBridgeTests: XCTestCase {
             using: root,
             herdrExecutable: "herdr",
             session: "default",
+            kind: .session,
             trace: trace
         )
         return (bridge, root)

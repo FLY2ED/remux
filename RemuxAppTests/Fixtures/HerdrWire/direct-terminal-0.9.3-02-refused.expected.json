@@ -1,0 +1,44 @@
+{
+  "client": [
+    {
+      "TerminalHello": {
+        "cell_height_px": 0,
+        "cell_width_px": 0,
+        "cols": 40,
+        "pixel_mouse": false,
+        "rows": 12,
+        "version": 22
+      },
+      "hex": "0016280c000000",
+      "tag": 0
+    },
+    {
+      "AttachTerminal": {
+        "takeover": false,
+        "terminal_id": "term_65ef71fbec2032"
+      },
+      "hex": "05137465726d5f363565663731666265633230333200",
+      "tag": 5
+    }
+  ],
+  "server": [
+    {
+      "Welcome": {
+        "encoding": "TerminalAnsi",
+        "error": null,
+        "version": 22
+      },
+      "length": 4,
+      "offset": 0,
+      "tag": 0
+    },
+    {
+      "ServerShutdown": {
+        "reason": "terminal attach failed: terminal term_65ef71fbec2032 already has an attached client; retry with --takeover"
+      },
+      "length": 109,
+      "offset": 8,
+      "tag": 3
+    }
+  ]
+}

@@ -28,6 +28,8 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
     private var tabIDsBySurfaceID: [UUID: String] = [:]
     private var workspaceGroupIDs: [String: UUID] = [:]
     private var workspaceIDsByGroupID: [UUID: String] = [:]
+    /// One id per popup terminal, as for a pane, which the composer holds as its message's destination.
+    private var popupSurfaceIDs: [String: UUID] = [:]
 
     func attach(to model: HerdrScreenModel) {
         self.model = model
@@ -49,6 +51,7 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
         tabIDsBySurfaceID.removeAll()
         workspaceGroupIDs.removeAll()
         workspaceIDsByGroupID.removeAll()
+        popupSurfaceIDs.removeAll()
         objectWillChange.send()
     }
 
@@ -60,6 +63,19 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
         paneSurfaceIDs[paneID] = id
         paneIDsBySurfaceID[id] = paneID
         return id
+    }
+
+    private func surfaceID(forPopup terminalID: String) -> UUID {
+        if let id = popupSurfaceIDs[terminalID] { return id }
+        let id = UUID()
+        popupSurfaceIDs[terminalID] = id
+        return id
+    }
+
+    /// The popup on screen's terminal id, when `id` is its surface.
+    private func popupTerminalID(for id: UUID) -> String? {
+        guard let terminalID = model?.popup.popup?.terminalID, popupSurfaceIDs[terminalID] == id else { return nil }
+        return terminalID
     }
 
     private func topLevelID(for layout: HerdrPaneLayout) -> UUID {
@@ -195,8 +211,50 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
             paneLines: layout.borders.map { Self.paneLine($0, colors: model.terminalColors) },
             focusedSurfaceID: presentedSurfaceID,
             isServerZoomed: zoomed,
-            windowCount: workspaceOnScreen?.tabs.count ?? 1
+            windowCount: workspaceOnScreen?.tabs.count ?? 1,
+            popup: model.popup.popup.map { popup in
+                let displayed = model.popup.surface?.terminalID == popup.terminalID ? model.popup.displayed : nil
+                let colors = model.terminalColors
+                return GhosttyTerminalViewportPresentationProjection.Popup(
+                    id: surfaceID(forPopup: popup.terminalID),
+                    title: popup.title,
+                    tabLabel: layout.tab.map { model.tabName(ofTab: $0.tabID) ?? $0.label },
+                    border: Self.popupBorder(columns: layout.columns, rows: layout.rows, accent: model.popupAccent, colors: colors),
+                    titleInk: Self.ink(model.popupAccent, colors: colors, minimumContrast: GhosttyTerminalColors.MinimumContrast.text),
+                    tabInk: colors.map { Self.ink($0.secondaryText) } ?? .separator,
+                    grid: displayed.map { GhosttyTerminalGridSize(columns: UInt32($0.grid.columns), rows: UInt32($0.grid.rows)) },
+                    cell: displayed?.cell
+                )
+            }
         )
+    }
+
+    /// Herdr's client draws a popup in a box of lines in its accent with the popup's title in the top line
+    /// (`client/shell/composition.rs`, ratatui's `Block`); the phone's popup takes the whole tab, so its box
+    /// is on the outer cells of the panes' grid, drawn as their lines are.
+    static func popupBorder(columns: UInt16, rows: UInt16, accent: HerdrColor, colors: GhosttyTerminalColors?) -> [GhosttyPaneLine] {
+        let grid = GhosttyTerminalGridSize(columns: UInt32(columns), rows: UInt32(rows))
+        guard GhosttyTerminalViewportPresentationProjection.Popup.isFramed(grid) else { return [] }
+        let across = 2 * UInt32(columns) - 1
+        let down = 2 * UInt32(rows) - 1
+        return [
+            HerdrBorderLine(axis: .horizontal, track: 0, start: 1, end: across, color: accent),
+            HerdrBorderLine(axis: .horizontal, track: rows - 1, start: 1, end: across, color: accent),
+            HerdrBorderLine(axis: .vertical, track: 0, start: 1, end: down, color: accent),
+            HerdrBorderLine(axis: .vertical, track: columns - 1, start: 1, end: down, color: accent),
+        ].map { paneLine($0, colors: colors) }
+    }
+
+    /// Herdr's colour as the terminal shows it, kept readable against the terminal's background: the
+    /// theme Herdr draws its lines for isn't the phone's, as Herdr's dark accent on a light terminal shows.
+    /// Without the terminal's colours, only an RGB colour is known.
+    static func ink(_ color: HerdrColor, colors: GhosttyTerminalColors?, minimumContrast: Double) -> GhosttyPaneLine.Ink {
+        guard let rgb = color.foregroundRGB(in: colors) else { return .separator }
+        return ink(colors?.legible(rgb, minimumContrast: minimumContrast) ?? rgb)
+    }
+
+    private static func ink(_ color: GhosttyTerminalColors.Color) -> GhosttyPaneLine.Ink {
+        .color(red: color.red, green: color.green, blue: color.blue)
     }
 
     /// As thin as Herdr's box-drawing glyphs show in a terminal.
@@ -205,15 +263,12 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
     /// Herdr's border line where its glyphs are, in the colour Herdr gave it. Ends in the middle of a
     /// cell reach on, as the glyphs' strokes meet in a corner.
     static func paneLine(_ border: HerdrBorderLine, colors: GhosttyTerminalColors?) -> GhosttyPaneLine {
-        let ink = border.color.foregroundRGB(in: colors).map {
-            GhosttyPaneLine.Ink.color(red: $0.red, green: $0.green, blue: $0.blue)
-        }
-        return GhosttyPaneLine(
+        GhosttyPaneLine(
             orientation: border.axis == .horizontal ? .horizontal : .vertical,
             position: CGFloat(border.track) + 0.5,
             start: CGFloat(border.start) / 2,
             end: CGFloat(border.end) / 2,
-            ink: ink ?? .separator,
+            ink: ink(border.color, colors: colors, minimumContrast: GhosttyTerminalColors.MinimumContrast.line),
             width: borderWidth,
             cap: .square
         )
@@ -231,9 +286,25 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
         _ = surface.screenSurface(id: surfaceID(forPane: surface.paneID))
     }
 
+    /// The popup's renderer gets its screen surface as it is made.
+    func makeScreenSurface(forPopup surface: HerdrPopupTerminalSurface) {
+        _ = surface.screenSurface(id: surfaceID(forPopup: surface.terminalID))
+    }
+
     private func managedSurface(for id: UUID) -> GhosttyManagedSurface? {
+        if let terminalID = popupTerminalID(for: id) {
+            guard let surface = model?.popup.surface, surface.terminalID == terminalID else { return nil }
+            return surface.renderer.managedSurface
+        }
         guard let paneID = paneID(for: id) else { return nil }
         return model?.paneSurface(paneID)?.renderer.managedSurface
+    }
+
+    /// What the screen waits on: the popup while the phone holds it on screen, else the focused pane. A
+    /// hidden session lets its popup go, so it reads as its panes do.
+    private var selectedPresentation: TerminalPanePresentation {
+        guard let model else { return .pending }
+        return model.popup.takesInput ? model.popupPresentation : model.presentation(ofPane: focusedPaneID)
     }
 }
 
@@ -259,7 +330,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
             presentedSurfaceID: presentedSurfaceID,
             snapshot: topologySnapshot,
             viewportProjection: viewportProjection,
-            selectedPanePresentation: model?.presentation(ofPane: focusedPaneID) ?? .pending,
+            selectedPanePresentation: selectedPresentation,
             isShown: model?.isSelected ?? false,
             switchingTo: model?.switchingCue
         )
@@ -281,7 +352,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
             phase: runtimePhase,
             presentedSurfaceID: presentedSurfaceID,
             snapshot: topologySnapshot,
-            selectedPanePresentation: model?.presentation(ofPane: focusedPaneID) ?? .pending
+            selectedPanePresentation: selectedPresentation
         )
         return GhosttyTerminalInteractionProjection(
             isInputAvailable: model?.isInputAvailable ?? false,
@@ -323,23 +394,33 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
 
     /// Herdr's client sends input only to the focused pane.
     func sendPaste(_ text: String, to surfaceID: UUID) -> FocusedTerminalInputSubmissionResult {
+        if popupTerminalID(for: surfaceID) != nil { return model?.popup.sendPaste(text) ?? .transportUnavailable }
         guard isFocusedPane(surfaceID) else { return .noFocusedSurface }
         return sendPasteToFocusedSurface(text)
     }
 
     /// The composer's paste and Enter go to the pane its message was written in, which may no longer be
     /// focused.
+    /// A popup's surface takes the composer's message itself; once that popup is gone or replaced, its id
+    /// names nothing, so what is left of the message doesn't go.
     func sendPasteAwaitingCommandCompletion(_ text: String, to surfaceID: UUID) async -> Bool {
+        if popupTerminalID(for: surfaceID) != nil {
+            return await managedSurface(for: surfaceID)?.sendPasteAwaitingCommandCompletion(text) ?? false
+        }
         guard let model, let paneID = paneID(for: surfaceID) else { return false }
         return await model.sendPasteAwaitingDelivery(text, toPane: paneID)
     }
 
     func sendKeyEvent(_ event: GhosttySurfaceKeyEvent, to surfaceID: UUID) -> FocusedTerminalInputSubmissionResult {
+        if popupTerminalID(for: surfaceID) != nil { return model?.popup.sendKey(event) ?? .transportUnavailable }
         guard isFocusedPane(surfaceID) else { return .noFocusedSurface }
         return sendKeyEventToFocusedSurface(event)
     }
 
     func sendKeyEventAwaitingCommandCompletion(_ event: GhosttySurfaceKeyEvent, to surfaceID: UUID) async -> Bool {
+        if popupTerminalID(for: surfaceID) != nil {
+            return await managedSurface(for: surfaceID)?.sendKeyEventAwaitingCommandCompletion(event) ?? false
+        }
         guard let model, let paneID = paneID(for: surfaceID) else { return false }
         return await model.sendKeyAwaitingDelivery(event, toPane: paneID)
     }
@@ -354,7 +435,9 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func isMouseCaptured(for surfaceID: UUID) -> Bool {
-        guard let model, let paneID = paneID(for: surfaceID) else { return false }
+        guard let model else { return false }
+        if popupTerminalID(for: surfaceID) != nil { return model.popupReportsMouse }
+        guard let paneID = paneID(for: surfaceID) else { return false }
         return model.reportsMouse(inPane: paneID)
     }
 
@@ -362,7 +445,11 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         to surfaceID: UUID,
         _ event: GhosttySurfaceMouseButtonEvent
     ) -> GhosttyMouseInputSubmissionOutcome {
-        guard let model, let paneID = paneID(for: surfaceID) else { return .missingTarget(surfaceID) }
+        guard let model else { return .missingTarget(surfaceID) }
+        if popupTerminalID(for: surfaceID) != nil {
+            return model.sendPopupMouseButton(event) ? .sent : .surfaceRejected
+        }
+        guard let paneID = paneID(for: surfaceID) else { return .missingTarget(surfaceID) }
         return model.sendMouseButton(event, inPane: paneID) ? .sent : .surfaceRejected
     }
 
@@ -371,7 +458,12 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         _ position: CGPoint,
         mods: GhosttySurfaceKeyEvent.Mods
     ) -> GhosttyMouseInputSubmissionOutcome {
-        guard let model, let paneID = paneID(for: surfaceID) else { return .missingTarget(surfaceID) }
+        guard let model else { return .missingTarget(surfaceID) }
+        if popupTerminalID(for: surfaceID) != nil {
+            model.movePopupPointer(to: position, mods: mods)
+            return .sent
+        }
+        guard let paneID = paneID(for: surfaceID) else { return .missingTarget(surfaceID) }
         model.movePointer(to: position, inPane: paneID, mods: mods)
         return .sent
     }
@@ -380,7 +472,11 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         to surfaceID: UUID,
         _ event: GhosttySurfaceMouseScrollEvent
     ) -> GhosttyMouseInputSubmissionOutcome {
-        guard let model, let paneID = paneID(for: surfaceID) else { return .missingTarget(surfaceID) }
+        guard let model else { return .missingTarget(surfaceID) }
+        if popupTerminalID(for: surfaceID) != nil {
+            return model.scrollPopup(event) ? .sent : .surfaceRejected
+        }
+        guard let paneID = paneID(for: surfaceID) else { return .missingTarget(surfaceID) }
         return model.scroll(event, inPane: paneID) ? .sent : .surfaceRejected
     }
 
@@ -438,9 +534,10 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
 
     /// The screen's tiles, swipes and sheet buttons pick from what it draws: the layout on screen, and the
     /// session's outline only while it has the layout's server boot (`workspaceOnScreen`). So each pick goes
-    /// only on that boot, through the model's one way to ask something of the session.
+    /// only on that boot, through the model's one way to ask something of the session. None goes while a
+    /// popup is open over the tab, as Herdr's client keeps its tabs and panes inert under a popup.
     private func ask(_ request: HerdrRequest) -> Bool {
-        guard let model, let layout = model.layout else { return false }
+        guard let model, let layout = model.layout, model.popup.popup == nil else { return false }
         return model.ask(request, bootID: layout.bootID)
     }
 
@@ -506,7 +603,10 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func setFocusedPaneZoomed(_ zoomed: Bool) -> GhosttyTerminalActionOutcome {
-        model?.setFocusedPaneZoomed(zoomed) == true ? .queued : .missingTarget(.focusedPane)
+        guard model?.popup.popup == nil, model?.setFocusedPaneZoomed(zoomed) == true else {
+            return .missingTarget(.focusedPane)
+        }
+        return .queued
     }
 
     func closePane(_ id: UUID) -> GhosttyTerminalActionOutcome {

@@ -375,6 +375,81 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// Herdr takes a popup's input only from a client on the popup's tab, the tab of the frame that showed it
+    /// (`server/headless.rs` `ClientShellPopupInput`). While a move to another tab is on its way, Herdr
+    /// applies it first and would drop the popup's input, so it doesn't go; a press's release goes, as Herdr
+    /// takes that whatever tab it shows. Input for a popup no frame showed doesn't go.
+    func testPopupInputGoesOnlyWhileHerdrShowsThisClientThePopupsTab() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shown(feed, updates, outbox, panes: Self.atP)
+        await feed.receive(.surface(try Self.surface(revision: 2, lines: ["one ", "two "], panes: Self.atP, popup: "pop")))
+        func goes(_ events: [HerdrInputEvent], to terminalID: String) async -> Bool {
+            if case .sent = await feed.send(events, to: .popup(terminalID)) { true } else { false }
+        }
+        let typed: [HerdrInputEvent] = [.text("k")]
+        let goesOnTab = await goes(typed, to: "pop")
+        XCTAssertTrue(goesOnTab, "the popup's input didn't go on its tab")
+        let goesToAnother = await goes(typed, to: "another")
+        XCTAssertFalse(goesToAnother, "input went to a popup no frame showed")
+
+        _ = try await start(feed, updates, .moved(.place(.tab("t2")), fromAnotherTab: true, columns: 4, rows: 2, zoom: Self.notZooming))
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t2"])
+        let goesWhileLeaving = await goes(typed, to: "pop")
+        XCTAssertFalse(goesWhileLeaving, "the popup's input went while Herdr was taking this client to another tab")
+        let release = HerdrInputEvent.mouse(HerdrMouseEvent(kind: .up(.left), column: 0, row: 0, modifiers: [], lines: 1))
+        let releaseGoes = await goes([release], to: "pop")
+        XCTAssertTrue(releaseGoes, "a press's release didn't go")
+        await engine.stop()
+    }
+
+    /// A frame Herdr could box the popup in that comes without it says the popup closed, and input for it
+    /// doesn't go; a frame too small for the popup, which Herdr leaves it out of, says nothing of it.
+    func testPopupInputStopsWithAFrameThatCouldShowThePopupButDoesnt() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shown(feed, updates, outbox, panes: Self.atP)
+        func goes() async -> Bool {
+            if case .sent = await feed.send([.paste("fix it")], to: .popup("pop")) { true } else { false }
+        }
+        await feed.receive(.surface(try Self.surface(revision: 2, lines: ["one ", "two "], panes: Self.atP, popup: "pop")))
+        let goesWhenShown = await goes()
+        XCTAssertTrue(goesWhenShown)
+        await feed.receive(.surface(try Self.surface(revision: 3, lines: ["one ", "two "], panes: Self.atP)))
+        let goesWhenLeftOut = await goes()
+        XCTAssertTrue(goesWhenLeftOut, "input stopped for a popup Herdr only left out of a small frame")
+        await feed.receive(.surface(try Self.surface(revision: 4, lines: ["one   ", "two   ", "      ", "      "], panes: Self.atP)))
+        let goesWhenClosed = await goes()
+        XCTAssertFalse(goesWhenClosed, "input went for a popup a frame that could show it left out")
+        await engine.stop()
+    }
+
+    /// A frame of another tab says nothing of the popup, since Herdr shows a popup only on its tab, though it
+    /// is big enough to show one: back on the popup's tab, input for it goes again.
+    func testAFrameOfAnotherTabSaysNothingOfThePopup() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shown(feed, updates, outbox, panes: Self.atP)
+        func goes() async -> Bool {
+            if case .sent = await feed.send([.paste("fix it")], to: .popup("pop")) { true } else { false }
+        }
+        await feed.receive(.surface(try Self.surface(revision: 2, lines: ["one ", "two "], panes: Self.atP, popup: "pop")))
+        let atR = [Self.pane("R", x: 0, width: 3, height: 4, focused: true), Self.pane("S", x: 3, width: 3, height: 4)]
+        await feed.receive(try Self.places(revision: 2, focusedPane: "R"))
+        let otherTab = try Self.surface(projection: 2, revision: 3, lines: ["one   ", "two   ", "      ", "      "], panes: atR)
+        await feed.receive(.surface(otherTab))
+        let goesElsewhere = await goes()
+        XCTAssertFalse(goesElsewhere, "the popup's input went while this client was on another tab")
+        await feed.receive(try Self.places(revision: 3))
+        await feed.receive(.surface(try Self.surface(projection: 3, revision: 4, lines: ["one ", "two "], panes: Self.atP)))
+        let goesBack = await goes()
+        XCTAssertTrue(goesBack, "a frame of another tab ended the popup's input")
+        await engine.stop()
+    }
+
     /// As in Herdr's client, a move completes once its focus is answered on a frame showing its pane, also
     /// one that came before the answer: Herdr can send the snapshot and frame first, and sends nothing
     /// more for a move it has already made.
@@ -1857,8 +1932,10 @@ final class HerdrTerminalEngineTests: XCTestCase {
             for update in await updates.drain() {
                 switch update {
                 case .paneTerminal(let paneID, let terminal): terminals[paneID] = terminal
-                case .paneTerminalFailed, .rendererWakeFailed, .failed: XCTFail("\(fixture.name): \(update)")
-                case .drawn, .paneScroll, .started, .activated, .timedOut, .answered, .zoomAnswered, .showRefused: break
+                case .paneTerminalFailed, .rendererWakeFailed, .popupTerminalFailed, .popupRendererWakeFailed, .failed:
+                    XCTFail("\(fixture.name): \(update)")
+                case .drawn, .paneScroll, .started, .activated, .timedOut, .answered, .zoomAnswered, .showRefused, .popupTerminal:
+                    break
                 }
             }
             for pane in surface.panes where pane.innerRect.width > 0 && pane.innerRect.height > 0 {
@@ -2884,6 +2961,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         revision: UInt64,
         lines: [String],
         panes: [String],
+        popup: String? = nil,
         graphics: String = #"{"assets":[],"placements":[],"retained_assets":[]}"#
     ) throws -> HerdrPaneSurfaceFrame {
         let width = lines.first?.count ?? 0
@@ -2891,10 +2969,16 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let cells = lines.joined().map {
             #"{"symbol":"\#($0)","fg":0,"bg":0,"modifier":0,"skip":false,"hyperlink":null}"#
         }
+        // A popup of terminal `popup`, with an empty frame: one painted only when the owner asks.
+        let popupJSON = popup.map {
+            #"{"terminal_id":"\#($0)","title":"popup","width":null,"height":null,"#
+                + #""frame":{"cells":[],"width":0,"height":0,"cursor":null,"hyperlinks":[],"graphics":[]},"#
+                + #""mouse_reporting":false,"sgr_pixel_mouse":false,"pixel_width":0,"pixel_height":0}"#
+        } ?? "null"
         let json = """
         {"boot_id":"\(boot)","projection_revision":\(projection),"surface_revision":\(revision),
          "frame":{"cells":[\(cells.joined(separator: ","))],"width":\(width),"height":\(lines.count),"cursor":null,"hyperlinks":[],"graphics":[]},
-         "panes":[\(panes.joined(separator: ","))],"splits":[],"popup":null,"graphics":\(graphics)}
+         "panes":[\(panes.joined(separator: ","))],"splits":[],"popup":\(popupJSON),"graphics":\(graphics)}
         """
         return try JSONDecoder().decode(HerdrPaneSurfaceFrame.self, from: Data(json.utf8))
     }

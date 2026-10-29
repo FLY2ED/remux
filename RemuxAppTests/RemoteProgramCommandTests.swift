@@ -37,7 +37,7 @@ final class RemoteProgramCommandTests: XCTestCase {
                 initialViewport: .default
             ),
             HerdrSessionDiscovery.listSessionsCommand(herdrExecutable: "herdr"),
-            HerdrSSHBridge.command(herdrExecutable: "herdr", session: "default"),
+            HerdrSSHBridge.command(herdrExecutable: "herdr", session: "default", kind: .session),
         ]
         XCTAssertEqual(commands.map { $0.filter { $0 == "'" }.count }, [4, 6, 6, 4, 6])
     }

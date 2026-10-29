@@ -71,6 +71,7 @@ struct RemuxAppDependencies: Sendable {
     ) async throws -> Void
     private let herdrBridgeOpener: @Sendable (
         _ target: SessionTarget,
+        _ kind: HerdrBridgeKind,
         _ trustedHostStore: TrustedHostStore,
         _ sshRootService: RemuxSSHRootService
     ) async throws -> any HerdrBridgeTransport
@@ -120,6 +121,7 @@ struct RemuxAppDependencies: Sendable {
         ) async throws -> Void = RemuxAppDependencies.liveSSHAccessVerifier,
         herdrBridgeOpener: @escaping @Sendable (
             _ target: SessionTarget,
+            _ kind: HerdrBridgeKind,
             _ trustedHostStore: TrustedHostStore,
             _ sshRootService: RemuxSSHRootService
         ) async throws -> any HerdrBridgeTransport = RemuxAppDependencies.liveHerdrBridgeOpener,
@@ -242,9 +244,9 @@ struct RemuxAppDependencies: Sendable {
         try await sshAccessVerifier(target, trustedHostStore, sshRootService)
     }
 
-    /// Opens a bridge to the target's Herdr session.
-    func openHerdrBridge(for target: SessionTarget) async throws -> any HerdrBridgeTransport {
-        try await herdrBridgeOpener(target, trustedHostStore, sshRootService)
+    /// Opens a bridge of `kind` to the target's Herdr session.
+    func openHerdrBridge(for target: SessionTarget, kind: HerdrBridgeKind) async throws -> any HerdrBridgeTransport {
+        try await herdrBridgeOpener(target, kind, trustedHostStore, sshRootService)
     }
 
     func closeIdleSSHConnections(forServerID serverID: SavedServer.ID) {
@@ -422,6 +424,7 @@ struct RemuxAppDependencies: Sendable {
     /// it back at once.
     private static func liveHerdrBridgeOpener(
         target: SessionTarget,
+        kind: HerdrBridgeKind,
         trustedHostStore: TrustedHostStore,
         sshRootService: RemuxSSHRootService
     ) async throws -> any HerdrBridgeTransport {
@@ -455,6 +458,7 @@ struct RemuxAppDependencies: Sendable {
             using: claimedRoot,
             herdrExecutable: target.server.herdrExecutablePath ?? "herdr",
             session: target.workspace.sessionName,
+            kind: kind,
             trace: trace
         )
     }
@@ -660,7 +664,7 @@ struct RemuxAppDependencies: Sendable {
             },
             // The simulated server has no Herdr, as its discovery reports. Like the live bridge, the channel
             // opens and its first read reports it.
-            herdrBridgeOpener: { _, _, _ in
+            herdrBridgeOpener: { _, _, _, _ in
                 UITestingMissingHerdrBridge()
             }
         )

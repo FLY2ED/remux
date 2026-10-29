@@ -34,7 +34,7 @@ final class HerdrPaneSurface: TerminalPaneInputSink {
 /// owns their renderers.
 @MainActor
 final class HerdrScreenModel {
-    typealias BridgeOpener = @Sendable () async throws -> any HerdrBridgeTransport
+    typealias BridgeOpener = @Sendable (HerdrBridgeKind) async throws -> any HerdrBridgeTransport
     typealias RendererFenceFactory = @MainActor (
         HerdrTerminalEngine,
         _ paneID: String,
@@ -66,8 +66,9 @@ final class HerdrScreenModel {
         case resize(HerdrSurfaceGeometry)
         case theme([HerdrHostThemeUpdate])
         case appActive(Bool)
-        /// `delivered`, when given, learns whether Herdr has the input.
-        case input(paneID: String, events: [HerdrInputEvent], delivered: CheckedContinuation<Bool, Never>?)
+        /// Input for a pane, or for a popup drawn from its frames; `delivered`, when given, learns whether
+        /// Herdr has it.
+        case input(HerdrTerminalTarget, events: [HerdrInputEvent], delivered: CheckedContinuation<Bool, Never>?)
         /// Remux's move to a place or creation (`move(_:to:)`); `fromAnotherTab` when another tab was on
         /// screen as it was asked for. `ask` names it among the attempt's moves (`Attempt.move`).
         case move(HerdrDestination, fromAnotherTab: Bool, ask: UInt64)
@@ -362,6 +363,14 @@ final class HerdrScreenModel {
     /// The mouse button held down in a pane, from its press to its release.
     private var mouseGesture: MouseGesture?
     private var presentationFailures: [String: TerminalDisconnectReason] = [:]
+    /// The popup over the tab on screen.
+    private(set) lazy var popup: HerdrPopupController = makePopupController()
+    private let makePopupAttachment: HerdrPopupController.AttachmentFactory?
+    /// The ink of the popup's frame: Herdr's accent as the session showed it last (`learnPopupAccent`).
+    private(set) var popupAccent = HerdrPopupAccent.herdrDefault
+    private var popupPointer: CGPoint?
+    /// The scroll travel over the popup not yet a whole row.
+    private var popupWheelRemainder: Double?
     private var notices = HerdrNoticePolicy(visibleFor: GhosttyTerminalNotice.failureDuration)
     private var creatingTerminals: Set<ObjectIdentifier> = []
     /// Ghostty gives a terminal one renderer at a time, so a replacement waits for these to close.
@@ -391,6 +400,7 @@ final class HerdrScreenModel {
         makeRendererFence: @escaping RendererFenceFactory = {
             HerdrPaneRendererFence(engine: $0, paneID: $1, terminal: $2)
         },
+        makePopupAttachment: HerdrPopupController.AttachmentFactory? = nil,
         clipboard: TerminalClipboard = .general
     ) {
         self.target = target
@@ -404,6 +414,7 @@ final class HerdrScreenModel {
         self.engine = engine
         self.zoomKeepers = zoomKeepers
         self.makeRendererFence = makeRendererFence
+        self.makePopupAttachment = makePopupAttachment
         self.clipboard = clipboard
         currentTerminalSettings = target.terminalSettings
         terminalScreenAdapter.attach(to: self)
@@ -415,6 +426,7 @@ final class HerdrScreenModel {
             return
         }
         terminalColors = try? runtime?.terminalColors()
+        popup.setRuntime(runtime)
         let engine = self.engine
         updatesTask = Task { [weak self] in
             for await update in engine.updates {
@@ -443,6 +455,7 @@ final class HerdrScreenModel {
         reconcilePresentationActivity()
         closeReleasedSurfaces()
         reconcileVisibility()
+        reconcilePopupHold()
     }
 
     /// Goes to `place`, a pick from what the screen or a list shows of the session (`ask(_:bootID:)`).
@@ -678,6 +691,9 @@ final class HerdrScreenModel {
                 surface.renderer.failPresentation(message: Self.configurationFailureMessage)
             }
         }
+        if !popup.applyTheme(settings.theme) {
+            popup.surface?.renderer.failPresentation(message: Self.configurationFailureMessage)
+        }
         if themeChanged, let themeReport {
             attempt?.ask(.theme(themeReport))
         }
@@ -701,6 +717,7 @@ final class HerdrScreenModel {
         guard let measured, measured != measurement else { return }
         if measurement == nil { sizeKnownSince = .now }
         measurement = measured
+        popup.setViewport(cell: measured.cellMetrics, columns: measured.controlViewport.columns, rows: measured.controlViewport.rows)
         if let geometry { attempt?.ask(.resize(geometry)) }
         resumeSizeWaiter()
         // The panes of a frame held off screen take a new cell size there, and the frame on screen keeps its
@@ -733,6 +750,7 @@ final class HerdrScreenModel {
         isReconnecting = false
         failuresInARow = 0
         failure = nil
+        popup.retryAttach()
         restart()
         return true
     }
@@ -752,6 +770,7 @@ final class HerdrScreenModel {
         stopped = true
         cancelRecovery()
         switchingCueTimer?.cancel()
+        popup.stop()
         if let feed, reason == .sessionEnded {
             await withCheckedContinuation { (released: CheckedContinuation<Void, Never>) in
                 Task { [stepTime = connectionTiming.activation] in
@@ -844,7 +863,7 @@ final class HerdrScreenModel {
     /// screen catches up with where Herdr has the session, so the keyboard stays up; the keys typed meanwhile
     /// are dropped (`inputTarget(forPane:)`).
     var isInputAvailable: Bool {
-        focusedPaneID.flatMap(herdrInputTarget(forPane:)) != nil
+        popup.takesInput || focusedPaneID.flatMap(herdrInputTarget(forPane:)) != nil
     }
 
     /// The pane the user is in: the pane of Remux's move from the moment it is asked until it ends, else
@@ -918,6 +937,7 @@ final class HerdrScreenModel {
 
     func sendText(_ text: String) -> FocusedTerminalInputSubmissionResult {
         guard !text.isEmpty else { return .empty }
+        if popup.takesInput { return popup.sendText(text) }
         guard let target = inputTarget else { return .transportUnavailable }
         return send(
             HerdrInputTranslator.events(forText: text, reportsAllKeys: target.attempt.reportsAllKeys),
@@ -927,12 +947,14 @@ final class HerdrScreenModel {
 
     func sendPaste(_ text: String) -> FocusedTerminalInputSubmissionResult {
         guard !text.isEmpty else { return .empty }
+        if popup.takesInput { return popup.sendPaste(text) }
         guard let target = inputTarget else { return .transportUnavailable }
         return send([.paste(text)], to: target)
     }
 
     /// A release is accepted without being sent: Herdr's client sends none from a plain terminal.
     func sendKey(_ key: GhosttySurfaceKeyEvent) -> FocusedTerminalInputSubmissionResult {
+        if popup.takesInput { return popup.sendKey(key) }
         guard let target = inputTarget else { return .transportUnavailable }
         guard let event = HerdrInputTranslator.event(for: key) else {
             return key.action == .release ? .accepted : .surfaceRejected
@@ -955,7 +977,7 @@ final class HerdrScreenModel {
             return .surfaceRejected
         }
         for message in messages {
-            ask(input: message, toPane: target.paneID, on: target.attempt, delivered: nil)
+            ask(input: message, to: .pane(target.paneID), on: target.attempt, delivered: nil)
         }
         return .accepted
     }
@@ -975,26 +997,192 @@ final class HerdrScreenModel {
 
     private func sendAwaitingDelivery(_ events: [HerdrInputEvent], toPane paneID: String) async -> Bool {
         // Herdr drops pane input while a popup is open over the tab, and still answers the ping.
-        guard let target = inputTarget(forPane: paneID), layout?.hasPopup == false,
+        guard let target = inputTarget(forPane: paneID), popup.popup == nil,
               (try? HerdrConnection.checkLimits(events)) != nil
         else { return false }
         return await withCheckedContinuation { delivered in
-            ask(input: events, toPane: target.paneID, on: target.attempt, delivered: delivered)
+            ask(input: events, to: .pane(target.paneID), on: target.attempt, delivered: delivered)
         }
     }
 
-    /// All input for a pane goes this way. Input other than the wheel ends the pane's selection, as Herdr's
-    /// client ends its own on a key, text or a paste, whatever sends it.
+    // MARK: - The popup
+
+    var popupPresentation: TerminalPanePresentation {
+        popup.presentation
+    }
+
+    /// The pointer moved over the popup, in its terminal's points, as over a pane (`motion`): the cell a tap
+    /// clicks and a scroll gesture's steps are reported at.
+    func movePopupPointer(to point: CGPoint, mods: GhosttySurfaceKeyEvent.Mods) {
+        let previous = popupPointer.flatMap(popupCell(at:))
+        popupPointer = point
+        guard let terminalID = popup.popup?.terminalID, let cell = popupCell(at: point),
+              let kind = motion(to: cell, from: previous, over: .popup(terminalID), readsMouse: popupReportsMouse)
+        else { return }
+        _ = popup.sendMouse(kind, column: cell.column, row: cell.row, modifiers: HerdrInputTranslator.modifiers(for: mods))
+    }
+
+    /// A swipe over the popup, as the pane's: its travel in whole rows of the panes' font.
+    func scrollPopup(_ event: GhosttySurfaceMouseScrollEvent) -> Bool {
+        let momentum = event.mods.momentum
+        guard momentum != .cancelled else {
+            popupWheelRemainder = nil
+            return true
+        }
+        if momentum == .began { popupWheelRemainder = 0 }
+        defer {
+            if momentum == .ended { popupWheelRemainder = nil }
+        }
+        guard popup.takesInput, let cell = popup.displayed?.cell ?? measurement?.cellMetrics else { return false }
+        let cellHeight = Double(cell.pixelHeight)
+        let travel = (popupWheelRemainder ?? 0) + event.deltaY
+        let steps = (travel / cellHeight).rounded(.towardZero)
+        popupWheelRemainder = travel - steps * cellHeight
+        guard let at = popupCell(at: popupPointer ?? .zero) else { return false }
+        return popup.scroll(rows: Int(steps), column: at.column, row: at.row)
+    }
+
+    /// Whether the popup's program reads the mouse, as its attach and Herdr's surface say.
+    var popupReportsMouse: Bool {
+        popup.reportsMouse
+    }
+
+    /// A button pressed or released at the pointer over the popup, as Herdr's client sends one to a popup
+    /// whose program reads the mouse (`client/shell/mouse.rs`): the press, and then its release
+    /// (`releaseHeldButton`). Herdr writes either to the program only while it reads the mouse
+    /// (`server/pane_input.rs`). Returns false when the event doesn't go.
+    func sendPopupMouseButton(_ event: GhosttySurfaceMouseButtonEvent) -> Bool {
+        guard let button = HerdrInputTranslator.mouseButton(event.button) else { return false }
+        switch event.state {
+        case .press:
+            guard mouseGesture == nil, popupReportsMouse, let terminalID = popup.popup?.terminalID,
+                  let cell = popupCell(at: popupPointer ?? .zero),
+                  popup.sendMouse(.down(button), column: cell.column, row: cell.row, modifiers: HerdrInputTranslator.modifiers(for: event.mods))
+            else { return false }
+            mouseGesture = MouseGesture(target: .popup(terminalID), button: button, cell: cell)
+            return true
+        case .release:
+            return releaseHeldButton(button, mods: event.mods)
+        }
+    }
+
+    /// The popup's cell at `point`, in its terminal's points, within the grid it draws.
+    private func popupCell(at point: CGPoint) -> PaneCell? {
+        guard let cell = popup.displayed?.cell ?? measurement?.cellMetrics else { return nil }
+        let grid = popup.displayed?.grid
+        func index(_ points: CGFloat, size: CGFloat, count: UInt16?) -> UInt16 {
+            let index = max(Int((points / max(size, 1)).rounded(.down)), 0)
+            return UInt16(clamping: count.map { min(index, Int(max($0, 1)) - 1) } ?? index)
+        }
+        return PaneCell(
+            column: index(point.x, size: cell.pointWidth, count: grid?.columns),
+            row: index(point.y, size: cell.pointHeight, count: grid?.rows)
+        )
+    }
+
+    /// Typing into the popup, read as Herdr's client reads a terminal's: Herdr says whether the popup's
+    /// program asks for every key (`ClientShellKeyboardReportAll` follows the popup, `render.rs`
+    /// `shell_focused_runtime`).
+    private func sendPopupText(_ text: String) -> FocusedTerminalInputSubmissionResult {
+        guard let attempt = shownAttempt else { return .transportUnavailable }
+        return sendPopupInput(HerdrInputTranslator.events(forText: text, reportsAllKeys: attempt.reportsAllKeys))
+    }
+
+    /// The popup's input, as Herdr's client sends a popup's: in the order typed, within Herdr's limits.
+    private func sendPopupInput(_ events: [HerdrInputEvent]) -> FocusedTerminalInputSubmissionResult {
+        guard let attempt = shownAttempt, let terminalID = popup.popup?.terminalID else { return .transportUnavailable }
+        let messages = HerdrInputTranslator.messages(events)
+        do {
+            try messages.forEach(HerdrConnection.checkLimits)
+        } catch {
+            presentInputFailure()
+            return .surfaceRejected
+        }
+        for message in messages {
+            ask(input: message, to: .popup(terminalID), on: attempt, delivered: nil)
+        }
+        return .accepted
+    }
+
+    private func deliverPopupInput(_ events: [HerdrInputEvent], to terminalID: String) async -> Bool {
+        guard let attempt = shownAttempt, popup.popup?.terminalID == terminalID,
+              (try? HerdrConnection.checkLimits(events)) != nil
+        else { return false }
+        return await withCheckedContinuation { delivered in
+            ask(input: events, to: .popup(terminalID), on: attempt, delivered: delivered)
+        }
+    }
+
+    /// The phone holds the popup while it is on the phone's screen: the session is shown and selected, the
+    /// app isn't in the background, and no move of Remux's is taking the session elsewhere.
+    private func reconcilePopupHold() {
+        let attempt = shownAttempt
+        popup.setHeld(!stopped && isSelected && appPhase != .background && popup.popup != nil
+            && attempt != nil && attempt?.move == nil)
+    }
+
+    /// Herdr's accent, which Herdr's client draws a popup's border in (`client/shell/composition.rs`), is the
+    /// colour of the focused pane's border lines (`ui/panes.rs`). A tab without lines there, as a single pane
+    /// is by Herdr's default `pane_borders`, keeps the one the session showed last.
+    private func learnPopupAccent(from layout: HerdrPaneLayout) {
+        guard let color = HerdrPopupAccent.color(in: layout) else { return }
+        popupAccent = color
+    }
+
+    private func makePopupController() -> HerdrPopupController {
+        let openBridge = openBridge
+        let engine = engine
+        let makeAttachment = makePopupAttachment ?? { terminalID, geometry in
+            HerdrTerminalAttachment(terminalID: terminalID, geometry: geometry, openBridge: { try await openBridge(.terminal) })
+        }
+        return HerdrPopupController(
+            theme: currentTerminalSettings.theme,
+            makeAttachment: makeAttachment,
+            makeFrameFence: { HerdrPaneRendererFence(engine: engine, target: .popup($0), terminal: $1) },
+            paintFrames: { paints, revision in Task { await engine.setPaintsPopup(paints, revision: revision) } },
+            input: HerdrPopupController.Input(
+                text: { [weak self] in self?.sendPopupText($0) ?? .transportUnavailable },
+                send: { [weak self] in self?.sendPopupInput($0) ?? .transportUnavailable },
+                deliver: { [weak self] in await self?.deliverPopupInput($1, to: $0) ?? false }
+            ),
+            onHeldElsewhere: { [weak self] in
+                self?.terminalScreenAdapter.presentInformation(Self.popupHeldElsewhereMessage, for: GhosttyTerminalNotice.failureDuration)
+            },
+            onSurface: { [weak self] in self?.terminalScreenAdapter.makeScreenSurface(forPopup: $0) },
+            onChange: { [weak self] in self?.popupChanged() }
+        )
+    }
+
+    /// The popup's renderer changed, or the popup went by itself, as one Herdr leaves out goes with its
+    /// attach: the panes it covered are drawn again.
+    private func popupChanged() {
+        reconcilePresentationActivity()
+        didChange()
+    }
+
+    /// All input over the session's connection goes this way. Input other than the wheel ends the selection
+    /// of the terminal it goes to, a pane's or the popup's, as Herdr's client ends its own on a key, text or a
+    /// paste, whatever sends it.
     private func ask(
         input events: [HerdrInputEvent],
-        toPane paneID: String,
+        to target: HerdrTerminalTarget,
         on attempt: Attempt,
         delivered: CheckedContinuation<Bool, Never>?
     ) {
         if events.contains(where: { if case .mouse = $0 { false } else { true } }) {
-            surfaces[paneID]?.renderer.managedSurface?.endSelection()
+            managedSurface(of: target)?.endSelection()
         }
-        attempt.ask(.input(paneID: paneID, events: events, delivered: delivered))
+        attempt.ask(.input(target, events: events, delivered: delivered))
+    }
+
+    private func managedSurface(of target: HerdrTerminalTarget) -> GhosttyManagedSurface? {
+        switch target {
+        case .pane(let paneID):
+            return surfaces[paneID]?.renderer.managedSurface
+        case .popup(let terminalID):
+            guard let surface = popup.surface, surface.terminalID == terminalID else { return nil }
+            return surface.renderer.managedSurface
+        }
     }
 
     /// Remux's move to `destination`: a view request the engine starts when it goes (`.move`); the newest
@@ -1017,13 +1205,13 @@ final class HerdrScreenModel {
             let reached = tab(reachedBy: place)
             fromAnotherTab = reached.map { $0 != herdrTab } == true
             if case .pane(let id) = place { pane = id }
-            goesTo = reached.map { ($0.tabID, switchName(ofTab: $0.tabID) ?? $0.tabID) }
+            goesTo = reached.map { ($0.tabID, tabName(ofTab: $0.tabID) ?? $0.tabID) }
         case .creation(.tab):
             goesTo = (nil, Self.newTabName)
         case .creation(.workspace):
             goesTo = (nil, Self.newWorkspaceName)
         case .creation(let split):
-            goesTo = split.tabPlace.flatMap(tab(reachedBy:)).map { ($0.tabID, switchName(ofTab: $0.tabID) ?? $0.tabID) }
+            goesTo = split.tabPlace.flatMap(tab(reachedBy:)).map { ($0.tabID, tabName(ofTab: $0.tabID) ?? $0.tabID) }
         case .closing:
             break
         }
@@ -1248,9 +1436,10 @@ final class HerdrScreenModel {
         let row: UInt16
     }
 
-    /// A mouse button held down in a pane, and the cell last reported with it.
+    /// A mouse button held down in a pane or the popup, and the cell last reported with it. One at a time, as
+    /// in Herdr's client.
     private struct MouseGesture {
-        let paneID: String
+        let target: HerdrTerminalTarget
         let button: HerdrMouseEvent.Button
         var cell: PaneCell
     }
@@ -1260,30 +1449,40 @@ final class HerdrScreenModel {
         paneScrolls[paneID]?.mouseReporting == true
     }
 
-    /// The pointer moved over a pane. As Herdr's client passes on the host terminal's motion
-    /// (`client/shell/mouse.rs`), a program that reads the mouse gets a move each time the pointer reaches
-    /// another cell, which Herdr reports only to a program asking for every motion, and while a button is
-    /// held in the pane, a drag. The wheel's steps are reported at this cell too.
+    /// The pointer moved over a pane (`motion`). The wheel's steps are reported at this cell too.
     func movePointer(to point: CGPoint, inPane paneID: String, mods: GhosttySurfaceKeyEvent.Mods) {
         let previous = pointers[paneID].flatMap { paneCell(at: $0, inPane: paneID) }
         pointers[paneID] = point
-        guard let target = inputTarget(forPane: paneID), let cell = paneCell(at: point, inPane: paneID) else { return }
-        let kind: HerdrMouseEvent.Kind
-        if let gesture = mouseGesture {
-            guard gesture.paneID == paneID, cell != gesture.cell else { return }
-            mouseGesture?.cell = cell
-            kind = .drag(gesture.button)
-        } else {
-            guard reportsMouse(inPane: paneID), cell != previous else { return }
-            kind = .moved
-        }
+        guard let target = inputTarget(forPane: paneID), let cell = paneCell(at: point, inPane: paneID),
+              let kind = motion(to: cell, from: previous, over: .pane(paneID), readsMouse: reportsMouse(inPane: paneID))
+        else { return }
         _ = send([mouseEvent(kind, at: cell, mods: mods)], to: target)
+    }
+
+    /// What the pointer reaching `cell` over `target` reports, as Herdr's client passes on the host
+    /// terminal's motion to a pane or the popup (`client/shell/mouse.rs`): while a button pressed there is
+    /// held, a drag each time it reaches another cell; with none held, to a program that reads the mouse, a
+    /// move each time it reaches another cell, which Herdr reports only to a program asking for every motion.
+    /// Nil when nothing goes.
+    private func motion(
+        to cell: PaneCell,
+        from previous: PaneCell?,
+        over target: HerdrTerminalTarget,
+        readsMouse: Bool
+    ) -> HerdrMouseEvent.Kind? {
+        if let gesture = mouseGesture {
+            guard gesture.target == target, cell != gesture.cell else { return nil }
+            mouseGesture?.cell = cell
+            return .drag(gesture.button)
+        }
+        return readsMouse && cell != previous ? .moved : nil
     }
 
     /// A button pressed or released at the pointer, as Herdr's client sends one to a pane: a press goes
     /// only to a program that reads the mouse, and a right press only to a pane set to take right-clicks
     /// (`pane.input.set`) with no modifier held, since Herdr's own menu takes them otherwise. Until its
-    /// release, which goes to the same pane, the press takes the pointer's moves and no other press goes.
+    /// release, which goes where the press went (`releaseHeldButton`), the press takes the pointer's moves and
+    /// no other press goes.
     /// The tap that makes the press focuses the pane, as a tap does on any pane. Returns false when the
     /// event doesn't go.
     func sendMouseButton(_ event: GhosttySurfaceMouseButtonEvent, inPane paneID: String) -> Bool {
@@ -1295,17 +1494,28 @@ final class HerdrScreenModel {
                   let cell = pointers[paneID].flatMap({ paneCell(at: $0, inPane: paneID) }),
                   send([mouseEvent(.down(button), at: cell, mods: event.mods)], to: target) == .accepted
             else { return false }
-            mouseGesture = MouseGesture(paneID: paneID, button: button, cell: cell)
+            mouseGesture = MouseGesture(target: .pane(paneID), button: button, cell: cell)
             return true
         case .release:
-            guard let gesture = mouseGesture, gesture.button == button else { return false }
-            mouseGesture = nil
-            // Herdr takes the release of a press it took whatever tab it shows the phone
-            // (`server/headless.rs` `client_pane_input_releases_press`), so it goes to the press's pane while the
-            // session is shown, also once a move leaves that pane: the program never keeps the button down.
+            return releaseHeldButton(button, mods: event.mods)
+        }
+    }
+
+    /// The release of the button held, wherever it is reported, goes where its press went. Herdr takes the
+    /// release of a press it took whatever tab it shows the phone (`server/headless.rs`
+    /// `client_pane_input_releases_press`, `ClientShellPopupInput`), so it goes while the session is shown,
+    /// also once a move leaves the pane: the program never keeps the button down.
+    private func releaseHeldButton(_ button: HerdrMouseEvent.Button, mods: GhosttySurfaceKeyEvent.Mods) -> Bool {
+        guard let gesture = mouseGesture, gesture.button == button else { return false }
+        mouseGesture = nil
+        switch gesture.target {
+        case .pane(let paneID):
             guard let attempt = shownAttempt else { return false }
-            let cell = pointers[gesture.paneID].flatMap { paneCell(at: $0, inPane: gesture.paneID) } ?? gesture.cell
-            return send([mouseEvent(.up(button), at: cell, mods: event.mods)], to: (attempt, gesture.paneID)) == .accepted
+            let cell = pointers[paneID].flatMap { paneCell(at: $0, inPane: paneID) } ?? gesture.cell
+            return send([mouseEvent(.up(button), at: cell, mods: mods)], to: (attempt, paneID)) == .accepted
+        case .popup:
+            let cell = popupCell(at: popupPointer ?? .zero) ?? gesture.cell
+            return popup.sendMouse(.up(button), column: cell.column, row: cell.row, modifiers: HerdrInputTranslator.modifiers(for: mods))
         }
     }
 
@@ -1528,7 +1738,7 @@ final class HerdrScreenModel {
             let deadline = ContinuousClock.now + Self.helloDeadline
             let transport: any HerdrBridgeTransport
             do {
-                transport = try await openBridge()
+                transport = try await openBridge(.session)
             } catch {
                 // A cancelled opening releases what it claimed.
                 if isCurrent(attempt) {
@@ -1582,8 +1792,8 @@ final class HerdrScreenModel {
             }
         case .appActive(let active):
             await connection.setAppActive(active)
-        case .input(let paneID, let events, let delivered):
-            switch await feed.send(events, to: .pane(paneID)) {
+        case .input(let target, let events, let delivered):
+            switch await feed.send(events, to: target) {
             case .sent:
                 guard let delivered else { return }
                 // Herdr acknowledges no input, but answers a ping only after reading everything sent before
@@ -1981,6 +2191,12 @@ final class HerdrScreenModel {
             showPreparedFrameIfReady()
         case .rendererWakeFailed(let paneID):
             currentSurface(of: paneID)?.renderer.failPresentation(message: Self.rendererFailureMessage)
+        case .popupTerminal(let terminalID, let terminal):
+            popup.takeFrameTerminal(terminal, terminalID: terminalID)
+        case .popupTerminalFailed(let terminalID):
+            popup.frameTerminalFailed(terminalID: terminalID)
+        case .popupRendererWakeFailed(let terminalID):
+            popup.rendererWakeFailed(terminalID: terminalID)
         case .failed(let error, let connection):
             if let attempt, attempt.id == connection {
                 end(attempt, error.terminalDisconnectReason(on: target.server), recovery: Self.recovery(connectionFailedWith: error, opened: true))
@@ -2112,10 +2328,10 @@ final class HerdrScreenModel {
         // send the touch's end to it: Herdr takes a release whatever tab it shows (`server/headless.rs`
         // `client_pane_input_releases_press`), as Herdr's client releases what it holds once its input
         // context is gone (`client/shell/input.rs` `release_input_leases`). A later release finds no press.
-        if let gesture = mouseGesture, !shown.contains(gesture.paneID) {
+        if let gesture = mouseGesture, case .pane(let paneID) = gesture.target, !shown.contains(paneID) {
             mouseGesture = nil
             if let attempt = shownAttempt {
-                _ = send([mouseEvent(.up(gesture.button), at: gesture.cell, mods: [])], to: (attempt, gesture.paneID))
+                _ = send([mouseEvent(.up(gesture.button), at: gesture.cell, mods: [])], to: (attempt, paneID))
             }
         }
         for (paneID, staged) in stagedSurfaces {
@@ -2134,6 +2350,8 @@ final class HerdrScreenModel {
                 createRendererIfPossible(paneID)
             }
         }
+        learnPopupAccent(from: layout)
+        popup.update(from: layout)
         presentedFrame = frame.presented
         acknowledgeShownAgents()
         reconcilePresentationActivity()
@@ -2291,16 +2509,23 @@ final class HerdrScreenModel {
     private func reconcilePresentationActivity() {
         let sceneActive = appPhase == .active
         let live = failure == nil && isConnectionOpen
+        // A popup covers the panes and has the only cursor, so they aren't drawn under it.
+        let popupShown = popup.popup != nil
         for (paneID, surface) in surfaces {
             let inLayout = layout?.panes.contains { $0.paneID == paneID } == true
             surface.renderer.setSceneActive(sceneActive)
-            surface.renderer.setPresented(isSelected && inLayout)
-            surface.renderer.setFocused(isSelected && live && inLayout && paneID == screenPaneID)
+            surface.renderer.setPresented(isSelected && inLayout && !popupShown)
+            surface.renderer.setFocused(isSelected && live && inLayout && !popupShown && paneID == screenPaneID)
         }
         // A pane drawing off screen is neither presented nor focused until its frame goes on screen.
         for surface in stagedSurfaces.values {
             surface.renderer.setSceneActive(sceneActive)
         }
+        popup.setRendererActivity(HerdrPopupController.RendererActivity(
+            sceneActive: sceneActive,
+            presented: isSelected && popupShown,
+            focused: isSelected && live && popupShown
+        ))
     }
 
     /// Every renderer is closed here, so a stop can wait for all of them; `completion` runs once the
@@ -2340,15 +2565,16 @@ final class HerdrScreenModel {
             guard target.tabID == nil || target.tabID != shownTab else { return nil }
             // A new tab or workspace is known by its pane's tab once a snapshot lists the pane Herdr made.
             let made = move.made.flatMap { made in snapshot?.panes.first { $0.paneID == made }?.tabID }
-            return (target.tabID ?? made, target.tabID.flatMap(switchName(ofTab:)) ?? target.name)
+            return (target.tabID ?? made, target.tabID.flatMap(tabName(ofTab:)) ?? target.name)
         }
         guard let tab = pendingFrame?.layout.tab, tab.tabID != shownTab else { return nil }
-        return (tab.tabID, switchName(ofTab: tab.tabID) ?? tab.label)
+        return (tab.tabID, tabName(ofTab: tab.tabID) ?? tab.label)
     }
 
-    /// What the switching cue calls a tab, as the newest snapshot has it: the user's name for it, else "tab"
-    /// and its number, as the toolbar counts tabs; Herdr's own name for a tab is its number.
-    private func switchName(ofTab tabID: String) -> String? {
+    /// What the screen calls a tab, in the switching cue and the popup's frame, as the newest snapshot has it:
+    /// the user's name for it, else "tab" and its number, as the toolbar counts tabs; Herdr's own name for a
+    /// tab is its number.
+    func tabName(ofTab tabID: String) -> String? {
         guard let tab = snapshot?.tabs.first(where: { $0.tabID == tabID }) else { return nil }
         return tab.customLabel ? tab.label : "tab \(tab.number)"
     }
@@ -2393,6 +2619,7 @@ final class HerdrScreenModel {
 
     private func didChange() {
         guard !stopped else { return }
+        reconcilePopupHold()
         // A reconnect reads as one until the session is ready again, shown or not.
         if isConnectionReady { isReconnecting = false }
         reconcileSwitchingCue()
@@ -2442,6 +2669,8 @@ final class HerdrScreenModel {
     nonisolated static let paneSelectionReadMethod = "pane.selection.read"
     nonisolated static let paneLinkResolveMethod = "pane.link.resolve"
     private static let inputFailureLabel = "input"
+    /// Herdr refuses an attach while another device's holds the popup; it then shows as Herdr draws it.
+    static let popupHeldElsewhereMessage = "Another device has this popup open, so it shows at that device's size."
     private static let copyFailureLabel = "copy"
     private static let zoomFailureLabel = "zoom pane"
     static let copiedNotice = "Copied to clipboard"

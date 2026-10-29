@@ -23,6 +23,17 @@ enum HerdrBridgeError: Error, Equatable, LocalizedError {
     }
 }
 
+/// What a bridge carries, which decides whether the server may end it while it is quiet.
+enum HerdrBridgeKind: Sendable {
+    /// The session's connection: with `--idle-timeout-v1` where the host supports it, as Herdr's own
+    /// client runs its background bridges.
+    case session
+    /// A direct attach to one terminal, which is quiet while the terminal is, so it has no idle timeout,
+    /// as Herdr's client runs its interactive attach (`remote/attach.rs` `bridge_command`); the SSH
+    /// connection's own liveness bounds it.
+    case terminal
+}
+
 /// `herdr remote-client-bridge` on an SSH exec channel: the bridge copies its stdin to the session's
 /// client socket and the socket to its stdout, so the channel carries the endpoint protocol unchanged.
 ///
@@ -58,12 +69,13 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
         using claimedRoot: RemuxSSHClaimedRoot,
         herdrExecutable: String,
         session: String,
+        kind: HerdrBridgeKind,
         trace: RemuxTransportStartupTrace
     ) async throws -> HerdrSSHBridge {
         let bridge = HerdrSSHBridge()
         let connection = try await RemuxSSHExecSession.open(
             using: claimedRoot,
-            command: command(herdrExecutable: herdrExecutable, session: session),
+            command: command(herdrExecutable: herdrExecutable, session: session, kind: kind),
             pseudoTerminal: false,
             readsOnDemand: true,
             trace: trace,
@@ -74,14 +86,15 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
         return bridge
     }
 
-    /// Runs the bridge for `session`, with `--idle-timeout-v1` when `herdr status client --json`
-    /// reports `remote_bridge_idle_timeout: true` (Linux and macOS hosts), as Herdr's own client does
-    /// for its background bridges. No locale is forced, since the bridge may start the server, whose
-    /// panes inherit the environment.
-    static func command(herdrExecutable: String, session: String) -> String {
-        RemoteProgramCommand.command(program: herdrExecutable, arguments: [session], body: [
+    /// Runs the bridge for `session`. A session's bridge has `--idle-timeout-v1` when `herdr status client
+    /// --json` reports `remote_bridge_idle_timeout: true` (Linux and macOS hosts), as Herdr's own client
+    /// does for its background bridges; a terminal's never does. No locale is forced, since the bridge may
+    /// start the server, whose panes inherit the environment.
+    static func command(herdrExecutable: String, session: String, kind: HerdrBridgeKind) -> String {
+        let idleTimeout = #"if "$resolved" status client --json 2> /dev/null | grep -Eq "\"remote_bridge_idle_timeout\": *true"; then exec "$resolved" --session "$session" remote-client-bridge --idle-timeout-v1; fi"#
+        return RemoteProgramCommand.command(program: herdrExecutable, arguments: [session], body: [
             #"session=$(printf %b "$2")"#,
-            #"if "$resolved" status client --json 2> /dev/null | grep -Eq "\"remote_bridge_idle_timeout\": *true"; then exec "$resolved" --session "$session" remote-client-bridge --idle-timeout-v1; fi"#,
+        ] + (kind == .session ? [idleTimeout] : []) + [
             #"exec "$resolved" --session "$session" remote-client-bridge"#,
         ])
     }

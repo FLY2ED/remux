@@ -2528,8 +2528,8 @@ final class RemuxRootModel: ObservableObject {
             runtime = .herdr(HerdrScreenModel(
                 target: target,
                 sessionInstanceID: session.instanceID,
-                openBridge: { [dependencies] in
-                    try await dependencies.openHerdrBridge(for: target)
+                openBridge: { [dependencies] kind in
+                    try await dependencies.openHerdrBridge(for: target, kind: kind)
                 },
                 onRuntimeStateChange: onRuntimeStateChange,
                 onNotification: { [weak self] event in

@@ -514,6 +514,39 @@ struct GhosttyTerminalViewportPresentationProjection: Equatable {
         windowCount: 0
     )
 
+    /// A popup the backend shows over the whole terminal area, which takes the terminal's input meanwhile. It
+    /// is framed on the panes' grid (`windowGrid`): its lines are on the grid's outer cells, as the panes'
+    /// lines are drawn, its title and tab in the top row, and its terminal in the cells inside.
+    struct Popup: Equatable {
+        /// Its surface, in the screen's surface lookup.
+        let id: UUID
+        /// The backend's title for it, which its frame shows.
+        let title: String
+        /// The tab it is open over.
+        let tabLabel: String?
+        let border: [GhosttyPaneLine]
+        let titleInk: GhosttyPaneLine.Ink
+        let tabInk: GhosttyPaneLine.Ink
+        /// The grid its renderer draws and the cell it draws with, once it has a renderer.
+        let grid: GhosttyTerminalGridSize?
+        let cell: GhosttyTerminalCellDisplayMetrics?
+
+        /// A frame takes the grid's outer cells, so it needs a cell inside: 3 x 3 at least.
+        static func isFramed(_ grid: GhosttyTerminalGridSize) -> Bool {
+            grid.columns >= 3 && grid.rows >= 3
+        }
+
+        /// The cells the popup's terminal takes on `grid`: those inside the frame, or all of them on a grid
+        /// too small for one, so the popup still shows. Nil for an empty grid.
+        static func content(in grid: GhosttyTerminalGridSize) -> GhosttyTerminalGridRect? {
+            guard grid.columns > 0, grid.rows > 0 else { return nil }
+            guard isFramed(grid) else {
+                return GhosttyTerminalGridRect(x: 0, y: 0, columns: grid.columns, rows: grid.rows)
+            }
+            return GhosttyTerminalGridRect(x: 1, y: 1, columns: grid.columns - 2, rows: grid.rows - 2)
+        }
+    }
+
     let windowGrid: GhosttyTerminalGridSize?
     let cellMetrics: GhosttyTerminalCellDisplayMetrics?
     let panes: [Pane]
@@ -522,6 +555,7 @@ struct GhosttyTerminalViewportPresentationProjection: Equatable {
     let focusedSurfaceID: UUID?
     let isServerZoomed: Bool
     let windowCount: Int
+    var popup: Popup? = nil
 
     var canNavigateWindows: Bool {
         windowCount > 1

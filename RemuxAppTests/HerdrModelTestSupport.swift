@@ -91,7 +91,8 @@ enum HerdrServerScript {
     /// `panes` and `agents` are the snapshot's JSON entries, made with `snapshotPane` and
     /// `snapshotAgent`. Without `panes` it lists the panes of its tabs in the scripted session
     /// (`sessionPanes`), as Herdr lists every pane, but those `closed` names.
-    /// The focused tab is labelled `tabLabel` and is `zoomed` or not; `otherTabs` are further tabs of
+    /// The focused tab is labelled `tabLabel`, a name of the user's unless `customTabLabel` is false, and is
+    /// `zoomed` or not; `otherTabs` are further tabs of
     /// workspace `w1`, by id, each named after its id, and zoomed when in `zoomedOtherTabs`. Workspace `w1`
     /// is listed when it has a label.
     static func snapshot(
@@ -99,6 +100,7 @@ enum HerdrServerScript {
         boot: String = "boot",
         workspaceLabel: String? = nil,
         tabLabel: String = "main",
+        customTabLabel: Bool = true,
         zoomed: Bool = false,
         focusedTab: String = "t1",
         otherTabs: [String] = [],
@@ -113,7 +115,7 @@ enum HerdrServerScript {
         }
         let tabs = ([(focusedTab, tabLabel, true)] + otherTabs.map { ($0, $0, false) }).enumerated().map { index, tab in
             """
-            {"tab_id":"\(tab.0)","workspace_id":"w1","number":\(index + 1),"label":"\(tab.1)","custom_label":true,
+            {"tab_id":"\(tab.0)","workspace_id":"w1","number":\(index + 1),"label":"\(tab.1)","custom_label":\(!tab.2 || customTabLabel),
              "zoomed":\(tab.2 ? zoomed : zoomedOtherTabs.contains(tab.0)),"focused":\(tab.2),"agent_status":"idle"}
             """
         }
@@ -292,8 +294,9 @@ enum HerdrServerScript {
         value.map { #""\#($0)""# } ?? "null"
     }
 
-    /// A full surface of the given lines, all of one width, and a one-cell popup for the terminal
-    /// `popup` names, if any. A cell whose symbol `foreground` lists has that colour.
+    /// A full surface of the given lines, all of one width, and a popup for the terminal `popup` names, if
+    /// any: titled `popupTitle`, of `popupLines` (one cell unless given). A cell whose symbol `foreground`
+    /// lists has that colour.
     static func surface(
         boot: String = "boot",
         projection: UInt64,
@@ -301,6 +304,9 @@ enum HerdrServerScript {
         lines: [String],
         panes: [Pane],
         popup: String? = nil,
+        popupTitle: String = "popup",
+        popupLines: [String] = ["p"],
+        popupMouseReporting: Bool = false,
         foreground: [Character: UInt32] = [:]
     ) -> [UInt8] {
         var writer = HerdrWireWriter()
@@ -338,11 +344,11 @@ enum HerdrServerScript {
         writer.array([UInt8]()) { $0.u8($1) }
         writer.optional(popup) { writer, terminalID in
             writer.string(terminalID)
-            writer.string("popup")
+            writer.string(popupTitle)
             writer.optional(nil as UInt8?) { $0.u8($1) }
             writer.optional(nil as UInt8?) { $0.u8($1) }
-            frame(["p"], to: &writer)
-            writer.bool(false)
+            frame(popupLines, to: &writer)
+            writer.bool(popupMouseReporting)
             writer.bool(false)
             writer.u32(0)
             writer.u32(0)
@@ -615,6 +621,8 @@ private final class GatedRendererFence: TerminalPaneRendererFence {
 final class HerdrModelHarness {
     actor Bridges {
         private(set) var opened: [FakeBridgeTransport] = []
+        /// What each opened bridge is for.
+        private(set) var kinds: [HerdrBridgeKind] = []
         /// When each opening started.
         private(set) var openingsStartedAt: [ContinuousClock.Instant] = []
         private let openingTakes: Duration
@@ -628,7 +636,7 @@ final class HerdrModelHarness {
             failure = error
         }
 
-        func open() async throws -> FakeBridgeTransport {
+        func open(_ kind: HerdrBridgeKind) async throws -> FakeBridgeTransport {
             openingsStartedAt.append(.now)
             if let failure {
                 self.failure = nil
@@ -637,6 +645,7 @@ final class HerdrModelHarness {
             if openingTakes > .zero { try await Task.sleep(for: openingTakes) }
             let transport = FakeBridgeTransport()
             opened.append(transport)
+            kinds.append(kind)
             return transport
         }
     }
@@ -686,7 +695,7 @@ final class HerdrModelHarness {
         model = HerdrScreenModel(
             target: target,
             sessionInstanceID: UUID(),
-            openBridge: { try await bridges.open() },
+            openBridge: { kind in try await bridges.open(kind) },
             onRuntimeStateChange: { stateLog.updates.append($0) },
             onNotification: { stateLog.notifications.append($0) },
             connectionTiming: timing,
@@ -750,13 +759,14 @@ final class HerdrModelHarness {
         projection: UInt64,
         revision: UInt64,
         lines: [String],
-        panes: [HerdrServerScript.Pane]
+        panes: [HerdrServerScript.Pane],
+        popup: String? = nil
     ) throws -> [UInt8] {
         let viewport = try XCTUnwrap(model.measurement).controlViewport
         let columns = Int(viewport.columns)
         let padded = lines.map { $0.padding(toLength: columns, withPad: " ", startingAt: 0) }
             + Array(repeating: String(repeating: " ", count: columns), count: max(Int(viewport.rows) - lines.count, 0))
-        return HerdrServerScript.surface(boot: boot, projection: projection, revision: revision, lines: padded, panes: panes)
+        return HerdrServerScript.surface(boot: boot, projection: projection, revision: revision, lines: padded, panes: panes, popup: popup)
     }
 
     /// The bridge's writes from `index` on, decoded, once there are `count` of them.

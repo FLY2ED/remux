@@ -2535,6 +2535,304 @@ final class RemuxAppUITests: XCTestCase {
         app.buttons["terminal.windows.close"].tap()
     }
 
+    /// Herdr's popup on a live server, opened by a second Herdr client on the tab the phone shows, as from a
+    /// Mac. The phone attaches to the popup's terminal and shows it in a frame filling the terminal area at
+    /// the panes' font, with its title and the tab it is over; Tabs and Panes are held, Sessions isn't. The
+    /// popup's terminal takes the phone's grid, which the keyboard and a rotation change by rows and columns,
+    /// not text size, and keeps it while the other client types, and through a quiet minute; Home gives it
+    /// back. Typing, the composer and swipes go into it: an arrow reaches a program asking for application
+    /// cursor keys as one, a shell's history scrolls, and a program reporting the mouse gets wheel steps and a
+    /// tap as a click.
+    /// btop says the grid it has is too small, with its size; Claude Code takes the phone's keys. Each
+    /// popup closes when its program exits. Screens in dark, then Latte.
+    /// The harness answers each `<step>.request` with `<step>.done`, and `<step>.out` for what it read:
+    /// `open-shell`, `open-probe`, `open-btop` and `open-claude` open the popups from the other client,
+    /// `mac-claims` and `mac-types` type there, `read` captures its screen, `winsize` reads the popup's
+    /// terminal size as "rows columns", and `end-claude` ends Claude Code (its first-run screens don't quit on
+    /// Control-C). The other client draws the popup's terminal in its own popup box, which shows only its top
+    /// rows while the phone's grid is taller, so what the test reads there is written after a `clear`. The
+    /// harness puts `key_probe.py` in the server's home, which shows the bytes of each key it gets.
+    func testLiveHerdrPopupFrameWhenConfigured() throws {
+        app.launchEnvironment["REMUX_TRACE_GHOSTTY_DIAGNOSTICS"] = "1"
+        let configuration = try launchLiveHerdrApp(requiringSteps: true)
+        // A failure in a landscape phase ends the test there; the tests after it start in portrait.
+        addTeardownBlock { XCUIDevice.shared.orientation = .portrait }
+        let popup = app.descendants(matching: .any)["terminal.popup"].firstMatch
+        let content = app.descendants(matching: .any)["terminal.popup.content"].firstMatch
+        let title = app.staticTexts["terminal.popup.title"].firstMatch
+        let tab = app.staticTexts["terminal.popup.tab"].firstMatch
+        let tabs = app.buttons["terminal.windows"].firstMatch
+        let panes = app.buttons["terminal.panes"].firstMatch
+        let sessions = app.buttons["terminal.sessions"].firstMatch
+        typealias Grid = (rows: Int, columns: Int)
+        func step(_ name: String) throws -> String {
+            try performLiveHerdrStep(name, in: configuration)
+        }
+        func capture(_ name: String) {
+            RunLoop.current.run(until: Date().addingTimeInterval(1))
+            captureLiveHerdrStep(name, in: configuration)
+        }
+        func showKeyboard() {
+            guard !app.keyboards.firstMatch.exists else { return }
+            content.tap()
+            XCTAssertNotNil(waitForKeyboardPresence(true, label: "popup keyboard", timeout: 8))
+        }
+        func hideKeyboard() {
+            guard app.keyboards.firstMatch.exists else { return }
+            app.buttons["terminal.keyboard"].tap()
+            XCTAssertNotNil(waitForKeyboardPresence(false, label: "popup keyboard hide", timeout: 8))
+        }
+        func typeIntoPopup(_ text: String) {
+            showKeyboard()
+            app.typeText(text)
+        }
+        func screen(containing text: String, timeout: TimeInterval = 10) throws -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if try step("read").contains(text) { return true }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+            }
+            return false
+        }
+        /// The popup's terminal size once `condition` holds for it, as its program sees it.
+        func popupGrid(_ context: String, where condition: (Grid) -> Bool = { _ in true }) throws -> Grid? {
+            let deadline = Date().addingTimeInterval(10)
+            var last: Grid?
+            while Date() < deadline {
+                let parts = try step("winsize").split(whereSeparator: \.isWhitespace).compactMap { Int($0) }
+                if parts.count == 2 {
+                    last = (parts[0], parts[1])
+                    if let last, condition(last) { return last }
+                }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+            }
+            XCTFail("The popup's terminal was \(last.map { "\($0.rows)x\($0.columns)" } ?? "unread") \(context).")
+            return nil
+        }
+        /// Asks the popup's shell for its size, typing with the keyboard up, and checks it says `grid`.
+        func assertSttySays(_ grid: Grid, _ context: String) throws {
+            typeIntoPopup("clear; stty size\n")
+            XCTAssertTrue(try screen(containing: "\(grid.rows) \(grid.columns)"), "stty didn't say \(grid.rows) \(grid.columns) \(context).")
+        }
+        /// The numbers on the other client's screen, which shows the popup's terminal.
+        func numbersOnScreen() throws -> [Int] {
+            let edges = CharacterSet.whitespaces.union(CharacterSet(charactersIn: "│┃║|"))
+            return try step("read").split(whereSeparator: \.isNewline).compactMap {
+                Int($0.trimmingCharacters(in: edges))
+            }
+        }
+        func assertNavigationHeld(_ held: Bool, _ context: String) {
+            XCTAssertEqual(tabs.isEnabled, !held, "Tabs \(held ? "worked" : "stayed held") \(context).")
+            XCTAssertEqual(panes.isEnabled, !held, "Panes \(held ? "worked" : "stayed held") \(context).")
+            XCTAssertTrue(sessions.isEnabled, "Sessions was held \(context).")
+        }
+        func backToSession() {
+            let activeSession = app.descendants(matching: .any)["library.active-session.show"].firstMatch
+            XCTAssertTrue(activeSession.waitForExistence(timeout: 5))
+            activeSession.tap()
+        }
+
+        openFirstSavedSession()
+        waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
+        assertNavigationHeld(false, "before any popup")
+        capture("f0-panes-dark")
+
+        // The other client holds the tab's size, then opens a shell popup over it.
+        _ = try step("mac-claims")
+        _ = try step("open-shell")
+        XCTAssertTrue(popup.waitForExistence(timeout: 15), "The popup opened on the tab on screen didn't show.")
+        XCTAssertFalse(title.label.isEmpty, "The popup's frame has no title.")
+        XCTAssertTrue(tab.label.hasPrefix("over "), "The popup's frame doesn't say which tab it is over: \(tab.label)")
+        XCTAssertFalse(app.buttons["terminal.popup.close"].exists, "The popup has a close button.")
+        XCTAssertFalse(app.buttons["terminal.popup.expand"].exists, "The popup has an Expand button.")
+        assertNavigationHeld(true, "under the popup")
+
+        // The popup's terminal has the phone's grid, narrower than the other client's popup.
+        let full = try XCTUnwrap(try popupGrid("at the phone's size") { $0.columns < 80 })
+        capture("f1-popup-dark")
+
+        // The keyboard takes rows, not text size; hiding it gives them back.
+        showKeyboard()
+        let withKeyboard = try XCTUnwrap(try popupGrid("with the keyboard up") {
+            $0.rows < full.rows && $0.columns == full.columns
+        })
+        try assertSttySays(withKeyboard, "with the keyboard up")
+        capture("f2-popup-dark-keyboard")
+        hideKeyboard()
+        XCTAssertNotNil(try popupGrid("with the keyboard down again") { $0 == full })
+
+        // Landscape in dark, with the keyboard down and up.
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let darkLandscape = try XCTUnwrap(try popupGrid("in landscape") { $0.columns > full.columns })
+        capture("f2l-popup-dark-landscape")
+        showKeyboard()
+        XCTAssertNotNil(try popupGrid("in landscape with the keyboard up") { $0.rows < darkLandscape.rows })
+        capture("f2lk-popup-dark-landscape-keyboard")
+        hideKeyboard()
+        XCUIDevice.shared.orientation = .portrait
+        XCTAssertNotNil(try popupGrid("back in portrait") { $0 == full })
+
+        // A quiet popup keeps its attach past Herdr's minute for an idle background bridge.
+        RunLoop.current.run(until: Date().addingTimeInterval(65))
+        XCTAssertNotNil(try popupGrid("after a quiet minute") { $0 == full })
+        typeIntoPopup("clear; echo still-$((6*7))\n")
+        XCTAssertTrue(try screen(containing: "still-42"), "Typing after a quiet minute didn't reach the popup.")
+        hideKeyboard()
+
+        // Herdr encodes the phone's keys for the program's modes: an arrow reaches a program asking for
+        // application cursor keys as one.
+        typeIntoPopup("clear; python3 -I ~/key_probe.py decckm ~/decckm.log\n")
+        XCTAssertTrue(try screen(containing: "probe decckm ready"), "The key probe didn't start.")
+        app.typeKey(.upArrow, modifierFlags: [])
+        XCTAssertTrue(try screen(containing: #"b'\x1bOA'"#), "An arrow didn't reach the program as an application cursor key.")
+        app.typeText("QQ")
+        hideKeyboard()
+
+        // A swipe scrolls the shell's history, and back.
+        typeIntoPopup("clear; seq 1 200\n")
+        XCTAssertTrue(try screen(containing: "199"), "seq didn't run in the popup.")
+        hideKeyboard()
+        let bottom = try XCTUnwrap(try numbersOnScreen().min())
+        content.swipeDown()
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        let scrolled = try XCTUnwrap(try numbersOnScreen().min())
+        XCTAssertLessThan(scrolled, bottom, "A swipe didn't scroll the popup's history.")
+        capture("f3-popup-dark-scrolled")
+        content.swipeUp()
+        content.swipeUp()
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        XCTAssertEqual(try numbersOnScreen().min(), bottom, "Swiping back didn't return to the popup's newest lines.")
+
+        // The composer's message goes into the popup.
+        app.buttons["terminal.composer.toggle"].tap()
+        let composerField = app.textViews["terminal.composer.field"]
+        XCTAssertTrue(composerField.waitForExistence(timeout: 3))
+        composerField.tap()
+        composerField.typeText("clear; echo from-the-$((6*7))-composer")
+        app.buttons["terminal.composer.send"].tap()
+        XCTAssertTrue(try screen(containing: "from-the-42-composer"), "The composer's message didn't reach the popup.")
+        if composerField.exists { app.buttons["terminal.composer.toggle"].tap() }
+        hideKeyboard()
+
+        // The other client's typing goes into the popup, which keeps the phone's size.
+        let held = try XCTUnwrap(try popupGrid("before the other client typed"))
+        _ = try step("mac-types")
+        XCTAssertTrue(try screen(containing: "typed-on-mac"), "The other client's typing didn't reach the popup.")
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        let afterMac = try XCTUnwrap(try popupGrid("after the other client typed"))
+        XCTAssertTrue(afterMac == held, "The other client's typing took the popup's size.")
+
+        // Home gives the popup's size back to the other client; coming back takes it again.
+        openHomeFromTerminal()
+        let given = try XCTUnwrap(try popupGrid("with the phone on Home") { $0.columns > held.columns })
+        XCTAssertGreaterThan(given.columns, held.columns)
+        backToSession()
+        XCTAssertTrue(popup.waitForExistence(timeout: 20), "Coming back didn't land on the popup.")
+        XCTAssertNotNil(try popupGrid("back on the popup") { $0 == held })
+        assertNavigationHeld(true, "back on the popup")
+
+        // Latte, the light theme, while the popup is open.
+        openHomeFromTerminal()
+        app.buttons["library.settings"].tap()
+        XCTAssertTrue(app.buttons["Latte"].waitForExistence(timeout: 5))
+        app.buttons["Latte"].tap()
+        app.navigationBars.buttons.firstMatch.tap()
+        backToSession()
+        XCTAssertTrue(popup.waitForExistence(timeout: 20))
+        typeIntoPopup("clear; ls /\n")
+        capture("f4k-popup-light-keyboard")
+        hideKeyboard()
+        capture("f4-popup-light")
+
+        // Landscape gives the popup the wider grid, at the same font; portrait takes it back.
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let landscape = try XCTUnwrap(try popupGrid("in landscape") { $0.columns > full.columns })
+        XCTAssertLessThan(landscape.rows, full.rows)
+        capture("f5-popup-light-landscape")
+        showKeyboard()
+        let landscapeWithKeyboard = try XCTUnwrap(try popupGrid("in landscape with the keyboard up") {
+            $0.rows < landscape.rows && $0.columns == landscape.columns
+        })
+        try assertSttySays(landscapeWithKeyboard, "in landscape with the keyboard up")
+        capture("f5k-popup-light-landscape-keyboard")
+        hideKeyboard()
+        XCUIDevice.shared.orientation = .portrait
+        XCTAssertNotNil(try popupGrid("back in portrait") { $0 == full })
+
+        // The shell exits, the popup closes, and the panes come back with Tabs and Panes.
+        typeIntoPopup("exit\n")
+        XCTAssertTrue(popup.waitForNonExistence(timeout: 15), "The popup stayed after its program exited.")
+        hideKeyboard()
+        assertNavigationHeld(false, "once the popup closed")
+        capture("f6-popup-closed")
+
+        // A program reporting the mouse gets a swipe as wheel steps, in its own grid.
+        _ = try step("open-probe")
+        XCTAssertTrue(popup.waitForExistence(timeout: 15), "The wheel probe's popup didn't show.")
+        XCTAssertTrue(try screen(containing: "probe ready"), "The wheel probe didn't start.")
+        content.swipeDown()
+        XCTAssertTrue(try screen(containing: "wheel up at"), "A swipe didn't reach the program as the wheel.")
+        content.swipeUp()
+        XCTAssertTrue(try screen(containing: "wheel down at"), "A swipe didn't reach the program as the wheel.")
+        // A tap is a click there, as on a pane: a press and its release.
+        content.tap()
+        XCTAssertTrue(try screen(containing: "press at"), "A tap didn't reach the program as a click.")
+        XCTAssertTrue(try screen(containing: "release at"), "A tap's release didn't reach the program.")
+        capture("f7-popup-light-wheel")
+        typeIntoPopup("q")
+        XCTAssertTrue(popup.waitForNonExistence(timeout: 15), "The wheel probe's popup stayed after it quit.")
+        hideKeyboard()
+
+        // btop draws at 80x24 or more; at the phone's grid it says so, with the size it has.
+        _ = try step("open-btop")
+        XCTAssertTrue(popup.waitForExistence(timeout: 15), "btop's popup didn't show.")
+        let btopGrid = try XCTUnwrap(try popupGrid("under btop"))
+        XCTAssertTrue(
+            try screen(containing: "Width = \(btopGrid.columns) Height = \(btopGrid.rows)"),
+            "btop didn't say the popup's grid, \(btopGrid.columns)x\(btopGrid.rows)."
+        )
+        capture("f8-popup-light-btop")
+        typeIntoPopup("q")
+        XCTAssertTrue(popup.waitForNonExistence(timeout: 15), "btop's popup stayed after it quit.")
+        hideKeyboard()
+
+        // Claude Code in a popup takes the phone's keys, and its popup closes when it exits.
+        _ = try step("open-claude")
+        XCTAssertTrue(popup.waitForExistence(timeout: 15), "The Claude Code popup didn't show.")
+        // Its first-run screen, or its name once past it.
+        let claudeDrew = try screen(containing: "Let's get started", timeout: 20) || screen(containing: "Claude", timeout: 1)
+        XCTAssertTrue(claudeDrew, "Claude Code didn't draw in the popup.")
+        capture("f9-popup-light-claude")
+        let before = try step("read")
+        typeIntoPopup("\n")
+        hideKeyboard()
+        RunLoop.current.run(until: Date().addingTimeInterval(2))
+        XCTAssertNotEqual(try step("read"), before, "The phone's key didn't reach Claude Code.")
+        capture("f10-popup-light-claude-key")
+        _ = try step("end-claude")
+        XCTAssertTrue(popup.waitForNonExistence(timeout: 15), "The Claude Code popup stayed after it exited.")
+        assertNavigationHeld(false, "once Claude Code's popup closed")
+    }
+
+    /// Asks the harness for `step` and waits for it to answer; returns what it wrote for the step.
+    private func performLiveHerdrStep(_ step: String, in configuration: LiveHerdrConfiguration) throws -> String {
+        let directory = URL(fileURLWithPath: try XCTUnwrap(configuration.stepDirectory))
+        let done = directory.appendingPathComponent("\(step).done")
+        try? FileManager.default.removeItem(at: done)
+        try requestLiveHerdrStep(step, in: configuration)
+        let deadline = Date().addingTimeInterval(20)
+        while !FileManager.default.fileExists(atPath: done.path) {
+            guard Date() < deadline else {
+                XCTFail("The harness didn't answer step \(step).")
+                return ""
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        let output = (try? String(contentsOf: directory.appendingPathComponent("\(step).out"), encoding: .utf8)) ?? ""
+        try? FileManager.default.removeItem(at: done)
+        return output
+    }
+
     private func waitForLabel(of element: XCUIElement, _ label: String, timeout: TimeInterval) -> Bool {
         let expectation = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "label == %@", label),

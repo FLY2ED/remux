@@ -290,6 +290,35 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
                             )
                             .background(presentation.terminalTheme.terminalSurfaceBackground)
 
+                        if let popup = screenProjection.viewport.popup {
+                            GhosttyTerminalPopupFrameView(
+                                popup: popup,
+                                windowGrid: screenProjection.viewport.windowGrid,
+                                cellMetrics: screenProjection.viewport.cellMetrics,
+                                surfaceLookup: model.terminalManagedSurfaceLookup,
+                                terminalTheme: presentation.terminalTheme,
+                                keyboardMode: renderedKeyboardMode,
+                                submitScroll: { surfaceID, event in
+                                    model.sendMouseScroll(to: surfaceID, event)
+                                },
+                                submitPointer: { surfaceID, position, mods in
+                                    model.sendMousePosition(to: surfaceID, position, mods: mods)
+                                },
+                                isMouseCaptured: { surfaceID in
+                                    model.isMouseCaptured(for: surfaceID)
+                                },
+                                submitMouseButton: { surfaceID, event in
+                                    model.sendMouseButton(to: surfaceID, event)
+                                },
+                                onTap: handlePopupTap
+                            )
+                            .frame(
+                                width: terminalViewportSize.width,
+                                height: terminalViewportSize.height,
+                                alignment: .topLeading
+                            )
+                        }
+
                         GhosttyTerminalResponderRepresentable(
                             isEnabled: terminalResponderFocusPolicy.isResponderEnabled,
                             wantsFirstResponder: terminalResponderFocusPolicy.wantsFirstResponder,
@@ -454,6 +483,7 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
                             selectedWindowIndex: interactionProjection.selectedWindowIndex,
                             windowCount: interactionProjection.windowCount,
                             paneCount: interactionProjection.paneCount,
+                            isNavigationHeldByPopup: screenProjection.viewport.popup != nil,
                             isComposerPresented: isActiveComposerPresented,
                             onShowSessions: onShowSessions,
                             onShowLibrary: onShowLibrary,
@@ -633,6 +663,11 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
             )
             .onChange(of: paneSelectionSheetTopologyProjection) { _, projection in
                 guard projection.shouldDismissPaneSheet else { return }
+                dismissSelectionSheet()
+            }
+            .onChange(of: screenProjection.viewport.popup?.id) { _, popupID in
+                // The Tabs and Panes sheets act on the tab a popup holds.
+                guard popupID != nil, selectionSheet != nil else { return }
                 dismissSelectionSheet()
             }
             .onChange(of: attachmentPhotoSelections) { _, items in
@@ -841,6 +876,12 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
                 "keyboard_requested": "\(shouldShowKeyboard)",
             ]
         )
+    }
+
+    /// A tap on the popup brings up the keyboard, as a tap on a pane does; the popup takes the input.
+    private func handlePopupTap() {
+        guard !isActiveComposerPresented else { return }
+        showSystemKeyboard()
     }
 
     private func handleWindowSwipe(_ direction: GhosttyRuntimeSelectionDirection) {
@@ -1453,7 +1494,7 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
     }
 
     private func showWindows(availableSize: CGSize) {
-        guard !composer.isSubmitting else { return }
+        guard !composer.isSubmitting, model.terminalScreenPresentationProjection.viewport.popup == nil else { return }
         model.claimActiveTmuxViewportIfNeeded()
         guard let projection = model.windowSheetPresentationProjection() else { return }
         GhosttyRuntimeTrace.flowEventIfActive("tmux.newWindow", event: "ui.showWindows")
@@ -1503,7 +1544,7 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
     }
 
     private func showPanes() {
-        guard !composer.isSubmitting else { return }
+        guard !composer.isSubmitting, model.terminalScreenPresentationProjection.viewport.popup == nil else { return }
         model.claimActiveTmuxViewportIfNeeded()
         guard let projection = model.selectedPaneSheetPresentationProjection() else { return }
         GhosttyRuntimeTrace.flowEventIfActive("tmux.splitPane", event: "ui.showPanes")
@@ -1622,10 +1663,12 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
         )
     }
 
+    /// The message goes where it was written, captured now: the popup over the tab when one is shown, which
+    /// takes the tab's input, else the selected pane.
     private func submitComposer() {
         let interaction = model.terminalInteractionProjection
         guard isTerminalInputAvailable,
-              let surfaceID = interaction.selectedActiveLeafID else {
+              let surfaceID = model.terminalScreenPresentationProjection.viewport.popup?.id ?? interaction.selectedActiveLeafID else {
             composer.statusMessage = "Couldn’t send. Message kept."
             return
         }

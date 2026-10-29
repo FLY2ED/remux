@@ -929,6 +929,8 @@ actor FakeBridgeTransport: HerdrBridgeTransport {
     private var writeFailure: Error?
     private var stallsWrites = false
     private var stalledWrites: [CheckedContinuation<Void, Error>] = []
+    private var closeWaiters: [(UInt64, CheckedContinuation<Bool, Never>)] = []
+    private var nextCloseWaiter: UInt64 = 0
     private(set) var reads = 0
     private(set) var isClosed = false
     /// Every close's cause, in order.
@@ -1030,7 +1032,28 @@ actor FakeBridgeTransport: HerdrBridgeTransport {
         isClosed = true
         stalledWrites.forEach { $0.resume(throwing: CancellationError()) }
         stalledWrites.removeAll()
+        closeWaiters.forEach { $0.1.resume(returning: true) }
+        closeWaiters.removeAll()
         finishServing()
+    }
+
+    /// Whether the transport closed, waiting up to two seconds for its first close.
+    func closed() async -> Bool {
+        guard closes.isEmpty else { return true }
+        nextCloseWaiter += 1
+        let id = nextCloseWaiter
+        return await withCheckedContinuation { continuation in
+            closeWaiters.append((id, continuation))
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                self.expireCloseWaiter(id)
+            }
+        }
+    }
+
+    private func expireCloseWaiter(_ id: UInt64) {
+        guard let position = closeWaiters.firstIndex(where: { $0.0 == id }) else { return }
+        closeWaiters.remove(at: position).1.resume(returning: false)
     }
 }
 
