@@ -951,6 +951,34 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// The connection's end during the session's end, as when the phone suspends the app and the link drops,
+    /// ends the release at once, leaving the zooms not yet taken off and the phone's record of them for a later
+    /// attachment.
+    func testTheConnectionsEndDuringTheSessionsEndLeavesTheRestWithThePhone() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        let store = InMemoryHerdrOwnedZoomStore()
+        let session = HerdrZoomSession(serverID: UUID(), session: "s")
+        await engine.keepOwnedZooms(in: store, of: session)
+        try await zoomedOnBothTabs(feed, updates, outbox)
+        let closed = Closed()
+
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        try await answer(feed, outbox)
+        await feed.receive(try Self.places(revision: 4, focusedPane: "P", zoomed: ["t1", "t2"]))
+        try await answerZoom(feed, outbox, zoomed: false)
+        await feed.receive(try Self.places(revision: 5, focusedPane: "P", zoomed: ["t2"]))
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t2"])
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t2"])
+        XCTAssertFalse(closed.isClosed)
+
+        await feed.ended()
+        XCTAssertTrue(closed.isClosed, "the end waited on a connection that ended")
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t2"], "the phone forgot a zoom still on the server")
+        await engine.stop()
+    }
+
     /// The setting's zoom waiting behind a command doesn't go once another client zoomed its tab meanwhile:
     /// the tab shows its pane zoomed already, and the move's focus still takes the session there. That zoom
     /// isn't Remux's.
