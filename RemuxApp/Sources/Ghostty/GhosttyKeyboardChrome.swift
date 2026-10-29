@@ -526,6 +526,8 @@ private struct GhosttyKeyboardKeyButton: View {
                 chromeStyle: chromeStyle
             )
             .scaleEffect(isPressed && isEnabled ? 0.96 : 1)
+            // Dimmed as one image, so a disabled button's symbol doesn't show through its badge or surface.
+            .compositingGroup()
             .opacity(isEnabled ? 1 : 0.42)
             .contentShape(Rectangle())
             .accessibilityLabel(accessibilityLabel)
@@ -573,6 +575,8 @@ private struct GhosttyChromePressBody<Content: View>: View {
     var body: some View {
         content()
             .scaleEffect(isPressed && isEnabled ? 0.96 : 1)
+            // Dimmed as one image, so a disabled button's symbol doesn't show through its badge or surface.
+            .compositingGroup()
             .opacity(isEnabled ? 1 : 0.42)
             .onChange(of: isPressed) { _, nowPressed in
                 let wasPressed = lastPressed

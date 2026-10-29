@@ -2632,6 +2632,7 @@ final class RemuxAppUITests: XCTestCase {
         openFirstSavedSession()
         waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
         assertNavigationHeld(false, "before any popup")
+        capture("f0-panes-dark")
 
         // The other client holds the tab's size, then opens a shell popup over it.
         _ = try step("mac-claims")
@@ -2656,6 +2657,17 @@ final class RemuxAppUITests: XCTestCase {
         capture("f2-popup-dark-keyboard")
         hideKeyboard()
         XCTAssertNotNil(try popupGrid("with the keyboard down again") { $0 == full })
+
+        // Landscape in dark, with the keyboard down and up.
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let darkLandscape = try XCTUnwrap(try popupGrid("in landscape") { $0.columns > full.columns })
+        capture("f2l-popup-dark-landscape")
+        showKeyboard()
+        XCTAssertNotNil(try popupGrid("in landscape with the keyboard up") { $0.rows < darkLandscape.rows })
+        capture("f2lk-popup-dark-landscape-keyboard")
+        hideKeyboard()
+        XCUIDevice.shared.orientation = .portrait
+        XCTAssertNotNil(try popupGrid("back in portrait") { $0 == full })
 
         // A quiet popup keeps its attach past Herdr's minute for an idle background bridge.
         RunLoop.current.run(until: Date().addingTimeInterval(65))
@@ -2725,6 +2737,7 @@ final class RemuxAppUITests: XCTestCase {
         backToSession()
         XCTAssertTrue(popup.waitForExistence(timeout: 20))
         typeIntoPopup("clear; ls /\n")
+        capture("f4k-popup-light-keyboard")
         hideKeyboard()
         capture("f4-popup-light")
 
@@ -2738,6 +2751,7 @@ final class RemuxAppUITests: XCTestCase {
             $0.rows < landscape.rows && $0.columns == landscape.columns
         })
         try assertSttySays(landscapeWithKeyboard, "in landscape with the keyboard up")
+        capture("f5k-popup-light-landscape-keyboard")
         hideKeyboard()
         XCUIDevice.shared.orientation = .portrait
         XCTAssertNotNil(try popupGrid("back in portrait") { $0 == full })

@@ -29,6 +29,64 @@ struct GhosttyTerminalColors: Equatable, Sendable {
     let palette: [Color]
 }
 
+extension GhosttyTerminalColors {
+    /// The least contrast with the background that a line (3) and text (4.5) keep, as WCAG asks of
+    /// graphics and of text.
+    enum MinimumContrast {
+        static let line = 3.0
+        static let text = 4.5
+    }
+
+    /// The contrast WCAG gives two colours, from 1, none, to 21, black on white.
+    static func contrast(_ first: Color, _ second: Color) -> Double {
+        let (lighter, darker) = (max(first.luminance, second.luminance), min(first.luminance, second.luminance))
+        return (lighter + 0.05) / (darker + 0.05)
+    }
+
+    /// `color` as it stays readable against the background: as is when it has `minimumContrast`, else
+    /// mixed toward the foreground just as far as reaches it, so it keeps as much of its hue as the theme
+    /// allows; the foreground itself when not even that does.
+    func legible(_ color: Color, minimumContrast: Double) -> Color {
+        guard Self.contrast(color, background) < minimumContrast else { return color }
+        guard Self.contrast(foreground, background) > minimumContrast else { return foreground }
+        var (low, high) = (0.0, 1.0)
+        for _ in 0..<16 {
+            let middle = (low + high) / 2
+            if Self.contrast(color.mixed(toward: foreground, by: middle), background) >= minimumContrast {
+                high = middle
+            } else {
+                low = middle
+            }
+        }
+        return color.mixed(toward: foreground, by: high)
+    }
+
+    /// Text that reads as secondary to the foreground: halfway from it to the background, as readable as
+    /// text must be.
+    var secondaryText: Color {
+        legible(foreground.mixed(toward: background, by: 0.5), minimumContrast: MinimumContrast.text)
+    }
+}
+
+extension GhosttyTerminalColors.Color {
+    /// Relative luminance, from sRGB (WCAG 2).
+    var luminance: Double {
+        func linear(_ channel: UInt8) -> Double {
+            let value = Double(channel) / 255
+            return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
+    }
+
+    /// This colour moved `fraction` of the way to `other`, channel by channel.
+    func mixed(toward other: Self, by fraction: Double) -> Self {
+        func mix(_ from: UInt8, _ to: UInt8) -> UInt8 {
+            UInt8((Double(from) + (Double(to) - Double(from)) * fraction).rounded())
+        }
+        return Self(red: mix(red, other.red), green: mix(green, other.green), blue: mix(blue, other.blue))
+    }
+}
+
 enum GhosttyTerminalDeviceClass {
     case phone
     case pad

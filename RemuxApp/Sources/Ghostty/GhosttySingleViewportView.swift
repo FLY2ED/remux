@@ -330,27 +330,7 @@ private final class GhosttyCompositeViewportContainerView: UIView,
               let context = UIGraphicsGetCurrentContext()
         else { return }
 
-        let canvas = CGRect(origin: layout.origin, size: layout.canvasSize)
-        context.setAllowsAntialiasing(false)
-        context.setShouldAntialias(false)
-        // In order, so a later line draws over an earlier one; a run of lines in one ink is one fill.
-        var start = lines.startIndex
-        while start < lines.endIndex {
-            let ink = lines[start].ink
-            let end = lines[start...].firstIndex { $0.ink != ink } ?? lines.endIndex
-            let path = CGMutablePath()
-            for line in lines[start..<end] {
-                addLine(
-                    to: path,
-                    frame: line.frame(origin: layout.origin, cellSize: layout.cellSize),
-                    clippedTo: canvas
-                )
-            }
-            context.setFillColor(color(of: ink))
-            context.addPath(path)
-            context.fillPath()
-            start = end
-        }
+        GhosttyPaneLine.draw(lines, in: context, layout: layout, scale: effectiveScale, color: color(of:))
     }
 
     private func color(of ink: GhosttyPaneLine.Ink) -> CGColor {
@@ -369,24 +349,6 @@ private final class GhosttyCompositeViewportContainerView: UIView,
         }
     }
 
-    private func addLine(
-        to path: CGMutablePath,
-        frame: CGRect,
-        clippedTo canvas: CGRect
-    ) {
-        let clipped = frame.intersection(canvas)
-        guard !clipped.isNull, !clipped.isEmpty else { return }
-
-        let scale = effectiveScale
-        let pixelAligned = CGRect(
-            x: (clipped.minX * scale).rounded() / scale,
-            y: (clipped.minY * scale).rounded() / scale,
-            width: max((clipped.width * scale).rounded() / scale, 1 / scale),
-            height: max((clipped.height * scale).rounded() / scale, 1 / scale)
-        ).intersection(canvas)
-        guard !pixelAligned.isNull, !pixelAligned.isEmpty else { return }
-        path.addRect(pixelAligned)
-    }
 
     private func syncVisibleSurfaces() {
         let startedAt = GhosttyRuntimeTrace.perfEnabled
@@ -1025,5 +987,51 @@ private extension GhosttySurfacePanGesture.WindowNavigationDirection {
         case .previous: .previous
         case .next: .next
         }
+    }
+}
+
+extension GhosttyPaneLine {
+    /// Draws `lines` on `layout`'s grid, inside its canvas, each on whole pixels of `scale` and at least one
+    /// pixel wide, so lines of one width are all equally crisp: in order, so a later line draws over an
+    /// earlier one, and a run of lines in one ink as one fill.
+    static func draw(
+        _ lines: [GhosttyPaneLine],
+        in context: CGContext,
+        layout: GhosttyCompositeViewportLayout,
+        scale: CGFloat,
+        color: (Ink) -> CGColor
+    ) {
+        let canvas = CGRect(origin: layout.origin, size: layout.canvasSize)
+        context.setAllowsAntialiasing(false)
+        context.setShouldAntialias(false)
+        var start = lines.startIndex
+        while start < lines.endIndex {
+            let ink = lines[start].ink
+            let end = lines[start...].firstIndex { $0.ink != ink } ?? lines.endIndex
+            let path = CGMutablePath()
+            for line in lines[start..<end] {
+                if let frame = line.pixelFrame(origin: layout.origin, cellSize: layout.cellSize, canvas: canvas, scale: scale) {
+                    path.addRect(frame)
+                }
+            }
+            context.setFillColor(color(ink))
+            context.addPath(path)
+            context.fillPath()
+            start = end
+        }
+    }
+
+    /// The line's frame on whole pixels, inside `canvas`, or nil when none of it is.
+    func pixelFrame(origin: CGPoint, cellSize: CGSize, canvas: CGRect, scale: CGFloat) -> CGRect? {
+        let clipped = frame(origin: origin, cellSize: cellSize).intersection(canvas)
+        guard !clipped.isNull, !clipped.isEmpty else { return nil }
+        let pixelAligned = CGRect(
+            x: (clipped.minX * scale).rounded() / scale,
+            y: (clipped.minY * scale).rounded() / scale,
+            width: max((clipped.width * scale).rounded() / scale, 1 / scale),
+            height: max((clipped.height * scale).rounded() / scale, 1 / scale)
+        ).intersection(canvas)
+        guard !pixelAligned.isNull, !pixelAligned.isEmpty else { return nil }
+        return pixelAligned
     }
 }

@@ -214,11 +214,14 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
             windowCount: workspaceOnScreen?.tabs.count ?? 1,
             popup: layout.popup.map { popup in
                 let displayed = model.popup.surface?.terminalID == popup.terminalID ? model.popup.displayed : nil
+                let colors = model.terminalColors
                 return GhosttyTerminalViewportPresentationProjection.Popup(
                     id: surfaceID(forPopup: popup.terminalID),
                     title: popup.title,
                     tabLabel: layout.tab.map { model.popupTabName(ofTab: $0.tabID) ?? $0.label },
-                    ink: Self.popupInk(model.popupAccent, colors: model.terminalColors),
+                    border: Self.popupBorder(columns: layout.columns, rows: layout.rows, accent: model.popupAccent, colors: colors),
+                    titleInk: Self.ink(model.popupAccent, colors: colors, minimumContrast: GhosttyTerminalColors.MinimumContrast.text),
+                    tabInk: colors.map { Self.ink($0.secondaryText) } ?? .separator,
                     grid: displayed.map { GhosttyTerminalGridSize(columns: UInt32($0.grid.columns), rows: UInt32($0.grid.rows)) },
                     cell: displayed?.cell
                 )
@@ -226,12 +229,31 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
         )
     }
 
-    /// The popup's frame in Herdr's accent, resolved as a border line's colour is.
-    static func popupInk(_ accent: HerdrColor, colors: GhosttyTerminalColors?) -> GhosttyPaneLine.Ink {
-        accent.foregroundRGB(in: colors).map { GhosttyPaneLine.Ink.color(red: $0.red, green: $0.green, blue: $0.blue) }
-            ?? HerdrPopupAccent.herdrDefault.foregroundRGB(in: nil).map {
-                GhosttyPaneLine.Ink.color(red: $0.red, green: $0.green, blue: $0.blue)
-            } ?? .separator
+    /// Herdr's client draws a popup in a box of lines in its accent with the popup's title in the top line
+    /// (`client/shell/composition.rs`, ratatui's `Block`); the phone's popup takes the whole tab, so its box
+    /// is on the outer cells of the panes' grid, drawn as their lines are.
+    static func popupBorder(columns: UInt16, rows: UInt16, accent: HerdrColor, colors: GhosttyTerminalColors?) -> [GhosttyPaneLine] {
+        guard columns >= 2, rows >= 2 else { return [] }
+        let across = 2 * UInt32(columns) - 1
+        let down = 2 * UInt32(rows) - 1
+        return [
+            HerdrBorderLine(axis: .horizontal, track: 0, start: 1, end: across, color: accent),
+            HerdrBorderLine(axis: .horizontal, track: rows - 1, start: 1, end: across, color: accent),
+            HerdrBorderLine(axis: .vertical, track: 0, start: 1, end: down, color: accent),
+            HerdrBorderLine(axis: .vertical, track: columns - 1, start: 1, end: down, color: accent),
+        ].map { paneLine($0, colors: colors) }
+    }
+
+    /// Herdr's colour as the terminal shows it, kept readable against the terminal's background: the
+    /// theme Herdr draws its lines for isn't the phone's, as Herdr's dark accent on a light terminal shows.
+    /// Without the terminal's colours, only an RGB colour is known.
+    static func ink(_ color: HerdrColor, colors: GhosttyTerminalColors?, minimumContrast: Double) -> GhosttyPaneLine.Ink {
+        guard let rgb = color.foregroundRGB(in: colors) else { return .separator }
+        return ink(colors?.legible(rgb, minimumContrast: minimumContrast) ?? rgb)
+    }
+
+    private static func ink(_ color: GhosttyTerminalColors.Color) -> GhosttyPaneLine.Ink {
+        .color(red: color.red, green: color.green, blue: color.blue)
     }
 
     /// As thin as Herdr's box-drawing glyphs show in a terminal.
@@ -240,15 +262,12 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
     /// Herdr's border line where its glyphs are, in the colour Herdr gave it. Ends in the middle of a
     /// cell reach on, as the glyphs' strokes meet in a corner.
     static func paneLine(_ border: HerdrBorderLine, colors: GhosttyTerminalColors?) -> GhosttyPaneLine {
-        let ink = border.color.foregroundRGB(in: colors).map {
-            GhosttyPaneLine.Ink.color(red: $0.red, green: $0.green, blue: $0.blue)
-        }
-        return GhosttyPaneLine(
+        GhosttyPaneLine(
             orientation: border.axis == .horizontal ? .horizontal : .vertical,
             position: CGFloat(border.track) + 0.5,
             start: CGFloat(border.start) / 2,
             end: CGFloat(border.end) / 2,
-            ink: ink ?? .separator,
+            ink: ink(border.color, colors: colors, minimumContrast: GhosttyTerminalColors.MinimumContrast.line),
             width: borderWidth,
             cap: .square
         )
@@ -299,10 +318,6 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     func setViewportStabilityHint(stable: Bool) {}
-
-    func preparePopupArea(widthPx: UInt32, heightPx: UInt32) {
-        model?.preparePopupArea(widthPx: widthPx, heightPx: heightPx)
-    }
 
     /// The session reads as ready once its connection is ready and its focused pane is presented, so the
     /// root sees it connect.

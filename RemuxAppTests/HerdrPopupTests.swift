@@ -20,8 +20,6 @@ final class HerdrPopupTests: XCTestCase {
         .init(id: "w1:p1", x: 0, width: 3, height: 1, focused: true),
         .init(id: "w1:p2", x: 4, width: 3, height: 1),
     ]
-    /// The pixels the tests give the popup's terminal.
-    private static let area = (widthPx: UInt32(1170), heightPx: UInt32(1800))
 
     override func tearDown() async throws {
         for renderer in renderers {
@@ -53,9 +51,8 @@ final class HerdrPopupTests: XCTestCase {
         await session.bridge.serve(popupSurface(revision: 3, title: "notes"))
         try await harness.waitUntil("the popup wasn't laid out") { harness.model.layout?.popup != nil }
         let cell = try XCTUnwrap(harness.model.measurement?.cellMetrics)
-        let grid = Self.grid(cell)
+        let grid = try Self.grid(harness)
 
-        adapter.preparePopupArea(widthPx: Self.area.widthPx, heightPx: Self.area.heightPx)
         let attach = try await harness.bridge(1)
         let opening = try await DirectClient.messages(attach, at: 0)
         XCTAssertEqual(opening, [
@@ -83,10 +80,9 @@ final class HerdrPopupTests: XCTestCase {
         let adapter = harness.model.terminalScreenAdapter
         await session.bridge.serve(popupSurface(revision: 3))
         try await harness.waitUntil("the popup wasn't laid out") { harness.model.layout?.popup != nil }
-        adapter.preparePopupArea(widthPx: Self.area.widthPx, heightPx: Self.area.heightPx)
         let cell = try XCTUnwrap(harness.model.measurement?.cellMetrics)
         let attach = try await harness.bridge(1)
-        await attach.serve(DirectServer.welcome() + DirectServer.frame(1, Self.grid(cell), "$ "))
+        await attach.serve(DirectServer.welcome() + DirectServer.frame(1, try Self.grid(harness), "$ "))
         try await harness.waitUntil("the popup's renderer wasn't made") { harness.model.popup.surface?.renderer.managedSurface != nil }
         try await Task.sleep(for: .milliseconds(300))
 
@@ -100,17 +96,16 @@ final class HerdrPopupTests: XCTestCase {
         try await harness.waitUntil("the screen wasn't told the popup drew") { read.last == .ready }
     }
 
-    /// The keyboard or a rotation changes the area; once it settles one resize goes, for its newest grid,
-    /// and the renderer follows the grid of Herdr's next frame, at the same font.
-    func testTheAreaSettlingResizesThePopupOnce() async throws {
+    /// The keyboard or a rotation changes the screen's grid; once it settles one resize goes, for the newest
+    /// grid inside the frame, and the renderer follows the grid of Herdr's next frame, at the same font.
+    func testTheScreenSettlingResizesThePopupOnce() async throws {
         let harness = await makeHarness()
         let (_, attach, cell) = try await attachedPopup(harness)
-        let adapter = harness.model.terminalScreenAdapter
         let before = await attach.writtenCount
 
-        adapter.preparePopupArea(widthPx: Self.area.widthPx, heightPx: 1400)
-        adapter.preparePopupArea(widthPx: Self.area.widthPx, heightPx: 1100)
-        let shorter = HerdrPopupGrid(widthPx: Self.area.widthPx, heightPx: 1100, cell: cell)!
+        harness.model.prepareViewport(size: CGSize(width: 390, height: 640), scale: 3)
+        harness.model.prepareViewport(size: CGSize(width: 390, height: 480), scale: 3)
+        let shorter = try Self.grid(harness)
         let resized = try await DirectClient.messages(attach, at: before)
         XCTAssertEqual(resized, [.resize(columns: shorter.columns, rows: shorter.rows)])
         try await Task.sleep(for: .milliseconds(400))
@@ -196,7 +191,6 @@ final class HerdrPopupTests: XCTestCase {
         let adapter = harness.model.terminalScreenAdapter
         await session.bridge.serve(popupSurface(revision: 3, lines: ["abcd", "efgh"]))
         try await harness.waitUntil("the popup wasn't laid out") { harness.model.layout?.popup != nil }
-        adapter.preparePopupArea(widthPx: Self.area.widthPx, heightPx: Self.area.heightPx)
         let attach = try await harness.bridge(1)
         await attach.serve(DirectServer.welcome() + DirectServer.shutdown(
             "terminal attach failed: terminal \(Self.popupID) already has an attached client; retry with --takeover"
@@ -243,8 +237,7 @@ final class HerdrPopupTests: XCTestCase {
             let adapter = harness.model.terminalScreenAdapter
             await session.bridge.serve(popupSurface(revision: 3, lines: ["abcd", "efgh"]))
             try await harness.waitUntil("\(name): the popup wasn't laid out") { harness.model.layout?.popup != nil }
-            adapter.preparePopupArea(widthPx: Self.area.widthPx, heightPx: Self.area.heightPx)
-            let grid = Self.grid(try XCTUnwrap(harness.model.measurement?.cellMetrics))
+            let grid = try Self.grid(harness)
             let attach = try await harness.bridge(1)
             await attach.serve(DirectServer.welcome() + stream(grid))
             try await harness.waitUntil("\(name): the popup wasn't drawn from its frame") {
@@ -269,8 +262,7 @@ final class HerdrPopupTests: XCTestCase {
         let session = try await shownSession(harness)
         await session.bridge.serve(popupSurface(revision: 3, lines: ["abcd", "efgh"]))
         try await harness.waitUntil("the popup wasn't laid out") { harness.model.layout?.popup != nil }
-        harness.model.terminalScreenAdapter.preparePopupArea(widthPx: Self.area.widthPx, heightPx: Self.area.heightPx)
-        let grid = Self.grid(try XCTUnwrap(harness.model.measurement?.cellMetrics))
+        let grid = try Self.grid(harness)
         let first = try await harness.bridge(1)
         await first.serve(DirectServer.welcome() + busy)
         let refusedAt = ContinuousClock.now
@@ -284,7 +276,6 @@ final class HerdrPopupTests: XCTestCase {
         let other = try await shownSession(again)
         await other.bridge.serve(popupSurface(revision: 3, lines: ["abcd", "efgh"]))
         try await again.waitUntil("the popup wasn't laid out") { again.model.layout?.popup != nil }
-        again.model.terminalScreenAdapter.preparePopupArea(widthPx: Self.area.widthPx, heightPx: Self.area.heightPx)
         let firstAgain = try await again.bridge(1)
         await firstAgain.serve(DirectServer.welcome() + busy)
         let secondAgain = try await again.bridge(2)
@@ -609,10 +600,9 @@ final class HerdrPopupTests: XCTestCase {
         await bridge.serve(try harness.shownSurface(projection: 1, revision: 2, lines: ["one two"], panes: Self.panes, popup: Self.popupID))
         let adapter = harness.model.terminalScreenAdapter
         try await harness.waitUntil("the popup wasn't laid out") { harness.model.layout?.popup != nil }
-        adapter.preparePopupArea(widthPx: Self.area.widthPx, heightPx: Self.area.heightPx)
         let cell = try XCTUnwrap(harness.model.measurement?.cellMetrics)
         let attach = try await harness.bridge(1)
-        await attach.serve(DirectServer.welcome() + DirectServer.frame(1, Self.grid(cell), "$ "))
+        await attach.serve(DirectServer.welcome() + DirectServer.frame(1, try Self.grid(harness), "$ "))
         try await harness.waitUntil("the popup's renderer wasn't made") { harness.model.popup.surface != nil }
         show(try XCTUnwrap(harness.model.popup.surface?.renderer.view))
         try await harness.waitUntil("the session waited on the panes under the popup", timeout: .seconds(5)) {
@@ -626,20 +616,24 @@ final class HerdrPopupTests: XCTestCase {
         let harness = await makeHarness()
         let (session, _, _) = try await attachedPopup(harness)
         let colors = harness.model.terminalColors
-        XCTAssertEqual(popup(harness)?.ink, HerdrTerminalScreenAdapter.popupInk(HerdrPopupAccent.herdrDefault, colors: colors))
+        XCTAssertEqual(
+            popup(harness)?.titleInk,
+            HerdrTerminalScreenAdapter.ink(HerdrPopupAccent.herdrDefault, colors: colors, minimumContrast: GhosttyTerminalColors.MinimumContrast.text)
+        )
 
         await session.bridge.serve(Self.borderedSurface(revision: 10, accent: 0x02_F3_8B_A8, popup: true))
         try await harness.waitUntil("the frame didn't take the accent") {
-            self.popup(harness)?.ink == .color(red: 0xF3, green: 0x8B, blue: 0xA8)
+            self.popup(harness)?.titleInk == .color(red: 0xF3, green: 0x8B, blue: 0xA8)
         }
         await session.bridge.serve(Self.borderedSurface(revision: 11, accent: 0x02_A6_E3_A1, popup: true))
         try await harness.waitUntil("the frame didn't follow the accent") {
-            self.popup(harness)?.ink == .color(red: 0xA6, green: 0xE3, blue: 0xA1)
+            self.popup(harness)?.titleInk == .color(red: 0xA6, green: 0xE3, blue: 0xA1)
         }
+        XCTAssertEqual(popup(harness)?.border.map(\.ink), Array(repeating: .color(red: 0xA6, green: 0xE3, blue: 0xA1), count: 4))
         // A single pane draws no lines; the frame keeps the accent the session showed.
         await session.bridge.serve(popupSurface(revision: 12))
         try await harness.waitUntil("the single pane's layout wasn't laid out") { harness.model.layout?.borders.isEmpty == true }
-        XCTAssertEqual(popup(harness)?.ink, .color(red: 0xA6, green: 0xE3, blue: 0xA1))
+        XCTAssertEqual(popup(harness)?.titleInk, .color(red: 0xA6, green: 0xE3, blue: 0xA1))
     }
 
     func testTheAccentIsTheFocusedPanesLines() {
@@ -679,53 +673,90 @@ final class HerdrPopupTests: XCTestCase {
 
     // MARK: - Grid
 
-    func testTheGridIsTheWholeCellsAnAreaHolds() throws {
+    /// The popup takes the cells inside Herdr's frame on the panes' grid, whose lines take the outer cells.
+    func testThePopupTakesTheCellsInsideHerdrsFrame() {
+        XCTAssertEqual(HerdrPopupGrid(framedIn: 50, rows: 41), HerdrPopupGrid(columns: 48, rows: 39))
+        XCTAssertEqual(HerdrPopupGrid(framedIn: 50, rows: 25), HerdrPopupGrid(columns: 48, rows: 23))
+        XCTAssertNil(HerdrPopupGrid(framedIn: 2, rows: 41))
+        XCTAssertNil(HerdrPopupGrid(framedIn: 50, rows: 2))
         let cell = GhosttyTerminalCellDisplayMetrics(pixelWidth: 24, pixelHeight: 53, contentScale: 3)
-        XCTAssertEqual(HerdrPopupGrid(widthPx: 1170, heightPx: 1800, cell: cell), HerdrPopupGrid(columns: 48, rows: 33))
-        XCTAssertEqual(HerdrPopupGrid(widthPx: 1176, heightPx: 1802, cell: cell), HerdrPopupGrid(columns: 49, rows: 34))
-        XCTAssertNil(HerdrPopupGrid(widthPx: 23, heightPx: 1800, cell: cell))
-        let grid = HerdrPopupGrid(columns: 48, rows: 33)
-        let drawable = grid.displayMetrics(cell: cell)
-        XCTAssertEqual([drawable.pixelWidth, drawable.pixelHeight], [1152, 1749])
+        let drawable = HerdrPopupGrid(columns: 48, rows: 39).displayMetrics(cell: cell)
+        XCTAssertEqual([drawable.pixelWidth, drawable.pixelHeight], [1152, 2067])
         XCTAssertEqual(drawable.contentScale, 3)
     }
 
-    /// The host reports the whole pixels inside its bounds, its edges rounded inward, and draws the grid at
-    /// its cells' size on whole pixels inside them.
-    func testTheHostReportsWholePixelsAndDrawsTheGridInsideThem() throws {
-        let host = GhosttyTerminalPopupHostView(frame: CGRect(x: 10.2, y: 20.5, width: 300.4, height: 200.3))
-        var reported: [(UInt32, UInt32)] = []
-        host.onArea = { reported.append(($0, $1)) }
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 400, height: 400))
-        window.addSubview(host)
-        window.isHidden = false
-        windows.append(window)
-        host.layoutIfNeeded()
-        let scale = window.screen.scale
-        let area = try XCTUnwrap(reported.last)
-        XCTAssertEqual(CGFloat(area.0), ((10.2 + 300.4) * scale).rounded(.down) - (10.2 * scale).rounded(.up))
-        XCTAssertEqual(CGFloat(area.1), ((20.5 + 200.3) * scale).rounded(.down) - (20.5 * scale).rounded(.up))
+    /// The popup's frame is Herdr's box on the outer cells of the panes' grid, its lines drawn as the panes'
+    /// lines are: through the middle of the outer cells, as thin, in the ink of a line in Herdr's accent. Its
+    /// terminal takes the cells inside, and its labels are in the panes' cells.
+    func testTheFrameIsHerdrsBoxOnThePanesGrid() async throws {
+        let harness = await makeHarness()
+        let (session, _, _) = try await attachedPopup(harness)
+        // Herdr lays out the client's whole grid.
+        await session.bridge.serve(try harness.shownSurface(projection: 1, revision: 20, lines: ["one two"], panes: Self.panes, popup: Self.popupID))
+        let adapter = harness.model.terminalScreenAdapter
+        try await harness.waitUntil("the screen's grid wasn't laid out") {
+            (adapter.terminalScreenPresentationProjection.viewport.windowGrid?.rows ?? 0) > 2
+        }
+        let viewport = adapter.terminalScreenPresentationProjection.viewport
+        let popup = try XCTUnwrap(viewport.popup)
+        let grid = try XCTUnwrap(viewport.windowGrid)
+        let cell = try XCTUnwrap(viewport.cellMetrics)
+        let colors = harness.model.terminalColors
+        let ink = HerdrTerminalScreenAdapter.ink(HerdrPopupAccent.herdrDefault, colors: colors, minimumContrast: GhosttyTerminalColors.MinimumContrast.line)
+        func line(_ orientation: GhosttyPaneLine.Orientation, _ position: CGFloat, _ end: CGFloat) -> GhosttyPaneLine {
+            GhosttyPaneLine(orientation: orientation, position: position, start: 0.5, end: end, ink: ink, width: HerdrTerminalScreenAdapter.borderWidth, cap: .square)
+        }
+        let columns = CGFloat(grid.columns), rows = CGFloat(grid.rows)
+        XCTAssertEqual(popup.border, [
+            line(.horizontal, 0.5, columns - 0.5), line(.horizontal, rows - 0.5, columns - 0.5),
+            line(.vertical, 0.5, rows - 0.5), line(.vertical, columns - 0.5, rows - 0.5),
+        ])
+        XCTAssertEqual(
+            GhosttyTerminalViewportPresentationProjection.Popup.content(in: grid),
+            GhosttyTerminalGridRect(x: 1, y: 1, columns: grid.columns - 2, rows: grid.rows - 2)
+        )
+        let inside = try Self.grid(harness)
+        XCTAssertEqual([UInt32(inside.columns), UInt32(inside.rows)], [grid.columns - 2, grid.rows - 2])
+        // The labels' characters are a cell wide, at the terminal's font size.
+        let font = GhosttyTerminalPopupFrameView.labelFont(cellWidth: cell.pointWidth)
+        XCTAssertEqual(("0" as NSString).size(withAttributes: [.font: font]).width, cell.pointWidth, accuracy: 0.01)
     }
 
-    /// The grid is drawn on whole pixels with the area's leftover split on both sides, and a grid of more or
-    /// fewer cells, as while Herdr's frames catch up with the keyboard, is drawn where the area's will be.
-    func testTheGridKeepsItsPlaceWhileHerdrsFramesCatchUp() throws {
-        let cell = GhosttyTerminalCellDisplayMetrics(pixelWidth: 24, pixelHeight: 53, contentScale: 3)
-        let origin = CGPoint(x: 0, y: 0)
-        func placed(rows: UInt32) -> CGRect {
-            GhosttyTerminalPopupHostView.placement(
-                areaOrigin: origin,
-                widthPx: 1137,
-                heightPx: 2096,
-                grid: GhosttyTerminalGridSize(columns: 47, rows: rows),
-                cell: cell,
-                scale: 3
-            )
+    /// Herdr's colours stay readable on the phone's terminal, whose theme Herdr doesn't draw for: a line at
+    /// 3:1 and text at 4.5:1 against the background, mixed toward the foreground only as far as that takes,
+    /// so Herdr's dark accent reads on a light terminal and is left as it is on a dark one. The tab's label
+    /// is the terminal's text made secondary, still readable.
+    func testHerdrsInkIsReadableOnTheTerminalsBackground() throws {
+        let light = try GhosttyKitRuntime(terminalSettings: TerminalSettings(fontSize: nil, theme: .remuxLight)).terminalColors()
+        let dark = try GhosttyKitRuntime(terminalSettings: TerminalSettings(fontSize: nil, theme: .remuxDark)).terminalColors()
+        let white = GhosttyTerminalColors.Color(red: 255, green: 255, blue: 255)
+        let black = GhosttyTerminalColors.Color(red: 0, green: 0, blue: 0)
+        XCTAssertEqual(GhosttyTerminalColors.contrast(black, white), 21, accuracy: 0.001)
+        let accent = GhosttyTerminalColors.Color(red: 0x89, green: 0xB4, blue: 0xFA)
+        XCTAssertEqual(GhosttyTerminalColors.contrast(accent, light.background), 1.86, accuracy: 0.01)
+
+        for (minimum, name) in [(GhosttyTerminalColors.MinimumContrast.line, "line"), (GhosttyTerminalColors.MinimumContrast.text, "text")] {
+            let onLight = light.legible(accent, minimumContrast: minimum)
+            XCTAssertGreaterThanOrEqual(GhosttyTerminalColors.contrast(onLight, light.background), minimum, name)
+            XCTAssertLessThan(GhosttyTerminalColors.contrast(onLight, light.background), minimum + 0.2, "\(name): mixed further than it needed")
+            XCTAssertEqual(dark.legible(accent, minimumContrast: minimum), accent, "\(name): a readable accent changed")
         }
-        let settled = placed(rows: 39)
-        XCTAssertEqual(settled, CGRect(x: 4.0 / 3, y: 14.0 / 3, width: 1128.0 / 3, height: 2067.0 / 3))
-        XCTAssertEqual(placed(rows: 24).origin, settled.origin, "a grid from before the keyboard went down moved")
-        XCTAssertEqual(placed(rows: 50).origin, settled.origin, "a grid from before the keyboard came up moved")
+        for colors in [light, dark] {
+            let secondary = GhosttyTerminalColors.contrast(colors.secondaryText, colors.background)
+            XCTAssertGreaterThanOrEqual(secondary, GhosttyTerminalColors.MinimumContrast.text)
+            XCTAssertLessThan(secondary, GhosttyTerminalColors.contrast(colors.foreground, colors.background))
+        }
+
+        // The panes' lines take the same rule: Herdr's focus line in its dark accent, on a light terminal.
+        let focusLine = HerdrTerminalScreenAdapter.paneLine(
+            HerdrBorderLine(axis: .horizontal, track: 0, start: 1, end: 7, color: HerdrPopupAccent.herdrDefault),
+            colors: light
+        )
+        guard case .color(let red, let green, let blue) = focusLine.ink else { return XCTFail("\(focusLine.ink)") }
+        XCTAssertGreaterThanOrEqual(
+            GhosttyTerminalColors.contrast(GhosttyTerminalColors.Color(red: red, green: green, blue: blue), light.background),
+            GhosttyTerminalColors.MinimumContrast.line
+        )
     }
 
     /// Herdr's terminals cluster graphemes, and its frames write a joined emoji as one cell's text for a
@@ -815,8 +846,10 @@ final class HerdrPopupTests: XCTestCase {
         return harness
     }
 
-    private static func grid(_ cell: GhosttyTerminalCellDisplayMetrics) -> HerdrPopupGrid {
-        HerdrPopupGrid(widthPx: area.widthPx, heightPx: area.heightPx, cell: cell)!
+    /// The grid inside the popup's frame on the screen's grid.
+    private static func grid(_ harness: HerdrModelHarness) throws -> HerdrPopupGrid {
+        let viewport = try XCTUnwrap(harness.model.measurement?.controlViewport)
+        return try XCTUnwrap(HerdrPopupGrid(framedIn: viewport.columns, rows: viewport.rows))
     }
 
     private func popup(_ harness: HerdrModelHarness) -> GhosttyTerminalViewportPresentationProjection.Popup? {
@@ -830,10 +863,9 @@ final class HerdrPopupTests: XCTestCase {
         let session = try await shownSession(harness)
         await session.bridge.serve(popupSurface(revision: 3))
         try await harness.waitUntil("the popup wasn't laid out") { harness.model.layout?.popup != nil }
-        harness.model.terminalScreenAdapter.preparePopupArea(widthPx: Self.area.widthPx, heightPx: Self.area.heightPx)
         let cell = try XCTUnwrap(harness.model.measurement?.cellMetrics)
         let attach = try await harness.bridge(1)
-        await attach.serve(DirectServer.welcome() + DirectServer.frame(1, Self.grid(cell), "$ "))
+        await attach.serve(DirectServer.welcome() + DirectServer.frame(1, try Self.grid(harness), "$ "))
         try await harness.waitUntil("the popup's renderer wasn't made") { harness.model.popup.surface?.renderer.managedSurface != nil }
         show(try XCTUnwrap(harness.model.popup.surface?.renderer.view))
         // The renderer takes input once it has drawn.

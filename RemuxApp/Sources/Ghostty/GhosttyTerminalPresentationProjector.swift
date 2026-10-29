@@ -514,7 +514,9 @@ struct GhosttyTerminalViewportPresentationProjection: Equatable {
         windowCount: 0
     )
 
-    /// A popup the backend shows over the whole terminal area, which takes the terminal's input meanwhile.
+    /// A popup the backend shows over the whole terminal area, which takes the terminal's input meanwhile. It
+    /// is framed on the panes' grid (`windowGrid`): its lines are on the grid's outer cells, as the panes'
+    /// lines are drawn, its title and tab in the top row, and its terminal in the cells inside.
     struct Popup: Equatable {
         /// Its surface, in the screen's surface lookup.
         let id: UUID
@@ -522,11 +524,18 @@ struct GhosttyTerminalViewportPresentationProjection: Equatable {
         let title: String
         /// The tab it is open over.
         let tabLabel: String?
-        /// The frame's colour.
-        let ink: GhosttyPaneLine.Ink
+        let border: [GhosttyPaneLine]
+        let titleInk: GhosttyPaneLine.Ink
+        let tabInk: GhosttyPaneLine.Ink
         /// The grid its renderer draws and the cell it draws with, once it has a renderer.
         let grid: GhosttyTerminalGridSize?
         let cell: GhosttyTerminalCellDisplayMetrics?
+
+        /// The cells inside the frame on a grid of `frame`, which the popup's terminal takes.
+        static func content(in frame: GhosttyTerminalGridSize) -> GhosttyTerminalGridRect? {
+            guard frame.columns > 2, frame.rows > 2 else { return nil }
+            return GhosttyTerminalGridRect(x: 1, y: 1, columns: frame.columns - 2, rows: frame.rows - 2)
+        }
     }
 
     let windowGrid: GhosttyTerminalGridSize?

@@ -1,19 +1,17 @@
 import Foundation
 import GhosttyKit
 
-/// The grid a popup gets in an area: whole cells of the panes' font, never scaled, so the popup's text is
-/// the panes' size and the keyboard takes rows, not size.
+/// The grid a popup gets: the panes' grid inside Herdr's frame, whose lines take its outer cells, as Herdr's
+/// client blits a popup's terminal inside its box. Cells of the panes' font, never scaled, so the popup's
+/// text is the panes' size and the keyboard takes rows, not size.
 struct HerdrPopupGrid: Equatable, Sendable, CustomStringConvertible {
     let columns: UInt16
     let rows: UInt16
 
-    /// The most whole cells that fit `widthPx` × `heightPx`; nil when not one does.
-    init?(widthPx: UInt32, heightPx: UInt32, cell: GhosttyTerminalCellDisplayMetrics) {
-        guard cell.pixelWidth > 0, cell.pixelHeight > 0 else { return nil }
-        let columns = widthPx / cell.pixelWidth
-        let rows = heightPx / cell.pixelHeight
-        guard columns > 0, rows > 0 else { return nil }
-        self.init(columns: UInt16(clamping: columns), rows: UInt16(clamping: rows))
+    /// The cells inside the frame on a grid of `columns` × `rows`; nil when there are none.
+    init?(framedIn columns: UInt16, rows: UInt16) {
+        guard columns > 2, rows > 2 else { return nil }
+        self.init(columns: columns - 2, rows: rows - 2)
     }
 
     init(columns: UInt16, rows: UInt16) {
@@ -137,8 +135,9 @@ final class HerdrPopupController {
     private var held = false
     private var activity = RendererActivity()
     private var cell: GhosttyTerminalCellDisplayMetrics?
-    private var area: (widthPx: UInt32, heightPx: UInt32)?
-    /// The grid the area holds now.
+    /// The panes' grid, which the popup is framed on.
+    private var viewport: (columns: UInt16, rows: UInt16)?
+    /// The grid inside the frame now.
     private(set) var requested: HerdrPopupGrid?
     /// The grid last sent to Herdr, and when.
     private var asked: (grid: HerdrPopupGrid, at: ContinuousClock.Instant)?
@@ -219,17 +218,11 @@ final class HerdrPopupController {
         applyActivity()
     }
 
-    /// The panes' cell, from the screen's font and scale.
-    func setCell(_ next: GhosttyTerminalCellDisplayMetrics?) {
-        guard next != cell else { return }
+    /// The panes' cell and grid, from the screen's font, scale and size.
+    func setViewport(cell next: GhosttyTerminalCellDisplayMetrics, columns: UInt16, rows: UInt16) {
+        guard next != cell || viewport.map({ $0.columns != columns || $0.rows != rows }) ?? true else { return }
         cell = next
-        planGrid()
-    }
-
-    /// The whole pixels the screen has for the popup's terminal.
-    func prepareArea(widthPx: UInt32, heightPx: UInt32) {
-        guard area.map({ $0.widthPx != widthPx || $0.heightPx != heightPx }) ?? true else { return }
-        area = (widthPx, heightPx)
+        viewport = (columns, rows)
         planGrid()
     }
 
@@ -345,8 +338,8 @@ final class HerdrPopupController {
     }
 
     private func planGrid() {
-        guard let area, let cell,
-              let next = HerdrPopupGrid(widthPx: area.widthPx, heightPx: area.heightPx, cell: cell),
+        guard let viewport, cell != nil,
+              let next = HerdrPopupGrid(framedIn: viewport.columns, rows: viewport.rows),
               next != requested
         else { return }
         requested = next
@@ -469,7 +462,7 @@ final class HerdrPopupController {
             self.asked = nil
         }
         GhosttyRuntimeTrace.diagnostics(
-            "popup layout terminal=\(popup.terminalID) area=\(area.map { "\($0.widthPx)x\($0.heightPx)" } ?? "-")px "
+            "popup layout terminal=\(popup.terminalID) viewport=\(viewport.map { "\($0.columns)x\($0.rows)" } ?? "-") "
                 + "scale=\(cell.contentScale) cell=\(cell.pixelWidth)x\(cell.pixelHeight)px "
                 + "requested=\(requested?.description ?? "-") received=\(received?.description ?? "-") "
                 + "displayed=\(surface.grid) "

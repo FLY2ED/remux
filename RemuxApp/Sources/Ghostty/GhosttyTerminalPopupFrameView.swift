@@ -1,109 +1,171 @@
 import SwiftUI
 import UIKit
 
-/// A popup the backend shows over the terminal area, as Herdr's client draws one: a thin frame in the
-/// backend's accent with the popup's title in its top edge, filling the space a pane gets, with the
-/// popup's terminal inside at the panes' font. Remux adds the tab it is open over at the frame's other end.
-/// A tap brings up the keyboard and a swipe scrolls, as on a pane.
+/// A popup the backend shows over the terminal area, framed as Herdr's client frames one: a box of lines on
+/// the outer cells of the panes' grid, drawn as the panes' lines are, the popup's title in its top line, and
+/// the popup's terminal in the cells inside, at the panes' font. Remux adds the tab it is open over at the
+/// top line's other end. A tap brings up the keyboard and a swipe scrolls, as on a pane.
 struct GhosttyTerminalPopupFrameView: View {
     let popup: GhosttyTerminalViewportPresentationProjection.Popup
+    /// The panes' grid and cell, which the frame is laid out on.
+    let windowGrid: GhosttyTerminalGridSize?
+    let cellMetrics: GhosttyTerminalCellDisplayMetrics?
     let surfaceLookup: GhosttyManagedSurfaceLookup
     let terminalTheme: TerminalTheme
     /// For the layout record only.
     let keyboardMode: GhosttyKeyboardChromeMode
-    let onArea: (_ widthPx: UInt32, _ heightPx: UInt32) -> Void
     let submitScroll: ((UUID, GhosttySurfaceMouseScrollEvent) -> GhosttyMouseInputSubmissionOutcome)?
     let submitPointer: ((UUID, CGPoint, GhosttySurfaceKeyEvent.Mods) -> GhosttyMouseInputSubmissionOutcome)?
     let onTap: () -> Void
 
-    /// The frame's place in the terminal area, in points.
-    enum Metrics {
-        static let sideInset: CGFloat = 6
-        static let border: CGFloat = 1.5
-        /// The labels' line box, centred on the frame's top edge.
-        static let labelHeight: CGFloat = 16
-        static let labelInset: CGFloat = 10
-        static let labelPadding: CGFloat = 4
-        /// Between the frame and the terminal.
-        static let padding: CGFloat = 4
-        static let bottomInset: CGFloat = 2
-
-        static var frameTop: CGFloat { labelHeight / 2 }
-        static var contentInsets: EdgeInsets {
-            EdgeInsets(
-                top: labelHeight + padding,
-                leading: sideInset + border + padding,
-                bottom: bottomInset + border + padding,
-                trailing: sideInset + border + padding
-            )
-        }
-    }
-
-    private var ink: Color {
-        switch popup.ink {
-        case .color(let red, let green, let blue):
-            Color(red: Double(red) / 255, green: Double(green) / 255, blue: Double(blue) / 255)
-        case .focus:
-            Color.accentColor
-        case .separator:
-            Color(uiColor: .separator)
-        }
-    }
-
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            Rectangle()
-                .strokeBorder(ink, lineWidth: Metrics.border)
-                .padding(EdgeInsets(
-                    top: Metrics.frameTop,
-                    leading: Metrics.sideInset,
-                    bottom: Metrics.bottomInset,
-                    trailing: Metrics.sideInset
-                ))
-                .accessibilityHidden(true)
-            GhosttyTerminalPopupHost(
-                popup: popup,
-                surfaceLookup: surfaceLookup,
-                keyboardMode: keyboardMode,
-                onArea: onArea,
-                submitScroll: submitScroll,
-                submitPointer: submitPointer,
-                onTap: onTap
-            )
-            .padding(Metrics.contentInsets)
-            .accessibilityElement()
-            .accessibilityLabel("Terminal")
-            .accessibilityIdentifier("terminal.popup.content")
-            labels
+        GeometryReader { proxy in
+            if let windowGrid, let cellMetrics,
+               let layout = GhosttyCompositeViewportLayout(
+                   bounds: CGRect(origin: .zero, size: proxy.size),
+                   grid: windowGrid,
+                   cellMetrics: cellMetrics
+               ),
+               let content = GhosttyTerminalViewportPresentationProjection.Popup.content(in: windowGrid)
+            {
+                let contentFrame = layout.frame(for: content)
+                ZStack(alignment: .topLeading) {
+                    GhosttyPaneLinesView(
+                        lines: popup.border,
+                        layout: layout,
+                        separatorColor: terminalTheme.terminalCompositeSeparatorUIColor
+                    )
+                    .accessibilityHidden(true)
+                    GhosttyTerminalPopupHost(
+                        popup: popup,
+                        surfaceLookup: surfaceLookup,
+                        keyboardMode: keyboardMode,
+                        submitScroll: submitScroll,
+                        submitPointer: submitPointer,
+                        onTap: onTap
+                    )
+                    .frame(width: contentFrame.width, height: contentFrame.height)
+                    .offset(x: contentFrame.minX, y: contentFrame.minY)
+                    .accessibilityElement()
+                    .accessibilityLabel("Terminal")
+                    .accessibilityIdentifier("terminal.popup.content")
+                    labels(layout: layout, columns: windowGrid.columns)
+                }
+            }
         }
         .background(terminalTheme.terminalSurfaceBackground)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("terminal.popup")
     }
 
-    private var labels: some View {
-        HStack(spacing: 0) {
-            label(popup.title, color: ink)
+    /// The top line's cells between its corners: the title from the first, as Herdr's client writes it,
+    /// and the tab at the other end.
+    private func labels(layout: GhosttyCompositeViewportLayout, columns: UInt32) -> some View {
+        let cell = layout.cellSize
+        let font = Font(Self.labelFont(cellWidth: cell.width))
+        return HStack(spacing: 0) {
+            label(popup.title, ink: popup.titleInk, font: font, height: cell.height)
                 .accessibilityAddTraits(.isHeader)
                 .accessibilityIdentifier("terminal.popup.title")
-            Spacer(minLength: Metrics.labelInset)
+            Spacer(minLength: cell.width)
             if let tabLabel = popup.tabLabel {
-                label("over \(tabLabel)", color: ink.opacity(0.6))
+                label("over \(tabLabel)", ink: popup.tabInk, font: font, height: cell.height)
                     .accessibilityIdentifier("terminal.popup.tab")
             }
         }
-        .frame(height: Metrics.labelHeight)
-        .padding(.horizontal, Metrics.sideInset + Metrics.labelInset)
+        .frame(width: CGFloat(max(Int(columns) - 2, 0)) * cell.width, height: cell.height, alignment: .leading)
+        .offset(x: layout.origin.x + cell.width, y: layout.origin.y)
     }
 
-    private func label(_ text: String, color: Color) -> some View {
+    /// The label's cells take the place of the line under it, as a title's do in Herdr's client.
+    private func label(_ text: String, ink: GhosttyPaneLine.Ink, font: Font, height: CGFloat) -> some View {
         Text(text)
-            .font(.system(size: 11.5, weight: .medium, design: .monospaced))
-            .foregroundStyle(color)
+            .font(font)
+            .foregroundStyle(color(of: ink))
             .lineLimit(1)
-            .truncationMode(.middle)
-            .padding(.horizontal, Metrics.labelPadding)
+            .truncationMode(.tail)
+            .frame(height: height)
             .background(terminalTheme.terminalSurfaceBackground)
+    }
+
+    private func color(of ink: GhosttyPaneLine.Ink) -> Color {
+        switch ink {
+        case .color(let red, let green, let blue):
+            Color(red: Double(red) / 255, green: Double(green) / 255, blue: Double(blue) / 255)
+        case .focus:
+            Color.accentColor
+        case .separator:
+            Color(uiColor: terminalTheme.terminalCompositeSeparatorUIColor)
+        }
+    }
+
+    /// The system's monospaced font at the size whose characters are a cell wide. Herdr's client writes the
+    /// title in the terminal's own font, which isn't one UIKit has; this one follows the terminal's font
+    /// size, a character a cell.
+    static func labelFont(cellWidth: CGFloat) -> UIFont {
+        let reference = UIFont.monospacedSystemFont(ofSize: 100, weight: .regular)
+        let advance = ("0" as NSString).size(withAttributes: [.font: reference]).width
+        return UIFont.monospacedSystemFont(ofSize: 100 * cellWidth / advance, weight: .regular)
+    }
+}
+
+/// Lines drawn as the panes' lines are (`GhosttyPaneLine.draw`), over a clear background.
+private struct GhosttyPaneLinesView: UIViewRepresentable {
+    let lines: [GhosttyPaneLine]
+    let layout: GhosttyCompositeViewportLayout
+    let separatorColor: UIColor
+
+    func makeUIView(context: Context) -> GhosttyPaneLinesUIView {
+        GhosttyPaneLinesUIView()
+    }
+
+    func updateUIView(_ view: GhosttyPaneLinesUIView, context: Context) {
+        view.update(lines: lines, layout: layout, separatorColor: separatorColor)
+    }
+}
+
+private final class GhosttyPaneLinesUIView: UIView {
+    private var lines: [GhosttyPaneLine] = []
+    private var layout: GhosttyCompositeViewportLayout?
+    private var separatorColor = UIColor.clear
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isOpaque = false
+        backgroundColor = .clear
+        isUserInteractionEnabled = false
+        contentMode = .redraw
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func update(lines: [GhosttyPaneLine], layout: GhosttyCompositeViewportLayout, separatorColor: UIColor) {
+        guard lines != self.lines || layout != self.layout || !separatorColor.isEqual(self.separatorColor) else { return }
+        self.lines = lines
+        self.layout = layout
+        self.separatorColor = separatorColor
+        setNeedsDisplay()
+    }
+
+    override func draw(_ rect: CGRect) {
+        guard let layout, let context = UIGraphicsGetCurrentContext() else { return }
+        let separator = separatorColor.cgColor
+        GhosttyPaneLine.draw(
+            lines,
+            in: context,
+            layout: layout,
+            scale: max(window?.screen.scale ?? traitCollection.displayScale, 1)
+        ) { ink in
+            switch ink {
+            case .separator, .focus:
+                separator
+            case .color(let red, let green, let blue):
+                UIColor(red: CGFloat(red) / 255, green: CGFloat(green) / 255, blue: CGFloat(blue) / 255, alpha: 1).cgColor
+            }
+        }
     }
 }
 
@@ -112,7 +174,6 @@ private struct GhosttyTerminalPopupHost: UIViewRepresentable {
     let popup: GhosttyTerminalViewportPresentationProjection.Popup
     let surfaceLookup: GhosttyManagedSurfaceLookup
     let keyboardMode: GhosttyKeyboardChromeMode
-    let onArea: (UInt32, UInt32) -> Void
     let submitScroll: ((UUID, GhosttySurfaceMouseScrollEvent) -> GhosttyMouseInputSubmissionOutcome)?
     let submitPointer: ((UUID, CGPoint, GhosttySurfaceKeyEvent.Mods) -> GhosttyMouseInputSubmissionOutcome)?
     let onTap: () -> Void
@@ -122,7 +183,6 @@ private struct GhosttyTerminalPopupHost: UIViewRepresentable {
     }
 
     func updateUIView(_ view: GhosttyTerminalPopupHostView, context: Context) {
-        view.onArea = onArea
         view.onTap = onTap
         view.keyboardMode = keyboardMode
         view.update(
@@ -138,18 +198,16 @@ private struct GhosttyTerminalPopupHost: UIViewRepresentable {
     }
 }
 
-/// The popup's terminal area. It reports the whole pixels inside its bounds, which the popup's grid fills,
-/// and draws the grid at exactly its cells' size, on whole pixels (`placement`). A tap brings up the
-/// keyboard; the scroll container forwards swipes. Each new placement is recorded in the diagnostics, for
-/// the popup's layout record.
+/// The popup's terminal, in the cells inside the frame. It draws the grid of Herdr's frames at its cells'
+/// size from the cells' top left: while Herdr's frames catch up with a new grid, the grid drawn has more or
+/// fewer cells than there are, as the panes' canvas does. A tap brings up the keyboard; the scroll container
+/// forwards swipes. Each new placement is recorded in the diagnostics, for the popup's layout record.
 final class GhosttyTerminalPopupHostView: UIView {
-    var onArea: ((UInt32, UInt32) -> Void)?
     var onTap: (() -> Void)?
     var keyboardMode: GhosttyKeyboardChromeMode = .hidden
     private let container = GhosttyPaneScrollContainerView()
-    private var drawn: (grid: GhosttyTerminalGridSize, cell: GhosttyTerminalCellDisplayMetrics)?
-    private var reported: (UInt32, UInt32)?
-    private var recorded: CGRect?
+    private var drawable: CGSize?
+    private var recorded: (cells: CGRect, drawable: CGSize)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -173,7 +231,10 @@ final class GhosttyTerminalPopupHostView: UIView {
             detachSurface()
             return
         }
-        drawn = (grid, cell)
+        drawable = CGSize(
+            width: Double(grid.columns) * Double(cell.pixelWidth) / cell.contentScale,
+            height: Double(grid.rows) * Double(cell.pixelHeight) / cell.contentScale
+        )
         if container.superview !== self { addSubview(container) }
         container.update(
             surface: surface,
@@ -186,12 +247,11 @@ final class GhosttyTerminalPopupHostView: UIView {
 
     func dismantle() {
         detachSurface()
-        onArea = nil
         onTap = nil
     }
 
     private func detachSurface() {
-        drawn = nil
+        drawable = nil
         container.detachCurrentSurfaceForRemoval()
         container.removeFromSuperview()
     }
@@ -200,80 +260,34 @@ final class GhosttyTerminalPopupHostView: UIView {
         max(window?.screen.scale ?? traitCollection.displayScale, 1)
     }
 
-    /// The bounds' whole pixels: its edges rounded inward to the screen's pixels.
-    private var pixelArea: (origin: CGPoint, widthPx: UInt32, heightPx: UInt32) {
-        let scale = scale
-        let inWindow = convert(bounds, to: nil)
-        let minX = (inWindow.minX * scale).rounded(.up), maxX = (inWindow.maxX * scale).rounded(.down)
-        let minY = (inWindow.minY * scale).rounded(.up), maxY = (inWindow.maxY * scale).rounded(.down)
-        let origin = CGPoint(x: minX / scale - inWindow.minX, y: minY / scale - inWindow.minY)
-        return (origin, UInt32(max(maxX - minX, 0)), UInt32(max(maxY - minY, 0)))
-    }
-
     override func layoutSubviews() {
         super.layoutSubviews()
-        let area = pixelArea
-        if reported.map({ $0 != (area.widthPx, area.heightPx) }) ?? true, area.widthPx > 0, area.heightPx > 0 {
-            reported = (area.widthPx, area.heightPx)
-            onArea?(area.widthPx, area.heightPx)
-        }
-        guard let drawn else { return }
-        let frame = Self.placement(
-            areaOrigin: area.origin,
-            widthPx: area.widthPx,
-            heightPx: area.heightPx,
-            grid: drawn.grid,
-            cell: drawn.cell,
-            scale: scale
-        )
+        guard let drawable else { return }
+        let frame = CGRect(origin: .zero, size: drawable)
         // Cell geometry never animates, even in a layout pass inside another animation.
         UIView.performWithoutAnimation {
             guard container.frame != frame else { return }
             container.frame = frame
             container.layoutIfNeeded()
         }
-        record(area: area, drawableFrame: frame)
+        record(drawable: drawable)
     }
 
-    /// Where the grid goes in the area: at its top left, past half of what is left over after the area's
-    /// whole cells, on whole pixels. While Herdr's frames catch up with a new area, the grid drawn has more
-    /// or fewer cells than the area holds; it is drawn where the area's grid will be, so nothing moves when
-    /// they arrive.
-    static func placement(
-        areaOrigin: CGPoint,
-        widthPx: UInt32,
-        heightPx: UInt32,
-        grid: GhosttyTerminalGridSize,
-        cell: GhosttyTerminalCellDisplayMetrics,
-        scale: CGFloat
-    ) -> CGRect {
-        func inset(_ room: UInt32, _ cellPx: UInt32) -> CGFloat {
-            cellPx > 0 ? CGFloat((room % cellPx) / 2) / scale : 0
-        }
-        return CGRect(
-            x: areaOrigin.x + inset(widthPx, cell.pixelWidth),
-            y: areaOrigin.y + inset(heightPx, cell.pixelHeight),
-            width: CGFloat(grid.columns * cell.pixelWidth) / cell.contentScale,
-            height: CGFloat(grid.rows * cell.pixelHeight) / cell.contentScale
-        )
-    }
-
-    private func record(area: (origin: CGPoint, widthPx: UInt32, heightPx: UInt32), drawableFrame: CGRect) {
-        guard GhosttyRuntimeTrace.diagnosticsEnabled, recorded != drawableFrame else { return }
-        recorded = drawableFrame
-        let inWindow = convert(bounds, to: nil)
+    private func record(drawable: CGSize) {
+        guard GhosttyRuntimeTrace.diagnosticsEnabled, window != nil else { return }
+        let cells = convert(bounds, to: nil)
+        guard recorded.map({ $0.cells != cells || $0.drawable != drawable }) ?? true else { return }
+        recorded = (cells, drawable)
         let orientation = window?.windowScene?.interfaceOrientation.isLandscape == true ? "landscape" : "portrait"
         GhosttyRuntimeTrace.diagnostics(
             "popup host keyboard=\(keyboardMode) orientation=\(orientation) scale=\(scale) "
-                + "bounds=\(inWindow.width)x\(inWindow.height)pt@(\(inWindow.minX),\(inWindow.minY)) "
-                + "area=\(area.widthPx)x\(area.heightPx)px origin=(\(area.origin.x),\(area.origin.y))pt "
-                + "drawable=\(drawableFrame.width)x\(drawableFrame.height)pt@(\(drawableFrame.minX),\(drawableFrame.minY))"
+                + "cells=\(cells.width)x\(cells.height)pt@(\(cells.minX),\(cells.minY)) "
+                + "drawable=\(drawable.width)x\(drawable.height)pt"
         )
     }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        reported = nil
         recorded = nil
         setNeedsLayout()
     }

@@ -293,12 +293,11 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
                         if let popup = screenProjection.viewport.popup {
                             GhosttyTerminalPopupFrameView(
                                 popup: popup,
+                                windowGrid: screenProjection.viewport.windowGrid,
+                                cellMetrics: screenProjection.viewport.cellMetrics,
                                 surfaceLookup: model.terminalManagedSurfaceLookup,
                                 terminalTheme: presentation.terminalTheme,
                                 keyboardMode: renderedKeyboardMode,
-                                onArea: { widthPx, heightPx in
-                                    model.preparePopupArea(widthPx: widthPx, heightPx: heightPx)
-                                },
                                 submitScroll: { surfaceID, event in
                                     model.sendMouseScroll(to: surfaceID, event)
                                 },

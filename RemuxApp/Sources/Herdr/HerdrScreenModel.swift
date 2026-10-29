@@ -717,7 +717,7 @@ final class HerdrScreenModel {
         guard let measured, measured != measurement else { return }
         if measurement == nil { sizeKnownSince = .now }
         measurement = measured
-        popup.setCell(measured.cellMetrics)
+        popup.setViewport(cell: measured.cellMetrics, columns: measured.controlViewport.columns, rows: measured.controlViewport.rows)
         if let geometry { attempt?.ask(.resize(geometry)) }
         resumeSizeWaiter()
         // The panes of a frame held off screen take a new cell size there, and the frame on screen keeps its
@@ -1006,12 +1006,6 @@ final class HerdrScreenModel {
     }
 
     // MARK: - The popup
-
-    /// The whole pixels the screen has for the popup's terminal (`HerdrPopupController`).
-    func preparePopupArea(widthPx: UInt32, heightPx: UInt32) {
-        guard !stopped else { return }
-        popup.prepareArea(widthPx: widthPx, heightPx: heightPx)
-    }
 
     var popupPresentation: TerminalPanePresentation {
         popup.presentation
