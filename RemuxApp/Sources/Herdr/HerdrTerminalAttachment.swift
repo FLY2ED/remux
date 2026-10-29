@@ -9,8 +9,8 @@ import GhosttyKit
 /// other clients do; when this client leaves, Herdr gives the size back (`server/headless.rs`
 /// `attach_terminal_client`, `remove_client`). Frames are terminal bytes, written for a terminal as Herdr's
 /// client draws in, fed into a terminal of its own whose renderer this wakes, as the engine does for panes.
-/// The attach carries the terminal's size and Herdr's wheel steps; typing goes to the terminal another
-/// way, which Herdr encodes for the program's modes.
+/// The attach carries the terminal's size and its frames; input, the wheel's too, goes to the terminal
+/// another way, which Herdr encodes for the program's modes.
 actor HerdrTerminalAttachment {
     enum Event: Sendable {
         /// The first frame's terminal; later frames of another size come as `grid`.
@@ -126,10 +126,6 @@ actor HerdrTerminalAttachment {
         } catch {
             end(.failed(Self.describe(error)))
         }
-    }
-
-    func scroll(_ direction: HerdrDirectTerminalClientMessage.ScrollDirection, lines: UInt16, column: UInt16?, row: UInt16?) async {
-        _ = await write(.scroll(direction, lines: lines, column: column, row: row))
     }
 
     /// The newest size goes; one asked for while another is being written replaces any still waiting.

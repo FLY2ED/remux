@@ -32,45 +32,16 @@ struct HerdrPopupGrid: Equatable, Sendable, CustomStringConvertible {
     }
 }
 
-/// Sends an attached popup's wheel steps through its attach, in order: one task writes them all.
-@MainActor
-final class HerdrPopupWheel {
-    private let continuation: AsyncStream<(HerdrDirectTerminalClientMessage.ScrollDirection, UInt16?, UInt16?)>.Continuation
-
-    init(attachment: HerdrTerminalAttachment) {
-        let (steps, continuation) = AsyncStream.makeStream(of: (HerdrDirectTerminalClientMessage.ScrollDirection, UInt16?, UInt16?).self)
-        self.continuation = continuation
-        Task {
-            for await (direction, column, row) in steps {
-                await attachment.scroll(direction, lines: 1, column: column, row: row)
-            }
-        }
-    }
-
-    /// One step of one row.
-    func scroll(_ direction: HerdrDirectTerminalClientMessage.ScrollDirection, column: UInt16?, row: UInt16?) {
-        continuation.yield((direction, column, row))
-    }
-
-    func finish() {
-        continuation.finish()
-    }
-}
-
 /// The renderer of the popup over the tab: over its attachment's terminal, or over the terminal the engine
 /// paints from Herdr's popup frame when it can't be attached. Either way its input goes as Herdr's client
 /// sends a popup's (`HerdrPopupController.Input`).
 @MainActor
 final class HerdrPopupTerminalSurface: TerminalPaneInputSink {
-    enum Source {
-        case attachment(HerdrPopupWheel)
-        case frame
-    }
-
     let terminalID: String
     let terminal: HerdrRetainedTerminal
     let renderer: TerminalPaneRenderer
-    let source: Source
+    /// Over the attachment's terminal, rather than the one painted from Herdr's frame.
+    let isAttached: Bool
     /// The composer's input for this popup's terminal, which learns whether Herdr has it.
     private let deliver: ([HerdrInputEvent]) async -> Bool
     /// The grid the renderer draws.
@@ -80,20 +51,16 @@ final class HerdrPopupTerminalSurface: TerminalPaneInputSink {
         terminalID: String,
         terminal: HerdrRetainedTerminal,
         renderer: TerminalPaneRenderer,
-        source: Source,
+        isAttached: Bool,
         deliver: @escaping ([HerdrInputEvent]) async -> Bool,
         grid: HerdrPopupGrid
     ) {
         self.terminalID = terminalID
         self.terminal = terminal
         self.renderer = renderer
-        self.source = source
+        self.isAttached = isAttached
         self.deliver = deliver
         self.grid = grid
-    }
-
-    var isAttached: Bool {
-        if case .attachment = source { true } else { false }
     }
 
     func screenSurface(id: UUID) -> GhosttyManagedSurface {
@@ -342,18 +309,12 @@ final class HerdrPopupController {
         return input.send([event])
     }
 
-    /// A swipe's wheel steps, a row each, up for positive `rows`: an attached popup's go through Herdr's
-    /// wheel handling for the program, a framed one's as Herdr's client sends a popup's wheel.
+    /// A swipe's wheel steps, a row each, up for positive `rows`, as Herdr's client sends a popup's wheel: on
+    /// the keys' queue, so a key after a swipe comes after all of its steps. Herdr routes each as the program
+    /// asks, a mouse report, cursor keys on the alternate screen, or the terminal's history.
     func scroll(rows: Int, column: UInt16, row: UInt16) -> Bool {
         guard takesInput else { return false }
         guard rows != 0 else { return true }
-        let direction: HerdrDirectTerminalClientMessage.ScrollDirection = rows > 0 ? .up : .down
-        if let surface, case .attachment(let wheel) = surface.source {
-            for _ in 0..<rows.magnitude {
-                wheel.scroll(direction, column: column, row: row)
-            }
-            return true
-        }
         let wheel = HerdrMouseEvent(
             kind: rows > 0 ? .scrollUp : .scrollDown,
             column: column,
@@ -523,7 +484,6 @@ final class HerdrPopupController {
     private func createAttachedRenderer(terminal: HerdrRetainedTerminal, grid: HerdrPopupGrid, generation: UInt64) {
         guard let runtime, let cell, let popup, let attached, attached.generation == generation else { return }
         closeSurface()
-        let wheel = HerdrPopupWheel(attachment: attached.attachment)
         let terminalID = popup.terminalID
         let deliver = input.deliver
         creating = ObjectIdentifier(terminal)
@@ -539,7 +499,6 @@ final class HerdrPopupController {
             onRendererFailure: { [weak self] in self?.rendererFailed(terminal) }
         ) { [weak self, runtime] result in
             guard let self, self.creating == ObjectIdentifier(terminal), self.attached?.generation == generation else {
-                wheel.finish()
                 if case .success(let renderer) = result {
                     renderer.close { withExtendedLifetime(runtime) {} }
                 }
@@ -557,7 +516,7 @@ final class HerdrPopupController {
                     terminalID: terminalID,
                     terminal: terminal,
                     renderer: renderer,
-                    source: .attachment(wheel),
+                    isAttached: true,
                     deliver: { await deliver(terminalID, $0) },
                     grid: current
                 )
@@ -566,7 +525,6 @@ final class HerdrPopupController {
                 self.applyActivity()
                 self.logLayout()
             case .failure:
-                wheel.finish()
                 self.failure = Self.rendererFailure
             }
             self.onChange()
@@ -609,7 +567,7 @@ final class HerdrPopupController {
                     terminalID: popup.terminalID,
                     terminal: terminal,
                     renderer: renderer,
-                    source: .frame,
+                    isAttached: false,
                     deliver: { await deliver(terminalID, $0) },
                     grid: grid
                 )
@@ -665,7 +623,6 @@ final class HerdrPopupController {
     private func closeSurface() {
         guard let surface else { return }
         self.surface = nil
-        if case .attachment(let wheel) = surface.source { wheel.finish() }
         surface.renderer.close { [runtime] in withExtendedLifetime(runtime) {} }
     }
 

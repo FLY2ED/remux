@@ -283,10 +283,11 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
         return model?.paneSurface(paneID)?.renderer.managedSurface
     }
 
-    /// What the screen waits on: the popup while one is over the tab, else the focused pane.
+    /// What the screen waits on: the popup while the phone holds it on screen, else the focused pane. A
+    /// hidden session lets its popup go, so it reads as its panes do.
     private var selectedPresentation: TerminalPanePresentation {
         guard let model else { return .pending }
-        return model.layout?.popup != nil ? model.popupPresentation : model.presentation(ofPane: focusedPaneID)
+        return model.popup.takesInput ? model.popupPresentation : model.presentation(ofPane: focusedPaneID)
     }
 }
 

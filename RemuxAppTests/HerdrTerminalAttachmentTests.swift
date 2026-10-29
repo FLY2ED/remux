@@ -54,8 +54,8 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
         }
     }
 
-    /// Herdr accepted these messages: the popup's pty took the hello's and the resize's sizes, and the wheel
-    /// scrolled its history. The recorded client also typed, which Remux doesn't do this way.
+    /// Herdr accepted these messages: the popup's pty took the hello's and the resize's sizes. The recorded
+    /// client also typed and scrolled, which Remux doesn't do this way.
     func testRemuxEncodesWhatTheRecordedClientSent() throws {
         for version in Self.versions {
             let fixture = try DirectTerminalFixture(version: version, scenario: "01-shell")
@@ -64,11 +64,9 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
                 .hello(columns: 40, rows: 12, cellWidthPx: 0, cellHeightPx: 0),
                 .attach(terminalID: terminalID, takeover: false),
                 .resize(columns: 44, rows: 14, cellWidthPx: 0, cellHeightPx: 0),
-                .scroll(.up, lines: 3, column: nil, row: nil),
-                .scroll(.down, lines: 3, column: nil, row: nil),
                 .detach,
             ]
-            let recorded = fixture.expected.client.filter { $0.tag != Self.inputTag }.map(\.hex)
+            let recorded = fixture.expected.client.filter { ![Self.inputTag, Self.scrollTag].contains($0.tag) }.map(\.hex)
             XCTAssertEqual(messages.map { Self.hex($0.payload) }, recorded, fixture.name)
         }
     }
@@ -223,7 +221,7 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
         guard case .failed = ending else { return XCTFail("ended \(String(describing: ending))") }
     }
 
-    func testScrollsAndAResizeGoAsWrittenOnceAttached() async throws {
+    func testAResizeGoesAsWrittenOnceAttached() async throws {
         let fixture = try DirectTerminalFixture(version: "0.9.5", scenario: "01-shell")
         let payloads = try fixture.serverPayloads()
         let bridge = FakeBridgeTransport()
@@ -234,8 +232,6 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
         await attachment.resize(to: Self.resized)
         // The size already asked for doesn't go again.
         await attachment.resize(to: Self.resized)
-        await attachment.scroll(.up, lines: 3, column: nil, row: nil)
-        await attachment.scroll(.down, lines: 3, column: nil, row: nil)
         await attachment.detach()
         // The recorded client's messages, which Remux encodes as Herdr accepted them, with the cell size.
         let terminalID = try XCTUnwrap(fixture.expected.client.compactMap(\.AttachTerminal).first?.terminal_id)
@@ -243,16 +239,14 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
             .hello(columns: 40, rows: 12, cellWidthPx: 8, cellHeightPx: 16),
             .attach(terminalID: terminalID, takeover: false),
             .resize(columns: 44, rows: 14, cellWidthPx: 8, cellHeightPx: 16),
-            .scroll(.up, lines: 3, column: nil, row: nil),
-            .scroll(.down, lines: 3, column: nil, row: nil),
             .detach,
         ]
         // The hello and the attach go in one write.
         var written: [UInt8] = []
-        for index in 0..<5 { written += try await bridge.written(index) }
+        for index in 0..<3 { written += try await bridge.written(index) }
         XCTAssertEqual(written, expected.flatMap(\.frame))
         let writes = await bridge.writtenCount
-        XCTAssertEqual(writes, 5)
+        XCTAssertEqual(writes, 3)
         let closed = await bridge.isClosed
         XCTAssertTrue(closed)
     }
@@ -297,8 +291,9 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
         return ending
     }
 
-    /// Herdr's `Input`, which the recorded client sent and Remux doesn't.
+    /// Herdr's `Input` and `AttachScroll`, which the recorded client sent and Remux doesn't.
     private static let inputTag: UInt32 = 1
+    private static let scrollTag: UInt32 = 6
 
     private static func hex(_ bytes: [UInt8]) -> String {
         bytes.map { String(format: "%02x", $0) }.joined()

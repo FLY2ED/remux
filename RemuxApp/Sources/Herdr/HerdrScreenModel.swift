@@ -1124,18 +1124,29 @@ final class HerdrScreenModel {
         )
     }
 
-    /// All input over the session's connection goes this way. Input for a pane other than the wheel ends
-    /// the pane's selection, as Herdr's client ends its own on a key, text or a paste, whatever sends it.
+    /// All input over the session's connection goes this way. Input other than the wheel ends the selection
+    /// of the terminal it goes to, a pane's or the popup's, as Herdr's client ends its own on a key, text or a
+    /// paste, whatever sends it.
     private func ask(
         input events: [HerdrInputEvent],
         to target: HerdrTerminalTarget,
         on attempt: Attempt,
         delivered: CheckedContinuation<Bool, Never>?
     ) {
-        if case .pane(let paneID) = target, events.contains(where: { if case .mouse = $0 { false } else { true } }) {
-            surfaces[paneID]?.renderer.managedSurface?.endSelection()
+        if events.contains(where: { if case .mouse = $0 { false } else { true } }) {
+            managedSurface(of: target)?.endSelection()
         }
         attempt.ask(.input(target, events: events, delivered: delivered))
+    }
+
+    private func managedSurface(of target: HerdrTerminalTarget) -> GhosttyManagedSurface? {
+        switch target {
+        case .pane(let paneID):
+            return surfaces[paneID]?.renderer.managedSurface
+        case .popup(let terminalID):
+            guard let surface = popup.surface, surface.terminalID == terminalID else { return nil }
+            return surface.renderer.managedSurface
+        }
     }
 
     /// Remux's move to `destination`: a view request the engine starts when it goes (`.move`); the newest

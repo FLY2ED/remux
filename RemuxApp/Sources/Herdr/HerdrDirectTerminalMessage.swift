@@ -3,22 +3,14 @@ import Foundation
 /// The messages of Herdr's direct terminal connection, the one `herdr terminal attach` makes: a
 /// `TerminalHello` instead of the endpoint hello, then one terminal's stream as terminal bytes (Herdr
 /// v0.9.3 and v0.9.5 `src/protocol/wire.rs`, protocol 22; the variant order is the tag, as on the
-/// endpoint connection). Remux sends no input this way (`HerdrTerminalAttachment`).
+/// endpoint connection). Remux sends no input this way, the wheel's neither (`HerdrTerminalAttachment`).
 enum HerdrDirectTerminalClientMessage: Equatable, Sendable {
-    enum ScrollDirection: UInt32, Equatable, Sendable {
-        case up = 0
-        case down = 1
-    }
-
     /// Must be the first message: the client's terminal size, which an attach gives the terminal.
     case hello(columns: UInt16, rows: UInt16, cellWidthPx: UInt32, cellHeightPx: UInt32)
     case resize(columns: UInt16, rows: UInt16, cellWidthPx: UInt32, cellHeightPx: UInt32)
     case detach
     /// Without `takeover`, Herdr refuses a terminal another direct client already holds.
     case attach(terminalID: String, takeover: Bool)
-    /// A mouse wheel step, which Herdr routes as the program asks: a mouse report, cursor keys on the
-    /// alternate screen, or the terminal's own history (`server/pane_input.rs` `apply_scroll`).
-    case scroll(ScrollDirection, lines: UInt16, column: UInt16?, row: UInt16?)
 
     static let protocolVersion: UInt32 = 22
 
@@ -50,14 +42,6 @@ enum HerdrDirectTerminalClientMessage: Equatable, Sendable {
             writer.variant(5)
             writer.string(terminalID)
             writer.bool(takeover)
-        case .scroll(let direction, let lines, let column, let row):
-            writer.variant(6)
-            writer.variant(0)
-            writer.variant(direction.rawValue)
-            writer.u16(lines)
-            writer.optional(column) { $0.u16($1) }
-            writer.optional(row) { $0.u16($1) }
-            writer.u8(0)
         }
         return writer.bytes
     }

@@ -147,6 +147,19 @@ final class HerdrPopupTests: XCTestCase {
         XCTAssertEqual(opening.last, .attach(Self.popupID))
     }
 
+    /// A hidden session reads as connected also with a popup open: the phone lets the popup go when the
+    /// session leaves the screen, and Home shows the session's state, as it does for its panes.
+    func testAHiddenSessionWithAPopupReadsAsConnected() async throws {
+        let harness = await makeHarness()
+        _ = try await attachedPopup(harness)
+        try await harness.waitUntil("the shown session wasn't connected") { harness.states.last == .connected }
+
+        harness.model.setSelected(false)
+        try await harness.waitUntil("the popup wasn't let go") { harness.model.popup.surface == nil }
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(harness.states.last, .connected, "the hidden session read as its popup")
+    }
+
     /// The background lets the popup go, as leaving does, and back in front the phone attaches again; an
     /// inactive phase, as under Control Center, keeps it.
     func testTheBackgroundDetachesAndTheFrontAttachesAgain() async throws {
@@ -340,24 +353,69 @@ final class HerdrPopupTests: XCTestCase {
         XCTAssertEqual(typed, popupInput(HerdrInputTranslator.events(forText: "é", reportsAllKeys: true)))
     }
 
-    /// A swipe over the attached popup goes as Herdr's attach wheel, a step a row, at the cell under the
-    /// finger; nothing of it goes over the session's connection.
-    func testASwipeGoesAsTheAttachsWheel() async throws {
+    /// A swipe over the popup goes as Herdr's client sends a popup's wheel, a step a row at the cell under the
+    /// finger, on the same connection and queue as the keys: a key after a swipe comes after all of its steps,
+    /// so it can't reset the history before steps that scroll it away again. Nothing goes over the attach.
+    func testASwipeAndAKeyGoInOrderAsHerdrsClientSendsThem() async throws {
         let harness = await makeHarness()
         let (session, attach, cell) = try await attachedPopup(harness)
+        var index = session.next
         let adapter = harness.model.terminalScreenAdapter
         let target = try XCTUnwrap(popup(harness)?.id)
-        let before = await attach.writtenCount
-        let mainWrites = await session.bridge.writtenCount
+        let attachWrites = await attach.writtenCount
 
         _ = adapter.sendMousePosition(to: target, CGPoint(x: cell.pointWidth * 2.5, y: cell.pointHeight * 3.5), mods: [])
         let swipe = GhosttySurfaceMouseScrollEvent(deltaX: 0, deltaY: Double(cell.pixelHeight) * 2, mods: .init(precision: true, momentum: .began))
         XCTAssertEqual(adapter.sendMouseScroll(to: target, swipe), .sent)
-        for step in 0..<2 {
-            let wheel = try await DirectClient.messages(attach, at: before + step)
-            XCTAssertEqual(wheel, [.scroll(up: true, lines: 1, column: 2, row: 3)])
+        XCTAssertTrue(adapter.sendInputToFocusedSurface("k").isAccepted)
+        let wheel = HerdrMouseEvent(kind: .scrollUp, column: 2, row: 3, modifiers: [], lines: 1)
+        let steps = try await nextInput(session.bridge, from: &index)
+        XCTAssertEqual(steps, popupInput([.mouse(wheel), .mouse(wheel)]))
+        let key = try await nextInput(session.bridge, from: &index)
+        XCTAssertEqual(key, popupInput(HerdrInputTranslator.events(forText: "k", reportsAllKeys: false)))
+        let after = await attach.writtenCount
+        XCTAssertEqual(after, attachWrites, "the swipe went over the attach")
+    }
+
+    /// Typing, a key, a paste and the composer's message end a selection in the popup, as Herdr's client ends
+    /// its own on a key, text or a paste, whatever sends it; a wheel step doesn't.
+    func testInputOtherThanTheWheelEndsThePopupsSelection() async throws {
+        let harness = await makeHarness()
+        let (_, _, cell) = try await attachedPopup(harness)
+        let adapter = harness.model.terminalScreenAdapter
+        let target = try XCTUnwrap(popup(harness)?.id)
+        let surface = try XCTUnwrap(harness.model.popup.surface?.renderer.managedSurface)
+        // The popup's first cell holds the frame's "$".
+        let point = CGPoint(x: cell.pointWidth / 2, y: cell.pointHeight / 2)
+        func selected() -> Bool {
+            if case .snapshot(let snapshot) = surface.selectionSnapshot() { snapshot.isActive } else { false }
         }
-        try await assertNoInput(session.bridge, from: mainWrites)
+        func select() {
+            _ = surface.selectWord(at: point)
+            XCTAssertTrue(selected(), "the popup's text wasn't selected")
+        }
+
+        select()
+        _ = adapter.sendMousePosition(to: target, point, mods: [])
+        let wheel = GhosttySurfaceMouseScrollEvent(deltaX: 0, deltaY: Double(cell.pixelHeight) * 1.2, mods: .init(precision: true, momentum: .began))
+        XCTAssertEqual(adapter.sendMouseScroll(to: target, wheel), .sent)
+        XCTAssertTrue(selected(), "a wheel step ended the selection")
+
+        XCTAssertEqual(adapter.sendInputToFocusedSurface("x"), .accepted)
+        XCTAssertFalse(selected(), "typing kept the selection")
+
+        select()
+        XCTAssertEqual(adapter.sendKeyEventToFocusedSurface(GhosttySurfaceKeyEvent(keyCode: .escape)), .accepted)
+        XCTAssertFalse(selected(), "Escape kept the selection")
+
+        select()
+        XCTAssertEqual(adapter.sendPasteToFocusedSurface("pasted"), .accepted)
+        XCTAssertFalse(selected(), "a paste kept the selection")
+
+        select()
+        let paste = Task { await adapter.sendPasteAwaitingCommandCompletion("message", to: target) }
+        try await harness.waitUntil("the composer's paste kept the selection") { !selected() }
+        paste.cancel()
     }
 
     /// The composer's message and its Enter go to the popup it was written in, each once Herdr has it.
