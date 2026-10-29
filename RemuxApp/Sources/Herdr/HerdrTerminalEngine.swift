@@ -126,9 +126,9 @@ enum HerdrEngineUpdate: Sendable {
     /// View request `request` didn't complete within its time.
     case timedOut(request: UInt64, connection: UInt64)
     /// Herdr answered the step of the current view request `request` that takes the session to its
-    /// place, a focus or a creation: why it failed, or nil when it worked. Reported only while `request`
-    /// is current, in order with its other events.
-    case answered(request: UInt64, step: HerdrCommandLane.Step, failure: HerdrCommandError?, connection: UInt64)
+    /// place, a focus or a creation: why it failed, or nil when it worked, and for a creation the pane Herdr
+    /// made. Reported only while `request` is current, in order with its other events.
+    case answered(request: UInt64, step: HerdrCommandLane.Step, failure: HerdrCommandError?, made: String?, connection: UInt64)
     /// Herdr answered a zoom Remux sent, of a request's step or not: the tab's layout, for the pane
     /// sheet's map, or why it failed or didn't go. `reportsFailure` for the zoom button's, whose
     /// outcome the screen reports.
@@ -1244,7 +1244,9 @@ actor HerdrTerminalEngine {
                 break
             case (.zoom, .success), (.create, .success), (.close, .success):
                 if !step.isZoom {
-                    continuation.yield(.answered(request: id, step: step, failure: nil, connection: connection))
+                    var made: String?
+                    if case .made(let pane, _)? = effect?.target { made = pane }
+                    continuation.yield(.answered(request: id, step: step, failure: nil, made: made, connection: connection))
                 }
                 if let effect {
                     request.target = effect.target
@@ -1255,15 +1257,15 @@ actor HerdrTerminalEngine {
             case (.zoom(_, navigates: true), .failure):
                 break
             case (.focus, .success(let reply)):
-                continuation.yield(.answered(request: id, step: step, failure: nil, connection: connection))
+                continuation.yield(.answered(request: id, step: step, failure: nil, made: nil, connection: connection))
                 request.answer = (reply.sentAfter, reply.answeredAfter)
             case (.focus(let place), .failure(let failure)):
-                continuation.yield(.answered(request: id, step: step, failure: failure, connection: connection))
+                continuation.yield(.answered(request: id, step: step, failure: failure, made: nil, connection: connection))
                 // The session stays where Herdr has it.
                 if request.target == .place(place) { request.target = nil }
             case (.create, .failure(let failure)), (.close, .failure(let failure)):
                 // Nothing was made or closed; the session stays where Herdr has it.
-                continuation.yield(.answered(request: id, step: step, failure: failure, connection: connection))
+                continuation.yield(.answered(request: id, step: step, failure: failure, made: nil, connection: connection))
                 request.target = nil
             }
             self.request = request

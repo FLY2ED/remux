@@ -2407,11 +2407,11 @@ private final class UpdateLog {
             if last?.layout != layout { return update }
         case .started(let request, let kind, _, _):
             started.append((request, kind))
-        case .answered(let request, .focus, let failure, _):
+        case .answered(let request, .focus, let failure, _, _):
             focusAnswers.append((request, failure))
-        case .answered(let request, .create(let creation), let failure, _):
+        case .answered(let request, .create(let creation), let failure, _, _):
             creationAnswers.append((request, creation, failure))
-        case .answered(let request, .close(let place, _), let failure, _):
+        case .answered(let request, .close(let place, _), let failure, _, _):
             closeAnswers.append((request, place, failure))
         case .zoomAnswered(let zoom, _, let failure, let reportsFailure, _):
             zoomAnswers.append((zoom, failure, reportsFailure))

@@ -4845,6 +4845,39 @@ final class HerdrScreenModelTests: XCTestCase {
 
     // MARK: - Mouse
 
+    /// A button held while the screen switches to another tab is released in the pane it was pressed in as
+    /// that pane leaves the screen, once, since the screen has no way left to send the touch's end there; the
+    /// touch's end itself sends nothing more.
+    func testAButtonHeldAsItsPaneLeavesTheScreenIsReleasedThere() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness, mouseReporting: true, otherTabs: ["t2"])
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let pane = try paneSurfaceID(harness, "w1:p1")
+
+        XCTAssertEqual(adapter.sendMousePosition(to: pane, try point(harness, column: 2), mods: []), .sent)
+        XCTAssertEqual(adapter.sendMouseButton(to: pane, .init(state: .press, button: .left)), .sent)
+        harness.model.reveal(.tab("t2"), bootID: "boot")
+        let away = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(away.params, ["tab_id": "t2"])
+        await session.bridge.serve(HerdrConnectionTests.reply(id: away.id, json: #"{"type":"ok"}"#))
+        await session.bridge.serve(HerdrServerScript.snapshot(
+            revision: 3, focusedTab: "t2", otherTabs: ["t1"], focusedPane: "w1:p3", panes: Self.bothTabsPanes
+        ))
+        await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 3, lines: ["thr fou"], panes: Self.secondTabDrawn()))
+        try await harness.waitUntil("the tab reached didn't come on screen") { self.drawnPanes(harness) == Self.secondTab }
+        _ = adapter.sendMouseButton(to: pane, .init(state: .release, button: .left))
+        try await Task.sleep(for: .milliseconds(100))
+
+        let written = await session.bridge.writtenCount
+        let inputs = try await harness.writes(session.bridge, from: session.next, count: written - session.next).compactMap(paneInput)
+        XCTAssertEqual(inputs, [
+            frame("w1:p1", [mouse(.moved, column: 2)]),
+            frame("w1:p1", [mouse(.down(.left), column: 2)]),
+            frame("w1:p1", [mouse(.up(.left), column: 2)]),
+        ])
+    }
+
     /// A button held as a switch is asked is released in the pane it was pressed in, as Herdr takes the release
     /// of a press it took whatever tab it shows the phone (`server/headless.rs`
     /// `client_pane_input_releases_press`): the program never keeps the button down.
@@ -6375,6 +6408,55 @@ extension HerdrScreenModelTests {
         let focus = try await nextWrite(session.bridge, from: &index, command)
         XCTAssertEqual(focus.method, "tab.focus")
         XCTAssertEqual(focus.params, ["tab_id": "t2"])
+    }
+
+    /// A swipe during a switch to a tab of another workspace goes on in that workspace, from the tab the switch
+    /// goes to, not in the workspace still on screen.
+    func testASwipeDuringASwitchToAnotherWorkspaceGoesOnThere() async throws {
+        let harness = await makeHarness()
+        let session = try await shownWorkspaces(harness, zoomingOnShow: false)
+        var index = session.next
+
+        harness.model.reveal(.tab("t3"), bootID: "boot")
+        let pick = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(pick.params, ["tab_id": "t3"])
+        XCTAssertEqual(harness.model.terminalScreenAdapter.focusAdjacentTopLevel(.next), .queued)
+        XCTAssertEqual(harness.model.switchingTabID, "t4", "the swipe went on in the workspace on screen")
+    }
+
+    /// A swipe during a switch to a new tab goes on from it once Herdr's answer names the pane it made and a
+    /// snapshot lists it, and takes no swipe before: the tab it would count from isn't known yet, and counting
+    /// from the tab left would go somewhere the user isn't going.
+    func testASwipeDuringASwitchToANewTabGoesOnFromItOnceHerdrNamesIt() async throws {
+        let harness = await makeHarness()
+        let session = try await shownWorkspaces(harness, zoomingOnShow: false)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+
+        XCTAssertTrue(harness.model.create(.tab(workspaceID: "w1"), bootID: "boot"))
+        let created = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(created.method, "tab.create")
+        XCTAssertEqual(adapter.focusAdjacentTopLevel(.next), .missingTarget(.adjacentTopLevel), "a swipe counted from the tab left")
+
+        await session.bridge.serve(HerdrConnectionTests.reply(
+            id: created.id, json: #"{"type":"tab_created","tab":{"tab_id":"t5"},"root_pane":{"pane_id":"w1:p9"}}"#
+        ))
+        await session.bridge.serve(HerdrServerScript.snapshot(
+            revision: 5,
+            workspaces: [
+                .init(id: "w1", label: "alpha", tabs: [("t1", ["w1:p1", "w1:p2"]), ("t2", ["w1:p3", "w1:p4"]), ("t5", ["w1:p9"])]),
+                .init(id: "w2", label: "beta", tabs: [("t3", ["w2:p5"]), ("t4", ["w2:p6", "w2:p7"])], activeTab: "t4"),
+            ],
+            focusedTab: "t5",
+            focusedPane: "w1:p9"
+        ))
+        try await harness.waitUntil("the snapshot didn't list the new tab") {
+            harness.model.places.outline?.workspace(containingTab: "t5") != nil
+        }
+        XCTAssertEqual(adapter.focusAdjacentTopLevel(.next), .queued)
+        let next = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(next.method, "tab.focus")
+        XCTAssertEqual(next.params, ["tab_id": "t1"], "the swipe didn't go on from the new tab")
     }
 
     /// A pick waits in the lane behind a command Herdr hasn't answered. The session leaves and comes back

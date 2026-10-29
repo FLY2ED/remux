@@ -444,19 +444,26 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         return model.ask(request, bootID: layout.bootID)
     }
 
-    /// The next tab over from the one the screen shows, or from the tab a switch under way goes to, so quick
-    /// swipes go on from where the last one went.
+    /// The next tab over from the one the screen shows or, while a switch is under way, from the tab it goes
+    /// to, in that tab's workspace as the Tabs sheet lists it, so quick swipes go on from where the last one
+    /// went. A switch to a tab not known yet, as a new tab before Herdr's answer names it, takes no swipe.
     func focusAdjacentTopLevel(
         _ direction: GhosttyRuntimeSelectionDirection
     ) -> GhosttyTerminalActionOutcome {
-        let topology = topologySnapshot
-        let switchingTo = model?.switchingTabID.flatMap { tabID in
-            topology.topLevels.firstIndex { $0.id == topLevelID(forTab: tabID) }
+        guard let model, model.isSwitching else {
+            let topology = topologySnapshot
+            guard let index = topology.selectedTopLevelIndex else { return .missingTarget(.adjacentTopLevel) }
+            let target = direction.advancedIndex(from: index, count: topology.topLevels.count)
+            guard target != index else { return .missingTarget(.adjacentTopLevel) }
+            return focusTopLevel(topology.topLevels[target].id)
         }
-        guard let index = switchingTo ?? topology.selectedTopLevelIndex else { return .missingTarget(.adjacentTopLevel) }
-        let target = direction.advancedIndex(from: index, count: topology.topLevels.count)
+        guard let tabID = model.switchingTabID, let layout = model.layout, let outline = model.places.outline,
+              outline.bootID == layout.bootID, let tabs = outline.workspace(containingTab: tabID)?.tabs,
+              let index = tabs.firstIndex(where: { $0.id == tabID })
+        else { return .missingTarget(.adjacentTopLevel) }
+        let target = direction.advancedIndex(from: index, count: tabs.count)
         guard target != index else { return .missingTarget(.adjacentTopLevel) }
-        return focusTopLevel(topology.topLevels[target].id)
+        return focusTopLevel(topLevelID(forTab: tabs[target].id))
     }
 
     /// New Tab goes in the workspace the Tabs sheet shows.

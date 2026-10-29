@@ -108,6 +108,8 @@ final class HerdrScreenModel {
         let goesTo: (tabID: String?, name: String)?
         /// The engine's request that takes the session there, once the engine has the move.
         var request: UInt64?
+        /// The pane a creation made, once Herdr's answer names it, whose tab the move goes to.
+        var made: String?
     }
 
     /// One connection to the server, from opening its bridge to its end. A reconnect replaces it, and
@@ -1889,8 +1891,9 @@ final class HerdrScreenModel {
             // since it was overtaken, its pane closed or its focus failed.
             if attempt.move?.request == request { moveEnded(on: attempt) }
             acknowledgeShownAgents()
-        case .answered(_, let step, let failure, let connection):
+        case .answered(let request, let step, let failure, let made, let connection):
             guard let attempt, attempt.id == connection, isCurrent(attempt) else { return }
+            if let made, attempt.move?.request == request { attempt.move?.made = made }
             answered(step, failure: failure)
         case .zoomAnswered(let zoom, let bootID, let failure, let reportsFailure, let connection):
             guard let attempt, attempt.id == connection, isCurrent(attempt) else { return }
@@ -2095,7 +2098,16 @@ final class HerdrScreenModel {
         presentationFailures = presentationFailures.filter { shown.contains($0.key) }
         pointers = pointers.filter { shown.contains($0.key) }
         wheelRemainders = wheelRemainders.filter { shown.contains($0.key) }
-        if let gesture = mouseGesture, !shown.contains(gesture.paneID) { mouseGesture = nil }
+        // A button held in a pane that leaves the screen is released there now, since the screen has no way left to
+        // send the touch's end to it: Herdr takes a release whatever tab it shows (`server/headless.rs`
+        // `client_pane_input_releases_press`), as Herdr's client releases what it holds once its input
+        // context is gone (`client/shell/input.rs` `release_input_leases`). A later release finds no press.
+        if let gesture = mouseGesture, !shown.contains(gesture.paneID) {
+            mouseGesture = nil
+            if let attempt = shownAttempt {
+                _ = send([mouseEvent(.up(gesture.button), at: gesture.cell, mods: [])], to: (attempt, gesture.paneID))
+            }
+        }
         for (paneID, staged) in stagedSurfaces {
             if let left = surfaces.updateValue(staged, forKey: paneID) { retiredSurfaces.append(left) }
             applyScroll(toPane: paneID)
@@ -2316,7 +2328,9 @@ final class HerdrScreenModel {
         let shownTab = layout?.tab?.tabID
         if let attempt, isCurrent(attempt), let move = attempt.move, let target = move.goesTo {
             guard target.tabID == nil || target.tabID != shownTab else { return nil }
-            return (target.tabID, target.tabID.flatMap(switchName(ofTab:)) ?? target.name)
+            // A new tab or workspace is known by its pane's tab once a snapshot lists the pane Herdr made.
+            let made = move.made.flatMap { made in snapshot?.panes.first { $0.paneID == made }?.tabID }
+            return (target.tabID ?? made, target.tabID.flatMap(switchName(ofTab:)) ?? target.name)
         }
         guard let tab = pendingFrame?.layout.tab, tab.tabID != shownTab else { return nil }
         return (tab.tabID, switchName(ofTab: tab.tabID) ?? tab.label)
@@ -2332,6 +2346,12 @@ final class HerdrScreenModel {
     /// The tab a switch under way goes to, which the next tab over is counted from.
     var switchingTabID: String? {
         switchTarget?.tabID
+    }
+
+    /// Whether the screen is going to another tab than the one it shows, known by its id or not yet, as a new
+    /// tab before Herdr's answer names it.
+    var isSwitching: Bool {
+        switchTarget != nil
     }
 
     /// The name of the tab the screen says it is switching to: only once the switch has taken longer than
