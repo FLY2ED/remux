@@ -1,5 +1,6 @@
 import Combine
 import GhosttyKit
+import SwiftUI
 import UIKit
 import XCTest
 @testable import Remux
@@ -407,6 +408,144 @@ final class HerdrPopupTests: XCTestCase {
         try await harness.waitUntil("the popup didn't take its new grid") { harness.model.popup.surface?.grid == grid }
         XCTAssertEqual(managed.scrollState.total, UInt64(grid.rows))
         XCTAssertEqual(managed.scrollState.len, UInt64(grid.rows))
+    }
+
+    // MARK: - Selection
+
+    /// Herdr can't read a popup's text, as its API knows only a workspace's panes (`app/ids.rs` `find_pane`),
+    /// so the popup's selection is read from the phone's terminal, which shows what the popup does.
+    func testThePopupsSelectionIsReadFromItsTerminal() async throws {
+        let harness = await makeHarness()
+        let (session, attach, cell) = try await attachedPopup(harness)
+        let adapter = harness.model.terminalScreenAdapter
+        let target = try XCTUnwrap(popup(harness)?.id)
+        await attach.serve(DirectServer.frame(2, try Self.grid(harness), "hello world"))
+        let managed = try XCTUnwrap(harness.model.popup.surface?.renderer.managedSurface)
+        let word = CGPoint(x: 1.5 * cell.pointWidth, y: 0.5 * cell.pointHeight)
+        try await harness.waitUntil("the popup's word wasn't selected") {
+            _ = managed.selectWord(at: word)
+            return managed.controlSurface.readSelection() == "hello"
+        }
+        let commands = await session.bridge.writtenCount
+
+        let text = await adapter.selectedText(in: target)
+        XCTAssertEqual(text, "hello")
+        try await Task.sleep(for: .milliseconds(100))
+        let written = await session.bridge.writtenCount
+        XCTAssertEqual(written, commands, "the popup's selection was asked of Herdr")
+    }
+
+    /// A popup's selection ends when its width changes, as a pane's does: Herdr redraws the popup at the new
+    /// width, and its lines move. The screen is told, so it lets the selection's handles go.
+    func testThePopupsSelectionEndsWhenItsWidthChanges() async throws {
+        let narrower = try HerdrModelHarness.screenSize(columns: 40, rows: 47)
+        let harness = await makeHarness()
+        let (_, attach, cell) = try await attachedPopup(harness)
+        await attach.serve(DirectServer.frame(2, try Self.grid(harness), "hello world"))
+        let managed = try XCTUnwrap(harness.model.popup.surface?.renderer.managedSurface)
+        let word = CGPoint(x: 1.5 * cell.pointWidth, y: 0.5 * cell.pointHeight)
+        try await harness.waitUntil("the popup's word wasn't selected") {
+            _ = managed.selectWord(at: word)
+            return managed.controlSurface.readSelection() == "hello"
+        }
+        var told = false
+        managed.onLocalSelectionGeometryChange = { told = true }
+
+        let before = await attach.writtenCount
+        harness.model.prepareViewport(size: narrower, scale: 3)
+        let grid = try Self.grid(harness)
+        try await harness.waitUntil("the popup wasn't resized") {
+            var messages: [DirectClient] = []
+            for write in before..<(await attach.writtenCount) {
+                messages += (try? await DirectClient.messages(attach, at: write)) ?? []
+            }
+            return messages.contains { if case .resize(grid.columns, grid.rows, _, _) = $0 { true } else { false } }
+        }
+        await attach.serve(DirectServer.frame(3, grid, "hello world"))
+        try await harness.waitUntil("the popup didn't take its new grid") { harness.model.popup.surface?.grid == grid }
+        XCTAssertTrue(told, "the screen kept the selection's handles")
+        XCTAssertNil(managed.historySelection.map { _ in "kept" } ?? managed.controlSurface.readSelection(), "the selection outlived the width")
+    }
+
+    /// The popup's terminal is one of the terminal area's surfaces, as a pane's is, so a touch and a selection
+    /// on it work as on a pane: the popup takes the area, in front of the panes and behind the selection's
+    /// handles, which show over its frame.
+    func testThePopupsTerminalIsOneOfTheTerminalAreasSurfaces() async throws {
+        let harness = await makeHarness()
+        _ = try await attachedPopup(harness)
+        let host = try await showTerminalArea(harness)
+        let area = try XCTUnwrap(Self.descendant(of: host.view, named: "GhosttyCompositeViewportContainerView"))
+        let managed = try XCTUnwrap(harness.model.popup.surface?.renderer.managedSurface)
+        XCTAssertTrue(managed.view.isDescendant(of: area), "the popup's terminal isn't one of the area's")
+
+        let layers = area.subviews.map { String(describing: type(of: $0)) }
+        let popup = try XCTUnwrap(layers.firstIndex(of: "GhosttyTerminalPopupFrameView"), "the popup isn't in the area: \(layers)")
+        XCTAssertEqual(area.subviews[popup].frame, area.bounds)
+        let panes = layers.indices.filter { layers[$0] == "GhosttyPaneScrollContainerView" }
+        XCTAssertEqual(panes.count, 2, "\(layers)")
+        XCTAssertTrue(panes.allSatisfy { $0 < popup }, "a pane is in front of the popup: \(layers)")
+        let handles = layers.indices.filter { layers[$0] == "GhosttySelectionHandleView" }
+        XCTAssertEqual(handles.count, 2, "\(layers)")
+        XCTAssertTrue(handles.allSatisfy { $0 > popup }, "the popup hides the selection's handles: \(layers)")
+    }
+
+    /// A selection on the popup's terminal has its handles, and they go when the popup closes, as a pane's go
+    /// with the pane.
+    func testThePopupsSelectionEndsWhenThePopupCloses() async throws {
+        let harness = await makeHarness()
+        let (session, attach, cell) = try await attachedPopup(harness)
+        let host = try await showTerminalArea(harness)
+        let handles = try selectionHandles(host)
+        try await selectHello(harness, attach, cell: cell, host: host)
+        XCTAssertTrue(handles.allSatisfy { !$0.isHidden }, "the popup's selection has no handles")
+
+        await attach.serve(DirectServer.shutdown("terminal attach ended: terminal \(Self.popupID) not found"))
+        await session.bridge.serve(try harness.shownSurface(projection: 1, revision: 9, lines: ["one two"], panes: Self.panes))
+        try await harness.waitUntil("the popup stayed after it closed") { self.popup(harness) == nil }
+        try await updateTerminalArea(host, harness)
+        XCTAssertTrue(handles.allSatisfy(\.isHidden), "the closed popup's selection kept its handles")
+    }
+
+    /// A popup that replaces the one selected on ends its selection: the handles were on the other's text.
+    func testThePopupsSelectionEndsWhenAnotherPopupReplacesIt() async throws {
+        let harness = await makeHarness()
+        let (session, attach, cell) = try await attachedPopup(harness)
+        let host = try await showTerminalArea(harness)
+        let handles = try selectionHandles(host)
+        try await selectHello(harness, attach, cell: cell, host: host)
+        XCTAssertTrue(handles.allSatisfy { !$0.isHidden }, "the popup's selection has no handles")
+
+        await session.bridge.serve(popupSurface(revision: 9, terminalID: "another-popup"))
+        try await harness.waitUntil("the popup wasn't replaced") { harness.model.layout?.popup?.terminalID == "another-popup" }
+        try await updateTerminalArea(host, harness)
+        XCTAssertTrue(handles.allSatisfy(\.isHidden), "the replaced popup's selection kept its handles")
+    }
+
+    /// Opening a popup over a pane's selection hides that selection's handles under it; they come back with
+    /// the pane once the popup closes.
+    func testAPanesSelectionWaitsUnderThePopup() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        let host = try await showTerminalArea(harness)
+        let handles = try selectionHandles(host)
+        let pane = try XCTUnwrap(harness.model.paneSurface("w1:p1")?.renderer.managedSurface)
+        let cell = try XCTUnwrap(harness.model.measurement?.cellMetrics)
+        try await harness.waitUntil("the pane's word wasn't selected") {
+            _ = pane.selectWord(at: CGPoint(x: 1.5 * cell.pointWidth, y: 0.5 * cell.pointHeight))
+            return pane.controlSurface.readSelection() == "one"
+        }
+        try await updateTerminalArea(host, harness)
+        XCTAssertTrue(handles.allSatisfy { !$0.isHidden }, "the pane's selection has no handles")
+
+        await session.bridge.serve(popupSurface(revision: 3))
+        try await harness.waitUntil("the popup wasn't laid out") { self.popup(harness) != nil }
+        try await updateTerminalArea(host, harness)
+        XCTAssertTrue(handles.allSatisfy(\.isHidden), "the pane's handles showed over the popup")
+
+        await session.bridge.serve(try harness.shownSurface(projection: 1, revision: 9, lines: ["one two"], panes: Self.panes))
+        try await harness.waitUntil("the popup stayed after it closed") { self.popup(harness) == nil }
+        try await updateTerminalArea(host, harness)
+        XCTAssertTrue(handles.allSatisfy { !$0.isHidden }, "the pane's selection didn't come back with the pane")
     }
 
     // MARK: - A surface too small for Herdr to box the popup
@@ -911,6 +1050,24 @@ final class HerdrPopupTests: XCTestCase {
         XCTAssertEqual(paneID, "w1:p2")
     }
 
+    /// A swipe on the terminal area switches tabs only without a popup, which takes every touch there.
+    func testASwipeSwitchesTabsOnlyWithoutAPopup() {
+        var projection = GhosttyTerminalViewportPresentationProjection(
+            windowGrid: nil,
+            cellMetrics: nil,
+            panes: [],
+            paneLines: [],
+            focusedSurfaceID: nil,
+            isServerZoomed: false,
+            windowCount: 2
+        )
+        XCTAssertTrue(projection.canNavigateWindows)
+        projection.popup = GhosttyTerminalViewportPresentationProjection.Popup(
+            id: UUID(), title: "popup", tabLabel: nil, border: [], titleInk: .separator, tabInk: .separator, grid: nil, cell: nil
+        )
+        XCTAssertFalse(projection.canNavigateWindows, "a swipe on the popup switches tabs")
+    }
+
     /// A new title for the same popup is shown at once.
     /// The frame names the tab it is over as the user named it, else "tab" and its number, as Herdr's own
     /// name for a tab is its number; a rename shows while the popup is on screen.
@@ -1127,6 +1284,22 @@ final class HerdrPopupTests: XCTestCase {
         XCTAssertEqual(("0" as NSString).size(withAttributes: [.font: font]).width, cell.pointWidth, accuracy: 0.01)
     }
 
+    /// The title and the tab share the top line, a cell at least between them: both as they are when they
+    /// fit; when they don't, the shorter as it is up to half the room, and the other cut short in the rest.
+    func testTheTitleAndTheTabShareTheTopLine() {
+        for (title, tab, widths) in [
+            (CGFloat(40), CGFloat(30), (CGFloat(40), CGFloat(30))),
+            (80, 20, (72, 20)),
+            (20, 80, (20, 72)),
+            (60, 60, (46, 46)),
+            (120, 0, (92, 0)),
+        ] {
+            let laid = GhosttyTerminalPopupFrameView.labelWidths(title: title, tab: tab, line: 100, gap: 8)
+            XCTAssertEqual(laid.title, widths.0, "title \(title) and tab \(tab)")
+            XCTAssertEqual(laid.tab, widths.1, "title \(title) and tab \(tab)")
+        }
+    }
+
     /// Herdr's colours stay readable on the phone's terminal, whose theme Herdr doesn't draw for: a line at
     /// 3:1 and text at 4.5:1 against the background, mixed toward the foreground only as far as that takes,
     /// so Herdr's dark accent reads on a light terminal and is left as it is on a dark one. The tab's label
@@ -1318,6 +1491,85 @@ final class HerdrPopupTests: XCTestCase {
         windows.append(window)
         try await harness.waitUntil("input wasn't offered") { harness.model.isInputAvailable }
         return (bridge, index)
+    }
+
+    /// The terminal area as the screen shows it, of the adapter's projection and surfaces, in a window of the
+    /// tests' screen.
+    private func showTerminalArea(_ harness: HerdrModelHarness) async throws -> UIHostingController<GhosttyCompositeViewportView> {
+        let host = UIHostingController(rootView: terminalArea(harness))
+        host.safeAreaRegions = []
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = host
+        window.isHidden = false
+        windows.append(window)
+        host.view.frame = window.bounds
+        try await settle(host)
+        return host
+    }
+
+    /// Hands the area the adapter's projection now, as the screen does on its next update.
+    private func updateTerminalArea(_ host: UIHostingController<GhosttyCompositeViewportView>, _ harness: HerdrModelHarness) async throws {
+        host.rootView = terminalArea(harness)
+        try await settle(host)
+    }
+
+    /// SwiftUI hands a new root view to its views from the main queue, which runs while the test waits.
+    private func settle(_ host: UIViewController) async throws {
+        try await Task.sleep(for: .milliseconds(100))
+        host.view.layoutIfNeeded()
+    }
+
+    private func terminalArea(_ harness: HerdrModelHarness) -> GhosttyCompositeViewportView {
+        let adapter = harness.model.terminalScreenAdapter
+        return GhosttyCompositeViewportView(
+            surfaceLookup: adapter.terminalManagedSurfaceLookup,
+            projection: adapter.terminalScreenPresentationProjection.viewport,
+            terminalTheme: TerminalTheme.allCases[0],
+            trackpadDriver: GhosttyKeyboardCursorTrackpadDriver(),
+            onSurfaceTap: nil,
+            onPreviewSelection: nil,
+            onWindowSwipe: nil,
+            sendKeyEventToSurface: { _, _ in false },
+            onTrackpadFeedbackChange: { _ in },
+            isMouseCaptured: { _ in false },
+            submitMouseButton: nil,
+            submitMousePosition: nil,
+            submitMouseScroll: nil,
+            selectionSource: nil
+        )
+    }
+
+    private func selectionHandles(_ host: UIViewController) throws -> [UIView] {
+        let area = try XCTUnwrap(Self.descendant(of: host.view, named: "GhosttyCompositeViewportContainerView"))
+        let handles = area.subviews.filter { String(describing: type(of: $0)) == "GhosttySelectionHandleView" }
+        XCTAssertEqual(handles.count, 2)
+        return handles
+    }
+
+    /// Selects "hello" on the popup's terminal, which the area then shows.
+    private func selectHello(
+        _ harness: HerdrModelHarness,
+        _ attach: FakeBridgeTransport,
+        cell: GhosttyTerminalCellDisplayMetrics,
+        host: UIHostingController<GhosttyCompositeViewportView>
+    ) async throws {
+        await attach.serve(DirectServer.frame(2, try Self.grid(harness), "hello world"))
+        let managed = try XCTUnwrap(harness.model.popup.surface?.renderer.managedSurface)
+        let word = CGPoint(x: 1.5 * cell.pointWidth, y: 0.5 * cell.pointHeight)
+        try await harness.waitUntil("the popup's word wasn't selected") {
+            _ = managed.selectWord(at: word)
+            return managed.controlSurface.readSelection() == "hello"
+        }
+        try await updateTerminalArea(host, harness)
+    }
+
+    /// The first view under `root`, depth first, whose class is named `name`.
+    private static func descendant(of root: UIView, named name: String) -> UIView? {
+        for view in root.subviews {
+            if String(describing: type(of: view)) == name { return view }
+            if let found = descendant(of: view, named: name) { return found }
+        }
+        return nil
     }
 
     private func show(_ view: UIView) {

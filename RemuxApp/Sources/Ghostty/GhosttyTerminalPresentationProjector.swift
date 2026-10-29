@@ -557,8 +557,9 @@ struct GhosttyTerminalViewportPresentationProjection: Equatable {
     let windowCount: Int
     var popup: Popup? = nil
 
+    /// A swipe switches tabs, except under a popup, which takes every touch on the terminal area.
     var canNavigateWindows: Bool {
-        windowCount > 1
+        windowCount > 1 && popup == nil
     }
 }
 
