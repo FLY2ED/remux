@@ -218,7 +218,7 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
                 return GhosttyTerminalViewportPresentationProjection.Popup(
                     id: surfaceID(forPopup: popup.terminalID),
                     title: popup.title,
-                    tabLabel: layout.tab.map { model.popupTabName(ofTab: $0.tabID) ?? $0.label },
+                    tabLabel: layout.tab.map { model.tabName(ofTab: $0.tabID) ?? $0.label },
                     border: Self.popupBorder(columns: layout.columns, rows: layout.rows, accent: model.popupAccent, colors: colors),
                     titleInk: Self.ink(model.popupAccent, colors: colors, minimumContrast: GhosttyTerminalColors.MinimumContrast.text),
                     tabInk: colors.map { Self.ink($0.secondaryText) } ?? .separator,

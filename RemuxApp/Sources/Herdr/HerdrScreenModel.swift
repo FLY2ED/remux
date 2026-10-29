@@ -1011,13 +1011,6 @@ final class HerdrScreenModel {
         popup.presentation
     }
 
-    /// What the popup's frame calls the tab it is over, as the newest snapshot has it: the user's name for
-    /// it, else "tab" and its number, as the toolbar counts tabs; Herdr's own name for a tab is its number.
-    func popupTabName(ofTab tabID: String) -> String? {
-        guard let tab = snapshot?.tabs.first(where: { $0.tabID == tabID }) else { return nil }
-        return tab.customLabel ? tab.label : "tab \(tab.number)"
-    }
-
     /// Where the pointer is over the popup, in its terminal's points: the place of a scroll gesture.
     func movePopupPointer(to point: CGPoint) {
         popupPointer = point
@@ -1163,13 +1156,13 @@ final class HerdrScreenModel {
             let reached = tab(reachedBy: place)
             fromAnotherTab = reached.map { $0 != herdrTab } == true
             if case .pane(let id) = place { pane = id }
-            goesTo = reached.map { ($0.tabID, switchName(ofTab: $0.tabID) ?? $0.tabID) }
+            goesTo = reached.map { ($0.tabID, tabName(ofTab: $0.tabID) ?? $0.tabID) }
         case .creation(.tab):
             goesTo = (nil, Self.newTabName)
         case .creation(.workspace):
             goesTo = (nil, Self.newWorkspaceName)
         case .creation(let split):
-            goesTo = split.tabPlace.flatMap(tab(reachedBy:)).map { ($0.tabID, switchName(ofTab: $0.tabID) ?? $0.tabID) }
+            goesTo = split.tabPlace.flatMap(tab(reachedBy:)).map { ($0.tabID, tabName(ofTab: $0.tabID) ?? $0.tabID) }
         case .closing:
             break
         }
@@ -2501,15 +2494,16 @@ final class HerdrScreenModel {
             guard target.tabID == nil || target.tabID != shownTab else { return nil }
             // A new tab or workspace is known by its pane's tab once a snapshot lists the pane Herdr made.
             let made = move.made.flatMap { made in snapshot?.panes.first { $0.paneID == made }?.tabID }
-            return (target.tabID ?? made, target.tabID.flatMap(switchName(ofTab:)) ?? target.name)
+            return (target.tabID ?? made, target.tabID.flatMap(tabName(ofTab:)) ?? target.name)
         }
         guard let tab = pendingFrame?.layout.tab, tab.tabID != shownTab else { return nil }
-        return (tab.tabID, switchName(ofTab: tab.tabID) ?? tab.label)
+        return (tab.tabID, tabName(ofTab: tab.tabID) ?? tab.label)
     }
 
-    /// What the switching cue calls a tab, as the newest snapshot has it: the user's name for it, else "tab"
-    /// and its number, as the toolbar counts tabs; Herdr's own name for a tab is its number.
-    private func switchName(ofTab tabID: String) -> String? {
+    /// What the screen calls a tab, in the switching cue and the popup's frame, as the newest snapshot has it:
+    /// the user's name for it, else "tab" and its number, as the toolbar counts tabs; Herdr's own name for a
+    /// tab is its number.
+    func tabName(ofTab tabID: String) -> String? {
         guard let tab = snapshot?.tabs.first(where: { $0.tabID == tabID }) else { return nil }
         return tab.customLabel ? tab.label : "tab \(tab.number)"
     }
