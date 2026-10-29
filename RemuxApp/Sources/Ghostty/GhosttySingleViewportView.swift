@@ -116,6 +116,8 @@ private final class GhosttyCompositeViewportContainerView: UIView,
     private var containersBySurfaceID: [UUID: GhosttyPaneScrollContainerView] = [:]
     /// The panes' lines, behind the panes.
     private let linesView = GhosttyPaneLinesUIView()
+    /// The backend's popup, in front of the panes while it shows, and behind the selection's handles.
+    private let popupView = GhosttyTerminalPopupFrameView()
     private var focusedSeparatorColor = UIColor.clear
     private var separatorColor = UIColor.clear
     private var trackpadDriver: GhosttyKeyboardCursorTrackpadDriver?
@@ -286,9 +288,9 @@ private final class GhosttyCompositeViewportContainerView: UIView,
             retire(container: container)
         }
         containersBySurfaceID.removeAll()
+        retirePopup()
         surfaceLookup = .empty
         projection = .empty
-
     }
 
     private func disableInteractions() {
@@ -357,6 +359,7 @@ private final class GhosttyCompositeViewportContainerView: UIView,
                 addSubview(container)
             }
         }
+        syncPopup()
         bringSubviewToFront(startSelectionHandle)
         bringSubviewToFront(endSelectionHandle)
     }
@@ -364,6 +367,31 @@ private final class GhosttyCompositeViewportContainerView: UIView,
     private func retire(container: GhosttyPaneScrollContainerView) {
         container.detachCurrentSurfaceForRemoval()
         container.removeFromSuperview()
+    }
+
+    /// The backend's popup covers the panes and takes every touch on the terminal area, as Herdr's client
+    /// gives a popup every click. Its terminal is a surface as a pane's is, so a touch and a selection on it
+    /// work as on a pane.
+    private func syncPopup() {
+        guard let popup = projection.popup else {
+            retirePopup()
+            return
+        }
+        popupView.show(
+            popup,
+            surface: surfaceLookup.managedSurface(for: popup.id),
+            displayScale: paneDisplayScale,
+            submitScroll: submitMouseScroll,
+            submitPointer: submitMousePosition
+        )
+        if popupView.superview !== self { addSubview(popupView) }
+        bringSubviewToFront(popupView)
+    }
+
+    private func retirePopup() {
+        guard popupView.superview != nil else { return }
+        popupView.dismantle()
+        popupView.removeFromSuperview()
     }
 
     private func layoutVisibleSurfaces() {
@@ -380,6 +408,7 @@ private final class GhosttyCompositeViewportContainerView: UIView,
               )
         else {
             linesView.update(lines: [], layout: nil, inks: inks)
+            UIView.performWithoutAnimation { placePopup(on: nil) }
             return
         }
         var changed = false
@@ -401,12 +430,25 @@ private final class GhosttyCompositeViewportContainerView: UIView,
                 container.layoutIfNeeded()
                 changed = true
             }
+            placePopup(on: layout)
         }
         if let startedAt {
             GhosttyRuntimeTrace.perf(
                 "viewport.layout bounds=\(ghosttyDiagnosticRect(bounds)) panes=\(containersBySurfaceID.count) changed=\(changed) elapsed_ms=\(GhosttyRuntimeTrace.elapsedMilliseconds(from: startedAt))"
             )
         }
+    }
+
+    private func placePopup(on layout: GhosttyCompositeViewportLayout?) {
+        guard popupView.superview === self else { return }
+        popupView.frame = bounds
+        // A popup's frame draws the focus ink as the separator.
+        popupView.place(
+            on: layout,
+            windowGrid: projection.windowGrid,
+            inks: GhosttyPaneLinesUIView.Inks(separator: separatorColor, focus: separatorColor),
+            background: backgroundColor ?? .clear
+        )
     }
 
     private func flushLayoutIfPossible() {
@@ -547,11 +589,15 @@ private final class GhosttyCompositeViewportContainerView: UIView,
 
     @objc
     private func handleSurfaceTap(_ recognizer: UITapGestureRecognizer) {
-        guard recognizer.state == .ended,
-              let (surfaceID, surface, container) = visibleSurface(
-                  at: recognizer.location(in: self)
-              )
-        else { return }
+        guard recognizer.state == .ended else { return }
+        let point = recognizer.location(in: self)
+        guard let (surfaceID, surface, container) = visibleSurface(at: point) else {
+            // The popup takes the input from a tap on its cells before its terminal draws there.
+            if let popup = projection.popup, popupView.terminalContains(convert(point, to: popupView)) {
+                onSurfaceTap?(popup.id, true)
+            }
+            return
+        }
 
         if selectionSnapshot.isActive,
            let (selectionSurface, _) = exactLocalSelectionSurface() {
@@ -563,7 +609,8 @@ private final class GhosttyCompositeViewportContainerView: UIView,
         let visiblePaneCount = projection.panes.lazy.filter {
             $0.visibleFrame != nil
         }.count
-        let shouldShowKeyboard = visiblePaneCount == 1
+        let shouldShowKeyboard = surfaceID == projection.popup?.id
+            || visiblePaneCount == 1
             || projection.focusedSurfaceID == surfaceID
         let mouseCaptured = isMouseCaptured(surfaceID)
         if shouldShowKeyboard, container.consumeMomentumCatchTap() == true {
@@ -652,10 +699,7 @@ private final class GhosttyCompositeViewportContainerView: UIView,
 
     private func projectedLocalSelectionSurface() -> GhosttyManagedSurface? {
         guard let recordedSurface = localSelectionSurface,
-              projection.panes.contains(where: {
-                  $0.id == recordedSurface.id && $0.visibleFrame != nil
-              }),
-              containersBySurfaceID[recordedSurface.id] != nil,
+              shownContainer(for: recordedSurface.id) != nil,
               surfaceLookup.managedSurface(for: recordedSurface.id) === recordedSurface,
               recordedSurface.view.isDescendant(of: self)
         else { return nil }
@@ -689,8 +733,8 @@ private final class GhosttyCompositeViewportContainerView: UIView,
 
     private func restoreLocalSelectionIfPresent() {
         guard localSelectionSurface == nil,
-              let surfaceID = projection.focusedSurfaceID,
-              containersBySurfaceID[surfaceID] != nil,
+              let surfaceID = projection.popup?.id ?? projection.focusedSurfaceID,
+              shownContainer(for: surfaceID) != nil,
               let surface = surfaceLookup.managedSurface(for: surfaceID),
               surface.view.isDescendant(of: self),
               case .snapshot(let snapshot) = surface.selectionSnapshot(),
@@ -834,15 +878,35 @@ private final class GhosttyCompositeViewportContainerView: UIView,
 
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         guard gestureRecognizer === panRecognizer else { return true }
-        return GhosttySurfacePanGesture.surfaceContainerPanShouldBegin(
+        return projection.canNavigateWindows && GhosttySurfacePanGesture.surfaceContainerPanShouldBegin(
             topLevelCount: projection.windowCount,
             velocity: panRecognizer.velocity(in: self)
         )
     }
 
+    /// The container showing `surfaceID`'s terminal: while the backend shows a popup, only the popup's, which
+    /// covers the panes.
+    private func shownContainer(for surfaceID: UUID) -> GhosttyPaneScrollContainerView? {
+        if let popup = projection.popup {
+            guard popup.id == surfaceID, popupView.surface?.id == surfaceID else { return nil }
+            return popupView.terminal
+        }
+        guard projection.panes.contains(where: { $0.id == surfaceID && $0.visibleFrame != nil }) else { return nil }
+        return containersBySurfaceID[surfaceID]
+    }
+
+    /// The surface a touch at `point` reaches: while the backend shows a popup, only the popup's, on its cells.
     private func visibleSurface(
         at point: CGPoint
     ) -> (UUID, GhosttyManagedSurface, GhosttyPaneScrollContainerView)? {
+        if let popup = projection.popup {
+            guard popupView.terminalContains(convert(point, to: popupView)),
+                  let container = shownContainer(for: popup.id),
+                  let surface = surfaceLookup.managedSurface(for: popup.id),
+                  surface.rendererIsAvailable
+            else { return nil }
+            return (popup.id, surface, container)
+        }
         for pane in projection.panes.reversed() where pane.visibleFrame != nil {
             guard let container = containersBySurfaceID[pane.id],
                   container.frame.contains(point),
@@ -965,6 +1029,17 @@ final class GhosttyPaneLinesUIView: UIView {
     struct Inks: Equatable {
         var separator: UIColor
         var focus: UIColor
+
+        func color(of ink: GhosttyPaneLine.Ink) -> UIColor {
+            switch ink {
+            case .separator:
+                separator
+            case .focus:
+                focus
+            case .color(let red, let green, let blue):
+                UIColor(red: CGFloat(red) / 255, green: CGFloat(green) / 255, blue: CGFloat(blue) / 255, alpha: 1)
+            }
+        }
     }
 
     private var lines: [GhosttyPaneLine] = []
@@ -1006,14 +1081,7 @@ final class GhosttyPaneLinesUIView: UIView {
         // The lines are laid out from the area's origin; the view sits at the canvas's.
         context.translateBy(x: -layout.origin.x, y: -layout.origin.y)
         GhosttyPaneLine.draw(lines, in: context, layout: layout, scale: paneDisplayScale) { ink in
-            switch ink {
-            case .separator:
-                inks.separator.cgColor
-            case .focus:
-                inks.focus.cgColor
-            case .color(let red, let green, let blue):
-                UIColor(red: CGFloat(red) / 255, green: CGFloat(green) / 255, blue: CGFloat(blue) / 255, alpha: 1).cgColor
-            }
+            inks.color(of: ink).cgColor
         }
     }
 }

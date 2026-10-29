@@ -480,8 +480,14 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         return model.scroll(event, inPane: paneID) ? .sent : .surfaceRejected
     }
 
-    /// Herdr keeps the pane's history and knows where its lines wrap, so it reads the selection.
+    /// Herdr keeps a pane's history and knows where its lines wrap, so it reads a pane's selection. It can't
+    /// read a popup's, as its API knows only a workspace's panes (`app/ids.rs` `find_pane`), so a popup's is
+    /// read from the phone's terminal, which shows the popup's screen. Herdr paints a popup's rows one by one
+    /// (`protocol/render_ansi.rs`), so a line longer than the popup copies as its rows.
     func selectedText(in surfaceID: UUID) async -> String? {
+        if popupTerminalID(for: surfaceID) != nil {
+            return managedSurface(for: surfaceID)?.controlSurface.readSelection()
+        }
         guard let model, let paneID = paneID(for: surfaceID),
               let selection = managedSurface(for: surfaceID)?.historySelection
         else { return nil }
