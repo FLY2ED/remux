@@ -2550,6 +2550,58 @@ final class HerdrScreenModelTests: XCTestCase {
         await stopping.value
     }
 
+    /// Ending the session gives each step of taking Remux's zooms off Herdr's time for a show, from Herdr's
+    /// answer before it, so a session with zooms on many tabs ends with all of them off over a slow link,
+    /// however long that takes in all.
+    func testEndingTheSessionGivesEachUnzoomStepHerdrsTimeForAShow() async throws {
+        var timing = HerdrConnection.Timing()
+        timing.activation = .seconds(1)
+        let slowAnswer: Duration = .milliseconds(400)
+        let harness = await makeHarness(settings: Self.zooming, timing: timing)
+        let session = try await shownTab(harness, zoomingOnShow: true, secondTab: Self.secondTab)
+        var index = session.next
+
+        harness.model.reveal(.pane("w1:p3"), bootID: "boot")
+        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        await session.bridge.serve(
+            HerdrServerScript.zoomReply(id: zoom.id, changed: true, zoomed: true, tab: "t2", panes: Self.secondTabPlaces)
+        )
+        await session.bridge.serve(Self.secondTabOnScreen(revision: 3, zoomed: true, firstTabZoomed: true))
+        let focus = try await nextWrite(session.bridge, from: &index, paneFocus)
+        await session.bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
+        try await Task.sleep(for: .milliseconds(100))
+
+        let started = ContinuousClock.now
+        let stopping = Task { await harness.model.stop() }
+        let left = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(left.params, ["tab_id": "t1"])
+        try await Task.sleep(for: slowAnswer)
+        await session.bridge.serve(HerdrConnectionTests.reply(id: left.id, json: #"{"type":"ok"}"#))
+        await session.bridge.serve(HerdrServerScript.snapshot(
+            revision: 4, zoomed: true, otherTabs: ["t2"], zoomedOtherTabs: ["t2"], panes: Self.bothTabsPanes
+        ))
+        let firstUnzoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        try await Task.sleep(for: slowAnswer)
+        await session.bridge.serve(HerdrServerScript.zoomReply(id: firstUnzoom.id, changed: true, zoomed: false, panes: Self.places(2)))
+        await session.bridge.serve(HerdrServerScript.snapshot(
+            revision: 5, otherTabs: ["t2"], zoomedOtherTabs: ["t2"], panes: Self.bothTabsPanes
+        ))
+        let back = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(back.params, ["tab_id": "t2"])
+        try await Task.sleep(for: slowAnswer)
+        await session.bridge.serve(HerdrConnectionTests.reply(id: back.id, json: #"{"type":"ok"}"#))
+        await session.bridge.serve(Self.secondTabOnScreen(revision: 6, zoomed: true))
+        let secondUnzoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        try await Task.sleep(for: slowAnswer)
+        let closedEarly = await session.bridge.isClosed
+        XCTAssertFalse(closedEarly, "the end closed the connection with each step in time")
+        await session.bridge.serve(
+            HerdrServerScript.zoomReply(id: secondUnzoom.id, changed: true, zoomed: false, tab: "t2", panes: Self.secondTabPlaces)
+        )
+        await stopping.value
+        XCTAssertGreaterThan(ContinuousClock.now - started, timing.activation)
+    }
+
     /// A notification tapped while the session is hidden shows it and takes it to the pane's tab as part
     /// of the show: the show doesn't zoom the tab it leaves; the setting's zoom of the pane's tab takes the
     /// session there, then the pane is focused.

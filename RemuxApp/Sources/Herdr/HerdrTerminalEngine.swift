@@ -196,10 +196,10 @@ struct HerdrEngineFeed: Sendable {
         await engine.enqueue(Self.zoom(pane, zoomed: true, purpose: .layout(pane: pane)), connection: connection)
     }
 
-    /// Remux's zooms off as the session ends, before the connection closes, if Herdr can take them at once;
-    /// `done` once the last is answered, or at once when none goes (`HerdrTerminalEngine.releaseZooms`).
-    func releaseZooms(done: @escaping @Sendable () -> Void) async {
-        await engine.releaseZooms(done: done, connection: connection)
+    /// Remux's zooms off as the session ends, before the connection closes, each step within `stepTime`;
+    /// `done` once the last is answered, or once none can go (`HerdrTerminalEngine.releaseZooms`).
+    func releaseZooms(within stepTime: Duration, done: @escaping @Sendable () -> Void) async {
+        await engine.releaseZooms(within: stepTime, done: done, connection: connection)
     }
 
     func resize(columns: UInt16, rows: UInt16) async {
@@ -799,10 +799,10 @@ actor HerdrTerminalEngine {
     ///
     /// Returns the request that takes the session where `view` asks: the one it starts or, for a move to
     /// where the request in progress already goes, that one; nil when none does, as for a hide or a move to
-    /// where Herdr has the session.
+    /// where Herdr has the session. None starts once the session's end takes Remux's zooms off.
     @discardableResult
     fileprivate func start(_ view: HerdrView, within deadline: Duration, connection: UInt64) -> UInt64? {
-        guard state == .running, connection == self.connection, let outbox else { return nil }
+        guard state == .running, connection == self.connection, let outbox, release == nil else { return nil }
         let snapshot = presentation.snapshot
         switch view {
         case .hidden:
@@ -1052,9 +1052,11 @@ actor HerdrTerminalEngine {
 
     // MARK: - Commands
 
-    /// A command for the lane, which goes in the lane's order.
+    /// A command for the lane, which goes in the lane's order; none goes once the session's end takes
+    /// Remux's zooms off.
     fileprivate func enqueue(_ command: HerdrCommandLane.Command, connection: UInt64) {
         guard state == .running, connection == self.connection else { return fail(command, .connectionEnded) }
+        guard release == nil else { return fail(command, .notSent) }
         lane.append(command)
         dispatch()
     }
@@ -1078,53 +1080,70 @@ actor HerdrTerminalEngine {
     }
 
     /// Remux's zooms coming off as the session ends, one tab at a time: a tab off screen is focused first,
-    /// since Herdr's unzoom focuses its target and the snapshot names only the focused tab's focused pane, so
-    /// unzooming that pane changes no one's focus; the tab on screen goes last.
+    /// since Herdr's unzoom focuses its target and the snapshot names only the focused tab's focused pane; the
+    /// tab on screen goes last.
     private struct Release {
-        var tabs: [String]
+        /// The tabs left, in order, from the release's start: once the lane is free and the newest snapshot
+        /// shows where the last step took the session.
+        var tabs: [String]?
         /// The tab focused for its unzoom, until a snapshot shows the session there.
         var focusing: String?
+        /// Herdr's time for each step, from the ask or Herdr's answer before it.
+        let stepTime: Duration
+        /// Names the newest step's time, so an older one's end is dropped.
+        var step: UInt64 = 0
+        var deadline: Task<Void, Never>?
         let done: @Sendable () -> Void
     }
 
-    /// Takes Remux's zooms off as the session ends, if Herdr can take a command at once: nothing is in flight
-    /// and the newest snapshot shows where the last step took the session. Otherwise they stay, and so does
-    /// the phone's record of them, so the end never waits. A hidden session's surface is made active first,
-    /// without focus, since Herdr takes commands only from an active one (`endpoint_requests.rs`). `done`
-    /// once the last unzoom is answered, the release can't go on, or at once when nothing goes.
-    fileprivate func releaseZooms(done: @escaping @Sendable () -> Void, connection: UInt64) {
-        guard state == .running, connection == self.connection, let outbox, release == nil,
-              lane.isIdle, unsettled == nil, let snapshot = presentation.snapshot,
-              methods.contains(HerdrScreenModel.paneZoomMethod)
+    /// Takes Remux's zooms off as the session ends. Nothing else goes from here on: the steps and commands not
+    /// sent yet are dropped. A command in flight, or a step whose effect Herdr's snapshots don't show yet, goes
+    /// first, since Herdr takes one command at a time and the release goes from where the session is. A hidden
+    /// session's surface is made active first, without focus, since Herdr takes commands only from an active
+    /// one (`endpoint_requests.rs`). Each step has `stepTime`, Herdr's time for a show, from the ask or Herdr's
+    /// answer before it; one that takes longer ends the release and leaves the zooms left, with the phone's
+    /// record of them, as does the connection's end. `done` once the last unzoom is answered, the release
+    /// can't go on, or at once when nothing goes.
+    fileprivate func releaseZooms(within stepTime: Duration, done: @escaping @Sendable () -> Void, connection: UInt64) {
+        guard state == .running, connection == self.connection, outbox != nil, release == nil,
+              methods.contains(HerdrScreenModel.paneZoomMethod),
+              !ownedZooms.tabIDs.isEmpty || lane.inFlight?.item.method == HerdrScreenModel.paneZoomMethod
         else { return done() }
-        let tabs = ownedZooms.tabsToRelease(in: snapshot)
-        guard !tabs.isEmpty else { return done() }
         lane.dropSteps()
         lane.takeWaiting().forEach { fail($0, .notSent) }
-        if request.map({ $0.kind == .hide }) ?? true, let message = surfaceSet(active: true, show: nil, in: snapshot) {
-            outbox.send([message])
-            outbox.setSurfaceActive(true)
-        }
-        release = Release(tabs: tabs, done: done)
-        advanceRelease()
+        release = Release(stepTime: stepTime, done: done)
+        startReleaseStep()
+        dispatch()
     }
 
-    /// The release's next command against Herdr's newest snapshot: the unzoom of the tab the session is on,
-    /// or the focus of the next tab, skipping a tab no longer zoomed or gone.
-    private func advanceRelease() {
-        guard var release, lane.isIdle, let snapshot = presentation.snapshot else { return }
+    /// The release's next command against Herdr's newest snapshot, with the lane free: the unzoom of the tab
+    /// the session is on, or the focus of the next tab, skipping a tab no longer zoomed or gone.
+    private func advanceRelease(outbox: any HerdrOutbound, in snapshot: HerdrSnapshot) {
+        guard var release, unsettled == nil else { return }
+        if release.tabs == nil {
+            let tabs = ownedZooms.tabsToRelease(in: snapshot)
+            release.tabs = tabs
+            if !tabs.isEmpty, request.map({ $0.kind == .hide }) ?? true,
+               let message = surfaceSet(active: true, show: nil, in: snapshot) {
+                outbox.send([message])
+                outbox.setSurfaceActive(true)
+            }
+        }
         if let focusing = release.focusing {
-            guard snapshot.focusedTabID == focusing else { return }
+            guard snapshot.focusedTabID == focusing else {
+                self.release = release
+                return
+            }
             release.focusing = nil
         }
-        while let tab = release.tabs.first {
+        while let tab = release.tabs?.first {
             guard snapshot.tabs.contains(where: { $0.tabID == tab && $0.zoomed }) else {
-                release.tabs.removeFirst()
+                release.tabs?.removeFirst()
                 continue
             }
             let command: HerdrCommandLane.Command
             if snapshot.focusedTabID == tab, let pane = snapshot.focusedPaneID {
-                release.tabs.removeFirst()
+                release.tabs?.removeFirst()
                 command = HerdrCommandLane.Command(
                     method: HerdrScreenModel.paneZoomMethod,
                     params: HerdrScreenModel.zoomParams(pane, zoomed: false),
@@ -1133,7 +1152,7 @@ actor HerdrTerminalEngine {
             } else {
                 let place = HerdrPlace.tab(tab)
                 guard methods.contains(place.focusMethod) else {
-                    release.tabs.removeFirst()
+                    release.tabs?.removeFirst()
                     continue
                 }
                 release.focusing = tab
@@ -1151,12 +1170,34 @@ actor HerdrTerminalEngine {
     private func releaseFocusAnswered(_ tab: String, failed: Bool) {
         guard failed, release?.focusing == tab else { return }
         release?.focusing = nil
-        release?.tabs.removeAll { $0 == tab }
+        release?.tabs?.removeAll { $0 == tab }
+    }
+
+    /// The release's next step has Herdr's time for a show from now.
+    private func startReleaseStep() {
+        guard var release else { return }
+        release.step += 1
+        release.deadline?.cancel()
+        let step = release.step
+        let connection = self.connection
+        release.deadline = Task { [weak self, stepTime = release.stepTime] in
+            try? await Task.sleep(for: stepTime)
+            guard !Task.isCancelled else { return }
+            await self?.releaseStepExpired(step, connection: connection)
+        }
+        self.release = release
+    }
+
+    /// A step's time passed: it ends the release only while it is the newest step's.
+    private func releaseStepExpired(_ step: UInt64, connection: UInt64) {
+        guard connection == self.connection, release?.step == step else { return }
+        endRelease()
     }
 
     private func endRelease() {
         guard let release else { return }
         self.release = nil
+        release.deadline?.cancel()
         release.done()
     }
 
@@ -1164,8 +1205,10 @@ actor HerdrTerminalEngine {
     /// order, if it may go now against Herdr's newest snapshot. This runs in the same turn as the start,
     /// answer, timeout or snapshot that made it due, so nothing changes between the check and the send. A
     /// step goes from where the step before it took the session, so it waits for the snapshot showing that.
+    /// Once the session's end takes Remux's zooms off, only the release's commands go.
     private func dispatch() {
-        guard state == .running, lane.isIdle, outbox != nil, let snapshot = presentation.snapshot else { return }
+        guard state == .running, lane.isIdle, let outbox, let snapshot = presentation.snapshot else { return }
+        guard release == nil else { return advanceRelease(outbox: outbox, in: snapshot) }
         lane: while let next = lane.next {
             var item = next
             let params: any Encodable & Sendable
@@ -1281,6 +1324,8 @@ actor HerdrTerminalEngine {
             return surfaceSetAnswered(set, data: set.data)
         }
         guard let (inFlight, data) = lane.receive(chunk) else { return }
+        // A step of the session's end has its time from Herdr's answer before it.
+        startReleaseStep()
         let answeredAfter = presentation.snapshot?.revision ?? inFlight.sentAfter
         finish(inFlight, with: HerdrCommandLane.result(of: data).map {
             HerdrCommandReply(json: $0, sentAfter: inFlight.sentAfter, answeredAfter: answeredAfter)
@@ -1367,7 +1412,6 @@ actor HerdrTerminalEngine {
                 } else {
                     releaseFocusAnswered(tab, failed: (try? result.get()) == nil)
                 }
-                advanceRelease()
             case .other(let answered):
                 answered(result)
             }
@@ -1514,7 +1558,6 @@ actor HerdrTerminalEngine {
         checkOvertaken()
         paintPresented()
         dispatch()
-        if release?.focusing != nil { advanceRelease() }
     }
 
     fileprivate func receive(_ output: HerdrSurfaceDecoder.Output, connection: UInt64) {

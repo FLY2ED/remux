@@ -1,6 +1,5 @@
 import Foundation
 import GhosttyKit
-import NIOConcurrencyHelpers
 
 /// One Herdr pane's renderer, over the pane terminal the engine gave it.
 @MainActor
@@ -738,10 +737,11 @@ final class HerdrScreenModel {
     /// renderers still being created, then closes every renderer, which unregisters it from the engine
     /// before freeing it, and releases the Ghostty app once every renderer closed anywhere is freed.
     ///
-    /// The session's end first takes off the zooms Remux made, as tmux's does, and waits for Herdr's answers
-    /// within Herdr's time for a show, so the unzooms aren't lost with the connection. A runtime replaced by a
-    /// new attempt leaves them: the new attempt takes them over from the phone's record of them. Closing the
-    /// connection then hides the session on the server.
+    /// The session's end first takes off the zooms Remux made, as tmux's does, after a command still in
+    /// flight, and waits for Herdr's answers, each within Herdr's time for a show, so the unzooms aren't lost
+    /// with the connection (`HerdrTerminalEngine.releaseZooms`). A runtime replaced by a new attempt leaves
+    /// them: the new attempt takes them over from the phone's record of them. Closing the connection then
+    /// hides the session on the server.
     func stop(_ reason: TerminalRuntimeStopReason = .sessionEnded) async {
         guard !stopped else { return }
         let feed = attempt.flatMap { isCurrent($0) && $0.isOpen ? HerdrEngineFeed(engine: engine, connection: $0.id) : nil }
@@ -749,12 +749,9 @@ final class HerdrScreenModel {
         cancelRecovery()
         switchingCueTimer?.cancel()
         if let feed, reason == .sessionEnded {
-            let once = HerdrOnce()
-            await withCheckedContinuation { (closed: CheckedContinuation<Void, Never>) in
-                Task { await feed.releaseZooms { if once.claim() { closed.resume() } } }
-                Task { [deadline = connectionTiming.activation] in
-                    try? await Task.sleep(for: deadline)
-                    if once.claim() { closed.resume() }
+            await withCheckedContinuation { (released: CheckedContinuation<Void, Never>) in
+                Task { [stepTime = connectionTiming.activation] in
+                    await feed.releaseZooms(within: stepTime) { released.resume() }
                 }
             }
         }
@@ -2608,18 +2605,5 @@ extension HerdrPaneScroll {
             len: rows,
             cellOffset: 0
         )
-    }
-}
-
-/// True for the first `claim` only, from any thread: whichever of two outcomes comes first acts.
-final class HerdrOnce: @unchecked Sendable {
-    private let lock = NIOLock()
-    private var claimed = false
-
-    func claim() -> Bool {
-        lock.withLock {
-            defer { claimed = true }
-            return !claimed
-        }
     }
 }
