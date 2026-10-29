@@ -1,8 +1,7 @@
 import Foundation
 
 /// Herdr's answer to `pane.zoom` (`api/schema/panes.rs`, `PaneZoomResult`): whether the zoom changed,
-/// the tab's zoom after it, the pane focused there, and where every pane of the tab sits, also while the tab
-/// is zoomed. The
+/// the tab's zoom after it, and where every pane of the tab sits, also while the tab is zoomed. The
 /// rects are in the area of Herdr's foreground client, which the command makes this one; only their
 /// proportions count here.
 struct HerdrPaneZoomResult: Equatable, Sendable {
@@ -28,8 +27,6 @@ struct HerdrPaneZoomResult: Equatable, Sendable {
 
     let zoomChanged: Bool
     let zoomed: Bool
-    /// The pane Herdr has focused on the tab after the command, which a zoom focuses.
-    let focusedPaneID: String
     let layout: Layout
 
     /// Reads the result from the reply `{"id", "result": {"type": "pane_zoom", "zoom": {...}}}`.
@@ -42,12 +39,10 @@ struct HerdrPaneZoomResult: Equatable, Sendable {
             struct Zoom: Decodable {
                 let zoomChanged: Bool
                 let zoomed: Bool
-                let focusedPaneID: String
                 let layout: Layout
 
                 private enum CodingKeys: String, CodingKey {
                     case zoomChanged = "zoom_changed"
-                    case focusedPaneID = "focused_pane_id"
                     case zoomed, layout
                 }
             }
@@ -57,7 +52,6 @@ struct HerdrPaneZoomResult: Equatable, Sendable {
         let zoom = try JSONDecoder().decode(Reply.self, from: reply).result.zoom
         zoomChanged = zoom.zoomChanged
         zoomed = zoom.zoomed
-        focusedPaneID = zoom.focusedPaneID
         layout = zoom.layout
     }
 }

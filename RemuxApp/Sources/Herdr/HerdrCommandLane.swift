@@ -73,9 +73,6 @@ struct HerdrCommandLane {
             case focus(tabID: String)
             /// The unzoom of the pane Herdr has focused on the tab this client views, meant for the tab `tabID`.
             case unzoom(tabID: String)
-            /// A zoom put back on the tab an unzoom reached in place of the tab it was meant for: another
-            /// client's, which isn't Remux's.
-            case restore
         }
 
         let method: String

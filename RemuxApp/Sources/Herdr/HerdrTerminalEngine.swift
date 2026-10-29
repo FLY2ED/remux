@@ -1104,8 +1104,7 @@ actor HerdrTerminalEngine {
     }
 
     /// Another engine takes the session's zooms over (`HerdrZoomKeepers`): the release under way sends nothing
-    /// more than a zoom it puts back, and ends once Herdr answers its command in flight, or the step's time runs
-    /// out. The zooms are then no longer kept here, so nothing this engine sees later is saved over the other
+    /// more, and ends once Herdr answers its command in flight, or the step's time runs out. The zooms are then no longer kept here, so nothing this engine sees later is saved over the other
     /// engine's record.
     fileprivate func handOverOwnedZooms() async {
         if release != nil {
@@ -1139,9 +1138,6 @@ actor HerdrTerminalEngine {
         var tabs: [String]?
         /// The tab focused for its unzoom, until a snapshot shows the session there.
         var focusing: String?
-        /// The pane to put a zoom back on, which an unzoom took off another tab than the one it was meant for
-        /// (`releaseUnzoomAnswered`).
-        var restoring: String?
         /// Once another engine takes the session's zooms over, the hand-over waiting for the release to end
         /// (`handOverOwnedZooms`).
         var handOver: [CheckedContinuation<Void, Never>]?
@@ -1174,24 +1170,12 @@ actor HerdrTerminalEngine {
         dispatch()
     }
 
-    /// The release's next command against Herdr's newest snapshot, with the lane free: a zoom put back that an
-    /// unzoom took off another tab, the unzoom of the tab the session is on, or the focus of the next tab. Each
-    /// tab is checked again as its turn comes (`releases`): one no longer Remux's is skipped, also the one being
-    /// focused, whose snapshot may then never come. Once another engine takes the zooms over, only a zoom put
-    /// back goes.
+    /// The release's next command against Herdr's newest snapshot, with the lane free: the unzoom of the tab
+    /// the session is on, or the focus of the next tab. Each tab is checked again as its turn comes
+    /// (`releases`): one no longer Remux's is skipped, also the one being focused, whose snapshot may then
+    /// never come. Once another engine takes the zooms over, nothing more goes.
     private func advanceRelease(outbox: any HerdrOutbound, in snapshot: HerdrSnapshot) {
         guard var release else { return }
-        if let pane = release.restoring {
-            release.restoring = nil
-            let restore = HerdrCommandLane.Command(
-                method: HerdrScreenModel.paneZoomMethod,
-                params: HerdrScreenModel.zoomParams(pane, zoomed: true),
-                purpose: .release(.restore)
-            )
-            self.release = release
-            send(.command(restore), params: restore.params, in: snapshot)
-            return
-        }
         guard release.handOver == nil else { return endRelease() }
         guard unshown.isEmpty else { return }
         if release.tabs == nil {
@@ -1256,23 +1240,6 @@ actor HerdrTerminalEngine {
         guard failed, release?.focusing == tab else { return }
         release?.focusing = nil
         release?.tabs?.removeAll { $0 == tab }
-    }
-
-    /// Herdr answered the release's unzoom meant for `tab`. It names no pane, so Herdr unzoomed the tab this
-    /// client viewed as it handled it, which its answer names (`HerdrPaneZoomResult.layout`): another tab when
-    /// the one meant closed, or another client moved this client's view, after the release checked it. A zoom
-    /// taken off that other tab isn't Remux's unless Remux zoomed it too, so it goes back on, on the pane Herdr
-    /// focused there; the tab meant keeps its zoom, and Remux's record of it, for a later attachment.
-    private func releaseUnzoomAnswered(
-        _ tab: String,
-        _ result: Result<HerdrCommandReply, HerdrCommandError>,
-        seen: [HerdrSnapshot]
-    ) {
-        if case .success(let reply) = result, let zoom = try? HerdrPaneZoomResult(reply: reply.json),
-           zoom.zoomChanged, !zoom.zoomed, zoom.layout.tabID != tab, !ownedZooms.tabIDs.contains(zoom.layout.tabID) {
-            release?.restoring = zoom.focusedPaneID
-        }
-        zoomAnswered(result, seen: seen, reportsFailure: false)
     }
 
     /// The release's next step has Herdr's time for a show from now.
@@ -1511,11 +1478,8 @@ actor HerdrTerminalEngine {
                 zoomAnswered(result, seen: inFlight.snapshots, reportsFailure: false)
             case .release(.focus(let tab)):
                 releaseFocusAnswered(tab, failed: (try? result.get()) == nil)
-            case .release(.unzoom(let tab)):
-                releaseUnzoomAnswered(tab, result, seen: inFlight.snapshots)
-            case .release(.restore):
-                // Another client's zoom, which isn't recorded as Remux's.
-                break
+            case .release(.unzoom):
+                zoomAnswered(result, seen: inFlight.snapshots, reportsFailure: false)
             case .other(let answered):
                 answered(result)
             }

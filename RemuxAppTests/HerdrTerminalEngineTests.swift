@@ -972,63 +972,6 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
-    /// The session's end unzooms naming no pane, so Herdr unzooms the tab this client views as it handles the
-    /// command. When the tab Remux zoomed closes after the release checked it, Herdr shows this client another
-    /// tab, and the unzoom takes another client's zoom off that tab: the release puts it back on the pane Herdr
-    /// focused there, and records nothing for it.
-    func testTheSessionsEndPutsBackAZoomItsUnzoomTookOffAnotherTabAfterAClose() async throws {
-        let engine = makeEngine()
-        let updates = UpdateLog(engine)
-        let (feed, outbox) = await connect(engine)
-        let store = InMemoryHerdrOwnedZoomStore()
-        let session = HerdrZoomSession(serverID: UUID(), session: "s")
-        await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
-        try await shownZoomed(feed, updates, outbox)
-        // Another client zooms the second tab.
-        await feed.receive(try Self.places(revision: 3, zoomed: ["t1", "t2"]))
-        let closed = Closed()
-
-        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
-        XCTAssertEqual(try outbox.commands().last, "zoom off")
-        // Another client closes the first tab before Herdr handles the unzoom, which reaches the second.
-        try await answerZoom(feed, outbox, zoomed: false, tab: "t2", panes: ["R", "S"])
-        XCTAssertEqual(try outbox.commands().last, "zoom R on", "the zoom taken off another tab wasn't put back")
-        XCTAssertFalse(closed.isClosed, "done before Herdr answered the zoom put back")
-        try await answerZoom(feed, outbox, zoomed: true, tab: "t2", panes: ["R", "S"])
-        XCTAssertTrue(closed.isClosed)
-        XCTAssertEqual(try outbox.commands(), ["zoom P on", "zoom off", "zoom R on"])
-        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t1"], "the zoom put back was taken as Remux's")
-        await engine.stop()
-    }
-
-    /// When another client moves this client's view to another tab after the release checked the tab Remux
-    /// zoomed, the unzoom takes the zoom off that other tab: the release puts it back, and the tab Remux zoomed
-    /// keeps its zoom and Remux's record of it for a later attachment.
-    func testTheSessionsEndPutsBackAZoomItsUnzoomTookOffAnotherTabAfterAFocus() async throws {
-        let engine = makeEngine()
-        let updates = UpdateLog(engine)
-        let (feed, outbox) = await connect(engine)
-        let store = InMemoryHerdrOwnedZoomStore()
-        let session = HerdrZoomSession(serverID: UUID(), session: "s")
-        await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
-        try await shownZoomed(feed, updates, outbox)
-        await feed.receive(try Self.places(revision: 3, zoomed: ["t1", "t2"]))
-        let closed = Closed()
-
-        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
-        XCTAssertEqual(try outbox.commands().last, "zoom off")
-        // Another client's focus moves every client to the second tab before Herdr handles the unzoom.
-        try await answerZoom(feed, outbox, zoomed: false, tab: "t2", panes: ["R", "S"])
-        await feed.receive(try Self.places(revision: 4, focusedPane: "R", zoomed: ["t1"]))
-        XCTAssertEqual(try outbox.commands().last, "zoom R on", "the zoom taken off another tab wasn't put back")
-        try await answerZoom(feed, outbox, zoomed: true, tab: "t2", panes: ["R", "S"])
-        await feed.receive(try Self.places(revision: 5, focusedPane: "R", zoomed: ["t1", "t2"]))
-        XCTAssertTrue(closed.isClosed)
-        XCTAssertEqual(try outbox.commands(), ["zoom P on", "zoom off", "zoom R on"])
-        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t1"], "the phone forgot a zoom still on the server")
-        await engine.stop()
-    }
-
     /// The session attached again while its end still takes Remux's zooms off: the new attachment takes the
     /// zooms over once Herdr answers the end's step in flight, after which the end sends nothing more and saves
     /// nothing more, so no tab is unzoomed under the new attachment, which keeps the zooms not taken off yet.
