@@ -173,6 +173,7 @@ protocol HerdrOutbound: Sendable {
     func send(_ messages: [HerdrClientMessage])
     /// The session is shown or hidden, as the show or hide just sent says; input goes only while shown.
     func setSurfaceActive(_ active: Bool)
+    var isSurfaceActive: Bool { get }
 }
 
 /// The connection's writer: one ordered queue of frames, written to the bridge one at a time, which any

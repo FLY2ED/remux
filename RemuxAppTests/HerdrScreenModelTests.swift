@@ -3346,6 +3346,188 @@ final class HerdrScreenModelTests: XCTestCase {
         paste.cancel()
     }
 
+    /// A composer message for a pane goes while the close of another pane of its tab is on its way: Herdr
+    /// unzooms the tab it takes a pane from and goes on taking input for the panes left, with the setting's
+    /// zoom off, and with it on, where the zoom that follows has the pane left alone.
+    func testAComposerMessageGoesWhileAnotherPaneOfItsTabCloses() async throws {
+        for zooms in [false, true] {
+            let harness = await makeHarness(settings: zooms ? Self.zooming : .default)
+            let session = try await shownTab(harness, zoomingOnShow: zooms)
+            var index = session.next
+            let adapter = harness.model.terminalScreenAdapter
+            let kept = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
+
+            XCTAssertTrue(harness.model.ask(.close(.pane("w1:p2"), group: false), bootID: "boot"))
+            let close = try await nextWrite(session.bridge, from: &index, command)
+            XCTAssertEqual(close.method, "pane.close")
+            let pasted = AnswerBox()
+            let paste = Task { await pasted.set(await adapter.sendPasteAwaitingCommandCompletion("ship it", to: kept)) }
+            let pasteInput = try await nextWrite(session.bridge, from: &index, paneInput)
+            XCTAssertEqual(pasteInput, frame("w1:p1", [.paste("ship it")]), "zoomed: \(zooms)")
+            let pastePing = try await nextWrite(session.bridge, from: &index, ping)
+            await session.bridge.serve(HerdrConnectionTests.pong(pastePing))
+            await paste.value
+            let answer = await pasted.value
+            XCTAssertEqual(answer, true, "the composer's message for the pane left was refused, zoomed: \(zooms)")
+        }
+    }
+
+    /// A tap back on the tab left while the switch away is still on its way goes nowhere until Herdr is back
+    /// there: Herdr applies the switch away first, then would drop input for the tab left, and only then
+    /// applies the way back. So the composer keeps its message, and keys typed meanwhile are dropped; once
+    /// Herdr's focus back is answered, keys go again.
+    func testInputForATabReturnedToWaitsForHerdrToBeBack() async throws {
+        let harness = await makeHarness()
+        let session = try await shownTab(harness, secondTab: Self.secondTab)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let left = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
+
+        harness.model.reveal(.tab("t2"), bootID: "boot")
+        let away = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(away.params, ["tab_id": "t2"])
+        harness.model.reveal(.pane("w1:p1"), bootID: "boot")
+        let pasted = AnswerBox()
+        let paste = Task { await pasted.set(await adapter.sendPasteAwaitingCommandCompletion("ship it", to: left)) }
+        try await Task.sleep(for: .milliseconds(200))
+        let answer = await pasted.value
+        XCTAssertEqual(answer, false, "the composer's message went while Herdr was still switching away")
+        _ = adapter.sendInputToFocusedSurface("a")
+
+        await session.bridge.serve(HerdrConnectionTests.reply(id: away.id, json: #"{"type":"ok"}"#))
+        await session.bridge.serve(Self.secondTabOnScreen(revision: 3))
+        let back = try await nextWrite(session.bridge, from: &index, paneFocus)
+        XCTAssertEqual(back.paneID, "w1:p1")
+        let focusedBack = index
+        _ = adapter.sendInputToFocusedSurface("b")
+        await session.bridge.serve(HerdrConnectionTests.reply(id: back.id, json: #"{"type":"pane_info","pane":{"pane_id":"w1:p1"}}"#))
+        await session.bridge.serve(Self.firstTabOnScreen(revision: 4))
+        // The model and the engine each take the snapshot; a key goes once both have.
+        try await harness.waitUntil("input didn't go again once Herdr was back") {
+            guard adapter.sendInputToFocusedSurface("c") == .accepted else { return false }
+            try? await Task.sleep(for: .milliseconds(50))
+            let written = await session.bridge.writtenCount
+            let since = (try? await harness.writes(session.bridge, from: focusedBack, count: written - focusedBack)) ?? []
+            return since.contains { paneInput($0) == self.frame("w1:p1", [self.typed("c")]) }
+        }
+        let written = await session.bridge.writtenCount
+        let inputs = try await harness.writes(session.bridge, from: session.next, count: written - session.next)
+            .enumerated().compactMap { offset, write in paneInput(write).map { (session.next + offset, $0) } }
+        XCTAssertTrue(inputs.allSatisfy { $0.0 >= focusedBack }, "input went before Herdr's focus back: \(inputs)")
+        XCTAssertFalse(inputs.contains { $0.1 == frame("w1:p1", [.paste("ship it")]) }, "the refused message went")
+        paste.cancel()
+    }
+
+    /// With the setting's zoom on, a split hands Herdr's focus to the new pane, which the setting then zooms.
+    /// While that zoom is on its way, input for the pane split is refused: Herdr applies the zoom first and
+    /// would drop it, though the snapshot after the split still shows the tab unzoomed. The composer keeps
+    /// its message. With the setting off, the message goes during the split.
+    func testInputForAPaneSplitWaitsForTheSettingsZoomOfTheNewPane() async throws {
+        let harness = await makeHarness(settings: Self.zooming)
+        let session = try await shownTab(harness, zoomingOnShow: true)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        let split = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
+
+        XCTAssertTrue(harness.model.create(.split(pane: "w1:p1", workspaceID: "w1", direction: .right), bootID: "boot"))
+        let made = try await nextWrite(session.bridge, from: &index, command)
+        XCTAssertEqual(made.method, "pane.split")
+        await session.bridge.serve(HerdrConnectionTests.reply(id: made.id, json: #"{"type":"pane_info","pane":{"pane_id":"w1:p5"}}"#))
+        await session.bridge.serve(HerdrServerScript.snapshot(
+            revision: 3, focusedPane: "w1:p5", panes: Self.tabPanes(["w1:p1", "w1:p2", "w1:p5"])
+        ))
+        let splitPanes: [HerdrServerScript.Pane] = [
+            .init(id: "w1:p1", x: 0, width: 2, height: 1),
+            .init(id: "w1:p2", x: 3, width: 2, height: 1),
+            .init(id: "w1:p5", x: 6, width: 1, height: 1, focused: true),
+        ]
+        await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 3, lines: ["on tw f"], panes: splitPanes))
+        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        XCTAssertEqual([zoom.paneID, zoom.mode], ["w1:p5", "on"])
+        XCTAssertEqual(drawnPanes(harness), ["w1:p1"], "the split's frame showed before the request completed")
+
+        let pasted = AnswerBox()
+        let paste = Task { await pasted.set(await adapter.sendPasteAwaitingCommandCompletion("ship it", to: split)) }
+        try await Task.sleep(for: .milliseconds(200))
+        let answer = await pasted.value
+        XCTAssertEqual(answer, false, "the composer's message went ahead of the zoom Herdr applies first")
+        let written = await session.bridge.writtenCount
+        let inputs = try await harness.writes(session.bridge, from: index, count: written - index).compactMap(paneInput)
+        XCTAssertEqual(inputs, [], "input went to the pane split")
+        paste.cancel()
+
+        let unzoomed = await makeHarness()
+        let plain = try await shownTab(unzoomed)
+        var plainIndex = plain.next
+        let plainAdapter = unzoomed.model.terminalScreenAdapter
+        let plainPane = try XCTUnwrap(plainAdapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
+        XCTAssertTrue(unzoomed.model.create(.split(pane: "w1:p1", workspaceID: "w1", direction: .right), bootID: "boot"))
+        let plainSplit = try await nextWrite(plain.bridge, from: &plainIndex, command)
+        XCTAssertEqual(plainSplit.method, "pane.split")
+        let plainPasted = AnswerBox()
+        let plainPaste = Task {
+            await plainPasted.set(await plainAdapter.sendPasteAwaitingCommandCompletion("ship it", to: plainPane))
+        }
+        let plainInput = try await nextWrite(plain.bridge, from: &plainIndex, paneInput)
+        XCTAssertEqual(plainInput, frame("w1:p1", [.paste("ship it")]))
+        let plainPing = try await nextWrite(plain.bridge, from: &plainIndex, ping)
+        await plain.bridge.serve(HerdrConnectionTests.pong(plainPing))
+        await plainPaste.value
+        let plainAnswer = await plainPasted.value
+        XCTAssertEqual(plainAnswer, true)
+    }
+
+    /// The composer says how far its message went when a switch cuts it off. Refused before anything went,
+    /// it keeps the message to send again; once the paste went and only the Enter is refused, the text is in
+    /// the pane already, so the composer says the send didn't finish and keeps no copy to paste twice.
+    func testTheComposerSaysHowFarAMessageCutOffByASwitchWent() async throws {
+        for pasteGoes in [false, true] {
+            let harness = await makeHarness()
+            let session = try await shownTab(harness, secondTab: Self.secondTab)
+            var index = session.next
+            let adapter = harness.model.terminalScreenAdapter
+            let left = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
+            if !pasteGoes {
+                harness.model.reveal(.tab("t2"), bootID: "boot")
+                _ = try await nextWrite(session.bridge, from: &index, command)
+            }
+
+            let composer = GhosttyComposerModel()
+            composer.draft = "ship it"
+            composer.submit(to: GhosttyComposerSubmissionDestination(
+                workspaceID: harness.model.target.workspace.id,
+                surfaceID: left,
+                destinationLabel: nil,
+                makeAttachmentTransferService: { FailingComposerAttachmentTransferService() },
+                prepareTerminalInput: {},
+                sendPaste: { await adapter.sendPasteAwaitingCommandCompletion($0, to: left) },
+                sendEnter: {
+                    await adapter.sendKeyEventAwaitingCommandCompletion(GhosttySurfaceKeyEvent(action: .press, keyCode: .enter), to: left)
+                }
+            ))
+            if pasteGoes {
+                let pasteInput = try await nextWrite(session.bridge, from: &index, paneInput)
+                XCTAssertEqual(pasteInput, frame("w1:p1", [.paste("ship it")]))
+                let pastePing = try await nextWrite(session.bridge, from: &index, ping)
+                harness.model.reveal(.tab("t2"), bootID: "boot")
+                _ = try await nextWrite(session.bridge, from: &index, command)
+                await session.bridge.serve(HerdrConnectionTests.pong(pastePing))
+            }
+            try await harness.waitUntil("the composer didn't finish") { !composer.isSubmitting }
+            if pasteGoes {
+                XCTAssertEqual(composer.statusMessage, "Couldn’t finish sending. Check the terminal.")
+                XCTAssertEqual(composer.draft, "")
+            } else {
+                XCTAssertEqual(composer.statusMessage, "Couldn’t send. Message kept.")
+                XCTAssertEqual(composer.draft, "ship it")
+            }
+            let written = await session.bridge.writtenCount
+            let inputs = try await harness.writes(session.bridge, from: session.next, count: written - session.next)
+                .compactMap(paneInput)
+            XCTAssertEqual(inputs, pasteGoes ? [frame("w1:p1", [.paste("ship it")])] : [], "paste went: \(pasteGoes)")
+        }
+    }
+
     /// The switching cue says where a switch goes only once it has taken longer than its delay from the tap,
     /// and goes as the tab reached comes on screen; a quick switch shows none.
     func testTheSwitchingCueShowsOnlyOnceASwitchTakesLong() async throws {

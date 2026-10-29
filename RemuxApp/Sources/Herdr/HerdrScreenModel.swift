@@ -170,8 +170,8 @@ final class HerdrScreenModel {
 
         /// Ready and shown, with no show in progress: the session takes input. A session shown again keeps
         /// its last frame and reads as connected meanwhile, but takes no input, as Herdr's client freezes
-        /// input while a show is in progress. A move doesn't freeze it, as in Herdr's client; only input for
-        /// the panes the move leaves is refused (`isLeftByMove`).
+        /// input while a show is in progress. A move doesn't freeze it, as in Herdr's client; the engine refuses
+        /// only input Herdr wouldn't take once the move's commands ahead of it are applied.
         var isActivated: Bool {
             guard isReady, wantsShown, !visibilityPending, let request, request.kind != .hide else { return false }
             return !request.showing || activatedRequest == request.id
@@ -879,27 +879,15 @@ final class HerdrScreenModel {
         userPaneID.flatMap(inputTarget(forPane:))
     }
 
-    /// Where input for `paneID` goes, the one rule for every input: Herdr takes it (`herdrInputTarget`), the
-    /// frame on screen draws the pane (`isDrawn`), so nothing typed goes to a pane the user doesn't see, as one
-    /// on the tab a move is going to while the tab left is still on screen, and Remux's move under way doesn't
-    /// leave the pane (`isLeftByMove`).
+    /// Where input for `paneID` goes, the one rule for every input: Herdr takes it (`herdrInputTarget`), and
+    /// the frame on screen draws the pane (`isDrawn`), so nothing typed goes to a pane the user doesn't see,
+    /// as one on the tab a move is going to while the tab left is still on screen. As it goes, the engine
+    /// sends it only if Herdr still takes it once the commands ahead of it are applied, as after the steps
+    /// of a move away from the pane (`HerdrTerminalEngine.send(_:to:connection:)`): a composer part that
+    /// doesn't go is refused, and a key is dropped.
     private func inputTarget(forPane paneID: String) -> (attempt: Attempt, paneID: String)? {
-        guard isDrawn(paneID), !isLeftByMove(paneID) else { return nil }
+        guard isDrawn(paneID) else { return nil }
         return herdrInputTarget(forPane: paneID)
-    }
-
-    /// Whether Remux's move under way takes the session where Herdr takes no input for `paneID`: to another
-    /// tab, to one Herdr hasn't made yet or wherever a close goes, or to another pane of a zoomed tab. Input
-    /// asked after the move reaches Herdr after it, on the same connection, and Herdr drops input for a pane
-    /// outside the tab the client views (`server/headless.rs` `ClientShellPaneInput`,
-    /// `shell_client_views_pane`). So input for the pane left would be lost while Herdr's snapshot still has
-    /// the session there; refused, a composer message stays to be sent again.
-    private func isLeftByMove(_ paneID: String) -> Bool {
-        guard let attempt, isCurrent(attempt), let move = attempt.move, paneID != move.pane else { return false }
-        guard let tabID = move.goesTo?.tabID, let snapshot,
-              snapshot.panes.contains(where: { $0.paneID == paneID && $0.tabID == tabID })
-        else { return true }
-        return snapshot.tabs.first { $0.tabID == tabID }?.zoomed != false
     }
 
     /// Whether Herdr takes input for `paneID`: the session is shown with no show in progress, and Herdr takes
@@ -1583,22 +1571,19 @@ final class HerdrScreenModel {
         case .appActive(let active):
             await connection.setAppActive(active)
         case .input(let paneID, let events, let delivered):
-            do {
-                try await connection.send(events, toPane: paneID)
-            } catch {
-                if let delivered {
-                    // The composer says what didn't go.
-                    delivered.resume(returning: false)
-                } else if (error as? HerdrInputError) != .connectionEnded {
-                    // The connection's end is reported when the reader sees it.
-                    inputFailed(attemptID)
-                }
-                return
+            switch await feed.send(events, to: .pane(paneID)) {
+            case .sent:
+                guard let delivered else { return }
+                // Herdr acknowledges no input, but answers a ping only after reading everything sent before
+                // it. Later operations don't wait for the answer.
+                Task { delivered.resume(returning: await connection.confirmAlive()) }
+            case .notTaken, .ended:
+                // Keys Herdr wouldn't take are dropped, as Herdr drops them; the composer says what didn't
+                // go. The connection's end is reported when the reader sees it.
+                delivered?.resume(returning: false)
+            case .inactive:
+                if let delivered { delivered.resume(returning: false) } else { inputFailed(attemptID) }
             }
-            guard let delivered else { return }
-            // Herdr acknowledges no input, but answers a ping only after reading everything sent before
-            // it. Later operations don't wait for the answer.
-            Task { delivered.resume(returning: await connection.confirmAlive()) }
         case .move(let destination, let fromAnotherTab, let ask):
             guard let geometry else { return moveTaken(ask, by: nil, on: attempt) }
             let request = await feed.start(
