@@ -626,11 +626,12 @@ actor HerdrTerminalEngine {
     private var release: Release?
     /// The newest answered step whose effect Herdr's snapshots don't show yet. Herdr can answer before it
     /// sends the snapshot showing the answer, so the next step waits for that snapshot, going from where the
-    /// step before it took the session, and the session's end unzooms nothing meanwhile.
+    /// step before it took the session.
     private var unsettled: StepEffect?
     /// The commands Herdr answered whose effect no snapshot shows yet, the steps and the zoom button's zooms, in
     /// the order Herdr applied them, which is the order of their answers, since one command is in flight at a
-    /// time. Input that goes now reaches Herdr after them (`takesInput`).
+    /// time. Input that goes now reaches Herdr after them (`takesInput`), and the session's end unzooms nothing
+    /// meanwhile (`releaseZooms`).
     private var unshown: [StepEffect] = []
     private var layout: HerdrPaneLayout?
     private var paneScrolls: [String: HerdrPaneScroll] = [:]
@@ -1101,8 +1102,9 @@ actor HerdrTerminalEngine {
     }
 
     /// Takes Remux's zooms off as the session ends. Nothing else goes from here on: the steps and commands not
-    /// sent yet are dropped. A command in flight, or a step whose effect Herdr's snapshots don't show yet, goes
-    /// first, since Herdr takes one command at a time and the release goes from where the session is. A hidden
+    /// sent yet are dropped. A command in flight goes first, since Herdr takes one command at a time, and the
+    /// release waits for the snapshots showing the commands Herdr answered, since it goes over the tabs a
+    /// snapshot shows zoomed, from where the session is. A hidden
     /// session's surface is made active first, without focus, since Herdr takes commands only from an active
     /// one (`endpoint_requests.rs`). Each step has `stepTime`, Herdr's time for a show, from the ask or Herdr's
     /// answer before it; one that takes longer ends the release and leaves the zooms left, with the phone's
@@ -1125,7 +1127,7 @@ actor HerdrTerminalEngine {
     /// (`releases`): one no longer Remux's is skipped, also the one being focused, whose snapshot may then
     /// never come.
     private func advanceRelease(outbox: any HerdrOutbound, in snapshot: HerdrSnapshot) {
-        guard var release, unsettled == nil else { return }
+        guard var release, unshown.isEmpty else { return }
         if release.tabs == nil {
             let tabs = ownedZooms.tabsToRelease(in: snapshot)
             release.tabs = tabs

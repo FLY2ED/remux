@@ -951,6 +951,27 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// The session's end with the zoom button's zoom answered but not shown yet waits for the snapshot showing
+    /// it, since the release goes over the tabs Herdr's snapshot shows zoomed, then takes that zoom off too.
+    func testTheSessionsEndTakesOffAZoomButtonsZoomAnsweredButNotShownYet() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shown(feed, updates, outbox, panes: Self.atP)
+        let closed = Closed()
+
+        await feed.setZoom(true, ofPane: "P")
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        try await answerZoom(feed, outbox, zoomed: true)
+        XCTAssertFalse(closed.isClosed, "the end missed the zoom Herdr answered")
+        XCTAssertEqual(try outbox.commands(), ["zoom P on"], "the end went before Herdr showed the zoom")
+        await feed.receive(try Self.places(revision: 2, zoomed: ["t1"]))
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "zoom off"])
+        try await answerZoom(feed, outbox, zoomed: false)
+        XCTAssertTrue(closed.isClosed)
+        await engine.stop()
+    }
+
     /// The connection's end during the session's end, as when the phone suspends the app and the link drops,
     /// ends the release at once, leaving the zooms not yet taken off and the phone's record of them for a later
     /// attachment.
