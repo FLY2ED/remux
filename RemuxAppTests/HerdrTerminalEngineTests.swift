@@ -819,6 +819,39 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// The setting's zoom waiting behind a command doesn't go once another client zoomed its tab meanwhile:
+    /// the tab shows its pane zoomed already, and the move's focus still takes the session there. That zoom
+    /// isn't Remux's.
+    func testAQueuedZoomOfTheSettingDoesNotGoOnceItsTabIsZoomed() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        let store = InMemoryHerdrOwnedZoomStore()
+        let session = HerdrZoomSession(serverID: UUID(), session: "s")
+        await engine.keepOwnedZooms(in: store, of: session)
+        try await shown(feed, updates, outbox, panes: Self.atP)
+        let answers = Answers()
+
+        await feed.command("worktree.list", params: [String: String](), answered: answers.record)
+        let toR = try await start(feed, updates, Self.move("R", fromAnotherTab: true, zoom: Self.zooming))
+        // Another client zooms the tab while the command holds the lane.
+        await feed.receive(try Self.places(revision: 2, zoomed: ["t2"]))
+        try await answer(feed, outbox)
+        _ = try await answers.next().get()
+        XCTAssertEqual(try outbox.commands(), ["worktree.list", "focus R"], "the zoom went on a zoomed tab")
+        try await answer(feed, outbox)
+        await feed.receive(try Self.places(revision: 3, focusedPane: "R", zoomed: ["t2"]))
+        await feed.receive(.surface(try Self.surface(
+            projection: 3,
+            revision: 2,
+            lines: ["new ", "tab "],
+            panes: [Self.pane("R", x: 0, width: 4, height: 2, focused: true)]
+        )))
+        try await activation(toR, updates)
+        XCTAssertEqual(store.zooms(of: session).tabIDs, [], "another client's zoom was recorded as Remux's")
+        await engine.stop()
+    }
+
     /// The phone keeps Remux's zooms, so a new engine for the session, as after the app ended, takes them over
     /// and the session's end takes them off, also after Herdr's server restarted with a boot of its own. A tab
     /// is taken over only while it is zoomed and still has one of the panes it had: one whose id names a tab
@@ -1296,12 +1329,10 @@ final class HerdrTerminalEngineTests: XCTestCase {
         XCTAssertEqual(try outbox.commands(), ["zoom R on"])
         try await answerZoom(feed, outbox, zoomed: true, tab: "t2", panes: ["R", "S"])
         await feed.receive(try Self.places(revision: 2, focusedPane: "R", zoomed: ["t2"]))
-        XCTAssertEqual(try outbox.commands(), ["zoom R on", "zoom S on"])
-        try await answerZoom(feed, outbox, zoomed: true, changed: false, tab: "t2", panes: ["S", "R"])
-        await feed.receive(try Self.places(revision: 3, focusedPane: "S", zoomed: ["t2"]))
-        XCTAssertEqual(try outbox.commands(), ["zoom R on", "zoom S on", "focus S"])
+        // The tab is zoomed now, so the new move's zoom doesn't go; its focus does.
+        XCTAssertEqual(try outbox.commands(), ["zoom R on", "focus S"])
         try await answer(feed, outbox)
-        XCTAssertEqual(try outbox.commands(), ["zoom R on", "zoom S on", "focus S", "worktree.list"])
+        XCTAssertEqual(try outbox.commands(), ["zoom R on", "focus S", "worktree.list"])
         try await answer(feed, outbox)
         _ = try await answers.next().get()
         await engine.stop()

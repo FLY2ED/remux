@@ -1199,10 +1199,12 @@ actor HerdrTerminalEngine {
         completeIfReady()
     }
 
-    /// What a step sends against Herdr's newest snapshot, as it goes, or nil when it doesn't go. A
-    /// show's zoom goes while the pane it zooms is still focused; the zoom of a tab reached goes as a show's
-    /// zoom of the pane Herdr focused there, while the snapshot shows the request's target and the setting
-    /// zooms that tab; a step that takes the session somewhere goes as long as the request isn't overtaken.
+    /// What a step sends against Herdr's newest snapshot, as it goes, or nil when it doesn't go. The setting's
+    /// zoom goes only while its pane's tab isn't zoomed, as another client may have zoomed it since the step was
+    /// planned, and a show's goes while the pane it zooms is still focused; the zoom of a tab reached goes as a
+    /// show's zoom of the pane Herdr focused there, while the snapshot shows the request's target and the
+    /// setting zooms that tab; a step that takes the session somewhere goes as long as the request isn't
+    /// overtaken.
     private func command(
         for step: HerdrCommandLane.Step,
         of request: ViewRequest,
@@ -1210,7 +1212,10 @@ actor HerdrTerminalEngine {
     ) -> (HerdrCommandLane.Step, any Encodable & Sendable)? {
         switch step {
         case .zoom(let pane, let navigates):
-            guard navigates || snapshot.focusedPaneID == pane else { return nil }
+            let tabID = snapshot.panes.first { $0.paneID == pane }?.tabID
+            guard navigates || snapshot.focusedPaneID == pane,
+                  !snapshot.tabs.contains(where: { $0.tabID == tabID && $0.zoomed })
+            else { return nil }
             return (step, HerdrScreenModel.zoomParams(pane, zoomed: true))
         case .zoomReached(let policy):
             guard request.target?.isShown(in: snapshot) == true, let tabID = snapshot.focusedTabID,

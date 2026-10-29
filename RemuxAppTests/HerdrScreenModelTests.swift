@@ -2058,7 +2058,8 @@ final class HerdrScreenModelTests: XCTestCase {
 
     /// A session that leaves before Herdr has answered its show's zoom, and comes back, completes the new
     /// show on Herdr's frame for it: the frames Herdr drew for the first show, before and after its zoom,
-    /// and that zoom's answer don't complete it.
+    /// and that zoom's answer don't complete it. The new show sends no zoom of its own, as the tab is zoomed
+    /// by then.
     func testAReturnAfterLeavingDuringAShowCompletesOnTheNewShowsFrame() async throws {
         let harness = await makeHarness(settings: Self.zooming)
         let bridge = try await harness.bridge()
@@ -2084,15 +2085,16 @@ final class HerdrScreenModelTests: XCTestCase {
         await bridge.serve(HerdrServerScript.zoomReply(id: zoom.id, changed: true, zoomed: true, panes: Self.places(2)))
         await bridge.serve(HerdrServerScript.surfaceSetReply(id: hide.id, active: false))
         await bridge.serve(HerdrServerScript.surfaceSetReply(id: second.id, active: true, projection: 4))
-        let again = try await nextWrite(bridge, from: &index, paneZoom)
         try await Task.sleep(for: .milliseconds(150))
         XCTAssertNil(harness.model.layout, "a frame Herdr drew for the first show was drawn")
 
         await bridge.serve(HerdrServerScript.snapshot(revision: 5, zoomed: true, panes: Self.tabPanes(["w1:p1", "w1:p2"])))
         await bridge.serve(try harness.shownSurface(projection: 5, revision: 4, lines: ["one"], panes: [Self.zoomedPane]))
-        await bridge.serve(HerdrServerScript.zoomReply(id: again.id, changed: false, zoomed: true, panes: Self.places(2)))
         try await harness.waitUntil("the second show didn't complete") { harness.model.stateTraceLabel == "shown" }
         XCTAssertEqual(drawnPanes(harness), ["w1:p1"])
+        let written = await bridge.writtenCount
+        let zooms = try await harness.writes(bridge, from: index, count: written - index).compactMap(paneZoom)
+        XCTAssertTrue(zooms.isEmpty, "the second show zoomed the tab zoomed already: \(zooms)")
     }
 
     /// A show whose zoom another client undoes before Herdr draws it, as a split does, completes on
