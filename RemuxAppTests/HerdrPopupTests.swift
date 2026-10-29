@@ -801,6 +801,23 @@ final class HerdrPopupTests: XCTestCase {
         XCTAssertEqual(HerdrTerminalScreenAdapter.popupBorder(columns: 0, rows: 0, accent: HerdrPopupAccent.herdrDefault, colors: nil), [])
     }
 
+    /// While the keyboard comes up, the popup's terminal still has Herdr's last grid until its next frame;
+    /// it draws only inside the terminal area, as the panes do, never under the toolbar.
+    func testThePopupDrawsOnlyInsideTheTerminalArea() throws {
+        let cell = GhosttyTerminalCellDisplayMetrics(pixelWidth: 24, pixelHeight: 53, contentScale: 3)
+        let grid = GhosttyTerminalGridSize(columns: 50, rows: 41)
+        let full = CGSize(width: 402, height: 726)
+        let layout = try XCTUnwrap(GhosttyCompositeViewportLayout(bounds: CGRect(origin: .zero, size: full), grid: grid, cellMetrics: cell))
+        let settled = try XCTUnwrap(GhosttyTerminalPopupFrameView.contentFrame(layout: layout, windowGrid: grid, size: full))
+        XCTAssertEqual(settled, layout.frame(for: GhosttyTerminalGridRect(x: 1, y: 1, columns: 48, rows: 39)))
+        // The terminal area with the keyboard up, before Herdr's frames have its grid.
+        let shorter = CGSize(width: 402, height: 459)
+        let early = try XCTUnwrap(GhosttyCompositeViewportLayout(bounds: CGRect(origin: .zero, size: shorter), grid: grid, cellMetrics: cell))
+        let keyboardUp = try XCTUnwrap(GhosttyTerminalPopupFrameView.contentFrame(layout: early, windowGrid: grid, size: shorter))
+        XCTAssertLessThanOrEqual(keyboardUp.maxY, shorter.height, "the popup drew under the toolbar")
+        XCTAssertEqual(keyboardUp.origin, settled.origin, "the popup moved")
+    }
+
     func testTheFrameIsHerdrsBoxOnThePanesGrid() async throws {
         let harness = await makeHarness()
         let (session, _, _) = try await attachedPopup(harness)

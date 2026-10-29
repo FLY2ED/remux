@@ -26,9 +26,8 @@ struct GhosttyTerminalPopupFrameView: View {
                    grid: windowGrid,
                    cellMetrics: cellMetrics
                ),
-               let content = GhosttyTerminalViewportPresentationProjection.Popup.content(in: windowGrid)
+               let contentFrame = Self.contentFrame(layout: layout, windowGrid: windowGrid, size: proxy.size)
             {
-                let contentFrame = layout.frame(for: content)
                 ZStack(alignment: .topLeading) {
                     GhosttyPaneLinesView(
                         lines: popup.border,
@@ -58,6 +57,15 @@ struct GhosttyTerminalPopupFrameView: View {
         .background(terminalTheme.terminalSurfaceBackground)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("terminal.popup")
+    }
+
+    /// Where the popup's terminal draws on `layout`, within the area of `size`: until Herdr's frames have the
+    /// grid of a smaller area, as while the keyboard comes up, the grid runs past it, and its terminal draws
+    /// only the cells the area has, as the panes do.
+    static func contentFrame(layout: GhosttyCompositeViewportLayout, windowGrid: GhosttyTerminalGridSize, size: CGSize) -> CGRect? {
+        guard let content = GhosttyTerminalViewportPresentationProjection.Popup.content(in: windowGrid) else { return nil }
+        let frame = layout.frame(for: content).intersection(CGRect(origin: .zero, size: size))
+        return frame.isNull ? nil : frame
     }
 
     /// The top line's cells between its corners: the title from the first, as Herdr's client writes it,
