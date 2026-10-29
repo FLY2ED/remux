@@ -206,7 +206,9 @@ extension HerdrSnapshot.Agent {
 
     /// What the agent says it is doing: its terminal title, from after a part that only names its kind, as
     /// Codex titles itself "codex | " and then its thread, else the title its hooks report. Codex names its
-    /// session by its id until it names the thread, and an id says nothing of the work.
+    /// session by its id until it names the thread, and an id says nothing of the work. Nothing in it ticks:
+    /// Herdr takes an agent's spinner off the title it sends (`terminal/title.rs`), and what Codex blinks
+    /// while it waits comes before its kind.
     var activity: String? {
         let kinds = [agent, kind, displayAgent].compactMap { $0 }.filter { !$0.isEmpty }
         let shown = terminalTitleStripped.flatMap { title -> String? in

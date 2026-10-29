@@ -553,9 +553,8 @@ final class HerdrScreenModel {
     }
 
     /// What runs in a pane and what it is doing, as the Tabs sheet's rows say, read from the newest snapshot
-    /// when the sheet is drawn (`HerdrSnapshot.program(ofPane:)`, `activity(ofPane:)`). A change to them alone
-    /// tells no view: agents retitle themselves often, and each change would redraw the whole screen for text
-    /// only the open sheet shows.
+    /// when the sheet is drawn (`HerdrSnapshot.program(ofPane:)`, `activity(ofPane:)`). A snapshot tells the
+    /// views when it changes what a row says, and only then: an agent's ticking title reaches no row.
     func program(ofPane paneID: String) -> TerminalProgram {
         snapshot?.program(ofPane: paneID) ?? .terminal
     }
@@ -1601,6 +1600,7 @@ final class HerdrScreenModel {
         if let previous = self.snapshot?.bootID, previous != snapshot.bootID {
             onNotification(.serverRestarted)
         }
+        let rows = terminalScreenAdapter.tabRowContents
         self.snapshot = snapshot
         if agents.project(snapshot, completions: completions) { didChange() }
         acknowledgeShownAgents()
@@ -1611,6 +1611,8 @@ final class HerdrScreenModel {
             reconcilePresentationActivity()
             didChange()
         }
+        // The rows read what each pane runs and does on demand, so a change to them alone tells the views here.
+        if terminalScreenAdapter.tabRowContents != rows { didChange() }
         guard !attempt.hasSnapshot else { return }
         attempt.hasSnapshot = true
         hasConnected = true

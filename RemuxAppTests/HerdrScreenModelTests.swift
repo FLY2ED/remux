@@ -4921,6 +4921,72 @@ final class HerdrScreenModelTests: XCTestCase {
         ])
     }
 
+    /// A snapshot that changes what a tab's row says tells the views: an agent naming its thread anew, a shell
+    /// moving to another folder. One that changes only what ticks doesn't: Codex's spinner, which Herdr takes
+    /// off the title it sends, and what Codex blinks while it waits, which the row leaves out; nor does a new
+    /// title of an agent whose pane no row puts in front.
+    func testATabsRowTellsTheViewsOnlyWhenWhatItSaysChanges() async throws {
+        let harness = await makeHarness()
+        let session = try await shownSession(harness)
+        func serve(
+            _ revision: UInt64, folder: String = "app", claude: String = "Fix the tests", blink: String = "!",
+            thread: String = "Review the diff", spinner: String = "⠋"
+        ) async {
+            let waiting = "[ \(blink) ] Action Required | codex | \(thread)"
+            await session.bridge.serve(HerdrServerScript.snapshot(
+                revision: revision,
+                workspaceLabel: "remux",
+                otherTabs: ["t2", "t3"],
+                panes: [
+                    HerdrServerScript.snapshotPane("w1:p1", cwd: "/home/me", foregroundCWD: "/home/me/\(folder)"),
+                    HerdrServerScript.snapshotPane("w1:p2"),
+                    HerdrServerScript.snapshotPane("w1:p3", tab: "t2"),
+                    HerdrServerScript.snapshotPane("w1:p5", tab: "t3"),
+                ],
+                agents: [
+                    HerdrServerScript.snapshotAgent(
+                        "w1:p2", terminalTitle: "✳ \(claude)", terminalTitleStripped: claude, agent: "claude",
+                        stateChange: 2
+                    ),
+                    HerdrServerScript.snapshotAgent(
+                        "w1:p3", terminalTitle: waiting, terminalTitleStripped: waiting, agent: "codex", tab: "t2",
+                        status: .blocked, stateChange: 2
+                    ),
+                    HerdrServerScript.snapshotAgent(
+                        "w1:p5", terminalTitle: "\(spinner) codex | Plan the release",
+                        terminalTitleStripped: "codex | Plan the release", agent: "codex", tab: "t3", stateChange: 2
+                    ),
+                ]
+            ))
+        }
+        let adapter = harness.model.terminalScreenAdapter
+        func activities() -> [String?] {
+            adapter.windowSelectionSheetRenderProjection(group: nil).windows.map { $0.contents?.activity }
+        }
+        await serve(2)
+        try await harness.waitUntil("the tabs' rows weren't listed") {
+            activities() == ["app", "Review the diff", "Plan the release"]
+        }
+
+        var screenChanges = 0
+        let watch = adapter.objectWillChange.sink { screenChanges += 1 }
+        defer { watch.cancel() }
+        await serve(3, claude: "Fix the flaky test", blink: ".", spinner: "⠙")
+        await serve(4, claude: "Fix the flaky test", blink: ".", thread: "Review the fix", spinner: "⠹")
+        try await harness.waitUntil("the agent's new thread didn't reach its row") {
+            activities() == ["app", "Review the fix", "Plan the release"]
+        }
+        XCTAssertEqual(screenChanges, 1, "a ticking title or a pane no row shows told the views")
+
+        await serve(
+            5, folder: "docs", claude: "Fix the flaky test", blink: ".", thread: "Review the fix", spinner: "⠸"
+        )
+        try await harness.waitUntil("the shell's new folder didn't reach its row") {
+            activities() == ["docs", "Review the fix", "Plan the release"]
+        }
+        XCTAssertEqual(screenChanges, 2)
+    }
+
     /// A tab shows its agent done until a frame drawn after it finished shows the agent's pane, as Herdr's
     /// client rolls its tabs up from the statuses it shows.
     func testATabShowsItsAgentDoneUntilItsPaneIsSeen() async throws {

@@ -268,6 +268,7 @@ enum HerdrServerScript {
         _ paneID: String,
         name: String? = nil,
         title: String? = nil,
+        terminalTitle: String? = nil,
         terminalTitleStripped: String? = nil,
         agent: String? = nil,
         displayAgent: String? = nil,
@@ -281,7 +282,7 @@ enum HerdrServerScript {
         return """
         {"pane_id":"\(paneID)","workspace_id":"\(workspace)","tab_id":"\(tab)","name":\(json(name)),
          "display_agent":\(json(displayAgent)),"agent":\(json(agent)),"title":\(json(title)),
-         "terminal_title":null,"terminal_title_stripped":\(json(terminalTitleStripped)),
+         "terminal_title":\(json(terminalTitle)),"terminal_title_stripped":\(json(terminalTitleStripped)),
          "agent_status":"\(status.rawValue)","state_change_seq":\(stateChange),
          "state_labels":[\(labels)],"tokens":[],"focused":false}
         """

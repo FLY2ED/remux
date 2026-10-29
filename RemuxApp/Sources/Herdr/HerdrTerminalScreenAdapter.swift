@@ -646,6 +646,12 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         )
     }
 
+    /// What every tab's row says, across the session's workspaces, so the model can tell the views when a
+    /// snapshot changes it.
+    var tabRowContents: [GhosttyWindowSelectionSheetRenderProjection.Contents] {
+        model?.places.outline?.workspaces.flatMap(\.tabs).map(contents(of:)) ?? []
+    }
+
     /// A tab's row: its name if the user gave it one, what its focused pane runs in front of what up to two
     /// of its other panes run, and what its focused pane is doing. Herdr names the focused pane only of the
     /// tab this phone is on, so another tab's row shows its most urgent agent's pane, else its first pane.
