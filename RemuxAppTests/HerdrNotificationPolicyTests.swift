@@ -50,7 +50,7 @@ final class HerdrNotificationPolicyTests: XCTestCase {
         shown: Bool = false,
         tab: String = "t1",
         workspace: String = "w1",
-        _ statuses: [String: HerdrAgentStatus] = [:]
+        _ statuses: [String: TerminalAgentStatus] = [:]
     ) -> HerdrNotificationSessionState {
         HerdrNotificationSessionState(isShown: shown, focusedWorkspaceID: workspace, focusedTabID: tab, agentStatuses: statuses)
     }

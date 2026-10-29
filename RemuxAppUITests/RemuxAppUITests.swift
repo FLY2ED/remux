@@ -34,7 +34,8 @@ final class RemuxAppUITests: XCTestCase {
         let expectedHostKey: String
         /// Where each step's screenshot is written as well, when set.
         var captureDirectory: String?
-        /// The panes of the session's tab, when the pane picker should be checked for a tile each.
+        /// The panes of the session's tab, as the server counts them: the session test needs more than one,
+        /// and checks that the pane picker shows a tile for each.
         var paneCount: Int?
         /// Where the notification test asks the harness for each change on the server, by writing
         /// `<step>.request`; that test is skipped without it.
@@ -1677,23 +1678,33 @@ final class RemuxAppUITests: XCTestCase {
         app.buttons["terminal.sessions.close"].tap()
     }
 
-    /// A Herdr session opened from the library on a live server: the tab's panes on screen, the keyboard
-    /// opening and closing over them, and Home and back. Skipped without REMUX_LIVE_HERDR_UI_CONFIG.
+    /// A Herdr session opened from the library on a live server. On a phone the multi-pane tab opens zoomed
+    /// on its focused pane, and Panes lists all of its panes; turned off there, the tab's panes are on
+    /// screen, with the keyboard opening and closing over them, and the tab stays unzoomed over Home and
+    /// back. Skipped without REMUX_LIVE_HERDR_UI_CONFIG; its `paneCount` must give the tab's panes.
     func testLiveHerdrSessionWhenConfigured() throws {
         let configuration = try launchLiveHerdrApp()
+        let paneCount = try XCTUnwrap(configuration.paneCount, "The live Herdr configuration should give paneCount.")
+        guard paneCount > 1 else { return XCTFail("The session's tab needs more than one pane to open zoomed.") }
 
         openFirstSavedSession()
         waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
         assertLiveTerminalScreenshotContainsRenderedContent()
         captureLiveHerdrStep("1-session", in: configuration)
 
-        // The pane picker maps every pane, however close Herdr's border settings put them.
-        if let paneCount = configuration.paneCount {
-            openPanesSheet()
-            XCTAssertTrue(waitForPanePickerTileCount(paneCount, timeout: 10), "The pane picker should map every pane.")
-            captureLiveHerdrStep("1a-pane-picker", in: configuration)
-            dismissTopSheetIfPresent()
-        }
+        // Zoomed on open, as "Zoom multipane windows" is on by default on a phone, with every pane in the
+        // pane picker; turned off from Panes, the tab's panes are on screen for the rest of the test.
+        let zoom = openHerdrPanesZoomSwitch(paneCount: paneCount)
+        XCTAssertEqual(zoom.value as? String, "1", "The multi-pane tab should open zoomed.")
+        captureLiveHerdrStep("1a-panes-zoomed", in: configuration)
+        zoom.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
+        XCTAssertTrue(
+            waitForValue("0", of: zoom, timeout: 8),
+            "Zoom should turn off from Panes."
+        )
+        app.buttons["terminal.panes.close"].tap()
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        captureLiveHerdrStep("1c-panes-unzoomed", in: configuration)
 
         // A long-press selects the word under the finger and offers Copy, as on a tmux pane.
         let terminal = app.otherElements["terminal.screen"].firstMatch
@@ -1743,6 +1754,17 @@ final class RemuxAppUITests: XCTestCase {
         assertLiveTerminalScreenshotContainsRenderedContent()
         captureLiveHerdrStep("5-back", in: configuration)
 
+        // The tab the user unzoomed isn't zoomed again on the way back, and the pane picker maps every pane
+        // from Herdr's frame, however close Herdr's border settings put them.
+        XCTAssertEqual(
+            openHerdrPanesZoomSwitch(paneCount: paneCount).value as? String,
+            "0",
+            "The tab should stay unzoomed."
+        )
+        captureLiveHerdrStep("5a-pane-picker", in: configuration)
+        app.buttons["terminal.panes.close"].tap()
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+
         // A swipe down over the first pane scrolls its history back on Herdr. The harness reads
         // Herdr's scroll position after the test, so the swipe's steps get time to go out first.
         let firstPane = app.otherElements["terminal.screen"].firstMatch
@@ -1751,6 +1773,439 @@ final class RemuxAppUITests: XCTestCase {
         _ = XCTWaiter.wait(for: [XCTestExpectation(description: "the swipe's wheel steps go out")], timeout: 2)
         XCTAssertEqual(app.state, .runningForeground)
         captureLiveHerdrStep("6-scrolled", in: configuration)
+    }
+
+    /// Tabs and workspaces of a live Herdr session whose workspace `remux` has a three-pane tab and a tab
+    /// `build`, beside workspaces `api` (a two-pane tab `server` and a tab `tests`), `web`, `notes` and
+    /// `infra`, with a session `locked` Herdr can't reach. The Tabs sheet lists the tabs of the workspace
+    /// on screen, and offers the three most recent workspaces as capsules and the rest behind More, with New
+    /// Workspace at the end of More's menu; picking one only changes the tiles, a tile goes there, and the
+    /// capsules follow recency. The Sessions sheet
+    /// lists the workspaces under the session with New Workspace, and lists `locked` as unavailable. New
+    /// Tab goes to its tab, and the Panes sheet's Split → goes to the pane it makes, zoomed by the setting.
+    func testLiveHerdrTabsAndWorkspacesWhenConfigured() throws {
+        let configuration = try launchLiveHerdrApp()
+        let tabs = app.buttons.matching(identifier: "terminal.windows").firstMatch
+        let panes = app.buttons.matching(identifier: "terminal.panes").firstMatch
+        let tabsSheet = elementWithIdentifier("terminal.windows.sheet")
+        func capsule(_ index: Int) -> XCUIElement { app.buttons["terminal.windows.group.\(index)"] }
+        let more = elementWithIdentifier("terminal.windows.group.more")
+        func tile(_ index: Int) -> XCUIElement { app.buttons["terminal.window.tile.\(index)"] }
+
+        openFirstSavedSession()
+        waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 2", timeout: 10))
+
+        tabs.tap()
+        XCTAssertTrue(tabsSheet.waitForExistence(timeout: 5))
+        XCTAssertEqual(capsule(1).label, "Workspace remux")
+        XCTAssertTrue(capsule(1).isSelected)
+        XCTAssertEqual([capsule(2).label, capsule(3).label], ["Workspace api", "Workspace web"])
+        XCTAssertTrue(tile(2).exists && !tile(3).exists, "The sheet should list remux's two tabs.")
+        XCTAssertEqual(tile(2).value as? String, "remux", "The build tab's row doesn't say its shell is in remux.")
+        captureLiveHerdrStep("w1-tabs-sheet", in: configuration)
+
+        capsule(2).tap()
+        XCTAssertTrue(waitForLabel(of: tile(1), "Tab 1 of 2, server, 2 panes", timeout: 5), "Picking api didn't list its tabs.")
+        XCTAssertTrue(tabsSheet.exists, "Picking a workspace closed the sheet.")
+        captureLiveHerdrStep("w2-other-workspace", in: configuration)
+
+        more.tap()
+        let infra = app.buttons["infra"]
+        XCTAssertTrue(infra.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["notes"].exists)
+        XCTAssertTrue(app.buttons["New Workspace"].exists, "More's menu doesn't offer New Workspace.")
+        XCTAssertEqual(
+            app.buttons.matching(NSPredicate(format: "label == %@", "New Workspace")).count, 1,
+            "New Workspace is offered twice."
+        )
+        captureLiveHerdrStep("w3-more-menu", in: configuration)
+        infra.tap()
+        XCTAssertTrue(waitForLabel(of: more, "Workspace infra, more workspaces", timeout: 5))
+        XCTAssertTrue(tile(1).exists && !tile(2).exists, "The sheet should list infra's one tab.")
+        captureLiveHerdrStep("w3b-more-picked", in: configuration)
+        more.tap()
+        XCTAssertTrue(infra.waitForExistence(timeout: 5))
+        XCTAssertTrue(infra.isSelected, "More didn't mark the workspace it shows.")
+        XCTAssertFalse(app.buttons["notes"].isSelected)
+        captureLiveHerdrStep("w3c-more-marks-shown", in: configuration)
+        infra.tap()
+        XCTAssertTrue(waitForLabel(of: more, "Workspace infra, more workspaces", timeout: 5))
+
+        capsule(2).tap()
+        XCTAssertTrue(waitForLabel(of: tile(1), "Tab 1 of 2, server, 2 panes", timeout: 5))
+        tile(1).tap()
+        XCTAssertTrue(tabsSheet.waitForNonExistence(timeout: 5), "The tile didn't close the sheet.")
+        XCTAssertTrue(waitForLabel(of: panes, "Panes, 2 panes", timeout: 10), "The tile didn't go to api's server tab.")
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 2", timeout: 10))
+        captureLiveHerdrStep("w4-moved-to-api", in: configuration)
+
+        // The setting zooms the two-pane tab reached, as a show does.
+        let zoom = openHerdrPanesZoomSwitch(paneCount: 2)
+        XCTAssertTrue(waitForValue("1", of: zoom, timeout: 8), "The tab reached wasn't zoomed.")
+        app.buttons["terminal.panes.close"].tap()
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+
+        tabs.tap()
+        XCTAssertTrue(tabsSheet.waitForExistence(timeout: 5))
+        XCTAssertEqual([capsule(1).label, capsule(2).label], ["Workspace api", "Workspace remux"])
+        captureLiveHerdrStep("w5-recency", in: configuration)
+        app.buttons["terminal.windows.close"].tap()
+        XCTAssertTrue(tabsSheet.waitForNonExistence(timeout: 5))
+
+        let sessionsSheet = app.otherElements["terminal.sessions.sheet"]
+        openSessionSwitcherFromTerminal()
+        XCTAssertTrue(sessionsSheet.waitForExistence(timeout: 5))
+        let workspaceRows = app.descendants(matching: .any).matching(identifier: "terminal.sessions.herdr-workspace")
+        XCTAssertTrue(workspaceRows.firstMatch.waitForExistence(timeout: 5), "The session on screen didn't list its workspaces.")
+        let current = workspaceRows.matching(NSPredicate(format: "label == %@", "Workspace api, 2 tabs, current workspace"))
+        XCTAssertEqual(current.count, 1)
+        captureLiveHerdrStep("w6-sessions-sheet", in: configuration)
+        // The list makes only the rows it shows, so the workspaces are read as it scrolls.
+        let sessionList = app.descendants(matching: .any)["terminal.sessions.list"]
+        let newWorkspace = elementWithIdentifier("terminal.sessions.herdr-workspace.new")
+        var listed = Set(workspaceRows.allElementsBoundByIndex.map { $0.label })
+        for _ in 0..<4 where !newWorkspace.exists || !newWorkspace.isHittable {
+            sessionList.swipeUp()
+            listed.formUnion(workspaceRows.allElementsBoundByIndex.map { $0.label })
+        }
+        XCTAssertTrue(newWorkspace.isHittable, "The session on screen didn't offer New Workspace.")
+        XCTAssertEqual(listed, [
+            "Workspace remux, 2 tabs", "Workspace api, 2 tabs, current workspace", "Workspace web, 1 tab",
+            "Workspace notes, 1 tab", "Workspace infra, 1 tab",
+        ], "The session on screen didn't list its 5 workspaces.")
+        captureLiveHerdrStep("w6b-sessions-sheet-scrolled", in: configuration)
+
+        let web = workspaceRows.matching(NSPredicate(format: "label BEGINSWITH %@", "Workspace web,")).firstMatch
+        for _ in 0..<4 where !web.exists || !web.isHittable {
+            sessionList.swipeDown()
+        }
+        web.tap()
+        XCTAssertTrue(sessionsSheet.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 1", timeout: 10))
+        XCTAssertTrue(waitForLabel(of: panes, "Panes, 1 pane", timeout: 10), "The workspace row didn't go to web.")
+        captureLiveHerdrStep("w7-moved-to-web", in: configuration)
+
+        // Herdr lists a session it can't reach as unavailable, and it isn't offered.
+        openSessionSwitcherFromTerminal()
+        XCTAssertTrue(sessionsSheet.waitForExistence(timeout: 5))
+        let locked = app.descendants(matching: .any)
+            .matching(identifier: "terminal.sessions.available-session")
+            .matching(NSPredicate(format: "label BEGINSWITH %@", "locked, Herdr, Unavailable"))
+            .firstMatch
+        for _ in 0..<6 where !locked.exists || !locked.isHittable {
+            sessionList.swipeUp()
+        }
+        XCTAssertTrue(locked.waitForExistence(timeout: 20), "The session Herdr can't reach wasn't listed as unavailable.")
+        XCTAssertFalse(locked.isEnabled, "The unavailable session was offered.")
+        sessionList.swipeUp()
+        captureLiveHerdrStep("w8-unavailable-session", in: configuration)
+        for _ in 0..<6 where !newWorkspace.exists || !newWorkspace.isHittable {
+            sessionList.swipeDown()
+        }
+        XCTAssertTrue(newWorkspace.isHittable)
+        newWorkspace.tap()
+        XCTAssertTrue(sessionsSheet.waitForNonExistence(timeout: 5))
+        tabs.tap()
+        XCTAssertTrue(tabsSheet.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitForLabel(of: more, "More workspaces", timeout: 5))
+        XCTAssertFalse(["Workspace remux", "Workspace api", "Workspace web", "Workspace notes", "Workspace infra"]
+            .contains(capsule(1).label), "New Workspace didn't go to the new workspace: \(capsule(1).label)")
+        captureLiveHerdrStep("w9-new-workspace", in: configuration)
+
+        app.buttons["terminal.window.new"].tap()
+        XCTAssertTrue(tabsSheet.waitForNonExistence(timeout: 5), "New Tab didn't close the sheet.")
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 2 of 2", timeout: 10), "New Tab didn't go to the new tab.")
+        sendTerminalCommand("echo REMUX_NEW_TAB_TYPED")
+        XCTAssertEqual(app.state, .runningForeground)
+        captureLiveHerdrStep("w10-new-tab", in: configuration)
+
+        // Split → makes a pane beside the one on screen and goes to it; the setting zooms the new pane.
+        openPanesSheet()
+        tapPickerButton(identifier: "terminal.pane.split.right", fallbackLabel: "Split right")
+        XCTAssertTrue(waitForLabel(of: panes, "Panes, 2 panes", timeout: 10), "Split didn't make a pane.")
+        let splitZoom = openHerdrPanesZoomSwitch(paneCount: 2)
+        XCTAssertTrue(waitForValue("1", of: splitZoom, timeout: 8), "The pane the split made wasn't zoomed.")
+        captureLiveHerdrStep("w11-split", in: configuration)
+        app.buttons["terminal.panes.close"].tap()
+        sendTerminalCommand("echo REMUX_SPLIT_TYPED")
+        XCTAssertEqual(app.state, .runningForeground)
+    }
+
+    /// Closing tabs from the Tabs sheet asks where Herdr's client asks, on the tabs test's server with a
+    /// worktree group added: the repository `shop`'s root checkout and its linked worktree `shop-feature`. A
+    /// tab beside another closes at once; a workspace's only tab asks about the workspace's close first; and
+    /// the only tab of the group's root, whose close Herdr's server asks to confirm, asks about the group's
+    /// close in the same dialog.
+    func testLiveHerdrClosesWhenConfigured() throws {
+        let configuration = try launchLiveHerdrApp()
+        let tabs = app.buttons.matching(identifier: "terminal.windows").firstMatch
+        let tabsSheet = elementWithIdentifier("terminal.windows.sheet")
+        func capsule(_ index: Int) -> XCUIElement { app.buttons["terminal.windows.group.\(index)"] }
+        let more = elementWithIdentifier("terminal.windows.group.more")
+        func tile(_ index: Int) -> XCUIElement { app.buttons["terminal.window.tile.\(index)"] }
+        func remove(tile index: Int) {
+            XCTAssertTrue(tile(index).waitForExistence(timeout: 5), "Missing tab tile \(index)")
+            tile(index).press(forDuration: 1.0)
+            tapPickerButton(identifier: "terminal.window.remove.\(index)", fallbackLabel: "Close Tab")
+        }
+
+        openFirstSavedSession()
+        waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 2", timeout: 10))
+        tabs.tap()
+        XCTAssertTrue(tabsSheet.waitForExistence(timeout: 5))
+
+        remove(tile: 2)
+        XCTAssertTrue(tile(2).waitForNonExistence(timeout: 10), "remux's second tab didn't close.")
+        XCTAssertFalse(app.buttons["terminal.window.remove.confirm.2"].exists, "A tab beside another asked first.")
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 1", timeout: 10))
+
+        // The row beside the tab on screen takes the touches on its own right edge and its own Close.
+        func openTabs() {
+            tabs.tap()
+            XCTAssertTrue(tabsSheet.waitForExistence(timeout: 5))
+        }
+        app.buttons["terminal.window.new"].tap()
+        XCTAssertTrue(tabsSheet.waitForNonExistence(timeout: 5), "New Tab didn't close the sheet.")
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 2 of 2", timeout: 10), "New Tab didn't go to the new tab.")
+        openTabs()
+        tile(1).coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        XCTAssertTrue(tabsSheet.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 2", timeout: 10), "A tap on tab 1's right edge didn't go to tab 1.")
+        tabs.tap()
+        XCTAssertTrue(tabsSheet.waitForExistence(timeout: 5))
+        tile(2).tap()
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 2 of 2", timeout: 10))
+        openTabs()
+        // The tiles are numbered by position, so the tab left is told by its panes: remux's three-pane tab
+        // and the new tab's one.
+        func panes(ofTile index: Int) -> String? {
+            tile(index).label.components(separatedBy: ", ").first { $0.hasSuffix(" pane") || $0.hasSuffix(" panes") }
+        }
+        let newTabPanes = panes(ofTile: 2)
+        XCTAssertNotEqual(panes(ofTile: 1), newTabPanes, "Tabs 1 and 2 can't be told apart.")
+        remove(tile: 1)
+        XCTAssertTrue(tile(2).waitForNonExistence(timeout: 10), "Tab 1's Close didn't close a tab.")
+        XCTAssertTrue(tabsSheet.exists, "Tab 1's Close closed the sheet.")
+        XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 1", timeout: 10))
+        XCTAssertEqual(panes(ofTile: 1), newTabPanes, "Tab 1's Close closed tab 2.")
+        captureLiveHerdrStep("d0-remove-beside-tab-on-screen", in: configuration)
+
+        XCTAssertEqual(capsule(3).label, "Workspace web")
+        capsule(3).tap()
+        XCTAssertTrue(capsule(3).isSelected)
+        remove(tile: 1)
+        // The action sheet nests each button in another with its identifier.
+        let closeWorkspace = app.buttons.matching(identifier: "terminal.window.remove.confirm.1").firstMatch
+        XCTAssertTrue(closeWorkspace.waitForExistence(timeout: 5), "web's only tab didn't ask first.")
+        XCTAssertEqual(closeWorkspace.label, "Close Workspace")
+        XCTAssertTrue(app.staticTexts["Close Workspace?"].exists)
+        XCTAssertTrue(app.staticTexts["“web” and its 1 tab and 1 pane will close."].exists)
+        captureLiveHerdrStep("d1-close-workspace", in: configuration)
+        closeWorkspace.tap()
+        XCTAssertTrue(waitForLabel(of: capsule(3), "Workspace notes", timeout: 10), "web didn't close.")
+        XCTAssertTrue(capsule(1).isSelected, "The sheet didn't go back to the workspace on screen.")
+
+        more.tap()
+        let shop = app.buttons["shop"]
+        XCTAssertTrue(shop.waitForExistence(timeout: 5), "The worktree group's root isn't listed.")
+        XCTAssertTrue(app.buttons["shop-feature"].exists, "The linked worktree isn't listed.")
+        shop.tap()
+        XCTAssertTrue(waitForLabel(of: more, "Workspace shop, more workspaces", timeout: 5))
+        remove(tile: 1)
+        let closeGroup = app.buttons.matching(identifier: "terminal.close.asked.confirm").firstMatch
+        XCTAssertTrue(closeGroup.waitForExistence(timeout: 10), "Herdr's question about the group didn't reach the user.")
+        XCTAssertEqual(closeGroup.label, "Close Worktree Group")
+        XCTAssertTrue(app.staticTexts["Close Worktree Group?"].exists)
+        XCTAssertTrue(app.staticTexts["“shop” and its 1 other workspace will close, with 2 tabs and 2 panes."].exists)
+        captureLiveHerdrStep("d2-close-worktree-group", in: configuration)
+        closeGroup.tap()
+        XCTAssertTrue(waitForLabel(of: more, "More workspaces", timeout: 10), "The sheet didn't leave the closed group.")
+        more.tap()
+        let infra = app.buttons["infra"]
+        XCTAssertTrue(infra.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["shop"].exists || app.buttons["shop-feature"].exists, "The group didn't close.")
+        captureLiveHerdrStep("d3-group-closed", in: configuration)
+        infra.tap()
+    }
+
+    /// The session `locked` that Herdr can't reach, on the tabs test's server, saved as the server's latest
+    /// session: the server row's Resume Latest is disabled, as the session's own row is, and doesn't open it,
+    /// and its swipe actions leave out Resume.
+    func testLiveHerdrUnreachableLatestSessionIsNotResumedFromItsServerWhenConfigured() throws {
+        let configuration = try launchLiveHerdrApp(sessionName: "locked")
+        let server = app.descendants(matching: .any).matching(identifier: "library.server.row").firstMatch
+        let terminal = app.otherElements["terminal.screen"]
+
+        // The server's sessions are listed once its host key is trusted.
+        openFirstServerDetail()
+        let hostKey = app.buttons["library.server.host-key"]
+        XCTAssertTrue(hostKey.waitForExistence(timeout: 20), "The server page didn't ask to verify the server.")
+        hostKey.tap()
+        let trust = app.alerts.firstMatch
+        XCTAssertTrue(trust.waitForExistence(timeout: 5))
+        let fingerprint = try XCTUnwrap(configuration.expectedHostKey.split(separator: " ").last.map(String.init))
+        guard trust.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", fingerprint)).firstMatch.exists else {
+            XCTFail("Refusing to trust a host key other than the fixture's.")
+            return
+        }
+        trust.buttons["Trust Server"].tap()
+        let locked = app.descendants(matching: .any)
+            .matching(identifier: "library.session.resume")
+            .matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "locked", "Unavailable"))
+            .firstMatch
+        XCTAssertTrue(locked.waitForExistence(timeout: 20), "The saved session Herdr can't reach wasn't shown unavailable.")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(server.waitForExistence(timeout: 5))
+
+        server.press(forDuration: 1.2)
+        let resumeLatest = app.buttons["Resume Latest"]
+        XCTAssertTrue(resumeLatest.waitForExistence(timeout: 5), "The server row's menu didn't open.")
+        XCTAssertFalse(resumeLatest.isEnabled, "Resume Latest offered the session Herdr can't reach.")
+        captureLiveHerdrStep("u1-resume-latest-disabled", in: configuration)
+        resumeLatest.tap()
+        XCTAssertFalse(terminal.waitForExistence(timeout: 3), "Resume Latest opened the session Herdr can't reach.")
+        if resumeLatest.exists {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)).tap()
+            XCTAssertTrue(resumeLatest.waitForNonExistence(timeout: 5))
+        }
+
+        server.swipeLeft()
+        XCTAssertTrue(app.buttons["Delete"].waitForExistence(timeout: 5), "The server row's swipe actions didn't open.")
+        XCTAssertFalse(app.buttons["Resume"].exists, "The Resume swipe offered the session Herdr can't reach.")
+        captureLiveHerdrStep("u2-resume-swipe-not-offered", in: configuration)
+    }
+
+    /// Copy on a Herdr pane is Herdr's text of the selection: an OSC 8 link the pane wraps onto two rows
+    /// pastes as the whole link on one line, as does a plain-text one once Herdr has found the rest of it,
+    /// and a word pastes as itself. A selection made over the history moves with its line when a swipe
+    /// scrolls Herdr's history.
+    func testLiveHerdrSelectionCopyWhenConfigured() throws {
+        let configuration = try launchLiveHerdrApp()
+        openFirstSavedSession()
+        waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
+        let terminal = app.otherElements["terminal.screen"].firstMatch
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10))
+        // A row and a half down, a press lands on the text's first or second row, whether or not Herdr
+        // draws a border above the pane.
+        let topRows = terminal.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 20, dy: 26))
+
+        let token = UUID().uuidString.prefix(8).lowercased()
+        let url = "https://example.com/\(token)/" + String(repeating: "p", count: 60)
+        UIPasteboard.general.string = "REMUX_HERDR_LINK_COPY_SENTINEL"
+        sendTerminalCommand(#"clear; printf '\033]8;;"# + url + #"\033\\"# + url + #"\033]8;;\033\\\n'"#)
+        hideKeyboardIfPresent()
+        guard waitForStableLiveTerminalScreenshot(attachmentName: "herdr-wrapped-link-ready") != nil else { return }
+        topRows.press(forDuration: 0.70)
+        let linkCopy = waitForCopyMenuItem(timeout: 5)
+        captureLiveHerdrStep("c1-wrapped-link-selected", in: configuration)
+        linkCopy.tap()
+        XCTAssertEqual(pasteIntoEmptyComposer(), url, "A link the pane wraps should copy whole, on one line.")
+        captureLiveHerdrStep("c2-link-pasted", in: configuration)
+        clearAndCloseComposer()
+
+        let plainURL = "https://example.org/\(token)/" + String(repeating: "q", count: 60)
+        UIPasteboard.general.string = "REMUX_HERDR_PLAIN_LINK_COPY_SENTINEL"
+        sendTerminalCommand("clear; printf '%s\\n' \(plainURL)")
+        hideKeyboardIfPresent()
+        guard waitForStableLiveTerminalScreenshot(attachmentName: "herdr-plain-link-ready") != nil else { return }
+        topRows.press(forDuration: 0.70)
+        let plainCopy = waitForCopyMenuItem(timeout: 5)
+        captureLiveHerdrStep("c2b-plain-link-grown", in: configuration)
+        plainCopy.tap()
+        XCTAssertEqual(
+            pasteIntoEmptyComposer(),
+            plainURL,
+            "A plain-text link the pane wraps should grow to the whole link and copy on one line."
+        )
+        clearAndCloseComposer()
+
+        let word = "herdrword-\(token)"
+        UIPasteboard.general.string = "REMUX_HERDR_WORD_COPY_SENTINEL"
+        sendTerminalCommand("clear; printf '%s\\n%s\\n' \(word) \(word)")
+        hideKeyboardIfPresent()
+        guard waitForStableLiveTerminalScreenshot(attachmentName: "herdr-word-ready") != nil else { return }
+        topRows.press(forDuration: 0.70)
+        waitForCopyMenuItem(timeout: 5).tap()
+        XCTAssertEqual(pasteIntoEmptyComposer(), word, "A word should copy as itself.")
+        clearAndCloseComposer()
+
+        sendTerminalCommand("clear; seq -f 'scrolled line %g' 1 120")
+        hideKeyboardIfPresent()
+        guard waitForStableLiveTerminalScreenshot(attachmentName: "herdr-history-ready") != nil else { return }
+        topRows.press(forDuration: 0.70)
+        XCTAssertTrue(waitForCopyMenuItem(timeout: 5).exists)
+        captureLiveHerdrStep("c3-history-word-selected", in: configuration)
+        let swipe = terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4))
+        swipe.press(forDuration: 0.05, thenDragTo: swipe.withOffset(CGVector(dx: 0, dy: 70)))
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "Herdr scrolls and the highlight follows")], timeout: 2)
+        captureLiveHerdrStep("c4-selection-followed-scroll", in: configuration)
+        XCTAssertEqual(app.state, .runningForeground)
+    }
+
+    /// A program's OSC 52 copy in a Herdr pane lands on the clipboard, and the screen says so.
+    func testLiveHerdrProgramCopyWhenConfigured() throws {
+        let configuration = try launchLiveHerdrApp()
+        openFirstSavedSession()
+        waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
+
+        let copied = "herdr-copy-\(UUID().uuidString.prefix(8).lowercased())"
+        sendTerminalCommand(#"clear; printf '\033]52;c;%s\a' "$(printf %s "# + copied + #" | base64)""#)
+        let notice = app.descendants(matching: .any)["terminal.notice"].firstMatch
+        XCTAssertTrue(notice.waitForExistence(timeout: 10), "A program's copy should say so.")
+        XCTAssertEqual(notice.label, "Copied to clipboard")
+        captureLiveHerdrStep("d1-copied", in: configuration)
+        hideKeyboardIfPresent()
+        XCTAssertEqual(pasteIntoEmptyComposer(), copied, "A program's copy should be on the clipboard.")
+        captureLiveHerdrStep("d2-copy-pasted", in: configuration)
+        clearAndCloseComposer()
+    }
+
+    /// A tap on a Herdr pane that isn't focused, whose program reads the mouse, focuses the pane and is a
+    /// click where the finger is. The session's tab has two panes, and the right one, not focused, runs
+    /// `cat -v` with SGR mouse reports on, which shows the reports it reads; the harness reads its text and
+    /// the focus after the test.
+    func testLiveHerdrMouseClickWhenConfigured() throws {
+        let configuration = try launchLiveHerdrApp()
+        openFirstSavedSession()
+        waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
+
+        // A phone opens a multi-pane tab zoomed; turned off from Panes, both panes are on screen.
+        let zoom = openHerdrPanesZoomSwitch(paneCount: 2)
+        zoom.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
+        XCTAssertTrue(waitForValue("0", of: zoom, timeout: 8), "Zoom should turn off from Panes.")
+        app.buttons["terminal.panes.close"].tap()
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        captureLiveHerdrStep("d3-two-panes", in: configuration)
+
+        let terminal = app.otherElements["terminal.screen"].firstMatch
+        terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.3)).tap()
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "the click shows")], timeout: 1.5)
+        captureLiveHerdrStep("d3-click", in: configuration)
+        XCTAssertEqual(app.state, .runningForeground)
+    }
+
+    /// Opens Panes over a Herdr session whose tab has `paneCount` panes, checks that the pane picker maps
+    /// every one, also while the tab is zoomed, and returns its Zoom switch.
+    private func openHerdrPanesZoomSwitch(paneCount: Int) -> XCUIElement {
+        openPanesSheet()
+        XCTAssertTrue(
+            waitForPanePickerTileCount(paneCount, timeout: 10),
+            "The pane picker should map every pane of the tab, also while it is zoomed."
+        )
+        let zoom = app.switches["terminal.pane.zoom"]
+        XCTAssertTrue(zoom.waitForExistence(timeout: 8))
+        return zoom
+    }
+
+    private func waitForValue(_ value: String, of element: XCUIElement, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if element.value as? String == value { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        return false
     }
 
     /// Herdr's notifications on a live server whose session has a three-pane tab (workspace `remux`) and a
@@ -1837,6 +2292,249 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertTrue(serverName.waitForNonExistence(timeout: 5))
     }
 
+    /// Herdr's agents on a live server whose session has the fixture's three-pane tab (workspace `remux`),
+    /// with agent `claude` working in it, and a second tab, `build`, whose two panes each have an agent: one
+    /// blocked, and one working that finishes when the test asks (`finish`). Panes adds the agent's state to
+    /// its tile, Tabs shows the tab's agent, and Sessions the session's most urgent one. The Agents list has
+    /// every agent, with Blocked and Done filters; the finished agent's row opens its pane, where it counts as
+    /// seen.
+    func testLiveHerdrAgentsWhenConfigured() throws {
+        let configuration = try launchLiveHerdrApp(requiringSteps: true)
+        let banner = app.descendants(matching: .any)["herdr.notification.banner"].firstMatch
+        let panes = app.buttons.matching(identifier: "terminal.panes").firstMatch
+        let sessionsSheet = app.otherElements["terminal.sessions.sheet"]
+        let agentRows = app.descendants(matching: .any).matching(identifier: "terminal.agents.agent")
+        func element(_ identifierPrefix: String, labelContaining text: String) -> XCUIElement {
+            app.descendants(matching: .any)
+                .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", identifierPrefix, text))
+                .firstMatch
+        }
+        func agentRow(_ label: String) -> XCUIElement {
+            agentRows.matching(NSPredicate(format: "label == %@", label)).firstMatch
+        }
+        func waitForAgentRows(_ labels: [String]) -> Bool {
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline {
+                if agentRows.allElementsBoundByIndex.map({ $0.label }).sorted() == labels.sorted() { return true }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            }
+            return false
+        }
+        func showAgents() {
+            openSessionSwitcherFromTerminal()
+            XCTAssertTrue(sessionsSheet.waitForExistence(timeout: 5))
+            let agents = app.segmentedControls["terminal.sessions.mode"].buttons["Agents"]
+            XCTAssertTrue(agents.waitForExistence(timeout: 5), "No Agents switch while a Herdr session is open.")
+            agents.tap()
+        }
+        let working = "claude, remux › 1, working"
+        let blocked = "claude, remux › build, blocked"
+        let done = "claude, remux › build, done"
+
+        openFirstSavedSession()
+        waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
+        XCTAssertTrue(waitForLabel(of: panes, "Panes, 3 panes", timeout: 10))
+
+        openPanesSheet()
+        XCTAssertTrue(
+            element("terminal.pane.tile.", labelContaining: "Fixing tests · 2, working").waitForExistence(timeout: 10),
+            "The agent's pane tile didn't name its state."
+        )
+        captureLiveHerdrStep("a1-panes", in: configuration)
+        app.buttons["terminal.panes.close"].tap()
+
+        openWindowsSheet()
+        XCTAssertTrue(
+            element("terminal.window.tile.", labelContaining: "agent working").waitForExistence(timeout: 10),
+            "The tab's tile didn't show its agent."
+        )
+        XCTAssertEqual(app.buttons["terminal.windows.group.1"].label, "Workspace remux, agent blocked")
+        XCTAssertFalse(app.buttons["terminal.windows.group.more"].exists, "One workspace offered More.")
+        let newWorkspace = app.buttons["terminal.windows.group.new"]
+        XCTAssertTrue(newWorkspace.isHittable, "New Workspace doesn't follow the workspace's capsule.")
+        XCTAssertEqual(newWorkspace.frame.midY, app.buttons["terminal.windows.group.1"].frame.midY, accuracy: 1)
+        captureLiveHerdrStep("a2-tabs", in: configuration)
+        app.buttons["terminal.windows.close"].tap()
+
+        try requestLiveHerdrStep("finish", in: configuration)
+        XCTAssertTrue(banner.waitForExistence(timeout: 20), "No banner for the agent that finished in the other tab.")
+        XCTAssertTrue(banner.waitForNonExistence(timeout: 20))
+
+        openSessionSwitcherFromTerminal()
+        XCTAssertTrue(sessionsSheet.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            element("terminal.sessions.active-session", labelContaining: "agent blocked").waitForExistence(timeout: 5),
+            "The session's row didn't show its most urgent agent."
+        )
+        captureLiveHerdrStep("a3-sessions", in: configuration)
+        app.buttons["terminal.sessions.close"].tap()
+        XCTAssertTrue(sessionsSheet.waitForNonExistence(timeout: 5))
+
+        showAgents()
+        XCTAssertTrue(waitForAgentRows([working, blocked, done]), "Agents didn't list every agent.")
+        captureLiveHerdrStep("a4-agents", in: configuration)
+        app.buttons["terminal.agents.filter.blocked"].tap()
+        XCTAssertTrue(waitForAgentRows([blocked]), "Blocked didn't show only the blocked agent.")
+        captureLiveHerdrStep("a5-agents-blocked", in: configuration)
+        app.buttons["terminal.agents.filter.done"].tap()
+        XCTAssertTrue(waitForAgentRows([done]), "Done didn't show only the finished agent.")
+        captureLiveHerdrStep("a6-agents-done", in: configuration)
+        app.buttons["terminal.agents.filter.working"].tap()
+        XCTAssertTrue(waitForAgentRows([working]), "Working didn't show only the working agent.")
+        captureLiveHerdrStep("a6b-agents-working", in: configuration)
+        app.buttons["terminal.agents.filter.idle"].tap()
+        XCTAssertTrue(waitForAgentRows([]), "Idle showed an agent while none is idle.")
+        XCTAssertTrue(app.staticTexts["No Agents Idle"].waitForExistence(timeout: 5))
+        captureLiveHerdrStep("a6c-agents-idle", in: configuration)
+        app.buttons["terminal.agents.filter.all"].tap()
+        XCTAssertTrue(waitForAgentRows([working, blocked, done]))
+
+        agentRow(done).tap()
+        XCTAssertTrue(sessionsSheet.waitForNonExistence(timeout: 5), "The row didn't close the Sessions sheet.")
+        XCTAssertTrue(waitForLabel(of: panes, "Panes, 2 panes", timeout: 10), "The row didn't go to the agent's tab.")
+        captureLiveHerdrStep("a7-opened-agent", in: configuration)
+        openPanesSheet()
+        XCTAssertTrue(
+            element("terminal.pane.tile.", labelContaining: "blocked").waitForExistence(timeout: 10),
+            "The blocked agent's pane tile didn't name its state."
+        )
+        XCTAssertTrue(
+            element("terminal.pane.tile.", labelContaining: "idle").waitForExistence(timeout: 10),
+            "The agent whose pane is on screen didn't count as seen."
+        )
+        captureLiveHerdrStep("a8-panes-agent-tab", in: configuration)
+        app.buttons["terminal.panes.close"].tap()
+
+        showAgents()
+        XCTAssertTrue(
+            waitForAgentRows([working, blocked, "claude, remux › build, idle"]),
+            "The agent that finished wasn't seen once its pane was on screen."
+        )
+        captureLiveHerdrStep("a9-agents-after-seen", in: configuration)
+        app.buttons["terminal.agents.filter.idle"].tap()
+        XCTAssertTrue(waitForAgentRows(["claude, remux › build, idle"]), "Idle didn't show only the idle agent.")
+        captureLiveHerdrStep("a9b-agents-idle", in: configuration)
+        app.buttons["terminal.sessions.close"].tap()
+    }
+
+    /// Herdr's workspaces on a live server, each showing its most urgent agent: the fixture's `remux`, with
+    /// agent `claude` working, then `api`, whose agent works and finishes when the test asks (`finish`),
+    /// `web`, with none, `notes`, whose agent is idle, and `infra`, whose agent is blocked. Sessions shows
+    /// each workspace's agent on its row, and collapses the session to one row that says it's current; Tabs
+    /// shows each workspace's agent on its capsule; the workspaces behind More show theirs in
+    /// its menu, top to bottom in Herdr's order then New Workspace, and on More once picked. Once `notes` and
+    /// `infra` close (`trim`), the three left fit as capsules, so there's no More and New Workspace ends the
+    /// capsules.
+    func testLiveHerdrWorkspaceAgentsWhenConfigured() throws {
+        let configuration = try launchLiveHerdrApp(requiringSteps: true)
+        let banner = app.descendants(matching: .any)["herdr.notification.banner"].firstMatch
+        let sessionsSheet = app.otherElements["terminal.sessions.sheet"]
+        let workspaceRows = app.buttons.matching(identifier: "terminal.sessions.herdr-workspace")
+        let more = app.buttons["terminal.windows.group.more"]
+        // The list makes only the rows it shows, so the workspaces are read as it scrolls, in order.
+        func listedWorkspaceRows() -> [String] {
+            let sessionList = app.descendants(matching: .any)["terminal.sessions.list"]
+            let newWorkspace = app.buttons["terminal.sessions.herdr-workspace.new"]
+            var listed: [String] = []
+            func read() {
+                for label in workspaceRows.allElementsBoundByIndex.map({ $0.label }) where !listed.contains(label) {
+                    listed.append(label)
+                }
+            }
+            read()
+            for _ in 0..<4 where !newWorkspace.exists || !newWorkspace.isHittable {
+                sessionList.swipeUp()
+                read()
+            }
+            return listed
+        }
+
+        openFirstSavedSession()
+        waitForLiveTerminalReady(timeout: 60, expectedHostKey: configuration.expectedHostKey)
+        try requestLiveHerdrStep("finish", in: configuration)
+        XCTAssertTrue(banner.waitForExistence(timeout: 20), "No banner for the agent that finished in api.")
+        XCTAssertTrue(banner.waitForNonExistence(timeout: 20))
+
+        openSessionSwitcherFromTerminal()
+        XCTAssertTrue(sessionsSheet.waitForExistence(timeout: 5))
+        XCTAssertTrue(workspaceRows.firstMatch.waitForExistence(timeout: 5), "The session didn't list its workspaces.")
+        captureLiveHerdrStep("w1-sessions", in: configuration)
+        XCTAssertEqual(listedWorkspaceRows(), [
+            "Workspace remux, 1 tab, agent working, current workspace",
+            "Workspace api, 1 tab, agent done",
+            "Workspace web, 1 tab",
+            "Workspace notes, 1 tab, agent idle",
+            "Workspace infra, 1 tab, agent blocked",
+        ], "The workspace rows didn't show their agents.")
+        captureLiveHerdrStep("w1b-sessions-scrolled", in: configuration)
+        // Collapsed, the session the user is in is marked on its own row; VoiceOver reads it as before.
+        let sessionRow = app.descendants(matching: .any).matching(identifier: "terminal.sessions.active-session").firstMatch
+        let sessionList = app.descendants(matching: .any)["terminal.sessions.list"]
+        for _ in 0..<4 where !sessionRow.isHittable {
+            sessionList.swipeDown()
+        }
+        XCTAssertEqual(sessionRow.value as? String, "Expanded")
+        sessionRow.tap()
+        XCTAssertTrue(waitForValue("Collapsed", of: sessionRow, timeout: 5), "The session didn't collapse.")
+        XCTAssertTrue(workspaceRows.firstMatch.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(sessionRow.label.hasSuffix(", current session"), sessionRow.label)
+        captureLiveHerdrStep("w1c-sessions-collapsed", in: configuration)
+        sessionRow.tap()
+        XCTAssertTrue(waitForValue("Expanded", of: sessionRow, timeout: 5), "The session didn't expand again.")
+        app.buttons["terminal.sessions.close"].tap()
+        XCTAssertTrue(sessionsSheet.waitForNonExistence(timeout: 5))
+
+        openWindowsSheet()
+        XCTAssertTrue(
+            waitForLabel(of: app.buttons["terminal.windows.group.1"], "Workspace remux, agent working", timeout: 10),
+            "The capsule of the workspace on screen didn't show its agent."
+        )
+        XCTAssertEqual(app.buttons["terminal.windows.group.2"].label, "Workspace api, agent done")
+        XCTAssertEqual(app.buttons["terminal.windows.group.3"].label, "Workspace web")
+        XCTAssertEqual(more.label, "More workspaces")
+        XCTAssertTrue(app.buttons["terminal.window.new"].isHittable, "New Tab isn't offered.")
+        XCTAssertFalse(app.buttons["New Workspace"].exists, "New Workspace is offered outside More's menu.")
+        captureLiveHerdrStep("w2-tabs", in: configuration)
+
+        more.tap()
+        let infra = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "infra")).firstMatch
+        XCTAssertTrue(infra.waitForExistence(timeout: 5), "More didn't list infra.")
+        let notes = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "notes")).firstMatch
+        XCTAssertTrue(notes.exists)
+        XCTAssertLessThan(notes.frame.minY, infra.frame.minY, "More didn't list its workspaces top to bottom in Herdr's order.")
+        let menuNewWorkspace = app.buttons["New Workspace"]
+        XCTAssertTrue(menuNewWorkspace.exists, "More's menu doesn't offer New Workspace.")
+        XCTAssertLessThan(infra.frame.minY, menuNewWorkspace.frame.minY, "New Workspace doesn't end More's menu.")
+        XCTAssertEqual(
+            app.buttons.matching(NSPredicate(format: "label == %@", "New Workspace")).count, 1,
+            "New Workspace is offered twice."
+        )
+        captureLiveHerdrStep("w3-more-menu", in: configuration)
+        infra.tap()
+        XCTAssertTrue(
+            waitForLabel(of: more, "Workspace infra, agent blocked, more workspaces", timeout: 10),
+            "More didn't show the picked workspace's agent."
+        )
+        captureLiveHerdrStep("w4-more-picked", in: configuration)
+        app.buttons["terminal.windows.close"].tap()
+        XCTAssertTrue(app.buttons["terminal.windows.close"].waitForNonExistence(timeout: 5))
+
+        try requestLiveHerdrStep("trim", in: configuration)
+        openWindowsSheet()
+        XCTAssertTrue(more.waitForNonExistence(timeout: 15), "Three workspaces still offered More.")
+        XCTAssertEqual(
+            (1...3).map { app.buttons["terminal.windows.group.\($0)"].label },
+            ["Workspace remux, agent working", "Workspace api, agent done", "Workspace web"]
+        )
+        let newWorkspace = app.buttons["terminal.windows.group.new"]
+        XCTAssertTrue(newWorkspace.isHittable, "New Workspace doesn't end the capsules.")
+        XCTAssertEqual(newWorkspace.label, "New Workspace")
+        XCTAssertEqual(newWorkspace.frame.midY, app.buttons["terminal.windows.group.3"].frame.midY, accuracy: 1)
+        XCTAssertGreaterThan(newWorkspace.frame.minX, app.buttons["terminal.windows.group.3"].frame.maxX)
+        captureLiveHerdrStep("w5-tabs-three-workspaces", in: configuration)
+        app.buttons["terminal.windows.close"].tap()
+    }
+
     private func waitForLabel(of element: XCUIElement, _ label: String, timeout: TimeInterval) -> Bool {
         let expectation = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "label == %@", label),
@@ -1850,8 +2548,11 @@ final class RemuxAppUITests: XCTestCase {
         try Data().write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(step).request"))
     }
 
-    /// Launches the app with the live Herdr configuration's server saved, for a test that opens it.
-    private func launchLiveHerdrApp(requiringSteps: Bool = false) throws -> LiveHerdrConfiguration {
+    /// Launches the app with the live Herdr configuration's server saved, with its session or `sessionName`.
+    private func launchLiveHerdrApp(
+        sessionName: String? = nil,
+        requiringSteps: Bool = false
+    ) throws -> LiveHerdrConfiguration {
         guard let path = ProcessInfo.processInfo.environment["REMUX_LIVE_HERDR_UI_CONFIG"], !path.isEmpty else {
             throw XCTSkip("Set REMUX_LIVE_HERDR_UI_CONFIG to run the live Herdr UI test.")
         }
@@ -1868,7 +2569,7 @@ final class RemuxAppUITests: XCTestCase {
         app.launchEnvironment["REMUX_DEBUG_SERVER_PORT"] = configuration.port ?? "22"
         app.launchEnvironment["REMUX_DEBUG_SERVER_USERNAME"] = configuration.username
         app.launchEnvironment["REMUX_DEBUG_CREDENTIALS_FILE"] = path
-        app.launchEnvironment["REMUX_DEBUG_HERDR_SESSION"] = configuration.sessionName
+        app.launchEnvironment["REMUX_DEBUG_HERDR_SESSION"] = sessionName ?? configuration.sessionName
         app.launchEnvironment["REMUX_DEBUG_HERDR_EXECUTABLE_PATH"] = configuration.herdrExecutablePath
         if let tmuxExecutablePath = configuration.tmuxExecutablePath {
             app.launchEnvironment["REMUX_DEBUG_TMUX_EXECUTABLE_PATH"] = tmuxExecutablePath
@@ -2274,6 +2975,18 @@ final class RemuxAppUITests: XCTestCase {
         tapPickerButton(identifier: "terminal.window.tile.1", fallbackLabel: "Window 1 of 2")
         waitForLiveTerminalReady(timeout: 30)
 
+        openWindowsSheet()
+        tapPickerButton(identifier: "terminal.window.tile.2", fallbackLabel: "Window 2 of 2")
+        waitForLiveTerminalReady(timeout: 30)
+
+        // A preview fills its tile and is drawn past its sides; the tile beside the window on screen still
+        // takes the touches on its own right edge.
+        let windows = app.buttons.matching(identifier: "terminal.windows").firstMatch
+        openWindowsSheet()
+        XCTAssertTrue(waitForValue("Preview ready", of: app.buttons["terminal.window.tile.2"], timeout: 10))
+        app.buttons["terminal.window.tile.1"].coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        XCTAssertTrue(waitForLabel(of: windows, "Window 1 of 2", timeout: 10), "A tap on tile 1's right edge didn't go to window 1.")
+        waitForLiveTerminalReady(timeout: 30)
         openWindowsSheet()
         tapPickerButton(identifier: "terminal.window.tile.2", fallbackLabel: "Window 2 of 2")
         waitForLiveTerminalReady(timeout: 30)

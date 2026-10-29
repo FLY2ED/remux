@@ -5,6 +5,7 @@ on:
     branches:
       - main
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 permissions:
@@ -90,7 +91,7 @@ jobs:
   app:
     name: App
     needs: changes
-    if: needs.changes.outputs.app == 'true'
+    if: needs.changes.outputs.app == 'true' && !github.event.pull_request.draft
     runs-on: macos-26
     timeout-minutes: 25
 
@@ -99,12 +100,14 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Select Xcode
+        id: xcode
         shell: bash
         run: |
           set -euo pipefail
           test -d "${XCODE_DEVELOPER_DIR}"
           sudo xcode-select --switch "${XCODE_DEVELOPER_DIR}"
           xcodebuild -version
+          printf 'build=%s\n' "$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "${GITHUB_OUTPUT}"
 
       - name: Test authorized-key installer
         shell: bash
@@ -168,6 +171,16 @@ jobs:
           key: swift-packages-${{ runner.os }}-${{ hashFiles('Remux.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
           restore-keys: swift-packages-${{ runner.os }}-
 
+      # Pull requests restore the newest cache from main and never save one, so
+      # they don't fill the repository's cache space.
+      - name: Restore compilation cache
+        id: compilation-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData/CompilationCache.noindex
+          key: compilation-cache-${{ runner.os }}-${{ steps.xcode.outputs.build }}-${{ github.sha }}
+          restore-keys: compilation-cache-${{ runner.os }}-${{ steps.xcode.outputs.build }}-
+
       # A new simulator's first boot keeps the runner busy for minutes. Booting
       # it here overlaps that work with the build instead of stalling the short
       # setup steps above.
@@ -182,9 +195,21 @@ jobs:
           printf 'udid=%s\n' "${udid}" >> "${GITHUB_OUTPUT}"
           xcrun simctl boot "${udid}"
 
-      - name: Build UI tests
+      # The Remux scheme builds the UI tests for testing too, so this one build
+      # compiles everything the job checks. The size limit makes Xcode prune the
+      # restored compilation cache, which otherwise grows with every save. Xcode
+      # starts a new cache generation once the current one passes half the
+      # limit, so half of it holds a full build's cache with room to grow.
+      - name: Build for testing
         shell: bash
-        run: xcodebuild build-for-testing -project Remux.xcodeproj -scheme RemuxUIOnly -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}" -clonedSourcePackagesDirPath "${RUNNER_TEMP}/SourcePackages"
+        run: xcodebuild build-for-testing -project Remux.xcodeproj -scheme Remux -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}" -clonedSourcePackagesDirPath "${RUNNER_TEMP}/SourcePackages" COMPILATION_CACHE_ENABLE_CACHING=YES COMPILATION_CACHE_LIMIT_SIZE=2G
+
+      - name: Save compilation cache
+        if: github.event_name != 'pull_request' && steps.compilation-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData/CompilationCache.noindex
+          key: ${{ steps.compilation-cache.outputs.cache-primary-key }}
 
       - name: Wait for simulator
         shell: bash
@@ -195,7 +220,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf "${RUNNER_TEMP}/RemuxUnitTests.xcresult"
-          xcodebuild test -project Remux.xcodeproj -scheme Remux -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}" -only-testing:RemuxTests -resultBundlePath "${RUNNER_TEMP}/RemuxUnitTests.xcresult" -clonedSourcePackagesDirPath "${RUNNER_TEMP}/SourcePackages"
+          xcodebuild test-without-building -project Remux.xcodeproj -scheme Remux -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}" -only-testing:RemuxTests -resultBundlePath "${RUNNER_TEMP}/RemuxUnitTests.xcresult" -clonedSourcePackagesDirPath "${RUNNER_TEMP}/SourcePackages"
 
       - name: Delete simulator
         if: always() && steps.simulator.outputs.udid != ''

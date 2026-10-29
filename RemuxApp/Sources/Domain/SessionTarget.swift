@@ -182,6 +182,9 @@ struct DiscoveredSession: Equatable, Sendable {
     let name: String
     /// tmux lists only running sessions. Herdr lists stopped ones too, and opening one starts it.
     let isRunning: Bool
+    /// Why Herdr can't reach a session it lists, as its `connection_error` says; such a session isn't
+    /// offered, since opening it would try to start it.
+    var unavailableReason: String? = nil
 }
 
 /// What a backend's discovery found on a server: where its program is, and its sessions.

@@ -22,6 +22,19 @@ struct HerdrSnapshot: Equatable, Sendable, Decodable {
         let customLabel: Bool
         let focused: Bool
         let agentStatus: HerdrAgentStatus
+        /// The git repository the workspace is a checkout of, when it is in one.
+        let worktree: Worktree?
+
+        /// A repository's root checkout and its linked worktrees share `key`.
+        struct Worktree: Equatable, Sendable, Decodable {
+            let key: String
+            let isLinkedWorktree: Bool
+
+            private enum CodingKeys: String, CodingKey {
+                case key
+                case isLinkedWorktree = "is_linked_worktree"
+            }
+        }
 
         private enum CodingKeys: String, CodingKey {
             case workspaceID = "workspace_id"
@@ -30,6 +43,7 @@ struct HerdrSnapshot: Equatable, Sendable, Decodable {
             case customLabel = "custom_label"
             case focused
             case agentStatus = "agent_status"
+            case worktree
         }
     }
 
@@ -61,6 +75,8 @@ struct HerdrSnapshot: Equatable, Sendable, Decodable {
         let cwd: String?
         let foregroundCWD: String?
         let focused: Bool
+        /// Whether a right-click goes to the pane's program rather than to Herdr's menu (`pane.input.set`).
+        let rightClickPassthrough: Bool
 
         private enum CodingKeys: String, CodingKey {
             case paneID = "pane_id"
@@ -69,6 +85,7 @@ struct HerdrSnapshot: Equatable, Sendable, Decodable {
             case label, cwd
             case foregroundCWD = "foreground_cwd"
             case focused
+            case rightClickPassthrough = "right_click_passthrough"
         }
     }
 
@@ -84,6 +101,14 @@ struct HerdrSnapshot: Equatable, Sendable, Decodable {
         let terminalTitleStripped: String?
         let agentStatus: HerdrAgentStatus
         let stateChangeSeq: UInt64
+        /// The agent's own words for its states, as Herdr sends its `(state, word)` pairs: set by the
+        /// user's hooks with `herdr pane report-metadata --state-label`.
+        let stateLabels: [[String]]
+
+        /// The agent's own word for `status`, if its labels give one, found as Herdr's client finds it.
+        func label(for status: HerdrAgentStatus) -> String? {
+            stateLabels.first { $0.count == 2 && $0[0] == status.rawValue }?[1]
+        }
 
         private enum CodingKeys: String, CodingKey {
             case paneID = "pane_id"
@@ -96,6 +121,7 @@ struct HerdrSnapshot: Equatable, Sendable, Decodable {
             case terminalTitleStripped = "terminal_title_stripped"
             case agentStatus = "agent_status"
             case stateChangeSeq = "state_change_seq"
+            case stateLabels = "state_labels"
         }
     }
 

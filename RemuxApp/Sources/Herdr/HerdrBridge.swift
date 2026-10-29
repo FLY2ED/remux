@@ -44,6 +44,9 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
     /// Writes the channel hasn't taken yet, by number; closing fails them.
     private var pendingWrites: [UInt64: CheckedContinuation<Void, Error>] = [:]
     private var nextWrite: UInt64 = 0
+    /// The channel failed a write. The stream's end keeps what the server said, such as an exit status
+    /// that names Herdr missing, but the SSH connection isn't offered again.
+    private var writeFailed = false
     private var state = State.running
     private var stderr = RemoteProgramMessages()
     private var readyLine = RemoteProgramCommand.ReadyLine()
@@ -139,23 +142,26 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
     }
 
     /// Ends the stream here at once: a waiting read returns nil and waiting writes fail, without
-    /// waiting for the server, whose answer never comes on a dead path. A failed channel, or a caller
-    /// that saw the path go silent, gives the SSH connection back as not reusable before returning, so
-    /// a reconnect right after never gets it again; that needs nothing from the server. A reusable
-    /// close finishes in the background, since it waits for the server to answer the channel close.
-    func close(reusable: Bool) async {
+    /// waiting for the server, whose answer never comes on a dead path.
+    ///
+    /// Whether the SSH connection may carry the next opening is decided here. It may when nothing says
+    /// the path is bad, as Herdr's client keeps its shared SSH connection for its next bridge whatever
+    /// ended the last. It may not when the closer doubts the path, having given up waiting for the
+    /// welcome or heard nothing in time, or when the channel failed, a write included: it is given back
+    /// as not reusable before returning, so a reconnect right after never gets it again, which needs
+    /// nothing from the server. A reusable close finishes in the background, since it waits for the
+    /// server to answer the channel close.
+    func close(_ cause: HerdrBridgeCloseCause) async {
         let (connection, disposition, writes) = lock.withLock { () -> (RemuxSSHExecConnection?, RemuxSSHRootLeaseDisposition, [CheckedContinuation<Void, Error>]) in
-            let channelFailed: Bool
+            var channelFailed = writeFailed
             if case .ended(let error?) = state, case .channel(_)? = error as? HerdrBridgeError {
                 channelFailed = true
-            } else {
-                channelFailed = false
             }
             let connection = self.connection
             self.connection = nil
             let writes = Array(pendingWrites.values)
             pendingWrites.removeAll()
-            return (connection, reusable && !channelFailed ? .reusable : .invalidated, writes)
+            return (connection, cause == .finished && !channelFailed ? .reusable : .invalidated, writes)
         }
         finish(status: nil, error: nil)
         lock.withLock { chunks.removeAll() }
@@ -195,8 +201,14 @@ final class HerdrSSHBridge: HerdrBridgeTransport, @unchecked Sendable {
         rearm?.requestRead()
     }
 
+    /// A failed write is recorded before the writer hears of it, so the close it leads to never offers
+    /// the SSH connection again, even when the channel's own end hasn't arrived yet.
     private func completeWrite(_ id: UInt64, error: Error?) {
-        guard let continuation = lock.withLock({ pendingWrites.removeValue(forKey: id) }) else { return }
+        let continuation = lock.withLock { () -> CheckedContinuation<Void, Error>? in
+            if error != nil { writeFailed = true }
+            return pendingWrites.removeValue(forKey: id)
+        }
+        guard let continuation else { return }
         if let error {
             continuation.resume(throwing: error)
         } else {

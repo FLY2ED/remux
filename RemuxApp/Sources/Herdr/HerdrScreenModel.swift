@@ -1,5 +1,6 @@
 import Foundation
 import GhosttyKit
+import NIOConcurrencyHelpers
 
 /// One Herdr pane's renderer, over the pane terminal the engine gave it.
 @MainActor
@@ -44,6 +45,8 @@ final class HerdrScreenModel {
     let target: SessionTarget
     let sessionInstanceID: UUID
     let terminalScreenAdapter = HerdrTerminalScreenAdapter()
+    /// The session's workspaces and tabs, from the newest snapshot, kept across a reconnect.
+    let places = HerdrSessionPlaces()
 
     /// What the model tells its owner about the session's notifications.
     enum NotificationEvent: Equatable {
@@ -58,24 +61,54 @@ final class HerdrScreenModel {
 
     /// What the model asks of the connection and the engine, in the order it asks.
     private enum Operation: Sendable {
-        case show(HerdrSurfaceGeometry, request: UInt64)
+        /// Shows the session, and takes it to `destination` right after, when given (`reconcileVisibility`).
+        case show(HerdrSurfaceGeometry, to: HerdrDestination?)
         case hide
         case resize(HerdrSurfaceGeometry)
         case theme([HerdrHostThemeUpdate])
         case appActive(Bool)
         /// `delivered`, when given, learns whether Herdr has the input.
         case input(paneID: String, events: [HerdrInputEvent], delivered: CheckedContinuation<Bool, Never>?)
-        /// A `pane.focus` that must reach Herdr after the operations asked before it.
-        case focusPane(String)
+        /// Remux's move to a place or creation (`move(_:to:)`); `fromAnotherTab` when another tab was on
+        /// screen as it was asked for. `ask` names it among the attempt's moves (`Attempt.move`).
+        case move(HerdrDestination, fromAnotherTab: Bool, ask: UInt64)
+        /// The zoom button's zoom of the focused pane's tab.
+        case zoom(String, zoomed: Bool)
+        /// The pane sheet's question for a zoomed tab's layout, through a zoom of `paneID` that changes
+        /// nothing (`fillTabMapIfNeeded`).
+        case askLayout(String)
+        /// Any other command, through the engine's lane after everything asked before it.
+        case command(
+            String,
+            params: any Encodable & Sendable,
+            answered: CheckedContinuation<Result<HerdrCommandReply, HerdrCommandError>, Never>
+        )
 
         /// Tells whoever waits on the operation that it won't be carried out.
         func abandon() {
-            if case .input(_, _, let delivered?) = self { delivered.resume(returning: false) }
+            switch self {
+            case .input(_, _, let delivered?):
+                delivered.resume(returning: false)
+            case .command(_, _, let answered):
+                answered.resume(returning: .failure(.connectionEnded))
+            default:
+                break
+            }
         }
     }
 
+    /// A move Remux asked for that hasn't ended. The engine decides what the move does; the model learns
+    /// which of its view requests carries it, then that the request ended (`moveEnded`).
+    private struct PendingMove {
+        let ask: UInt64
+        /// The pane it goes to; nil for a tab, a workspace or a creation, whose pane Herdr names once there.
+        let pane: String?
+        /// The engine's request that takes the session there, once the engine has the move.
+        var request: UInt64?
+    }
+
     /// One connection to the server, from opening its bridge to its end. A reconnect replaces it, and
-    /// the panes keep their last frame meanwhile.
+    /// the panes keep their last frame meanwhile. Its id names its connection to the engine.
     ///
     /// Its task opens the connection, then carries out the operations one at a time, in the order they
     /// were asked for. Herdr takes the newest of a show and a hide, so that order is the session's
@@ -84,28 +117,36 @@ final class HerdrScreenModel {
     private final class Attempt {
         let id: UInt64
         var task: Task<Void, Never>?
-        /// The bridge, while the hello waits for the screen's size.
-        var transport: (any HerdrBridgeTransport)?
+        /// The connection, from the moment its bridge opened: from then on only the connection closes
+        /// the bridge.
         var connection: HerdrConnection?
-        var feed: HerdrEngineFeed?
+        /// The hello is on its way to Herdr: from then on, until the welcome, whether the path works is
+        /// unknown.
+        var helloSent = false
+        /// The connection's welcome came and the model took it.
+        var isOpen = false
         /// Herdr's surface switch names the snapshot's boot, so nothing is shown before one arrives.
         var hasSnapshot = false
-        var requestedShown = false
-        var visibilityRequests: UInt64 = 0
-        /// The newest show Herdr completed: its answer and a frame sent after it are in.
+        /// Whether the model asked for the session shown.
+        var wantsShown = false
+        /// A show or hide was asked that the engine hasn't started yet: the screen reads nothing of the
+        /// request before it as the session's state.
+        var visibilityPending = false
+        /// The engine's current view request, as its `started` event said; only for what the screen
+        /// reads, since the engine alone decides what is current.
+        var request: (id: UInt64, kind: HerdrViewKind, showing: Bool)?
+        /// The newest request the engine completed.
         var activatedRequest: UInt64?
-        var activationDeadline: Task<Void, Never>?
-        var ended = false
-        /// Whether its SSH connection may serve the next opening, as its retirement decided. A bridge or
-        /// connection that opens after the retirement closes the same way, so a path the retirement
-        /// doubted isn't offered again.
-        var reusable = true
+        /// Remux's newest move, from the moment it is asked until it ends (`userPaneID`).
+        var move: PendingMove?
+        /// The moves asked so far, which name each one.
+        var moveAsks: UInt64 = 0
+        /// How the attempt's bridge closes, set once it is given up; nil while it is under way.
+        var closeCause: HerdrBridgeCloseCause?
+        /// The give-up's close of the connection.
+        var closing: Task<Void, Never>?
         /// Whether the focused pane asks for every key as an escape code.
         var reportsAllKeys = false
-        /// A `pane.focus` waits for Herdr's answer. Taps meanwhile wait for it, and only the newest is
-        /// sent, so the last pane tapped ends up focused.
-        var focusInFlight = false
-        var waitingFocus: String?
         private var operations: [Operation] = []
         private var operationWaiter: CheckedContinuation<Void, Never>?
         private var operationsFinished = false
@@ -114,10 +155,34 @@ final class HerdrScreenModel {
             self.id = id
         }
 
-        /// Shown, and the newest show completed. Until then the panes keep their last frame and take
-        /// no input, as Herdr's client freezes input while a show is in progress.
+        var ended: Bool { closeCause != nil }
+
+        var requestedShown: Bool { wantsShown }
+
+        /// The session reads as connected: the connection is open with its first snapshot and, while the
+        /// session is shown, has completed a request, so the panes show its frames.
+        var isReady: Bool {
+            isOpen && hasSnapshot && (!wantsShown || activatedRequest != nil)
+        }
+
+        /// Ready and shown, with no show in progress: the session takes input. A session shown again keeps
+        /// its last frame and reads as connected meanwhile, but takes no input, as Herdr's client freezes
+        /// input while a show is in progress. A move doesn't freeze it, as in Herdr's client.
         var isActivated: Bool {
-            requestedShown && activatedRequest == visibilityRequests
+            guard isReady, wantsShown, !visibilityPending, let request, request.kind != .hide else { return false }
+            return !request.showing || activatedRequest == request.id
+        }
+
+        /// Activated with no request in progress: the frame on screen shows where the session is, so a
+        /// command for the tab on screen can go.
+        var isSettled: Bool {
+            isActivated && activatedRequest == request?.id
+        }
+
+        /// Returns once the attempt's task has returned and its give-up has closed its connection.
+        func closed() async {
+            await task?.value
+            await closing?.value
         }
 
         /// Queued while the connection opens, and carried out once it is open. Only the newest size
@@ -196,6 +261,7 @@ final class HerdrScreenModel {
     private let onNotification: (NotificationEvent) -> Void
     private let engine: HerdrTerminalEngine
     private let makeRendererFence: RendererFenceFactory
+    private let clipboard: TerminalClipboard
     private var runtime: GhosttyKitRuntime?
     private var currentTerminalSettings: TerminalSettings
     /// The colours of the current theme: Herdr gets them in the theme report, and Herdr's pane borders
@@ -237,21 +303,32 @@ final class HerdrScreenModel {
     private var snapshot: HerdrSnapshot?
     /// The frame on screen: the connection and snapshot revision it was drawn against, and its panes.
     private var presentedFrame: (connection: UInt64, bootID: String, projectionRevision: UInt64, paneIDs: Set<String>)?
-    private var agents = HerdrAgentPresentation()
-    /// A pane to go to once the session is shown, and the server boot its id belongs to.
-    private var pendingReveal: (paneID: String, bootID: String?)?
-    /// The pane keys go to and the screen highlights: the newest snapshot's focused pane, as in
-    /// Herdr's client. A pane can be focused before its first frame arrives.
+    /// The session's agents as this phone shows them.
+    let agents = HerdrAgentPresentation()
+    /// Where to go once the session is shown, and the server boot its ids belong to.
+    private var pendingReveal: (destination: HerdrDestination, bootID: String?)?
+    /// The workspace close Herdr's server asked the user to confirm, until the user answers
+    /// (`answerAskedCloseConfirmation(agreed:)`).
+    private(set) var askedCloseConfirmation: HerdrCloseConfirmation?
+    /// The pane Herdr has focused, as the newest snapshot says. A pane can be focused before its first
+    /// frame arrives. The user may be in another while Remux's move is under way (`userPaneID`).
     private(set) var focusedPaneID: String?
+    /// Tabs the user unzoomed with the pane sheet's button, which the setting leaves alone after.
+    private var tabsUnzoomedByUser: Set<HerdrTabKey> = []
+    private var tabMap: HerdrTabMap?
+    /// The zoomed tab's panes the map had no place for when Remux last asked Herdr for its layout.
+    private var askedTabMapGap: HerdrTabMapGap?
     private var terminals: [String: HerdrRetainedTerminal] = [:]
     private var surfaces: [String: HerdrPaneSurface] = [:]
     private var paneScrolls: [String: HerdrPaneScroll] = [:]
-    /// Where the current scroll gesture over each pane is, in the pane's points, and the travel not
-    /// yet a whole wheel step.
-    private var scrollPointers: [String: CGPoint] = [:]
+    /// Where the pointer is over each pane, in the pane's points: a tap's place or a scroll gesture's.
+    private var pointers: [String: CGPoint] = [:]
+    /// The scroll travel over each pane not yet a whole wheel step.
     private var wheelRemainders: [String: Double] = [:]
+    /// The mouse button held down in a pane, from its press to its release.
+    private var mouseGesture: MouseGesture?
     private var presentationFailures: [String: TerminalDisconnectReason] = [:]
-    private var notices = HerdrNoticePolicy(visibleFor: GhosttyTerminalCommandFailureNotice.duration)
+    private var notices = HerdrNoticePolicy(visibleFor: GhosttyTerminalNotice.failureDuration)
     private var creatingTerminals: Set<ObjectIdentifier> = []
     /// Ghostty gives a terminal one renderer at a time, so a replacement waits for these to close.
     private var closingTerminals: Set<ObjectIdentifier> = []
@@ -272,7 +349,8 @@ final class HerdrScreenModel {
         engine: HerdrTerminalEngine = HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1),
         makeRendererFence: @escaping RendererFenceFactory = {
             HerdrPaneRendererFence(engine: $0, paneID: $1, terminal: $2)
-        }
+        },
+        clipboard: TerminalClipboard = .general
     ) {
         self.target = target
         self.sessionInstanceID = sessionInstanceID
@@ -283,6 +361,7 @@ final class HerdrScreenModel {
         self.recoveryTiming = recoveryTiming
         self.engine = engine
         self.makeRendererFence = makeRendererFence
+        self.clipboard = clipboard
         currentTerminalSettings = target.terminalSettings
         terminalScreenAdapter.attach(to: self)
         do {
@@ -299,7 +378,7 @@ final class HerdrScreenModel {
                 self?.handle(update)
             }
         }
-        startAttempt()
+        restart()
     }
 
     /// True when no connection is open or opening, so the root may replace this model without dropping
@@ -316,30 +395,185 @@ final class HerdrScreenModel {
     func setSelected(_ selected: Bool) {
         guard !stopped, selected != isSelected else { return }
         isSelected = selected
-        // A pane asked for applies to the show it was asked for.
+        // Where the session was asked to go applies to the show it was asked for.
         if !selected { pendingReveal = nil }
         reconcilePresentationActivity()
         reconcileVisibility()
     }
 
-    /// Goes to `paneID` as Herdr's client goes to a notification's pane: `pane.focus` takes this
-    /// client to the pane's tab and focuses it there. It is sent once the session is shown, right after
-    /// the show, and only on the server boot the pane id came from, while the pane is still there.
-    func reveal(paneID: String, bootID: String?) {
-        guard !stopped else { return }
-        pendingReveal = (paneID, bootID)
-        sendPendingReveal()
+    /// Goes to `place`, a pick from what the screen or a list shows of the session (`ask(_:bootID:)`).
+    @discardableResult
+    func reveal(_ place: HerdrPlace, bootID: String?) -> Bool {
+        ask(.go(.place(place)), bootID: bootID)
     }
 
-    private func sendPendingReveal() {
-        guard let reveal = pendingReveal, let attempt, isCurrent(attempt), attempt.connection != nil,
-              attempt.requestedShown, let snapshot
-        else { return }
+    /// New Tab, New Workspace or a split of a pane, with the command Herdr's client sends, focused, which
+    /// goes to the pane Herdr makes (`ask(_:bootID:)`). Remux's zoom comes off a tab the session leaves for
+    /// a new one. Herdr's split unzooms the tab it splits (`workspace/tab.rs`), so the setting zooms the
+    /// new pane, as tmux keeps a window zoomed through a split; a tab the user unzoomed stays unzoomed.
+    @discardableResult
+    func create(_ creation: HerdrCreation, bootID: String?) -> Bool {
+        ask(.go(.creation(creation)), bootID: bootID)
+    }
+
+    /// A pane of the tab on screen, as a scroll over it picks it: a pick from the layout drawn.
+    func focusPane(_ paneID: String) -> Bool {
+        reveal(.pane(paneID), bootID: layout?.bootID)
+    }
+
+    /// The one way Remux asks something of the session. It goes only on the server boot its ids came from,
+    /// while what it names is still there; one whose target changed is refused, as Herdr's client refuses a
+    /// stale close (`overlay_input.rs` `accept_close_confirmation`).
+    /// - Going somewhere, as Herdr's client goes to a notification's pane or a workspace on its machine, is
+    ///   a move there on the session on screen (`move(_:to:)`); a session not on screen goes there right
+    ///   after its show, as part of it.
+    /// - A close or a rename goes only on the session on screen, since Herdr refuses commands from a hidden
+    ///   one. A close of what is on screen, the workspace, the tab or one of its panes, takes the session
+    ///   wherever Herdr shows it then, so it is a view request as a move is (`.closing`). Any other close,
+    ///   and a rename, moves nothing: they go through the lane after the commands asked before them.
+    /// Returns false when it won't go: the model has stopped, the session can't take it, or what it names
+    /// changed.
+    @discardableResult
+    func ask(_ request: HerdrRequest, bootID: String?) -> Bool {
+        guard !stopped else { return false }
+        guard case .go(let destination) = request else { return change(request, bootID: bootID) }
+        pendingReveal = (destination, bootID)
+        guard let attempt = shownOpenAttempt else { return true }
+        guard let destination = takePendingReveal() else { return false }
+        move(attempt, to: destination)
+        return true
+    }
+
+    /// A close or rename on the session on screen (`ask(_:bootID:)`). A tab or workspace name is trimmed
+    /// and never empty, since Herdr would keep an empty one as the name; a pane's empty name clears its
+    /// manual one, as Herdr's client sends it (`overlay_input.rs` `save_rename_overlay`). An auto-named tab
+    /// given its own name back sends nothing, which would only pin the name.
+    private func change(_ request: HerdrRequest, bootID: String?) -> Bool {
+        guard let attempt = shownOpenAttempt, let snapshot, Self.holds(request.origin, bootID: bootID, in: snapshot) else {
+            if !stopped { refused(request) }
+            return false
+        }
+        switch request {
+        case .go:
+            return false
+        case .close(let place, let group) where snapshot.isOnScreen(place):
+            move(attempt, to: .closing(place, group: group))
+        case .close(let place, let group):
+            send(request, method: place.closeMethod, params: place.closeParams(group: group), on: attempt)
+        case .rename(let place, let typed):
+            let name = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+            switch place {
+            case .pane:
+                break
+            case .tab(let id):
+                guard !name.isEmpty else { return false }
+                if let tab = snapshot.tabs.first(where: { $0.tabID == id }), !tab.customLabel, tab.label == name {
+                    return true
+                }
+            case .workspace:
+                guard !name.isEmpty else { return false }
+            }
+            send(request, method: place.renameMethod, params: place.renameParams(name), on: attempt)
+        }
+        return true
+    }
+
+    /// The current attempt, while it is open and the session is on screen.
+    private var shownOpenAttempt: Attempt? {
+        guard let attempt, isCurrent(attempt), attempt.isOpen, attempt.requestedShown else { return nil }
+        return attempt
+    }
+
+    /// Where to go, once a snapshot is in, if what it names is still there on the server boot its ids came
+    /// from.
+    private func takePendingReveal() -> HerdrDestination? {
+        guard let reveal = pendingReveal, let snapshot else { return nil }
         pendingReveal = nil
-        guard reveal.bootID.map({ $0 == snapshot.bootID }) ?? true,
-              snapshot.panes.contains(where: { $0.paneID == reveal.paneID })
-        else { return }
-        attempt.ask(.focusPane(reveal.paneID))
+        guard Self.holds(reveal.destination.origin, bootID: reveal.bootID, in: snapshot) else { return nil }
+        return reveal.destination
+    }
+
+    /// Whether `origin`, named on server boot `bootID`, is still there in `snapshot`.
+    private static func holds(_ origin: HerdrPlace?, bootID: String?, in snapshot: HerdrSnapshot) -> Bool {
+        (bootID.map { $0 == snapshot.bootID } ?? true) && (origin.map(snapshot.contains) ?? true)
+    }
+
+    /// A close or rename that moves nothing, through the engine's lane after the operations asked before it.
+    private func send(
+        _ request: HerdrRequest,
+        method: String,
+        params: some Encodable & Sendable,
+        on attempt: Attempt
+    ) {
+        Task { [weak self] in
+            guard let self else { return }
+            let result = await command(method, params: params, on: attempt)
+            guard isCurrent(attempt) else { return }
+            if case .failure(let failure) = result { return changeAnswered(request, failure: failure) }
+            changeAnswered(request, failure: nil)
+        }
+    }
+
+    /// Herdr answered a close or rename. A close Herdr's server wants confirmed, as one that would close a
+    /// worktree group, asks the user about its workspace's close instead of failing, as Herdr's client does
+    /// (`client/shell/actions.rs`); any other failure says so.
+    private func changeAnswered(_ request: HerdrRequest, failure: HerdrCommandError?) {
+        let method: String
+        let label: String
+        switch request {
+        case .go: return
+        case .close(let place, _):
+            method = place.closeMethod
+            label = place.closeFailureLabel
+        case .rename(let place, _):
+            method = place.renameMethod
+            label = place.renameFailureLabel
+        }
+        guard let failure else { return notices.succeeded(method, bootID: layout?.bootID) }
+        if case .failed("confirmation_required", _) = failure, case .close(let place, _) = request,
+           let outline = places.outline, let workspace = outline.workspace(containing: place) {
+            askedCloseConfirmation = outline.closeConfirmation(ofWorkspace: workspace.id)
+            didChange()
+            return
+        }
+        presentFailure(of: method, label: label, failure)
+    }
+
+    /// A close or rename that won't go, whose target or server boot changed, says so, as Herdr's client
+    /// says a close target changed.
+    private func refused(_ request: HerdrRequest) {
+        let label: String
+        switch request {
+        case .go: return
+        case .close(let place, _): label = place.closeFailureLabel
+        case .rename(let place, _): label = place.renameFailureLabel
+        }
+        notices.replaced()
+        terminalScreenAdapter.presentFailure(label)
+    }
+
+    /// What runs in a pane and what it is doing, as the Tabs sheet's rows say, read from the newest snapshot
+    /// when the sheet is drawn (`HerdrSnapshot.program(ofPane:)`, `activity(ofPane:)`). A snapshot tells the
+    /// views when it changes what a row says, and only then: an agent's ticking title reaches no row.
+    func program(ofPane paneID: String) -> TerminalProgram {
+        snapshot?.program(ofPane: paneID) ?? .terminal
+    }
+
+    func activity(ofPane paneID: String) -> String {
+        snapshot?.activity(ofPane: paneID) ?? "terminal"
+    }
+
+    /// What the rename alert for `place` starts with (`HerdrSnapshot.renameField(for:)`).
+    func renameField(for place: HerdrPlace) -> HerdrRenameField? {
+        snapshot?.renameField(for: place)
+    }
+
+    /// The user answered the asked confirmation; agreeing asks for its close as any close goes.
+    func answerAskedCloseConfirmation(agreed: Bool) {
+        guard let confirmation = askedCloseConfirmation else { return }
+        askedCloseConfirmation = nil
+        if agreed { ask(confirmation.request, bootID: confirmation.bootID) }
+        didChange()
     }
 
     /// The background hides the session; the app's other phases leave it on screen.
@@ -370,19 +604,15 @@ final class HerdrScreenModel {
         recoveryTimer?.cancel()
         recoveryTimer = nil
         readySince = nil
-        guard let attempt, !attempt.ended, attempt.connection == nil else { return }
-        // Not a failure: it is opened again on return. Whether its path still works is unknown, so its
-        // SSH connection isn't offered to the next one, which would wait on a dead one; an opening under
-        // way closes its own the same way.
-        retire(attempt, reusable: false)
+        guard let attempt, !attempt.ended, !attempt.isOpen else { return }
+        // Not a failure: it is opened again on return.
+        giveUp(attempt, suspending: true)
         recoveryDue = recoveryDue ?? .now
     }
 
     private func leaveBackground() {
         wokeAt = .now
-        guard recoveryDue != nil else { return }
-        recoveryDue = .now
-        startRecoveryTimer()
+        if recoveryDue != nil { restart() }
     }
 
     /// Live settings: the renderers take the new appearance in place, and Herdr gets the new colours.
@@ -452,37 +682,39 @@ final class HerdrScreenModel {
     @discardableResult
     func reconnect() -> Bool {
         guard !stopped, runtime != nil else { return false }
-        cancelRecovery()
         isReconnecting = false
         failuresInARow = 0
-        openAgain()
+        failure = nil
+        restart()
         return true
-    }
-
-    private func openAgain() {
-        if let attempt { retire(attempt) }
-        startAttempt()
-        retryFailedPanes()
     }
 
     /// Closes the connection, lets the engine finish its event and free the pane producers, waits for
     /// renderers still being created, then closes every renderer, which unregisters it from the engine
     /// before freeing it, and releases the Ghostty app once every renderer closed anywhere is freed.
+    ///
+    /// A session on screen first takes off the zoom Remux made, as leaving the screen does, and waits for
+    /// Herdr's answer within Herdr's time for a show, so the unzoom isn't lost with the connection. A new
+    /// attempt can't take the zoom over, since Herdr's zoom has no owner. Closing the connection then hides
+    /// the session on the server.
     func stop() async {
         guard !stopped else { return }
+        let feed = attempt.flatMap { isCurrent($0) && $0.isOpen ? HerdrEngineFeed(engine: engine, connection: $0.id) : nil }
         stopped = true
         cancelRecovery()
-        resumeSizeWaiter()
-        if let attempt {
-            attempt.finishOperations()
-            attempt.task?.cancel()
-            if let connection = attempt.connection {
-                await connection.close(reusable: attempt.reusable)
-            } else if let transport = attempt.transport {
-                await transport.close(reusable: attempt.reusable)
+        if let feed {
+            let once = HerdrOnce()
+            await withCheckedContinuation { (closed: CheckedContinuation<Void, Never>) in
+                Task { await feed.unzoomBeforeClosing { if once.claim() { closed.resume() } } }
+                Task { [deadline = connectionTiming.activation] in
+                    try? await Task.sleep(for: deadline)
+                    if once.claim() { closed.resume() }
+                }
             }
-            // An opening still under way closes what it opened once it sees the stop.
-            await attempt.task?.value
+        }
+        if let attempt {
+            giveUp(attempt)
+            await attempt.closed()
         }
         await engine.stop()
         if !creatingTerminals.isEmpty {
@@ -506,30 +738,29 @@ final class HerdrScreenModel {
 
     var runtimePhase: GhosttyTerminalRuntimePhase {
         if let failure { return .failed(message: failure.message, reason: failure) }
-        guard let attempt, !attempt.ended, attempt.connection != nil else { return .starting }
+        guard let attempt, !attempt.ended, attempt.isOpen else { return .starting }
         return .running
     }
 
     var isConnectionOpen: Bool {
         guard let attempt else { return false }
-        return attempt.connection != nil && !attempt.ended
+        return attempt.isOpen && !attempt.ended
     }
 
-    /// The session reads as connected once its current connection has a snapshot and, while the session
-    /// is shown, a show completed on it. Until then the panes show the last connection's frame, which
-    /// takes no input.
+    /// The session reads as connected once its current connection is ready (`Attempt.isReady`). Until
+    /// then the panes show the last connection's frame, which takes no input.
     var isConnectionReady: Bool {
-        guard let attempt, isCurrent(attempt), attempt.connection != nil, attempt.hasSnapshot else { return false }
-        return !attempt.requestedShown || attempt.activatedRequest != nil
+        guard let attempt, isCurrent(attempt) else { return false }
+        return attempt.isReady
     }
 
     var stateTraceLabel: String {
         if stopped { return "released" }
         if failure != nil { return "ended" }
         if isReconnecting { return "reconnecting" }
-        guard let attempt, attempt.connection != nil else { return "connecting" }
+        guard let attempt, attempt.isOpen else { return "connecting" }
         guard attempt.requestedShown else { return "hidden" }
-        return attempt.isActivated ? "shown" : "showing"
+        return attempt.isSettled ? "shown" : "showing"
     }
 
     func paneSurface(_ paneID: String) -> HerdrPaneSurface? {
@@ -543,7 +774,7 @@ final class HerdrScreenModel {
             isShown: isSelected,
             focusedWorkspaceID: snapshot.focusedWorkspaceID,
             focusedTabID: snapshot.focusedTabID,
-            agentStatuses: agents.statuses
+            agentStatuses: Dictionary(agents.agents.map { ($0.paneID, $0.state.status) }) { $1 }
         )
     }
 
@@ -555,23 +786,56 @@ final class HerdrScreenModel {
 
     // MARK: - Input
 
-    /// Input goes out while the session is shown on an open connection, its show completed, and its
-    /// focused pane shows a frame: Herdr's client drops input before its first snapshot and while a show
-    /// is in progress, and the server drops input on a hidden surface.
+    /// The session takes input: it is shown on an open connection with no show in progress, and Herdr has a
+    /// pane focused, as Herdr's client sends input (`shell/input.rs`): Herdr's client drops input before its
+    /// first snapshot and while a show is in progress, and the server drops input on a hidden surface. It
+    /// holds while Remux's move is under way, whichever pane the user is in (`userPaneID`).
     var isInputAvailable: Bool {
-        inputTarget != nil
+        focusedPaneID.flatMap(inputTarget(forPane:)) != nil
+    }
+
+    /// The pane the user is in: the pane of Remux's move from the moment it is asked until it ends, else
+    /// the pane Herdr has focused. A move to a tab, a workspace or a new pane is in no pane until it ends,
+    /// as Herdr names that pane only once there.
+    ///
+    /// Keys follow it, as Herdr's client sends every key to its own focused pane, through
+    /// `inputTarget(forPane:)`: while Herdr doesn't take input for it yet, as for another pane of a zoomed
+    /// tab or a pane on another tab, keys are dropped, one by one, as Herdr's client drops input during an
+    /// activation, and never go to the pane left. The screen's drawing, readiness and the composer's pane
+    /// follow it only once it is drawn (`screenPaneID`); until then they keep the focus of the frame on
+    /// screen, which the engine holds until the move completes, so the session stays ready to type into.
+    var userPaneID: String? {
+        guard let attempt, isCurrent(attempt), let move = attempt.move else { return focusedPaneID }
+        return move.pane
+    }
+
+    /// The pane the screen shows as the user's: `userPaneID` once it is drawn, else Herdr's focused pane.
+    var screenPaneID: String? {
+        guard let pane = userPaneID, layout?.panes.contains(where: { $0.paneID == pane && $0.hasTextArea }) == true
+        else { return focusedPaneID }
+        return pane
     }
 
     private var inputTarget: (attempt: Attempt, paneID: String)? {
-        guard let attempt = shownAttempt, let paneID = focusedPaneID, presentation(ofPane: paneID) == .ready else {
-            return nil
-        }
+        userPaneID.flatMap(inputTarget(forPane:))
+    }
+
+    /// Where input for `paneID` goes, the one rule for every input: the session is shown with no show in
+    /// progress, and Herdr takes input for the pane, as it does for the panes of the tab a client views
+    /// (`server/headless/client_views.rs` `shell_client_views_pane`), whatever Remux has drawn of them:
+    /// only the focused pane while that tab is zoomed, and any pane of it otherwise.
+    private func inputTarget(forPane paneID: String) -> (attempt: Attempt, paneID: String)? {
+        guard let attempt = shownAttempt, let snapshot else { return nil }
+        let tab = snapshot.tabs.first { $0.tabID == snapshot.focusedTabID }
+        guard paneID == snapshot.focusedPaneID
+            || (tab?.zoomed == false
+                && snapshot.panes.contains { $0.paneID == paneID && $0.tabID == snapshot.focusedTabID })
+        else { return nil }
         return (attempt, paneID)
     }
 
     private var shownAttempt: Attempt? {
-        guard let attempt, isCurrent(attempt), attempt.connection != nil, attempt.isActivated
-        else { return nil }
+        guard let attempt, isCurrent(attempt), attempt.isActivated else { return nil }
         return attempt
     }
 
@@ -614,7 +878,7 @@ final class HerdrScreenModel {
             return .surfaceRejected
         }
         for message in messages {
-            target.attempt.ask(.input(paneID: target.paneID, events: message, delivered: nil))
+            ask(input: message, toPane: target.paneID, on: target.attempt, delivered: nil)
         }
         return .accepted
     }
@@ -634,61 +898,202 @@ final class HerdrScreenModel {
 
     private func sendAwaitingDelivery(_ events: [HerdrInputEvent], toPane paneID: String) async -> Bool {
         // Herdr drops pane input while a popup is open over the tab, and still answers the ping.
-        guard let attempt = shownAttempt, presentation(ofPane: paneID) == .ready, layout?.hasPopup == false,
+        guard let target = inputTarget(forPane: paneID), layout?.hasPopup == false,
               (try? HerdrConnection.checkLimits(events)) != nil
         else { return false }
         return await withCheckedContinuation { delivered in
-            attempt.ask(.input(paneID: paneID, events: events, delivered: delivered))
+            ask(input: events, toPane: target.paneID, on: target.attempt, delivered: delivered)
         }
     }
 
-    /// Asks Herdr to focus the pane, as Herdr's client does on a click; keys follow the snapshot that
-    /// reports the new focus. Returns false when the session can't take input.
-    func focusPane(_ paneID: String) -> Bool {
-        guard let attempt, isCurrent(attempt), let connection = attempt.connection,
-              attempt.isActivated
+    /// All input for a pane goes this way. Input other than the wheel ends the pane's selection, as Herdr's
+    /// client ends its own on a key, text or a paste, whatever sends it.
+    private func ask(
+        input events: [HerdrInputEvent],
+        toPane paneID: String,
+        on attempt: Attempt,
+        delivered: CheckedContinuation<Bool, Never>?
+    ) {
+        if events.contains(where: { if case .mouse = $0 { false } else { true } }) {
+            surfaces[paneID]?.renderer.managedSurface?.endSelection()
+        }
+        attempt.ask(.input(paneID: paneID, events: events, delivered: delivered))
+    }
+
+    /// Remux's move to `destination`: a view request the engine starts when it goes (`.move`); the newest
+    /// wins, and as in Herdr's client, a move while a show is in progress takes that show over. It goes
+    /// with the command Herdr's client sends for the place or creation. Herdr's zoom is a flag on a tab,
+    /// which shows its focused pane, so a move within the tab on screen is a `pane.focus`, as Herdr's
+    /// client sends on a click. A move to another tab changes the tab: Remux's zoom comes off the tab left
+    /// while it is still on screen, since an unzoom focuses its target; the setting zooms the tab reached;
+    /// and a pane's `pane.focus` marks the tab's agents seen. The engine holds the frames meanwhile, so only
+    /// the tab reached shows, as it ends up. A tab another client moves the session to stays as it is:
+    /// unzooming a tab off screen would focus it and take the session back.
+    ///
+    /// The user is in the move's pane from this moment (`userPaneID`), so keys typed right after a tap go
+    /// to the pane tapped.
+    private func move(_ attempt: Attempt, to destination: HerdrDestination) {
+        var fromAnotherTab = false
+        var pane: String?
+        if case .place(let place) = destination {
+            fromAnotherTab = tab(reachedBy: place).map { $0 != onScreenTab } == true
+            if case .pane(let id) = place { pane = id }
+        }
+        attempt.moveAsks += 1
+        attempt.move = PendingMove(ask: attempt.moveAsks, pane: pane)
+        attempt.ask(.move(destination, fromAnotherTab: fromAnotherTab, ask: attempt.moveAsks))
+        reconcilePresentationActivity()
+        didChange()
+    }
+
+    /// The engine took move `ask`: `request` carries it, or nothing does, as when Herdr has the session
+    /// there already. A newer move has replaced it if the attempt's isn't this one. The engine's updates
+    /// come on their own, so the request may already have completed, as one to a pane gone by then does at
+    /// once, or a later one replaced it.
+    private func moveTaken(_ ask: UInt64, by request: UInt64?, on attempt: Attempt) {
+        guard attempt.move?.ask == ask else { return }
+        guard let request, attempt.activatedRequest.map({ $0 < request }) ?? true,
+              attempt.request.map({ $0.id <= request }) ?? true
+        else { return moveEnded(on: attempt) }
+        attempt.move?.request = request
+    }
+
+    /// Remux's move ended, as Herdr showed where it went, another client took the session elsewhere, its
+    /// pane closed, its focus failed, or a later request replaced it: the user is in the pane Herdr has
+    /// focused from here on.
+    private func moveEnded(on attempt: Attempt) {
+        guard attempt.move != nil else { return }
+        attempt.move = nil
+        reconcilePresentationActivity()
+        didChange()
+    }
+
+    /// Which tabs the setting zooms as the session comes to them.
+    private var zoomPolicy: HerdrZoomPolicy {
+        HerdrZoomPolicy(
+            zoomsMultipaneTabs: currentTerminalSettings.zoomMultipaneWindowsByDefault,
+            unzoomedByUser: tabsUnzoomedByUser
+        )
+    }
+
+    /// The tab on screen, as the newest snapshot has it.
+    private var onScreenTab: HerdrTabKey? {
+        guard let snapshot, let tabID = snapshot.focusedTabID else { return nil }
+        return HerdrTabKey(bootID: snapshot.bootID, tabID: tabID)
+    }
+
+    /// The tab a move to `place` shows.
+    private func tab(reachedBy place: HerdrPlace) -> HerdrTabKey? {
+        guard let snapshot, let tabID = snapshot.tabID(reachedBy: place) else { return nil }
+        return HerdrTabKey(bootID: snapshot.bootID, tabID: tabID)
+    }
+
+    /// The current request's focus or creation was answered, in the engine's order.
+    private func answered(_ step: HerdrCommandLane.Step, failure: HerdrCommandError?) {
+        let label: String
+        switch step {
+        case .focus(let place): label = place.focusFailureLabel
+        case .create(let creation): label = creation.failureLabel
+        case .close(let place, let group): return changeAnswered(.close(place, group: group), failure: failure)
+        case .leave, .zoom, .zoomReached: return
+        }
+        if let failure {
+            presentFailure(of: step.method, label: label, failure)
+        } else {
+            notices.succeeded(step.method, bootID: layout?.bootID)
+        }
+    }
+
+    /// A command's failure as Herdr's notice rules read it.
+    private nonisolated static func commandError(_ failure: Error) -> HerdrCommandError {
+        failure as? HerdrCommandError ?? .failed(code: "invalid_response", message: failure.localizedDescription)
+    }
+
+    private func presentFailure(of method: String, label: String, _ failure: Error) {
+        let error = Self.commandError(failure)
+        if notices.shows(method, failedWith: error, bootID: layout?.bootID) {
+            terminalScreenAdapter.presentFailure(label)
+        }
+    }
+
+    // MARK: - Zoom
+
+    /// The pane sheet's zoom button: Herdr zooms or unzooms the focused pane's tab, through the engine's
+    /// lane after the commands already asked for. Every `pane.zoom` focuses its target first, so it goes
+    /// only while no request is in progress, on the pane the session is on, as the engine checks when it
+    /// goes. A tab the user unzooms isn't zoomed again as the session comes back on screen, as tmux keeps
+    /// a user's choice for a window. Returns false when the session can't take it.
+    func setFocusedPaneZoomed(_ zoomed: Bool) -> Bool {
+        guard let attempt, isCurrent(attempt), attempt.isSettled, let paneID = focusedPaneID, let tab = onScreenTab
         else { return false }
-        focus(paneID, attempt: attempt, connection: connection)
+        if zoomed {
+            tabsUnzoomedByUser.remove(tab)
+        } else {
+            tabsUnzoomedByUser.insert(tab)
+        }
+        attempt.ask(.zoom(paneID, zoomed: zoomed))
         return true
     }
 
-    private func focus(_ paneID: String, attempt: Attempt, connection: HerdrConnection) {
-        if attempt.focusInFlight {
-            attempt.waitingFocus = paneID
-        } else if paneID != focusedPaneID {
-            requestFocus(paneID, attempt: attempt, connection: connection)
-        }
+    /// The pane sheet is opening. A zoomed tab's map places the panes its frame doesn't draw from the
+    /// newest full layout Herdr reported, and a tab zoomed before Remux saw it, as by another client
+    /// while the setting is off, has none. Herdr's endpoint has no layout query, so Remux asks for the
+    /// zoom the tab already has: Herdr changes nothing and answers with the tab's full layout, which
+    /// fills the map as any zoom's answer does. It asks once for each set of missing panes, through the
+    /// engine's lane, which lets it go only while no request is in progress, since the zoom focuses its
+    /// pane; one that doesn't go is asked again at the next opening.
+    func fillTabMapIfNeeded() {
+        guard let attempt, isCurrent(attempt), attempt.isSettled,
+              let layout, let tab = layout.tab, tab.zoomed, let snapshot, snapshot.bootID == layout.bootID,
+              snapshot.focusedTabID == tab.tabID, let paneID = snapshot.focusedPaneID
+        else { return }
+        let gap = HerdrTabMapGap(
+            tab: HerdrTabKey(bootID: layout.bootID, tabID: tab.tabID),
+            paneIDs: Set(layout.panes.lazy.map(\.paneID).filter { self.mapRect(ofPane: $0) == nil })
+        )
+        guard !gap.paneIDs.isEmpty, gap != askedTabMapGap else { return }
+        askedTabMapGap = gap
+        attempt.ask(.askLayout(paneID))
     }
 
-    private func requestFocus(_ paneID: String, attempt: Attempt, connection: HerdrConnection) {
-        attempt.focusInFlight = true
-        Task { [weak self] in
-            var failure: Error?
-            do {
-                _ = try await connection.command(Self.paneFocusMethod, params: ["pane_id": paneID])
-            } catch {
-                failure = error
-            }
-            self?.focusAnswered(attempt: attempt, connection: connection, failure: failure)
-        }
-    }
-
-    private func focusAnswered(attempt: Attempt, connection: HerdrConnection, failure: Error?) {
-        attempt.focusInFlight = false
-        guard isCurrent(attempt) else { return }
+    /// Herdr answered a zoom Remux sent: the zoom button's outcome is reported, and any zoom's layout fills
+    /// the tab's map. One that didn't go, as the pane sheet's question while a request was in progress, is
+    /// asked again at the next opening. An answer that comes after the stop changes nothing.
+    private func zoomAnswered(
+        _ zoom: HerdrPaneZoomResult?,
+        bootID: String,
+        failure: HerdrCommandError?,
+        reportsFailure: Bool
+    ) {
+        guard !stopped else { return }
         if let failure {
-            let error = failure as? HerdrCommandError
-                ?? .failed(code: "invalid_response", message: failure.localizedDescription)
-            if notices.shows(Self.paneFocusMethod, failedWith: error, bootID: layout?.bootID) {
-                terminalScreenAdapter.presentFailure(Self.focusFailureLabel)
+            if reportsFailure {
+                presentFailure(of: Self.paneZoomMethod, label: Self.zoomFailureLabel, failure)
+            } else if failure == .notSent {
+                askedTabMapGap = nil
             }
-        } else {
-            notices.succeeded(Self.paneFocusMethod, bootID: layout?.bootID)
+            return
         }
-        if let next = attempt.waitingFocus {
-            attempt.waitingFocus = nil
-            requestFocus(next, attempt: attempt, connection: connection)
-        }
+        guard let zoom else { return }
+        if reportsFailure { notices.succeeded(Self.paneZoomMethod, bootID: bootID) }
+        tabMap = HerdrTabMap(
+            bootID: bootID,
+            tabID: zoom.layout.tabID,
+            rects: Dictionary(zoom.layout.panes.map { ($0.paneID, $0.rect) }) { first, _ in first }
+        )
+        didChange()
+    }
+
+    /// Where `paneID` sits in the tab on screen, for the pane sheet's map: from the newest full layout of
+    /// the tab Herdr reported.
+    func mapRect(ofPane paneID: String) -> HerdrSurfaceRect? {
+        guard let layout, let tab = layout.tab, let tabMap, tabMap.bootID == layout.bootID, tabMap.tabID == tab.tabID
+        else { return nil }
+        return tabMap.rects[paneID]
+    }
+
+    nonisolated static func zoomParams(_ paneID: String, zoomed: Bool) -> [String: String] {
+        ["pane_id": paneID, "mode": zoomed ? "on" : "off"]
     }
 
     // MARK: - Scrolling
@@ -697,16 +1102,11 @@ final class HerdrScreenModel {
     /// or takes the wheel as arrow keys, gets one report or key per step instead.
     static let wheelLines: UInt16 = 3
 
-    /// Where a scroll gesture over the pane is; its wheel steps are reported at that cell, as Herdr's
-    /// client reports the pointer's.
-    func setScrollPointer(_ point: CGPoint, inPane paneID: String) {
-        scrollPointers[paneID] = point
-    }
-
     /// A scroll gesture's travel over a pane becomes Herdr wheel steps the way Ghostty turns travel into
     /// lines for tmux: one step per cell height, the rest kept for the next. Herdr decides what a step
     /// does: it scrolls the pane's history, or goes to the program as a wheel report or an arrow key. As
-    /// in Herdr's client, scrolling another pane focuses it.
+    /// in Herdr's client, scrolling another pane focuses it. The wheel goes where any input goes
+    /// (`inputTarget(forPane:)`), placed in the pane's drawn area.
     func scroll(_ event: GhosttySurfaceMouseScrollEvent, inPane paneID: String) -> Bool {
         let momentum = event.mods.momentum
         // A cancelled gesture, as when the program's mouse mode changes, sends none of its travel.
@@ -718,10 +1118,10 @@ final class HerdrScreenModel {
         defer {
             if momentum == .ended { wheelRemainders[paneID] = nil }
         }
-        guard let attempt = shownAttempt, let measurement, presentation(ofPane: paneID) == .ready,
-              let pane = layout?.panes.first(where: { $0.paneID == paneID })
+        guard let target = inputTarget(forPane: paneID), let measurement,
+              let cell = paneCell(at: pointers[paneID] ?? .zero, inPane: paneID)
         else { return false }
-        if momentum == .began, paneID != focusedPaneID { _ = focusPane(paneID) }
+        if momentum == .began, paneID != userPaneID { _ = focusPane(paneID) }
 
         let cellHeight = Double(measurement.cellMetrics.pixelHeight)
         let travel = (wheelRemainders[paneID] ?? 0) + event.deltaY
@@ -729,20 +1129,14 @@ final class HerdrScreenModel {
         wheelRemainders[paneID] = travel - steps * cellHeight
         guard steps != 0 else { return true }
 
-        let scale = measurement.cellMetrics.contentScale
-        let point = scrollPointers[paneID] ?? .zero
-        func cell(_ points: CGFloat, size: UInt32, count: UInt16) -> UInt16 {
-            let index = Int((Double(points) * scale / Double(max(size, 1))).rounded(.down))
-            return UInt16(min(max(index, 0), Int(max(count, 1)) - 1))
-        }
         let wheel = HerdrMouseEvent(
             kind: steps > 0 ? .scrollUp : .scrollDown,
-            column: cell(point.x, size: measurement.cellMetrics.pixelWidth, count: pane.innerRect.width),
-            row: cell(point.y, size: measurement.cellMetrics.pixelHeight, count: pane.innerRect.height),
+            column: cell.column,
+            row: cell.row,
             lines: Self.wheelLines
         )
         let events = Array(repeating: HerdrInputEvent.mouse(wheel), count: Int(steps.magnitude))
-        return send(events, to: (attempt, paneID)) == .accepted
+        return send(events, to: target) == .accepted
     }
 
     private func applyScroll(toPane paneID: String) {
@@ -750,6 +1144,185 @@ final class HerdrScreenModel {
               let managed = surfaces[paneID]?.renderer.managedSurface
         else { return }
         managed.setRemoteScroll(scroll.scrollState, route: scroll.route)
+    }
+
+    // MARK: - Mouse
+
+    /// A pane's cell, relative to its text area.
+    private struct PaneCell: Equatable {
+        let column: UInt16
+        let row: UInt16
+    }
+
+    /// A mouse button held down in a pane, and the cell last reported with it.
+    private struct MouseGesture {
+        let paneID: String
+        let button: HerdrMouseEvent.Button
+        var cell: PaneCell
+    }
+
+    /// Whether the pane's program reads the mouse, as Herdr's surface says.
+    func reportsMouse(inPane paneID: String) -> Bool {
+        paneScrolls[paneID]?.mouseReporting == true
+    }
+
+    /// The pointer moved over a pane. As Herdr's client passes on the host terminal's motion
+    /// (`client/shell/mouse.rs`), a program that reads the mouse gets a move each time the pointer reaches
+    /// another cell, which Herdr reports only to a program asking for every motion, and while a button is
+    /// held in the pane, a drag. The wheel's steps are reported at this cell too.
+    func movePointer(to point: CGPoint, inPane paneID: String, mods: GhosttySurfaceKeyEvent.Mods) {
+        let previous = pointers[paneID].flatMap { paneCell(at: $0, inPane: paneID) }
+        pointers[paneID] = point
+        guard let target = inputTarget(forPane: paneID), let cell = paneCell(at: point, inPane: paneID) else { return }
+        let kind: HerdrMouseEvent.Kind
+        if let gesture = mouseGesture {
+            guard gesture.paneID == paneID, cell != gesture.cell else { return }
+            mouseGesture?.cell = cell
+            kind = .drag(gesture.button)
+        } else {
+            guard reportsMouse(inPane: paneID), cell != previous else { return }
+            kind = .moved
+        }
+        _ = send([mouseEvent(kind, at: cell, mods: mods)], to: target)
+    }
+
+    /// A button pressed or released at the pointer, as Herdr's client sends one to a pane: a press goes
+    /// only to a program that reads the mouse, and a right press only to a pane set to take right-clicks
+    /// (`pane.input.set`) with no modifier held, since Herdr's own menu takes them otherwise. Until its
+    /// release, which goes to the same pane, the press takes the pointer's moves and no other press goes.
+    /// The tap that makes the press focuses the pane, as a tap does on any pane. Returns false when the
+    /// event doesn't go.
+    func sendMouseButton(_ event: GhosttySurfaceMouseButtonEvent, inPane paneID: String) -> Bool {
+        guard let button = HerdrInputTranslator.mouseButton(event.button) else { return false }
+        switch event.state {
+        case .press:
+            guard mouseGesture == nil, let target = inputTarget(forPane: paneID), reportsMouse(inPane: paneID),
+                  button != .right || takesRightClick(inPane: paneID, mods: event.mods),
+                  let cell = pointers[paneID].flatMap({ paneCell(at: $0, inPane: paneID) }),
+                  send([mouseEvent(.down(button), at: cell, mods: event.mods)], to: target) == .accepted
+            else { return false }
+            mouseGesture = MouseGesture(paneID: paneID, button: button, cell: cell)
+            return true
+        case .release:
+            guard let gesture = mouseGesture, gesture.button == button else { return false }
+            mouseGesture = nil
+            guard let target = inputTarget(forPane: gesture.paneID) else { return false }
+            let cell = pointers[gesture.paneID].flatMap { paneCell(at: $0, inPane: gesture.paneID) } ?? gesture.cell
+            return send([mouseEvent(.up(button), at: cell, mods: event.mods)], to: target) == .accepted
+        }
+    }
+
+    private func takesRightClick(inPane paneID: String, mods: GhosttySurfaceKeyEvent.Mods) -> Bool {
+        HerdrInputTranslator.modifiers(for: mods).isEmpty
+            && snapshot?.panes.first { $0.paneID == paneID }?.rightClickPassthrough == true
+    }
+
+    private func mouseEvent(
+        _ kind: HerdrMouseEvent.Kind,
+        at cell: PaneCell,
+        mods: GhosttySurfaceKeyEvent.Mods
+    ) -> HerdrInputEvent {
+        .mouse(HerdrMouseEvent(
+            kind: kind,
+            column: cell.column,
+            row: cell.row,
+            modifiers: HerdrInputTranslator.modifiers(for: mods)
+        ))
+    }
+
+    /// The cell at `point`, in the pane's points, within the pane's drawn area. Herdr reports a cell to a
+    /// program in SGR pixel mode as the cell's centre pixel.
+    private func paneCell(at point: CGPoint, inPane paneID: String) -> PaneCell? {
+        guard let measurement, let area = layout?.panes.first(where: { $0.paneID == paneID })?.innerRect
+        else { return nil }
+        let scale = measurement.cellMetrics.contentScale
+        func index(_ points: CGFloat, size: UInt32, count: UInt16) -> UInt16 {
+            let index = Int((Double(points) * scale / Double(max(size, 1))).rounded(.down))
+            return UInt16(min(max(index, 0), Int(max(count, 1)) - 1))
+        }
+        return PaneCell(
+            column: index(point.x, size: measurement.cellMetrics.pixelWidth, count: area.width),
+            row: index(point.y, size: measurement.cellMetrics.pixelHeight, count: area.height)
+        )
+    }
+
+    // MARK: - Selection
+
+    /// The text of a selection in `paneID`, read by Herdr, which keeps the pane's history and joins its
+    /// wrapped lines. The read waits in line behind the commands asked before it and for Herdr's answer as
+    /// long as Herdr's client waits for a command. A read that can't go or fails says so, as Herdr's client
+    /// does, and returns nil.
+    func readSelection(_ selection: GhosttyHistorySelection, inPane paneID: String) async -> String? {
+        guard let attempt = shownAttempt else {
+            notices.replaced()
+            terminalScreenAdapter.presentFailure(Self.copyFailureLabel)
+            return nil
+        }
+        do {
+            let reply = try await command(
+                Self.paneSelectionReadMethod,
+                params: HerdrSelectionRead(paneID: paneID, selection: selection),
+                on: attempt
+            ).get()
+            let text = try HerdrSelectionRead.text(fromReply: reply.json)
+            notices.succeeded(Self.paneSelectionReadMethod, bootID: layout?.bootID)
+            return text
+        } catch {
+            if isCurrent(attempt) {
+                presentFailure(of: Self.paneSelectionReadMethod, label: Self.copyFailureLabel, error)
+            }
+            return nil
+        }
+    }
+
+    /// The whole of the plain-text link at `cell`, a history cell of `paneID`, which Herdr finds across the
+    /// pane's wrapped rows; nil when there is none. It is asked about the frame the pane's terminal shows,
+    /// and its regions, rows of that frame's viewport, come back as history rows. The answer holds only
+    /// while the terminal still shows that frame: as Herdr's client does, one found in content or a viewport
+    /// that has changed since is dropped. As for Herdr's client the question is optional, so a failure says
+    /// nothing.
+    func resolveLink(at cell: GhosttyTerminalCell, inPane paneID: String) async -> GhosttyHistorySelection? {
+        guard let attempt = shownAttempt,
+              let content = await engine.content(ofPane: paneID),
+              let request = HerdrLinkResolve(paneID: paneID, cell: cell, content: content),
+              let reply = try? await command(Self.paneLinkResolveMethod, params: request, on: attempt).get(),
+              await engine.content(ofPane: paneID) == content
+        else { return nil }
+        return try? request.link(fromReply: reply.json)
+    }
+
+    /// `method` through the engine's lane, after the operations asked before it: it waits in line behind
+    /// them, and behind the steps of the view request in progress, then for Herdr's answer as long as
+    /// Herdr's client waits for a command.
+    private func command(
+        _ method: String,
+        params: some Encodable & Sendable,
+        on attempt: Attempt
+    ) async -> Result<HerdrCommandReply, HerdrCommandError> {
+        await withCheckedContinuation { answered in
+            attempt.ask(.command(method, params: params, answered: answered))
+        }
+    }
+
+    /// Herdr's client ends a pane's selection when the pane's width changes, since Herdr rewraps its lines
+    /// and their rows move, and when its program switches screens. A change of height keeps the rows, and
+    /// on the phone the keyboard makes one, so the selection stays.
+    private func endSelections(movedBy layout: HerdrPaneLayout) {
+        for pane in layout.panes {
+            guard let width = pane.innerRect?.width,
+                  let previous = self.layout?.panes.first(where: { $0.paneID == pane.paneID })?.innerRect?.width,
+                  width != previous
+            else { continue }
+            surfaces[pane.paneID]?.renderer.managedSurface?.endSelection()
+        }
+    }
+
+    private func endSelections(movedBy scrolls: [String: HerdrPaneScroll]) {
+        for (paneID, scroll) in scrolls {
+            guard let previous = paneScrolls[paneID], previous.alternateScreenActive != scroll.alternateScreenActive
+            else { continue }
+            surfaces[paneID]?.renderer.managedSurface?.endSelection()
+        }
     }
 
     private func inputFailed(_ attemptID: UInt64) {
@@ -779,31 +1352,36 @@ final class HerdrScreenModel {
 
     // MARK: - Connection
 
-    /// A recheck keeps saying what needs attention until it connects.
-    private func startAttempt(keepingFailure: Bool = false) {
+    /// Gives up the current attempt, if any, and starts a new one: the session's first connection, a
+    /// reconnect the user asks for, and a reconnect by itself, when its delay is up or the app comes back.
+    /// The panes keep their terminals, so the last frame stays on screen until the new connection's
+    /// first; pane failures say to reconnect, so the failed panes are tried again. A recheck keeps saying
+    /// what needs attention until it connects.
+    private func restart() {
+        cancelRecovery()
+        if let attempt { giveUp(attempt) }
         attemptCount += 1
         let attempt = Attempt(id: attemptCount)
         self.attempt = attempt
         readySince = nil
-        if !keepingFailure { failure = nil }
         attempt.task = Task { [weak self] in await self?.run(attempt) }
+        retryFailedPanes()
         reconcilePresentationActivity()
         didChange()
     }
 
     /// Once the connection is open, the attempt's operations are carried out in order.
     private func run(_ attempt: Attempt) async {
-        // Whoever retires the attempt closes its bridge.
-        guard let (transport, size) = await bridgeAndScreenSize(for: attempt) else { return }
+        let feed = HerdrEngineFeed(engine: engine, connection: attempt.id)
+        guard let size = await connectionAndScreenSize(for: attempt, feed: feed),
+              let connection = attempt.connection
+        else { return }
         // Frames can arrive before `open` returns; the engine paints them at the hello's cell size.
         await engine.setCellSize(widthPx: size.cellWidthPx, heightPx: size.cellHeightPx)
-        let feed = await engine.beginConnection()
-        guard isCurrent(attempt) else { return }
-        attempt.feed = feed
-        let connection: HerdrConnection
+        await engine.beginConnection(attempt.id, outbox: connection.outbox)
+        attempt.helloSent = true
         do {
-            connection = try await HerdrConnection.open(
-                transport: transport,
+            try await connection.open(
                 hello: HerdrHello(
                     cellWidthPx: size.cellWidthPx,
                     cellHeightPx: size.cellHeightPx,
@@ -811,21 +1389,18 @@ final class HerdrScreenModel {
                     rows: size.rows,
                     surfaceActive: false
                 ),
-                appActive: appPhase != .background,
-                timing: connectionTiming,
-                onEvent: Self.eventHandler(feed: feed, attemptID: attempt.id, model: self)
+                appActive: appPhase != .background
             )
         } catch {
-            guard isCurrent(attempt) else { return }
-            end(attempt, disconnectReason(connectionFailedWith: error), recovery: Self.recovery(connectionFailedWith: error, opened: false))
+            if isCurrent(attempt) {
+                end(attempt, disconnectReason(connectionFailedWith: error), recovery: Self.recovery(connectionFailedWith: error, opened: false))
+            }
             return
         }
-        guard isCurrent(attempt) else {
-            await connection.close(reusable: attempt.reusable)
-            return
-        }
-        attempt.transport = nil
-        attempt.connection = connection
+        guard isCurrent(attempt) else { return }
+        await feed.opened(methods: await connection.negotiated?.methods ?? [], commandTimeout: connectionTiming.command)
+        guard isCurrent(attempt) else { return }
+        attempt.isOpen = true
         if let themeReport { attempt.ask(.theme(themeReport)) }
         reconcileVisibility()
         reconcilePresentationActivity()
@@ -839,44 +1414,43 @@ final class HerdrScreenModel {
         }
     }
 
-    /// A bridge and the screen size for its hello, or nil when the attempt is over. The bridge opens at
-    /// once, so its setup overlaps the screen's layout. A bridge still waiting for a size at the hello
-    /// deadline is closed, and another opens once the size arrives.
-    private func bridgeAndScreenSize(
-        for attempt: Attempt
-    ) async -> (any HerdrBridgeTransport, HerdrSurfaceGeometry)? {
+    /// The attempt's connection, in `attempt.connection`, and the screen's size for its hello, or nil when
+    /// the attempt is over. The bridge opens at once, so its setup overlaps the screen's first layout, and
+    /// goes straight to the connection, which the attempt's give-up closes. A connection still waiting for
+    /// a size at the hello deadline is closed, and another opens once the size is known.
+    private func connectionAndScreenSize(for attempt: Attempt, feed: HerdrEngineFeed) async -> HerdrSurfaceGeometry? {
         while true {
             // Herdr's clock starts when the bridge reaches its socket, which can be before the opening
             // returns.
             let deadline = ContinuousClock.now + Self.helloDeadline
-            guard let transport = await openTransport(for: attempt) else { return nil }
-            if let size = await screenSize(for: attempt, until: deadline) { return (transport, size) }
+            let transport: any HerdrBridgeTransport
+            do {
+                transport = try await openBridge()
+            } catch {
+                // A cancelled opening releases what it claimed.
+                if isCurrent(attempt) {
+                    let reason = disconnectReason(openingBridgeFailedWith: error)
+                    end(attempt, reason, recovery: Self.recovery(openingBridgeFailedWith: error, reason: reason))
+                }
+                return nil
+            }
+            // A bridge that opens after the attempt was given up closes the way the give-up decided.
+            if let cause = attempt.closeCause {
+                await transport.close(cause)
+                return nil
+            }
+            let connection = HerdrConnection(
+                transport: transport,
+                timing: connectionTiming,
+                onEvent: Self.eventHandler(feed: feed, attemptID: attempt.id, model: self)
+            )
+            attempt.connection = connection
+            if let size = await screenSize(for: attempt, until: deadline) { return size }
             guard isCurrent(attempt) else { return nil }
-            attempt.transport = nil
-            await transport.close(reusable: true)
+            await connection.close(.finished)
+            attempt.connection = nil
             guard await screenSize(for: attempt, until: nil) != nil else { return nil }
         }
-    }
-
-    /// The attempt's bridge, or nil when the opening failed, which is reported, or the attempt is over.
-    private func openTransport(for attempt: Attempt) async -> (any HerdrBridgeTransport)? {
-        let transport: any HerdrBridgeTransport
-        do {
-            transport = try await openBridge()
-        } catch {
-            // A cancelled opening releases what it claimed.
-            if isCurrent(attempt) {
-                let reason = disconnectReason(openingBridgeFailedWith: error)
-                end(attempt, reason, recovery: Self.recovery(openingBridgeFailedWith: error, reason: reason))
-            }
-            return nil
-        }
-        guard isCurrent(attempt) else {
-            await transport.close(reusable: attempt.reusable)
-            return nil
-        }
-        attempt.transport = transport
-        return transport
     }
 
     /// Each operation returns once its messages are queued on the connection; Herdr's answer to a show
@@ -889,23 +1463,14 @@ final class HerdrScreenModel {
     ) async {
         let attemptID = attempt.id
         switch operation {
-        case .show(let geometry, let request):
-            await feed.beginActivation(request: request, columns: geometry.cols, rows: geometry.rows)
-            await connection.sendShow(geometry) { [weak self] result in
-                switch result {
-                case .success(let floor):
-                    Task { await feed.acknowledgeActivation(request: request, floor: floor) }
-                case .failure(let error):
-                    Task { @MainActor [weak self] in self?.showFailed(attemptID, request: request, error: error) }
-                }
-            }
+        case .show(let geometry, let destination):
+            // The engine sends the show and its steps; its frames are held from here on.
+            await feed.start(.shown(geometry, to: destination, zoom: zoomPolicy), within: connectionTiming.activation)
         case .hide:
-            // The session is off screen and takes no input either way; a hide Herdr doesn't confirm
-            // leaves only its stale foreground on the server.
-            await feed.endActivation()
-            await connection.sendHide()
+            // Frames from here on show what leaving does, so the engine holds them before anything goes out.
+            await feed.start(.hidden, within: connectionTiming.activation)
         case .resize(let geometry):
-            await feed.resizeActivation(columns: geometry.cols, rows: geometry.rows)
+            await feed.resize(columns: geometry.cols, rows: geometry.rows)
             await connection.resize(geometry)
             await engine.setCellSize(widthPx: geometry.cellWidthPx, heightPx: geometry.cellHeightPx)
         case .theme(let updates):
@@ -931,8 +1496,19 @@ final class HerdrScreenModel {
             // Herdr acknowledges no input, but answers a ping only after reading everything sent before
             // it. Later operations don't wait for the answer.
             Task { delivered.resume(returning: await connection.confirmAlive()) }
-        case .focusPane(let paneID):
-            focus(paneID, attempt: attempt, connection: connection)
+        case .move(let destination, let fromAnotherTab, let ask):
+            guard let geometry else { return moveTaken(ask, by: nil, on: attempt) }
+            let request = await feed.start(
+                .moved(destination, fromAnotherTab: fromAnotherTab, columns: geometry.cols, rows: geometry.rows, zoom: zoomPolicy),
+                within: connectionTiming.activation
+            )
+            moveTaken(ask, by: request, on: attempt)
+        case .zoom(let paneID, let zoomed):
+            await feed.setZoom(zoomed, ofPane: paneID)
+        case .askLayout(let paneID):
+            await feed.askLayout(ofPane: paneID)
+        case .command(let method, let params, let answered):
+            await feed.command(method, params: params) { answered.resume(returning: $0) }
         }
     }
 
@@ -953,16 +1529,20 @@ final class HerdrScreenModel {
                 await feed.receive(output)
             case .ended(let error):
                 await model.connectionEnded(attemptID, error)
+                // Also after a stop, which takes no more of the attempt's events.
+                await feed.ended()
             case .inputRefused(let message):
                 Task { @MainActor in model.inputRefused(attemptID, message: message) }
             case .keyboardReportAll(let enabled):
                 Task { @MainActor in model.keyboardReportAllChanged(attemptID, enabled) }
+            case .response(let chunk):
+                await feed.receive(chunk)
             case .notification(let notification):
                 Task { @MainActor in model.notificationArrived(attemptID, notification) }
             case .bell:
                 Task { @MainActor in model.bellRang(attemptID) }
-            case .clipboard:
-                break
+            case .clipboard(let base64):
+                Task { @MainActor in model.clipboardWritten(attemptID, base64: base64) }
             }
         }
     }
@@ -1020,20 +1600,25 @@ final class HerdrScreenModel {
         if let previous = self.snapshot?.bootID, previous != snapshot.bootID {
             onNotification(.serverRestarted)
         }
+        let rows = terminalScreenAdapter.tabRowContents
         self.snapshot = snapshot
-        agents.project(snapshot, completions: completions)
+        if agents.project(snapshot, completions: completions) { didChange() }
         acknowledgeShownAgents()
+        // The sheets and the toolbar list the session's tabs.
+        if places.update(with: snapshot) { didChange() }
         if snapshot.focusedPaneID != focusedPaneID {
             focusedPaneID = snapshot.focusedPaneID
             reconcilePresentationActivity()
             didChange()
         }
+        // The rows read what each pane runs and does on demand, so a change to them alone tells the views here.
+        if terminalScreenAdapter.tabRowContents != rows { didChange() }
         guard !attempt.hasSnapshot else { return }
         attempt.hasSnapshot = true
         hasConnected = true
         failure = nil
         reconcileVisibility()
-        readinessChanged()
+        didChange()
     }
 
     /// Herdr sends its notifications to every connection, shown or hidden; the owner decides what
@@ -1051,8 +1636,22 @@ final class HerdrScreenModel {
     /// Herdr rings only the session in front, which the connection checks; a bell that comes after the
     /// session left the screen has no one to ring for.
     private func bellRang(_ attemptID: UInt64) {
-        guard let attempt, attempt.id == attemptID, isCurrent(attempt), isSelected else { return }
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt), isOnScreen else { return }
         onNotification(.bell)
+    }
+
+    /// A program in the session on screen wrote the clipboard (OSC 52); a write that comes after the session
+    /// left the screen has no one to write for. As in Herdr's client, a payload that isn't base64 is
+    /// dropped, and the copy notice shows only after a write that wasn't a duplicate
+    /// (`client/clipboard_forwarding.rs`, `selection.rs` `write_osc52_bytes`). The iPhone clipboard holds
+    /// text, so bytes that aren't UTF-8 are dropped too.
+    private func clipboardWritten(_ attemptID: UInt64, base64: String) {
+        guard let attempt, attempt.id == attemptID, isCurrent(attempt), isOnScreen,
+              let bytes = Data(base64Encoded: base64), let text = String(data: bytes, encoding: .utf8),
+              clipboard.write(text)
+        else { return }
+        notices.replaced()
+        terminalScreenAdapter.presentInformation(Self.copiedNotice, for: Self.copiedNoticeDuration)
     }
 
     /// The panes on screen show their agents as they are now, as Herdr's client counts a pane it
@@ -1061,16 +1660,10 @@ final class HerdrScreenModel {
     /// acknowledges nothing.
     private func acknowledgeShownAgents() {
         guard appPhase == .active, let attempt = shownAttempt, let frame = presentedFrame,
-              frame.connection == attempt.feed?.connection, let snapshot,
+              frame.connection == attempt.id, let snapshot,
               frame.bootID == snapshot.bootID, frame.projectionRevision == snapshot.revision
         else { return }
-        agents.acknowledge(panes: frame.paneIDs)
-    }
-
-    /// A reconnect reads as one until the new connection is ready.
-    private func readinessChanged() {
-        if isConnectionReady { isReconnecting = false }
-        didChange()
+        if agents.acknowledge(panes: frame.paneIDs) { didChange() }
     }
 
     private func connectionEnded(_ attemptID: UInt64, _ error: HerdrConnectionError) {
@@ -1079,15 +1672,15 @@ final class HerdrScreenModel {
     }
 
     /// Ends the attempt and reports why. A connection Remux closes sends no `ended` event, so whoever
-    /// finds the reason reports it here. `reusable` is false when Herdr didn't answer in time.
+    /// finds the reason reports it here. `unresponsive` when Herdr didn't answer in time.
     private func end(
         _ attempt: Attempt,
         _ reason: TerminalDisconnectReason,
         recovery: Recovery,
-        reusable: Bool = true
+        unresponsive: Bool = false
     ) {
         guard isCurrent(attempt) else { return }
-        retire(attempt, reusable: reusable)
+        giveUp(attempt, unresponsive: unresponsive)
         let stayedUp = readySince.map { ContinuousClock.now - $0 >= recoveryTiming.stable } ?? false
         readySince = nil
         // A session that never opened says why instead of retrying.
@@ -1137,17 +1730,8 @@ final class HerdrScreenModel {
         recoveryTimer = Task { [weak self] in
             try? await Task.sleep(until: due, clock: .continuous)
             guard !Task.isCancelled else { return }
-            self?.recover()
+            self?.restart()
         }
-    }
-
-    private func recover() {
-        guard !stopped, appPhase != .background, recoveryDue != nil else { return }
-        recoveryDue = nil
-        recoveryTimer = nil
-        if let attempt { retire(attempt) }
-        startAttempt(keepingFailure: failure != nil)
-        retryFailedPanes()
     }
 
     private func cancelRecovery() {
@@ -1156,88 +1740,86 @@ final class HerdrScreenModel {
         recoveryDue = nil
     }
 
-    /// A connection Herdr didn't answer in time may be on a dead path, so it isn't `reusable`: its SSH
-    /// connection isn't offered to the next one, which would wait on it. Only the first retire counts, so
-    /// a later one can't offer a path an earlier one doubted.
-    private func retire(_ attempt: Attempt, reusable: Bool = true) {
+    /// Gives the attempt up, once, whatever ends it: a failure, a replacement, the background or a stop.
+    /// Its operations end, its opening stops, the engine drops what its connection still sends, and the
+    /// connection closes, telling the bridge whether Herdr went silent or the path is in doubt: the
+    /// attempt was waiting for its welcome, or the app is going to the background, where its SSH
+    /// connection may not survive. A bridge that opens afterwards closes the same way; one given up
+    /// otherwise before anything was written to it opened fine, so its SSH connection can carry the next
+    /// opening.
+    private func giveUp(_ attempt: Attempt, unresponsive: Bool = false, suspending: Bool = false) {
         guard !attempt.ended else { return }
-        attempt.ended = true
-        attempt.reusable = reusable
+        let cause: HerdrBridgeCloseCause = unresponsive ? .unresponsive
+            : attempt.isOpen ? .finished
+            : suspending || attempt.helloSent ? .givenUpWhileOpening : .finished
+        attempt.closeCause = cause
         attempt.finishOperations()
         attempt.task?.cancel()
-        attempt.activationDeadline?.cancel()
         if attempt === self.attempt { resumeSizeWaiter() }
+        Task { [engine, id = attempt.id] in await engine.endConnection(id) }
         if let connection = attempt.connection {
-            Task { await connection.close(reusable: reusable) }
-        } else if let transport = attempt.transport {
-            Task { await transport.close(reusable: reusable) }
+            attempt.closing = Task { await connection.close(cause) }
         }
     }
 
-    /// Shows the session while the root wants it on screen and hides it otherwise. Herdr takes the
+    /// The root wants the session on screen, and the app isn't in the background, which hides it.
+    private var isOnScreen: Bool {
+        isSelected && appPhase != .background
+    }
+
+    /// Shows the session while it is on screen (`isOnScreen`) and hides it otherwise. Herdr takes the
     /// newest of a show and a hide, so each change is sent at once, even while the last is unanswered.
+    /// A place or creation asked for goes right after the show, as part of it.
     private func reconcileVisibility() {
-        guard let attempt, isCurrent(attempt), attempt.hasSnapshot,
-              attempt.connection != nil, let geometry
+        guard let attempt, isCurrent(attempt), attempt.isOpen, attempt.hasSnapshot, let geometry
         else { return }
-        let wanted = isSelected && appPhase != .background
-        guard wanted != attempt.requestedShown else { return }
-        attempt.requestedShown = wanted
-        attempt.visibilityRequests += 1
-        attempt.activationDeadline?.cancel()
-        attempt.activationDeadline = nil
-        if wanted {
-            awaitActivation(of: attempt, request: attempt.visibilityRequests)
-            attempt.ask(.show(geometry, request: attempt.visibilityRequests))
-            sendPendingReveal()
-        } else {
-            attempt.ask(.hide)
-        }
+        let wanted = isOnScreen
+        guard wanted != attempt.wantsShown else { return }
+        attempt.wantsShown = wanted
+        attempt.visibilityPending = true
+        attempt.ask(wanted ? .show(geometry, to: takePendingReveal()) : .hide)
         // Input is offered only once a show completes, and closes as soon as a hide is asked.
         didChange()
     }
 
-    /// Herdr's answer and a frame sent after it must both be in within the show's time, as in Herdr's
-    /// client (`activation.rs`); a show that doesn't complete is rolled back like one Herdr refused.
-    private func awaitActivation(of attempt: Attempt, request: UInt64) {
-        let attemptID = attempt.id
-        attempt.activationDeadline = Task { [weak self, deadline = connectionTiming.activation] in
-            try? await Task.sleep(for: deadline)
-            guard !Task.isCancelled else { return }
-            self?.activationTimedOut(attemptID, request: request)
+    /// The engine's view requests, in its order: the screen reads the newest one started and the newest
+    /// one completed.
+    private func viewRequestUpdated(_ update: HerdrEngineUpdate) {
+        switch update {
+        case .started(let request, let kind, let showing, let connection):
+            guard let attempt, attempt.id == connection, isCurrent(attempt) else { return }
+            attempt.request = (request, kind, showing)
+            if kind != .move, (kind == .show) == attempt.wantsShown { attempt.visibilityPending = false }
+            // A later request replaced the one carrying Remux's move.
+            if let moving = attempt.move?.request, request > moving { moveEnded(on: attempt) }
+        case .activated(let request, let connection):
+            guard let attempt, attempt.id == connection, isCurrent(attempt) else { return }
+            attempt.activatedRequest = request
+            // The engine completes a move once Herdr shows where it went, or where Herdr has the session
+            // since it was overtaken, its pane closed or its focus failed.
+            if attempt.move?.request == request { moveEnded(on: attempt) }
+            acknowledgeShownAgents()
+        case .answered(_, let step, let failure, let connection):
+            guard let attempt, attempt.id == connection, isCurrent(attempt) else { return }
+            answered(step, failure: failure)
+        case .zoomAnswered(let zoom, let bootID, let failure, let reportsFailure, let connection):
+            guard let attempt, attempt.id == connection, isCurrent(attempt) else { return }
+            zoomAnswered(zoom, bootID: bootID, failure: failure, reportsFailure: reportsFailure)
+        case .showRefused(_, let reason, let connection):
+            // Herdr's client rolls a refused show back and stays on what it showed before; a Remux session
+            // screen has nothing else to show, so the connection ends, which takes the session off Herdr's
+            // screen, and the session reconnects. A show Herdr doesn't answer runs out of its time instead.
+            guard let attempt, attempt.id == connection, isCurrent(attempt) else { return }
+            end(attempt, TerminalDisconnectReason(kind: .runtime, message: reason), recovery: .retry)
+        case .timedOut(_, let connection):
+            // Herdr's answers and a frame showing them must all be in within the request's time, as in
+            // Herdr's client (`activation.rs`); a request that doesn't complete is rolled back like a show
+            // Herdr refused.
+            guard let attempt, attempt.id == connection, isCurrent(attempt) else { return }
+            end(attempt, Self.activationTimeout, recovery: .retry, unresponsive: true)
+        default:
+            break
         }
-    }
-
-    private func activated(_ request: UInt64, connection: UInt64) {
-        guard let attempt, isCurrent(attempt), attempt.feed?.connection == connection,
-              attempt.requestedShown, request == attempt.visibilityRequests
-        else { return }
-        attempt.activatedRequest = request
-        attempt.activationDeadline?.cancel()
-        attempt.activationDeadline = nil
-        acknowledgeShownAgents()
-        readinessChanged()
-    }
-
-    private func activationTimedOut(_ attemptID: UInt64, request: UInt64) {
-        guard let attempt, attempt.id == attemptID, isCurrent(attempt),
-              attempt.requestedShown, request == attempt.visibilityRequests, attempt.activatedRequest != request
-        else { return }
-        attempt.requestedShown = false
-        end(attempt, Self.activationTimeout, recovery: .retry, reusable: false)
-    }
-
-    /// Herdr's client rolls a failed show back and stays on what it showed before; a Remux session
-    /// screen has nothing else to show, so the connection ends and the root offers a reconnect.
-    private func showFailed(_ attemptID: UInt64, request: UInt64, error: Error) {
-        guard let attempt, attempt.id == attemptID, isCurrent(attempt),
-              request == attempt.visibilityRequests
-        else { return }
-        if case .connectionEnded? = error as? HerdrCommandError { return }
-        attempt.requestedShown = false
-        let answered: Bool
-        if case .timedOut? = error as? HerdrCommandError { answered = false } else { answered = true }
-        end(attempt, Self.disconnectReason(showFailedWith: error), recovery: .retry, reusable: answered)
     }
 
     /// Herdr stores a client's theme and uses it whenever that client is in front, so one full report
@@ -1282,12 +1864,22 @@ final class HerdrScreenModel {
             }
             createRendererIfPossible(paneID)
         case .layout(let layout):
+            endSelections(movedBy: layout)
             self.layout = layout
+            if let tab = layout.tab, !tab.zoomed {
+                let drawn = layout.panes.compactMap { pane in pane.hasTextArea ? pane.innerRect.map { (pane.paneID, $0) } : nil }
+                tabMap = HerdrTabMap(
+                    bootID: layout.bootID,
+                    tabID: tab.tabID,
+                    rects: Dictionary(drawn) { first, _ in first }
+                )
+            }
             let shown = Set(layout.panes.lazy.filter(\.hasTextArea).map(\.paneID))
             terminals = terminals.filter { shown.contains($0.key) }
             presentationFailures = presentationFailures.filter { shown.contains($0.key) }
-            scrollPointers = scrollPointers.filter { shown.contains($0.key) }
+            pointers = pointers.filter { shown.contains($0.key) }
             wheelRemainders = wheelRemainders.filter { shown.contains($0.key) }
+            if let gesture = mouseGesture, !shown.contains(gesture.paneID) { mouseGesture = nil }
             for paneID in Array(surfaces.keys) where !shown.contains(paneID) {
                 closeSurface(paneID)
             }
@@ -1305,6 +1897,7 @@ final class HerdrScreenModel {
             // Only what counts as seen follows it; the screen has nothing new to show.
             return
         case .paneScroll(let scrolls):
+            endSelections(movedBy: scrolls)
             paneScrolls = scrolls
             for paneID in surfaces.keys {
                 applyScroll(toPane: paneID)
@@ -1317,23 +1910,20 @@ final class HerdrScreenModel {
         case .rendererWakeFailed(let paneID):
             surfaces[paneID]?.renderer.failPresentation(message: Self.rendererFailureMessage)
         case .failed(let error, let connection):
-            if let attempt, attempt.feed?.connection == connection {
+            if let attempt, attempt.id == connection {
                 end(attempt, error.terminalDisconnectReason(on: target.server), recovery: Self.recovery(connectionFailedWith: error, opened: true))
             }
-        case .activated(let request, let connection):
-            activated(request, connection: connection)
+        case .started, .activated, .timedOut, .answered, .zoomAnswered, .showRefused:
+            viewRequestUpdated(update)
         }
         didChange()
     }
 
     private func displayMetrics(for paneID: String) -> GhosttySurfaceDisplayMetrics? {
         guard let measurement,
-              let pane = layout?.panes.first(where: { $0.paneID == paneID })
+              let area = layout?.panes.first(where: { $0.paneID == paneID })?.innerRect
         else { return nil }
-        return measurement.displayMetrics(
-            columns: UInt32(pane.innerRect.width),
-            rows: UInt32(pane.innerRect.height)
-        )
+        return measurement.displayMetrics(columns: UInt32(area.width), rows: UInt32(area.height))
     }
 
     private func retryFailedPanes() {
@@ -1441,7 +2031,7 @@ final class HerdrScreenModel {
             let inLayout = layout?.panes.contains { $0.paneID == paneID } == true
             surface.renderer.setSceneActive(sceneActive)
             surface.renderer.setPresented(isSelected && inLayout)
-            surface.renderer.setFocused(isSelected && live && inLayout && paneID == focusedPaneID)
+            surface.renderer.setFocused(isSelected && live && inLayout && paneID == screenPaneID)
         }
     }
 
@@ -1480,6 +2070,8 @@ final class HerdrScreenModel {
 
     private func didChange() {
         guard !stopped else { return }
+        // A reconnect reads as one until the session is ready again, shown or not.
+        if isConnectionReady { isReconnecting = false }
         terminalScreenAdapter.objectWillChange.send()
         let readiness = terminalScreenAdapter.terminalScreenPresentationProjection.readiness
         var state = TerminalReadinessProjector.runtimeState(readiness)
@@ -1516,8 +2108,15 @@ final class HerdrScreenModel {
     )
 
     nonisolated static let paneFocusMethod = "pane.focus"
+    nonisolated static let paneZoomMethod = "pane.zoom"
+    nonisolated static let paneSelectionReadMethod = "pane.selection.read"
+    nonisolated static let paneLinkResolveMethod = "pane.link.resolve"
     private static let inputFailureLabel = "input"
-    private static let focusFailureLabel = "select pane"
+    private static let copyFailureLabel = "copy"
+    private static let zoomFailureLabel = "zoom pane"
+    static let copiedNotice = "Copied to clipboard"
+    /// As long as Herdr's client shows its copy notice.
+    static let copiedNoticeDuration: Duration = .seconds(2)
 
     private static let rendererFailureMessage = "Terminal renderer is unavailable. Reconnect to try again."
     private static let configurationFailureMessage =
@@ -1578,13 +2177,6 @@ final class HerdrScreenModel {
         default:
             return .none
         }
-    }
-
-    private static func disconnectReason(showFailedWith error: Error) -> TerminalDisconnectReason {
-        if case .timedOut? = error as? HerdrCommandError {
-            return TerminalDisconnectReason(kind: .transportIO, message: error.localizedDescription)
-        }
-        return TerminalDisconnectReason(kind: .runtime, message: error.localizedDescription)
     }
 }
 
@@ -1655,9 +2247,10 @@ extension HerdrBridgeError {
 }
 
 extension HerdrPaneLayout.Pane {
-    /// A pane with no text area has no terminal.
+    /// A pane with no text area, or one the frame doesn't draw, has no terminal.
     var hasTextArea: Bool {
-        innerRect.width > 0 && innerRect.height > 0
+        guard let innerRect else { return false }
+        return innerRect.width > 0 && innerRect.height > 0
     }
 }
 
@@ -1681,5 +2274,18 @@ extension HerdrPaneScroll {
             len: rows,
             cellOffset: 0
         )
+    }
+}
+
+/// True for the first `claim` only, from any thread: whichever of two outcomes comes first acts.
+final class HerdrOnce: @unchecked Sendable {
+    private let lock = NIOLock()
+    private var claimed = false
+
+    func claim() -> Bool {
+        lock.withLock {
+            defer { claimed = true }
+            return !claimed
+        }
     }
 }

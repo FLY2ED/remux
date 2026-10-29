@@ -25,32 +25,60 @@ struct GhosttyTerminalCommandFailureEvent: Equatable {
     let message: String
 }
 
-/// A failed command: an event the screen reacts to once, and a message the status overlay shows for a
-/// few seconds, until a newer failure replaces it.
+/// The status overlay's notice: a failed command, which is also an event the screen reacts to once, or
+/// something a program did that the user should know, such as a copy. The overlay shows one at a time,
+/// for its time, until a newer one replaces it.
 @MainActor
-final class GhosttyTerminalCommandFailureNotice {
-    /// How long a notice stays on screen.
-    nonisolated static let duration: Duration = .seconds(4)
+final class GhosttyTerminalNotice {
+    /// How long a failure stays on screen.
+    nonisolated static let failureDuration: Duration = .seconds(4)
+
+    private struct Shown {
+        let token: UInt64
+        let message: String
+        let isFailure: Bool
+    }
 
     private(set) var event: GhosttyTerminalCommandFailureEvent?
-    private(set) var message: String?
+    private var shown: Shown?
+    private var lastToken: UInt64 = 0
     private let onChange: () -> Void
 
     init(onChange: @escaping () -> Void) {
         self.onChange = onChange
     }
 
-    func present(_ message: String) {
-        let token = (event?.token ?? 0) &+ 1
+    var failureMessage: String? {
+        shown.flatMap { $0.isFailure ? $0.message : nil }
+    }
+
+    var informationMessage: String? {
+        shown.flatMap { $0.isFailure ? nil : $0.message }
+    }
+
+    func presentFailure(_ message: String) {
+        let token = show(message, isFailure: true, for: Self.failureDuration)
         event = GhosttyTerminalCommandFailureEvent(token: token, message: message)
-        self.message = message
         onChange()
+    }
+
+    func presentInformation(_ message: String, for duration: Duration) {
+        show(message, isFailure: false, for: duration)
+        onChange()
+    }
+
+    @discardableResult
+    private func show(_ message: String, isFailure: Bool, for duration: Duration) -> UInt64 {
+        lastToken &+= 1
+        let token = lastToken
+        shown = Shown(token: token, message: message, isFailure: isFailure)
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: Self.duration)
-            guard let self, self.event?.token == token else { return }
-            self.message = nil
+            try? await Task.sleep(for: duration)
+            guard let self, self.shown?.token == token else { return }
+            self.shown = nil
             self.onChange()
         }
+        return token
     }
 }
 
@@ -142,6 +170,27 @@ protocol GhosttyTerminalInputModeling: ObservableObject {
         _ event: GhosttySurfaceMouseScrollEvent
     ) -> GhosttyMouseInputSubmissionOutcome
 
+    /// The text the pane's selection copies, from wherever the backend keeps the pane's history; nil
+    /// when there is none to copy.
+    func selectedText(in surfaceID: UUID) async -> String?
+
+    /// Grows what a long-press at `point` selected to the whole link there, when the backend knows more
+    /// of the link than the pane's terminal shows; true once it has.
+    func completeLinkSelection(
+        in surfaceID: UUID,
+        at point: CGPoint,
+        selected: GhosttyLongPressSelection
+    ) async -> Bool
+}
+
+/// What a long-press selected from a pane's terminal.
+enum GhosttyLongPressSelection: Equatable, Sendable {
+    /// An OSC 8 link, whose id marks every cell of it, so the terminal has all of it.
+    case explicitLink
+    /// Text the terminal's link patterns matched.
+    case link
+    /// The word at the press, where no link matched.
+    case word
 }
 
 @MainActor
@@ -163,8 +212,13 @@ protocol GhosttyTerminalActionModeling: ObservableObject {
         _ direction: GhosttyRuntimeSelectionDirection
     ) -> GhosttyTerminalActionOutcome
 
+    /// `group`, when the backend groups its top-levels, is the group the window sheet shows.
     @discardableResult
-    func createTopLevel() -> GhosttyTerminalActionOutcome
+    func createTopLevel(inGroup group: UUID?) -> GhosttyTerminalActionOutcome
+
+    /// A new group, as a Herdr workspace, made from `group`, the group the window sheet shows.
+    @discardableResult
+    func createTopLevelGroup(from group: UUID?) -> GhosttyTerminalActionOutcome
 
     @discardableResult
     func splitFocusedPane(
@@ -179,6 +233,12 @@ protocol GhosttyTerminalActionModeling: ObservableObject {
 
     @discardableResult
     func closeTopLevel(_ id: UUID) -> GhosttyTerminalActionOutcome
+
+    /// A close the backend's server asked the user to confirm, as Herdr's asks before a close that would
+    /// close a worktree group, until the user answers it (`answerAskedCloseConfirmation(agreed:)`).
+    var askedCloseConfirmation: GhosttyCloseConfirmation? { get }
+
+    func answerAskedCloseConfirmation(agreed: Bool)
 
     @discardableResult
     func enterFocusedTmuxCopyMode() -> GhosttyTerminalActionOutcome
@@ -207,10 +267,12 @@ struct GhosttyTopLevelNoun: Equatable, Sendable {
 protocol GhosttyTerminalSelectionModeling: ObservableObject {
     var topLevelNoun: GhosttyTopLevelNoun { get }
 
+    /// The window sheet's previews of `leafIDs`; nil for a backend whose sheet lists its windows as rows
+    /// saying what each holds.
     func makePanePreviewSession(
         leafIDs: [UUID],
         pixelBudget: GhosttyPanePreviewSession.PixelBudget
-    ) -> GhosttyPanePreviewSession
+    ) -> GhosttyPanePreviewSession?
 
     // MARK: Selection sheets
 
@@ -220,7 +282,8 @@ protocol GhosttyTerminalSelectionModeling: ObservableObject {
     func paneSelectionSheetTopologyProjection(
         topLevelID: UUID?
     ) -> GhosttyPaneSelectionSheetTopologyProjection
-    func windowSelectionSheetRenderProjection() -> GhosttyWindowSelectionSheetRenderProjection
+    /// The windows of `group`, or of the group on screen, for a backend that groups its top-levels.
+    func windowSelectionSheetRenderProjection(group: UUID?) -> GhosttyWindowSelectionSheetRenderProjection
     func paneSelectionSheetRenderProjection(
         topLevelID: UUID
     ) -> GhosttyPaneSelectionSheetRenderProjection

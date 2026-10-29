@@ -203,6 +203,8 @@ struct GhosttyTerminalInteractionProjection: Equatable, Sendable {
 enum GhosttyTerminalStatusOverlayProjection: Equatable, Sendable {
     case starting
     case commandFailure(String)
+    /// Something a program did that the user should know, such as a copy.
+    case notice(String)
     case waitingForPanes(debugStatus: String, registryDebugSummary: String)
     case ready
     case failed(message: String, reason: TerminalDisconnectReason?)
@@ -496,6 +498,8 @@ struct GhosttyTerminalViewportPresentationProjection: Equatable {
         let isFocused: Bool
         let currentCommand: String
         let currentPath: String
+        /// The pane's agent, when the backend reports one.
+        var agent: TerminalAgentState?
     }
 
     static let empty = GhosttyTerminalViewportPresentationProjection(
@@ -554,6 +558,14 @@ struct GhosttyPaneSelectionSheetTopologyProjection: Equatable, Sendable {
     let shouldDismissPaneSheet: Bool
 }
 
+/// What a close asks the user first, in its backend's words, as the selection sheets' dialog shows it.
+struct GhosttyCloseConfirmation: Equatable, Sendable {
+    let title: String
+    let message: String
+    /// The destructive button's title.
+    let action: String
+}
+
 struct GhosttyWindowSelectionSheetRenderProjection: Equatable, Sendable {
     struct Window: Identifiable, Equatable, Sendable {
         let id: UUID
@@ -563,11 +575,60 @@ struct GhosttyWindowSelectionSheetRenderProjection: Equatable, Sendable {
         let paneCount: Int
         let isSelected: Bool
         let focusedPreviewPaneID: UUID?
+        /// The window's most urgent agent, when the backend reports agents.
+        var agentStatus: TerminalAgentStatus?
+        /// What closing the window asks the user first; nil when it closes at once.
+        var closeConfirmation: GhosttyCloseConfirmation?
+        /// What the window holds, for a backend whose sheet lists its windows as rows.
+        var contents: Contents?
+    }
+
+    /// What a window holds, as its row in the sheet says it.
+    struct Contents: Equatable, Sendable {
+        /// The window's name, when the user gave it one.
+        let name: String?
+        /// What its focused pane runs, then what up to two of its other panes run.
+        let programs: [TerminalProgram]
+        /// What its focused pane is doing.
+        let activity: String
+    }
+
+    /// The groups a backend keeps its top-levels in, as Herdr's workspaces hold its tabs.
+    struct Grouping: Equatable, Sendable {
+        struct Group: Identifiable, Equatable, Sendable {
+            let id: UUID
+            let name: String
+            /// The group's most urgent agent, when the backend reports agents.
+            var agentStatus: TerminalAgentStatus?
+        }
+
+        static let capsuleCount = 3
+
+        let noun: GhosttyTopLevelNoun
+        /// The most recent first.
+        let groups: [Group]
+        /// The group whose windows the sheet lists.
+        let shownGroupID: UUID
+        /// The most windows a group has, so the sheet keeps one height whichever group it shows.
+        let largestWindowCount: Int
+
+        /// The most recent groups, which the sheet offers as capsules.
+        var capsules: [Group] {
+            Array(groups.prefix(Self.capsuleCount))
+        }
+
+        /// The groups that don't fit as capsules, which the sheet offers behind More, only when there are any;
+        /// otherwise a new group ends the capsules.
+        var overflow: [Group] {
+            Array(groups.dropFirst(Self.capsuleCount))
+        }
     }
 
     let windows: [Window]
     let selectedWindowID: UUID?
     let previewLeafIDs: [UUID]
+    /// Nil for a backend without groups.
+    var grouping: Grouping? = nil
 }
 
 struct GhosttyPaneSelectionSheetRenderProjection: Equatable, Sendable {
@@ -576,6 +637,9 @@ struct GhosttyPaneSelectionSheetRenderProjection: Equatable, Sendable {
         let frame: GhosttyTerminalGridRect?
         let currentCommand: String
         let currentPath: String
+        var agent: TerminalAgentState?
+        /// What closing the pane asks the user first; nil when it closes at once.
+        var closeConfirmation: GhosttyCloseConfirmation?
     }
 
     let panes: [Pane]
@@ -591,6 +655,7 @@ enum GhosttyTerminalPresentationProjector {
         phase: GhosttyTerminalRuntimePhase,
         transportWritable: Bool,
         commandFailureMessage: String?,
+        noticeMessage: String? = nil,
         debugStatus: String,
         registryDebugSummary: String,
         presentedSurfaceID: UUID?,
@@ -620,15 +685,18 @@ enum GhosttyTerminalPresentationProjector {
             statusOverlay: terminalStatusOverlayProjection(
                 readiness: readiness,
                 commandFailureMessage: commandFailureMessage,
+                noticeMessage: noticeMessage,
                 debugStatus: debugStatus,
                 registryDebugSummary: registryDebugSummary
             )
         )
     }
 
+    /// A session's notice holds one message at a time, so at most one of a failure and a notice is given.
     static func terminalStatusOverlayProjection(
         readiness: TerminalReadinessSnapshot,
         commandFailureMessage: String?,
+        noticeMessage: String? = nil,
         debugStatus: String,
         registryDebugSummary: String
     ) -> GhosttyTerminalStatusOverlayProjection {
@@ -643,6 +711,9 @@ enum GhosttyTerminalPresentationProjector {
             }
             if let commandFailureMessage {
                 return .commandFailure(commandFailureMessage)
+            }
+            if let noticeMessage {
+                return .notice(noticeMessage)
             }
             if TerminalReadinessProjector.isTerminalStatusReady(
                 readiness,
@@ -774,7 +845,8 @@ enum GhosttyTerminalPresentationProjector {
                 totalCount: totalCount,
                 paneCount: topLevel.leafIDs.count,
                 isSelected: topLevel.id == selectedWindowID,
-                focusedPreviewPaneID: topLevel.resolvedFocusedLeafID
+                focusedPreviewPaneID: topLevel.resolvedFocusedLeafID,
+                agentStatus: topLevel.agentStatus
             )
         }
 
@@ -827,7 +899,8 @@ enum GhosttyTerminalPresentationProjector {
                 id: paneID,
                 frame: viewportPanesByID[paneID]?.normalFrame,
                 currentCommand: viewportPanesByID[paneID]?.currentCommand ?? "",
-                currentPath: viewportPanesByID[paneID]?.currentPath ?? ""
+                currentPath: viewportPanesByID[paneID]?.currentPath ?? "",
+                agent: viewportPanesByID[paneID]?.agent
             )
         }
 

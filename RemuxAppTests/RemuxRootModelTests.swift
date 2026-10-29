@@ -4915,6 +4915,97 @@ final class RemuxRootModelTests: XCTestCase {
         XCTAssertLessThan(show, focus)
     }
 
+    /// New Workspace under a Herdr session that isn't on screen shows the session and makes the workspace as
+    /// part of its show, beside the workspace this phone has there.
+    func testNewWorkspaceUnderASessionNotOnScreenShowsItAndMakesTheWorkspace() async throws {
+        let (harness, workspace, bridge) = try await connectedHerdrSession(agentStatus: .working)
+        let listed = await waitUntil(timeout: 3) { harness.model.herdrPlaces(of: workspace.id)?.outline != nil }
+        XCTAssertTrue(listed, "the session's workspaces weren't listed")
+        await harness.model.showLibrary()
+        // Leaving for Home hides the session; the New Workspace's writes follow the hide's.
+        var beforeTap = 0
+        while true {
+            let write = try ClientWrite.decode(try await bridge.written(beforeTap))
+            beforeTap += 1
+            if case .surfaceSet(_, false) = write { break }
+        }
+
+        harness.model.createHerdrWorkspace(in: workspace.id)
+
+        XCTAssertEqual(harness.model.state, .terminal(workspace.id))
+        var writes: [ClientWrite] = []
+        for position in beforeTap..<(beforeTap + 4) {
+            writes.append(try ClientWrite.decode(try await bridge.written(position)))
+        }
+        let show = try XCTUnwrap(writes.firstIndex { if case .surfaceSet(_, true) = $0 { true } else { false } })
+        let created = try XCTUnwrap(writes.firstIndex {
+            if case .command(_, "workspace.create", ["source_workspace_id": "w1", "focus": "true"]) = $0 { true } else { false }
+        })
+        XCTAssertLessThan(show, created)
+    }
+
+    /// A workspace row offers its close and rename only for the session on screen, since Herdr refuses
+    /// commands from a hidden session. Its close always asks first, saying what closes, and agreeing closes
+    /// it with Herdr's client's `workspace.close`.
+    func testAHerdrWorkspaceRowClosesOnlyInTheSessionOnScreen() async throws {
+        let (harness, workspace, bridge) = try await connectedHerdrSession(agentStatus: .working)
+        let listed = await waitUntil(timeout: 3) { harness.model.herdrPlaces(of: workspace.id)?.outline != nil }
+        XCTAssertTrue(listed, "the session's workspaces weren't listed")
+
+        let confirmation = try XCTUnwrap(harness.model.herdrWorkspaceCloseConfirmation("w1", in: workspace.id))
+        XCTAssertEqual([confirmation.label, "\(confirmation.tabCount)", "\(confirmation.paneCount)"], ["remux", "2", "2"])
+        XCTAssertEqual(harness.model.herdrWorkspaceRenameField("w1", in: workspace.id)?.name, "remux")
+        let before = await bridge.writtenCount
+        harness.model.closeHerdrWorkspace(confirmed: confirmation, in: workspace.id)
+        var close: (method: String, params: [String: String])?
+        for position in before..<(before + 6) {
+            if case .command(_, let method, let params) = try ClientWrite.decode(try await bridge.written(position)) {
+                close = (method, params)
+                break
+            }
+        }
+        XCTAssertEqual(close?.method, "workspace.close")
+        XCTAssertEqual(close?.params, ["workspace_id": "w1", "close_group": "false"])
+
+        await harness.model.showLibrary()
+        XCTAssertNil(harness.model.herdrWorkspaceCloseConfirmation("w1", in: workspace.id))
+        XCTAssertNil(harness.model.herdrWorkspaceRenameField("w1", in: workspace.id))
+    }
+
+    /// An open Herdr session's agents are listed, as the phone shows them, until the session closes; an
+    /// agent's row opens the session and asks Herdr to focus the agent's pane right after the show, as a
+    /// banner does.
+    func testAnAgentsRowOpensItsSessionAtItsPane() async throws {
+        let (harness, workspace, bridge) = try await connectedHerdrSession(agentStatus: .blocked)
+        let listed = await waitUntil(timeout: 3) { harness.model.herdrAgents(of: workspace.id)?.agents.isEmpty == false }
+        XCTAssertTrue(listed, "the session's agents weren't listed")
+        let agents = try XCTUnwrap(harness.model.herdrAgents(of: workspace.id))
+        XCTAssertEqual(agents.agents.map(\.paneID), ["w1:p3"])
+        XCTAssertEqual(agents.status(ofTab: "t2"), .blocked)
+        await harness.model.showLibrary()
+        // Leaving for Home hides the session; the tap's writes follow the hide's.
+        var beforeTap = 0
+        while true {
+            let write = try ClientWrite.decode(try await bridge.written(beforeTap))
+            beforeTap += 1
+            if case .surfaceSet(_, false) = write { break }
+        }
+
+        harness.model.openHerdrSession(workspace.id, atPane: "w1:p3", bootID: agents.bootID)
+
+        XCTAssertEqual(harness.model.state, .terminal(workspace.id))
+        var writes: [ClientWrite] = []
+        for position in beforeTap..<(beforeTap + 4) {
+            writes.append(try ClientWrite.decode(try await bridge.written(position)))
+        }
+        let show = try XCTUnwrap(writes.firstIndex { if case .surfaceSet(_, true) = $0 { true } else { false } })
+        let focus = try XCTUnwrap(writes.firstIndex { if case .paneFocus(_, "w1:p3") = $0 { true } else { false } })
+        XCTAssertLessThan(show, focus)
+
+        harness.model.disconnectActiveSession(workspace.id)
+        XCTAssertNil(harness.model.herdrAgents(of: workspace.id))
+    }
+
     /// Nothing shows for the tab on screen; a session's banner goes when the session is closed.
     func testAHerdrBannerSkipsTheTabOnScreenAndGoesWithItsSession() async throws {
         let (harness, workspace, bridge) = try await connectedHerdrSession(agentStatus: .blocked, agentTab: "t1")

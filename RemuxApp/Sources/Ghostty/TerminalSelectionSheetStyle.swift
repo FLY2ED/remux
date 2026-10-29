@@ -27,6 +27,8 @@ enum TerminalSelectionSheetLayout {
     /// inset, so fitted selectors supply the same boundary explicitly.
     static let navigationToContextSpacing: CGFloat = 8
     static let contextHeight: CGFloat = 16
+    /// The window sheet's group picker, in place of the context line.
+    static let groupPickerHeight: CGFloat = 34
     static let contextToContentSpacing: CGFloat = 12
     static let contentToActionsSpacing: CGFloat = 16
     static let actionBarHeight: CGFloat = 44
@@ -40,31 +42,35 @@ enum TerminalSelectionSheetLayout {
     }
 
     static func fixedChromeHeight(
-        navigationBarHeight: CGFloat
+        navigationBarHeight: CGFloat,
+        headerHeight: CGFloat = contextHeight
     ) -> CGFloat {
         max(0, navigationBarHeight)
-            + navigationToContextSpacing + contextHeight + contextToContentSpacing
+            + navigationToContextSpacing + headerHeight + contextToContentSpacing
             + contentToActionsSpacing + actionBarHeight + actionsBottomPadding
     }
 
     static func maximumContentHeight(
         availableHeight: CGFloat,
-        navigationBarHeight: CGFloat
+        navigationBarHeight: CGFloat,
+        headerHeight: CGFloat = contextHeight
     ) -> CGFloat {
         guard availableHeight.isFinite else { return 0 }
         return max(
             0,
             availableHeight - fixedChromeHeight(
-                navigationBarHeight: navigationBarHeight
+                navigationBarHeight: navigationBarHeight,
+                headerHeight: headerHeight
             )
         )
     }
 
     static func sheetHeight(
         contentHeight: CGFloat,
-        navigationBarHeight: CGFloat
+        navigationBarHeight: CGFloat,
+        headerHeight: CGFloat = contextHeight
     ) -> CGFloat {
-        fixedChromeHeight(navigationBarHeight: navigationBarHeight)
+        fixedChromeHeight(navigationBarHeight: navigationBarHeight, headerHeight: headerHeight)
             + max(0, contentHeight)
     }
 
@@ -91,18 +97,19 @@ struct TerminalSelectionSheetContextLabel: View {
     }
 }
 
-/// Shared selector anatomy below a native navigation bar.
-struct TerminalSelectionSheetContent<Content: View, Actions: View>: View {
-    let context: String
+/// Shared selector anatomy below a native navigation bar: a header, the context line unless a sheet
+/// has its own, then the content and the actions.
+struct TerminalSelectionSheetContent<Header: View, Content: View, Actions: View>: View {
+    let header: Header
     let content: Content
     let actions: Actions
 
     init(
-        context: String,
+        @ViewBuilder header: () -> Header,
         @ViewBuilder content: () -> Content,
         @ViewBuilder actions: () -> Actions
     ) {
-        self.context = context
+        self.header = header()
         self.content = content()
         self.actions = actions()
     }
@@ -110,7 +117,7 @@ struct TerminalSelectionSheetContent<Content: View, Actions: View>: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: TerminalSelectionSheetLayout.contextToContentSpacing) {
-                TerminalSelectionSheetContextLabel(text: context)
+                header
                     .padding(
                         .horizontal,
                         TerminalSelectionSheetLayout.horizontalContentPadding
@@ -132,6 +139,16 @@ struct TerminalSelectionSheetContent<Content: View, Actions: View>: View {
                 .padding(.bottom, TerminalSelectionSheetLayout.actionsBottomPadding)
         }
         .padding(.top, TerminalSelectionSheetLayout.navigationToContextSpacing)
+    }
+}
+
+extension TerminalSelectionSheetContent where Header == TerminalSelectionSheetContextLabel {
+    init(
+        context: String,
+        @ViewBuilder content: () -> Content,
+        @ViewBuilder actions: () -> Actions
+    ) {
+        self.init(header: { TerminalSelectionSheetContextLabel(text: context) }, content: content, actions: actions)
     }
 }
 
@@ -204,16 +221,19 @@ extension View {
         isSelected: Bool,
         chromeStyle: GhosttyTerminalChromeStyle
     ) -> some View {
-        background(TerminalSelectionSheetPalette.row)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        return background(TerminalSelectionSheetPalette.row)
+            .clipShape(shape)
             .overlay {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(
-                        isSelected
-                            ? TerminalSelectionSheetPalette.selectedStroke(chromeStyle)
-                            : TerminalSelectionSheetPalette.stroke,
-                        lineWidth: isSelected ? 1.25 : 1
-                    )
+                shape.strokeBorder(
+                    isSelected
+                        ? TerminalSelectionSheetPalette.selectedStroke(chromeStyle)
+                        : TerminalSelectionSheetPalette.stroke,
+                    lineWidth: isSelected ? 1.25 : 1
+                )
             }
+            // Clipping only hides what is drawn past the tile, such as a preview filling it, which would
+            // otherwise take the touches meant for the tile beside it.
+            .contentShape(shape)
     }
 }

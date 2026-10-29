@@ -21,7 +21,7 @@ final class HerdrBorderLineTests: XCTestCase {
         let runtime = try GhosttyKitRuntime(terminalSettings: .default)
         defer { withExtendedLifetime(runtime) {} }
         let engine = HerdrTerminalEngine(cellWidthPx: 9, cellHeightPx: 18)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         var decoder = HerdrSurfaceDecoder(deltaNegotiated: negotiated.delta, scrollNegotiated: negotiated.scroll)
         var reference = HerdrPresentation()
         var splitter = HerdrFrameSplitter()
@@ -61,7 +61,7 @@ final class HerdrBorderLineTests: XCTestCase {
         let runtime = try GhosttyKitRuntime(terminalSettings: .default)
         defer { withExtendedLifetime(runtime) {} }
         let engine = HerdrTerminalEngine(cellWidthPx: 9, cellHeightPx: 18)
-        let feed = await engine.beginConnection()
+        let feed = await engine.beginConnection(1)
         let narrow = [(x: 1, y: 1, width: 2, height: 1), (x: 5, y: 1, width: 2, height: 1)]
         let wide = [(x: 1, y: 1, width: 3, height: 1), (x: 6, y: 1, width: 2, height: 1)]
         await feed.receive(try HerdrPresentationTests.snapshot(revision: 1))

@@ -9,7 +9,7 @@ struct HerdrNotificationSessionState: Equatable {
     var focusedWorkspaceID: String?
     var focusedTabID: String?
     /// Each agent pane's status as this phone shows it (`HerdrAgentPresentation`).
-    var agentStatuses: [String: HerdrAgentStatus]
+    var agentStatuses: [String: TerminalAgentStatus]
 }
 
 /// The workspace and tab a notification is about, by the names Herdr gives them in the session's snapshot

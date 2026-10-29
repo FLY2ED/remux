@@ -128,7 +128,9 @@ enum HerdrSessionDiscovery {
         }
         return SessionListing(
             executablePath: String(path),
-            sessions: list.sessions.map { DiscoveredSession(name: $0.name, isRunning: $0.running) }
+            sessions: list.sessions.map {
+                DiscoveredSession(name: $0.name, isRunning: $0.running, unavailableReason: $0.connectionError)
+            }
         )
     }
 
@@ -136,6 +138,13 @@ enum HerdrSessionDiscovery {
         struct Session: Decodable {
             let name: String
             let running: Bool
+            /// From v0.9.4: why Herdr can't reach the session, as `session list` reports it unavailable.
+            let connectionError: String?
+
+            private enum CodingKeys: String, CodingKey {
+                case name, running
+                case connectionError = "connection_error"
+            }
         }
 
         let sessions: [Session]

@@ -7,6 +7,12 @@ struct ActiveSessionSwitcherItem: Identifiable, Equatable {
     let serverName: String
     let runtimeState: TerminalRuntimeState
     let isSelected: Bool
+
+    /// Whether the session's row marks it as the one the user is in, as a list marks its current choice. A
+    /// session open over its workspaces leaves the mark to the workspace the user is in.
+    func showsCheckmark(disclosure: Bool?) -> Bool {
+        isSelected && disclosure != true
+    }
 }
 
 struct RemoteSessionIdentity: Hashable {
@@ -19,6 +25,8 @@ struct AvailableSessionSwitcherItem: Identifiable, Equatable {
     let serverName: String
     /// Herdr lists stopped sessions too; opening one starts it.
     let isRunning: Bool
+    /// Why Herdr can't reach the session, which then isn't offered.
+    var unavailableReason: String? = nil
 }
 
 struct RecentSessionSwitcherItem: Identifiable, Equatable {
@@ -27,6 +35,8 @@ struct RecentSessionSwitcherItem: Identifiable, Equatable {
     let sessionName: String
     let serverName: String
     let lastOpenedAt: Date
+    /// Why the session can't be opened, as its server's newest list says.
+    var unavailableReason: String? = nil
 }
 
 struct SessionSwitcherProjection: Equatable {
@@ -103,7 +113,8 @@ struct SessionSwitcherProjection: Equatable {
                     backend: workspace.backend,
                     sessionName: workspace.sessionName,
                     serverName: server.displayName,
-                    lastOpenedAt: workspace.lastOpenedAt
+                    lastOpenedAt: workspace.lastOpenedAt,
+                    unavailableReason: discoveries[workspace.serverID]?.unavailableReason(of: workspace.locator)
                 )
             }
 
@@ -113,13 +124,12 @@ struct SessionSwitcherProjection: Equatable {
                 return [SessionBackend.tmux, .herdr]
                     .flatMap { backend in
                         discovery[backend].sessions.map { session in
-                            AvailableSessionSwitcherItem(
-                                id: RemoteSessionIdentity(
-                                    serverID: server.id,
-                                    locator: SessionLocator(backend: backend, name: session.name)
-                                ),
+                            let locator = SessionLocator(backend: backend, name: session.name)
+                            return AvailableSessionSwitcherItem(
+                                id: RemoteSessionIdentity(serverID: server.id, locator: locator),
                                 serverName: server.displayName,
-                                isRunning: session.isRunning
+                                isRunning: session.isRunning,
+                                unavailableReason: discovery.unavailableReason(of: locator)
                             )
                         }
                     }
@@ -156,6 +166,11 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
         case newSession
     }
 
+    private enum Mode: Hashable {
+        case sessions
+        case agents
+    }
+
     @Environment(\.dismiss) private var dismiss
     @Environment(\.ghosttyTerminalChromeStyle) private var chromeStyle
 
@@ -172,13 +187,25 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
     let newSessionContent: () -> NewSessionContent
     let onRefresh: () -> Void
     let discoveries: [SavedServer.ID: ServerSessionDiscovery]
+    /// An open Herdr session's workspaces, which its row lists under it.
+    let herdrPlaces: (SavedWorkspace.ID) -> HerdrSessionPlaces?
+    let onSelectHerdrWorkspace: (_ herdrWorkspaceID: String, _ bootID: String, _ session: SavedWorkspace.ID) -> Void
+    let onCreateHerdrWorkspace: (SavedWorkspace.ID) -> Void
+    /// An open Herdr session's agents, which the sheet follows as they change.
+    let herdrAgents: (SavedWorkspace.ID) -> HerdrAgentPresentation?
+    /// Opens a Herdr session at an agent's pane: the session, the pane and the server boot its id is from.
+    let onOpenHerdrAgent: (SavedWorkspace.ID, String, String?) -> Void
 
     @State private var path: [Route] = []
     @State private var showsAllRecentSessions = false
+    /// Herdr sessions opened or closed by hand; otherwise only the session on screen lists its workspaces.
+    @State private var herdrDisclosures: [SavedWorkspace.ID: Bool] = [:]
+    @State private var mode = Mode.sessions
+    @State private var agentFilter = SessionAgentsFilter.all
 
     var body: some View {
         NavigationStack(path: $path) {
-            sessionList
+            sheetContent
                 .navigationDestination(for: Route.self) { route in
                     switch route {
                     case .chooseServer:
@@ -217,11 +244,73 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
         .accessibilityIdentifier("terminal.sessions.sheet")
     }
 
+    /// Agents are listed only for Herdr sessions, so the switch to them shows while one is open.
+    private var showsAgentsSwitch: Bool {
+        projection.activeSessions.contains { $0.backend == .herdr }
+    }
+
+    private var sheetContent: some View {
+        VStack(spacing: 0) {
+            if showsAgentsSwitch {
+                Picker("Show", selection: $mode) {
+                    Text("Sessions").tag(Mode.sessions)
+                    Text("Agents").tag(Mode.agents)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.horizontal, 16)
+                .padding(.top, 4)
+                .padding(.bottom, 4)
+                .accessibilityIdentifier("terminal.sessions.mode")
+            }
+
+            if showsAgentsSwitch, mode == .agents {
+                SessionAgentsList(
+                    projection: SessionAgentsProjection(
+                        activeSessions: projection.activeSessions,
+                        agents: herdrAgents
+                    ),
+                    filter: $agentFilter,
+                    onOpen: openAgent
+                )
+            } else {
+                sessionList
+            }
+        }
+        .navigationTitle("Sessions")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button {
+                    Haptic.tap()
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .accessibilityLabel("Close Sessions")
+                .accessibilityIdentifier("terminal.sessions.close")
+            }
+        }
+    }
+
+    private func openAgent(_ session: SessionAgentsProjection.Session, _ agent: HerdrAgentPresentation.Agent) {
+        Haptic.selection()
+        onOpenHerdrAgent(session.id, agent.paneID, session.bootID)
+        dismiss()
+    }
+
     private var sessionList: some View {
         List {
             Section {
                 ForEach(projection.activeSessions) { session in
-                    activeSessionRow(session)
+                    if session.backend == .herdr, let places = herdrPlaces(session.id) {
+                        HerdrOutlineReader(places: places) { outline in
+                            activeSessionRows(session, outline: outline)
+                        }
+                    } else {
+                        activeSessionRows(session, outline: nil)
+                    }
                 }
             } header: {
                 SessionSwitcherSectionHeader(title: "Active")
@@ -290,21 +379,6 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
             .padding(.top, TerminalSelectionSheetLayout.contentToActionsSpacing)
             .padding(.bottom, TerminalSelectionSheetLayout.actionsBottomPadding)
         }
-        .navigationTitle("Sessions")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.visible, for: .navigationBar)
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button {
-                    Haptic.tap()
-                    dismiss()
-                } label: {
-                    Image(systemName: "xmark")
-                }
-                .accessibilityLabel("Close Sessions")
-                .accessibilityIdentifier("terminal.sessions.close")
-            }
-        }
     }
 
     private var availableSessionsHeader: some View {
@@ -341,14 +415,44 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
         return Array(projection.recentSessions.prefix(Self.collapsedRecentSessionCount))
     }
 
-    private func activeSessionRow(_ session: ActiveSessionSwitcherItem) -> some View {
+    /// A Herdr session that has listed its workspaces opens and closes over them, with New Workspace
+    /// under each; picking one goes there.
+    @ViewBuilder
+    private func activeSessionRows(_ session: ActiveSessionSwitcherItem, outline: HerdrSessionOutline?) -> some View {
+        let workspaces = outline?.workspaces ?? []
+        let isExpanded = herdrDisclosures[session.id] ?? session.isSelected
+        activeSessionRow(session, disclosure: workspaces.isEmpty ? nil : isExpanded)
+        if let outline, !workspaces.isEmpty, isExpanded {
+            let agents = herdrAgents(session.id)
+            ForEach(workspaces) { workspace in
+                herdrWorkspaceRow(
+                    workspace,
+                    isCurrent: session.isSelected && workspace.id == outline.focusedWorkspaceID,
+                    agentStatus: agents?.status(ofWorkspace: workspace.id),
+                    isStale: session.runtimeState != .connected
+                ) {
+                    onSelectHerdrWorkspace(workspace.id, outline.bootID, session.id)
+                }
+            }
+            newHerdrWorkspaceRow(session)
+        }
+    }
+
+    private func activeSessionRow(_ session: ActiveSessionSwitcherItem, disclosure: Bool?) -> some View {
         Button {
-            Haptic.selection()
-            onSelectActiveSession(session.id)
-            dismiss()
+            if let disclosure {
+                Haptic.tap()
+                withAnimation(.snappy) { herdrDisclosures[session.id] = !disclosure }
+            } else {
+                Haptic.selection()
+                onSelectActiveSession(session.id)
+                dismiss()
+            }
         } label: {
             ActiveSessionSwitcherRow(
                 session: session,
+                disclosure: disclosure,
+                agentStatus: herdrAgents(session.id)?.status,
                 chromeStyle: chromeStyle
             )
         }
@@ -368,6 +472,47 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
         }
     }
 
+    private func herdrWorkspaceRow(
+        _ workspace: HerdrSessionOutline.Workspace,
+        isCurrent: Bool,
+        agentStatus: TerminalAgentStatus?,
+        isStale: Bool,
+        open: @escaping () -> Void
+    ) -> some View {
+        Button {
+            Haptic.selection()
+            dismiss()
+            open()
+        } label: {
+            HerdrWorkspaceSwitcherRow(
+                workspace: workspace,
+                isCurrent: isCurrent,
+                agentStatus: agentStatus,
+                isStale: isStale,
+                chromeStyle: chromeStyle
+            )
+        }
+        .buttonStyle(.plain)
+        .sessionSwitcherListRow(accessibilityIdentifier: "terminal.sessions.herdr-workspace")
+    }
+
+    private func newHerdrWorkspaceRow(_ session: ActiveSessionSwitcherItem) -> some View {
+        Button {
+            Haptic.tap()
+            dismiss()
+            onCreateHerdrWorkspace(session.id)
+        } label: {
+            Label("New Workspace", systemImage: "plus")
+                .font(.body)
+                .foregroundStyle(chromeStyle.accent)
+                .padding(.leading, HerdrWorkspaceSwitcherRow.leadingInset)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .sessionSwitcherListRow(accessibilityIdentifier: "terminal.sessions.herdr-workspace.new")
+    }
+
     private func availableSessionRow(_ session: AvailableSessionSwitcherItem) -> some View {
         Button {
             resumeAvailableSession(session)
@@ -375,6 +520,7 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
             AvailableSessionSwitcherRow(session: session)
         }
         .buttonStyle(.plain)
+        .disabled(session.unavailableReason != nil)
         .sessionSwitcherListRow(accessibilityIdentifier: "terminal.sessions.available-session")
     }
 
@@ -437,6 +583,7 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
             RecentSessionSwitcherRow(session: session)
         }
         .buttonStyle(.plain)
+        .disabled(session.unavailableReason != nil)
         .sessionSwitcherListRow(accessibilityIdentifier: "terminal.sessions.recent-session")
     }
 
@@ -516,7 +663,7 @@ struct SessionSwitcherView<NewSessionContent: View>: View {
     }
 }
 
-private struct SessionSwitcherSectionHeader: View {
+struct SessionSwitcherSectionHeader: View {
     let title: String
 
     var body: some View {
@@ -527,8 +674,22 @@ private struct SessionSwitcherSectionHeader: View {
     }
 }
 
+/// Observes a Herdr session's places, so only its rows follow its workspaces.
+private struct HerdrOutlineReader<Content: View>: View {
+    @ObservedObject var places: HerdrSessionPlaces
+    @ViewBuilder let content: (HerdrSessionOutline?) -> Content
+
+    var body: some View {
+        content(places.outline)
+    }
+}
+
 private struct ActiveSessionSwitcherRow: View {
     let session: ActiveSessionSwitcherItem
+    /// Whether the rows under it are open, for a session that lists its places.
+    let disclosure: Bool?
+    /// The session's most urgent agent, for a session that reports agents.
+    let agentStatus: TerminalAgentStatus?
     let chromeStyle: GhosttyTerminalChromeStyle
 
     var body: some View {
@@ -536,11 +697,21 @@ private struct ActiveSessionSwitcherRow: View {
             SessionBackendLogo(backend: session.backend, size: 28)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(session.sessionName)
-                    .font(.headline)
-                    .foregroundStyle(TerminalSelectionSheetPalette.primary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                HStack(spacing: 7) {
+                    Text(session.sessionName)
+                        .font(.headline)
+                        .foregroundStyle(TerminalSelectionSheetPalette.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    if let agentStatus {
+                        TerminalAgentDot(
+                            status: agentStatus,
+                            size: 9,
+                            isStale: session.runtimeState != .connected
+                        )
+                    }
+                }
 
                 HStack(spacing: 6) {
                     Text(session.serverName)
@@ -558,10 +729,18 @@ private struct ActiveSessionSwitcherRow: View {
 
             Spacer(minLength: 8)
 
-            if session.isSelected {
+            if session.showsCheckmark(disclosure: disclosure) {
                 Image(systemName: "checkmark")
                     .font(.body.weight(.semibold))
                     .foregroundStyle(chromeStyle.accent)
+                    .accessibilityHidden(true)
+            }
+
+            if let disclosure {
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(TerminalSelectionSheetPalette.tertiary)
+                    .rotationEffect(.degrees(disclosure ? 90 : 0))
                     .accessibilityHidden(true)
             }
         }
@@ -569,13 +748,78 @@ private struct ActiveSessionSwitcherRow: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)
+        .accessibilityValue(disclosure.map { $0 ? "Expanded" : "Collapsed" } ?? "")
         .accessibilityAddTraits(session.isSelected ? [.isSelected, .isButton] : .isButton)
     }
 
     private var accessibilityLabel: String {
         let status = TerminalRuntimeStatusPresentation.projection(for: session.runtimeState).label
+        let agent = agentStatus.map { ", agent \($0.word)" } ?? ""
         let current = session.isSelected ? ", current session" : ""
-        return "\(session.sessionName), \(session.serverName), \(status)\(current)"
+        return "\(session.sessionName), \(session.serverName), \(status)\(agent)\(current)"
+    }
+}
+
+/// A Herdr workspace under its session's row, lined up with the session's name. Its most urgent agent's
+/// dot comes before its name, as in Herdr's sidebar, in the margin, so the names stay lined up whichever
+/// workspaces have agents.
+private struct HerdrWorkspaceSwitcherRow: View {
+    /// The session row's logo and the space after it.
+    static let leadingInset: CGFloat = 40
+    private static let dotSize: CGFloat = 9
+    private static let dotSpacing: CGFloat = 7
+
+    let workspace: HerdrSessionOutline.Workspace
+    let isCurrent: Bool
+    let agentStatus: TerminalAgentStatus?
+    /// The session isn't connected, so the agents' state may be out of date.
+    let isStale: Bool
+    let chromeStyle: GhosttyTerminalChromeStyle
+
+    private var tabCount: String {
+        workspace.tabs.count == 1 ? "1 tab" : "\(workspace.tabs.count) tabs"
+    }
+
+    private var accessibilityLabel: String {
+        let agent = agentStatus.map { ", agent \($0.word)" } ?? ""
+        return "Workspace \(workspace.label), \(tabCount)\(agent)\(isCurrent ? ", current workspace" : "")"
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(workspace.label)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(TerminalSelectionSheetPalette.primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .overlay(alignment: .leading) {
+                        if let agentStatus {
+                            TerminalAgentDot(status: agentStatus, size: Self.dotSize, isStale: isStale)
+                                .offset(x: -(Self.dotSize + Self.dotSpacing))
+                        }
+                    }
+
+                Text(tabCount)
+                    .font(.footnote)
+                    .foregroundStyle(TerminalSelectionSheetPalette.secondary)
+            }
+
+            Spacer(minLength: 8)
+
+            if isCurrent {
+                Image(systemName: "checkmark")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(chromeStyle.accent)
+                    .accessibilityHidden(true)
+            }
+        }
+        .padding(.leading, Self.leadingInset)
+        .frame(minHeight: 44)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityAddTraits(isCurrent ? [.isSelected, .isButton] : .isButton)
     }
 }
 
@@ -583,10 +827,13 @@ private struct AvailableSessionSwitcherRow: View {
     let session: AvailableSessionSwitcherItem
     var showsServerName = true
 
-    /// The logo tells tmux from Herdr; a Herdr session can be listed while stopped.
+    /// The logo tells tmux from Herdr; a Herdr session can be listed while stopped, or unavailable, as
+    /// Herdr's own list says.
     private var detail: String? {
         var parts: [String] = []
-        if !session.isRunning {
+        if session.unavailableReason != nil {
+            parts.append("Unavailable")
+        } else if !session.isRunning {
             parts.append("Stopped")
         }
         if showsServerName {
@@ -612,6 +859,13 @@ private struct AvailableSessionSwitcherRow: View {
                         .foregroundStyle(TerminalSelectionSheetPalette.secondary)
                         .lineLimit(1)
                 }
+
+                if let reason = session.unavailableReason {
+                    Text(reason)
+                        .font(.footnote)
+                        .foregroundStyle(TerminalSelectionSheetPalette.tertiary)
+                        .lineLimit(2)
+                }
             }
 
             Spacer(minLength: 8)
@@ -620,12 +874,12 @@ private struct AvailableSessionSwitcherRow: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(
-            ([session.id.locator.name, session.id.locator.backend.displayName] + [detail].compactMap { $0 })
+            ([session.id.locator.name, session.id.locator.backend.displayName] + [detail, session.unavailableReason].compactMap { $0 })
                 .joined(separator: ", ")
         )
-        .accessibilityValue("Available")
-        .accessibilityHint("Resume this session")
-        .accessibilityAddTraits(.isButton)
+        .accessibilityValue(session.unavailableReason == nil ? "Available" : "")
+        .accessibilityHint(session.unavailableReason == nil ? "Resume this session" : "")
+        .accessibilityAddTraits(session.unavailableReason == nil ? .isButton : [])
     }
 }
 
@@ -644,6 +898,13 @@ private struct RecentSessionSwitcherRow: View {
                     .truncationMode(.middle)
 
                 HStack(spacing: 6) {
+                    if session.unavailableReason != nil {
+                        Text("Unavailable")
+
+                        Text("·")
+                            .accessibilityHidden(true)
+                    }
+
                     Text(session.serverName)
                         .lineLimit(1)
 
@@ -655,6 +916,13 @@ private struct RecentSessionSwitcherRow: View {
                 .font(.footnote)
                 .foregroundStyle(TerminalSelectionSheetPalette.secondary)
                 .lineLimit(1)
+
+                if let reason = session.unavailableReason {
+                    Text(reason)
+                        .font(.footnote)
+                        .foregroundStyle(TerminalSelectionSheetPalette.tertiary)
+                        .lineLimit(2)
+                }
             }
 
             Spacer(minLength: 8)
@@ -662,10 +930,13 @@ private struct RecentSessionSwitcherRow: View {
         .frame(minHeight: 52)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(session.sessionName), \(session.serverName)")
+        .accessibilityLabel(
+            ([session.sessionName, session.serverName] + [session.unavailableReason.map { "Unavailable, \($0)" }].compactMap { $0 })
+                .joined(separator: ", ")
+        )
         .accessibilityValue(SessionLastOpenedText.value(for: session.lastOpenedAt))
-        .accessibilityHint("Resume this session")
-        .accessibilityAddTraits(.isButton)
+        .accessibilityHint(session.unavailableReason == nil ? "Resume this session" : "")
+        .accessibilityAddTraits(session.unavailableReason == nil ? .isButton : [])
     }
 }
 
@@ -729,6 +1000,7 @@ private struct AvailableSessionsBrowserView: View {
                                 )
                             }
                             .buttonStyle(.plain)
+                            .disabled(session.unavailableReason != nil)
                             .sessionSwitcherListRow(
                                 accessibilityIdentifier: "terminal.sessions.available-result"
                             )
@@ -872,7 +1144,7 @@ private struct NewSessionServerPickerView: View {
     }
 }
 
-private extension View {
+extension View {
     func sessionSwitcherListRow(accessibilityIdentifier: String) -> some View {
         self
             .accessibilityIdentifier(accessibilityIdentifier)

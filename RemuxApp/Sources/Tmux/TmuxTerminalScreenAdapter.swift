@@ -89,7 +89,7 @@ final class TmuxTerminalScreenAdapter: ObservableObject {
     private var didAdoptZoomMarks = false
     private var multipaneZoomDefault = TmuxMultipaneZoomDefaultPolicy()
 
-    private lazy var commandFailure = GhosttyTerminalCommandFailureNotice { [weak self] in
+    private lazy var commandFailure = GhosttyTerminalNotice { [weak self] in
         self?.objectWillChange.send()
     }
 
@@ -462,7 +462,7 @@ final class TmuxTerminalScreenAdapter: ObservableObject {
     // MARK: Command failures
 
     private func presentCommandFailure(for request: TmuxSessionController.Request) {
-        commandFailure.present("tmux: \(Self.failureLabel(for: request)) failed")
+        commandFailure.presentFailure("tmux: \(Self.failureLabel(for: request)) failed")
     }
 
     private static func failureLabel(for request: TmuxSessionController.Request) -> String {
@@ -496,7 +496,7 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         GhosttyTerminalPresentationProjector.terminalScreenPresentationProjection(
             phase: runtimePhase,
             transportWritable: isTransportWritable,
-            commandFailureMessage: commandFailure.message,
+            commandFailureMessage: commandFailure.failureMessage,
             debugStatus: stateTraceLabel,
             registryDebugSummary: "tmux session stack",
             presentedSurfaceID: activeManagedSurface?.id,
@@ -544,7 +544,7 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     func makePanePreviewSession(
         leafIDs: [UUID],
         pixelBudget: GhosttyPanePreviewSession.PixelBudget
-    ) -> GhosttyPanePreviewSession {
+    ) -> GhosttyPanePreviewSession? {
         GhosttyPanePreviewSession(
             leafIDs: leafIDs,
             pixelBudget: pixelBudget,
@@ -667,6 +667,20 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         return .sent
     }
 
+    /// A tmux pane's history is in its local terminal, which reads the selection itself.
+    func selectedText(in surfaceID: UUID) async -> String? {
+        managedSurface(for: surfaceID)?.controlSurface.readSelection()
+    }
+
+    /// A tmux pane's terminal knows where its lines wrap, so its link match is already whole.
+    func completeLinkSelection(
+        in surfaceID: UUID,
+        at point: CGPoint,
+        selected: GhosttyLongPressSelection
+    ) async -> Bool {
+        false
+    }
+
     // MARK: tmux topology actions
 
     func reclaimActiveTmuxViewport() {
@@ -771,10 +785,14 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         )
     }
 
-    func createTopLevel() -> GhosttyTerminalActionOutcome {
+    func createTopLevel(inGroup group: UUID?) -> GhosttyTerminalActionOutcome {
         guard let controller else { return .missingTarget(.host) }
         controller.requestNewWindow()
         return .queued
+    }
+
+    func createTopLevelGroup(from group: UUID?) -> GhosttyTerminalActionOutcome {
+        .missingTarget(.host)
     }
 
     func splitFocusedPane(
@@ -973,6 +991,11 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         return .queued
     }
 
+    /// tmux's server asks nothing before a close.
+    var askedCloseConfirmation: GhosttyCloseConfirmation? { nil }
+
+    func answerAskedCloseConfirmation(agreed: Bool) {}
+
     func enterFocusedTmuxCopyMode() -> GhosttyTerminalActionOutcome {
         guard let controller, let activeManagedPaneID else {
             return .missingTarget(.focusedPane)
@@ -1042,12 +1065,22 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
 
     var topLevelNoun: GhosttyTopLevelNoun { .window }
 
-    func windowSelectionSheetRenderProjection() -> GhosttyWindowSelectionSheetRenderProjection {
+    /// The windows, each asking before it closes with its panes.
+    func windowSelectionSheetRenderProjection(group: UUID?) -> GhosttyWindowSelectionSheetRenderProjection {
         let projection = GhosttyTerminalPresentationProjector.windowSelectionSheetRenderProjection(
             snapshot: topologySnapshot
         )
         return GhosttyWindowSelectionSheetRenderProjection(
-            windows: projection.windows,
+            windows: projection.windows.map { window in
+                var window = window
+                let panes = window.paneCount == 1 ? "1 pane" : "\(window.paneCount) panes"
+                window.closeConfirmation = GhosttyCloseConfirmation(
+                    title: "Remove Window?",
+                    message: "This will close Window \(window.displayIndex) and \(panes).",
+                    action: "Remove Window \(window.displayIndex)"
+                )
+                return window
+            },
             selectedWindowID: projection.selectedWindowID,
             previewLeafIDs: capturablePreviewLeafIDs(projection.previewLeafIDs)
         )
@@ -1061,16 +1094,28 @@ extension TmuxTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         }
     }
 
+    /// The window's panes; its only pane asks before it closes, since that can close the window.
     func paneSelectionSheetRenderProjection(
         topLevelID: UUID
     ) -> GhosttyPaneSelectionSheetRenderProjection {
         let selectedTopLevelID = topologySnapshot.selectedTopLevelID
-        return GhosttyTerminalPresentationProjector.paneSelectionSheetRenderProjection(
+        let projection = GhosttyTerminalPresentationProjector.paneSelectionSheetRenderProjection(
             topLevelID: topLevelID,
             snapshot: topologySnapshot,
             viewport: selectedTopLevelID == topLevelID
                 ? terminalViewportPresentationProjection
                 : nil
+        )
+        guard projection.paneCount == 1, var pane = projection.panes.first else { return projection }
+        pane.closeConfirmation = GhosttyCloseConfirmation(
+            title: "Remove Pane?",
+            message: "This is the only pane in the window, so removing it can close the window too.",
+            action: "Remove Pane"
+        )
+        return GhosttyPaneSelectionSheetRenderProjection(
+            panes: [pane],
+            selectedPaneID: projection.selectedPaneID,
+            isServerZoomed: projection.isServerZoomed
         )
     }
 }

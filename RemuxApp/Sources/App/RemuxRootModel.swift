@@ -144,7 +144,8 @@ enum TerminalRuntime {
         }
     }
 
-    /// Herdr keeps nothing of Remux's on the server for a stop to undo or hand on.
+    /// A Herdr stop undoes Remux's zoom for either reason: Herdr's zoom has no owner, so a new attempt
+    /// can't take it over.
     func stop(_ reason: TerminalRuntimeStopReason) async {
         switch self {
         case .tmux(let model): await model.stop(reason)
@@ -310,6 +311,13 @@ struct ServerSessionDiscovery: Equatable {
 
     var hostKeyChallenge: SSHHostKeyTrustChallenge? {
         tmux.hostKeyChallenge ?? herdr.hostKeyChallenge
+    }
+
+    /// Why the server's backend can't reach the session, as its newest list says: Herdr marks a session it
+    /// can't connect to (`connection_error`). Every row that offers a session, discovered or saved, reads
+    /// it here, so none offers one that can't open.
+    func unavailableReason(of locator: SessionLocator) -> String? {
+        self[locator.backend].sessions.first { $0.name == locator.name }?.unavailableReason
     }
 
     var isLoading: Bool {
@@ -1679,20 +1687,95 @@ final class RemuxRootModel: ObservableObject {
     /// goes to a notification's pane on its machine. The banner goes either way.
     func openHerdrNotification(_ banner: HerdrNotificationPolicy.Banner) {
         herdrNotifications.dismiss(banner.id)
-        let workspaceID = banner.origin.workspaceID
-        guard let session = RemuxActiveSessionCollection.session(workspaceID, in: activeSessions) else { return }
-        if let paneID = banner.notification.paneID,
-           case .herdr(let model)? = terminalRuntimes[TerminalRuntimeAttemptKey(session: session)] {
-            model.reveal(paneID: paneID, bootID: banner.origin.bootID)
+        openHerdrSession(banner.origin.workspaceID, atPane: banner.notification.paneID, bootID: banner.origin.bootID)
+    }
+
+    /// Shows an open Herdr session, at `paneID` when given.
+    func openHerdrSession(_ workspaceID: SavedWorkspace.ID, atPane paneID: String?, bootID: String?) {
+        openHerdrSession(workspaceID, to: paneID.map { .place(.pane($0)) }, bootID: bootID)
+    }
+
+    /// Shows an open Herdr session, taken to `destination` when given: the session goes there once it is on
+    /// screen, if what it names is still there on the server boot `bootID` names. The session on screen goes
+    /// there at once.
+    private func openHerdrSession(_ workspaceID: SavedWorkspace.ID, to destination: HerdrDestination?, bootID: String?) {
+        guard RemuxActiveSessionCollection.containsWorkspace(workspaceID, in: activeSessions) else { return }
+        if let destination {
+            herdrModel(of: workspaceID)?.ask(.go(destination), bootID: bootID)
         }
         showActiveSession(workspaceID)
     }
 
-    private func herdrNotificationState(of workspaceID: SavedWorkspace.ID) -> HerdrNotificationSessionState? {
+    /// The workspaces and tabs of an open Herdr session, for the Sessions sheet.
+    func herdrPlaces(of workspaceID: SavedWorkspace.ID) -> HerdrSessionPlaces? {
+        herdrModel(of: workspaceID)?.places
+    }
+
+    /// A Herdr workspace picked in the Sessions sheet, as Herdr's client opens a machine at a workspace.
+    /// `bootID` is the server boot the sheet listed it from.
+    func openHerdrWorkspace(_ herdrWorkspaceID: String, bootID: String, in workspaceID: SavedWorkspace.ID) {
+        openHerdrSession(workspaceID, to: .place(.workspace(herdrWorkspaceID)), bootID: bootID)
+    }
+
+    /// New Workspace under a session in the Sessions sheet, beside the workspace this phone has there. A
+    /// session not on screen is shown, and the workspace made as part of its show.
+    func createHerdrWorkspace(in workspaceID: SavedWorkspace.ID) {
+        guard let outline = herdrModel(of: workspaceID)?.places.outline else { return }
+        openHerdrSession(
+            workspaceID,
+            to: .creation(.workspace(source: outline.focusedWorkspaceID)),
+            bootID: outline.bootID
+        )
+    }
+
+    /// What closing a workspace from its row in the Sessions sheet asks: always, as Herdr's client asks. Only
+    /// the session on screen offers it, since Herdr refuses commands from a hidden session.
+    func herdrWorkspaceCloseConfirmation(
+        _ herdrWorkspaceID: String,
+        in workspaceID: SavedWorkspace.ID
+    ) -> HerdrCloseConfirmation? {
+        herdrModelOnScreen(workspaceID)?.places.outline?.closeConfirmation(ofWorkspace: herdrWorkspaceID)
+    }
+
+    /// The close the user agreed to, checked as any close is when it goes.
+    func closeHerdrWorkspace(confirmed confirmation: HerdrCloseConfirmation, in workspaceID: SavedWorkspace.ID) {
+        herdrModelOnScreen(workspaceID)?.ask(confirmation.request, bootID: confirmation.bootID)
+    }
+
+    /// What renaming a workspace from its row starts with; only the session on screen offers it.
+    func herdrWorkspaceRenameField(_ herdrWorkspaceID: String, in workspaceID: SavedWorkspace.ID) -> HerdrRenameField? {
+        herdrModelOnScreen(workspaceID)?.renameField(for: .workspace(herdrWorkspaceID))
+    }
+
+    /// A workspace renamed from its row, which the Sessions sheet listed from server boot `bootID`.
+    func renameHerdrWorkspace(
+        _ herdrWorkspaceID: String,
+        to name: String,
+        bootID: String,
+        in workspaceID: SavedWorkspace.ID
+    ) {
+        herdrModelOnScreen(workspaceID)?.ask(.rename(.workspace(herdrWorkspaceID), name: name), bootID: bootID)
+    }
+
+    private func herdrModelOnScreen(_ workspaceID: SavedWorkspace.ID) -> HerdrScreenModel? {
+        guard state == .terminal(workspaceID) else { return nil }
+        return herdrModel(of: workspaceID)
+    }
+
+    /// An open Herdr session's agents.
+    func herdrAgents(of workspaceID: SavedWorkspace.ID) -> HerdrAgentPresentation? {
+        herdrModel(of: workspaceID)?.agents
+    }
+
+    private func herdrModel(of workspaceID: SavedWorkspace.ID) -> HerdrScreenModel? {
         guard let session = RemuxActiveSessionCollection.session(workspaceID, in: activeSessions),
               case .herdr(let model)? = terminalRuntimes[TerminalRuntimeAttemptKey(session: session)]
         else { return nil }
-        return model.notificationState
+        return model
+    }
+
+    private func herdrNotificationState(of workspaceID: SavedWorkspace.ID) -> HerdrNotificationSessionState? {
+        herdrModel(of: workspaceID)?.notificationState
     }
 
     /// Only the session's current model speaks for it; a replaced one's late events are dropped.

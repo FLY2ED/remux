@@ -214,7 +214,14 @@ private struct RemuxWorkspaceShell: View {
                     }
                 },
                 onRefresh: model.refreshSessions,
-                discoveries: model.sessionDiscoveries
+                discoveries: model.sessionDiscoveries,
+                herdrPlaces: model.herdrPlaces(of:),
+                onSelectHerdrWorkspace: model.openHerdrWorkspace(_:bootID:in:),
+                onCreateHerdrWorkspace: model.createHerdrWorkspace(in:),
+                herdrAgents: model.herdrAgents(of:),
+                onOpenHerdrAgent: { workspaceID, paneID, bootID in
+                    model.openHerdrSession(workspaceID, atPane: paneID, bootID: bootID)
+                }
             )
             .remuxSheetPresentationBackground()
             .ghosttyTerminalChromePresentation(
@@ -1126,6 +1133,7 @@ private struct ConnectionLibraryView: View {
             Section {
                 ForEach(visibleRecentWorkspaces) { workspace in
                     if let server = snapshot.server(id: workspace.serverID) {
+                        let unavailableReason = discoveries[server.id]?.unavailableReason(of: workspace.locator)
                         Button {
                             onConnect(workspace.id)
                         } label: {
@@ -1133,11 +1141,13 @@ private struct ConnectionLibraryView: View {
                                 server: server,
                                 workspace: workspace,
                                 runtimeState: nil,
-                                subtitleMode: .serverAndLastOpened
+                                subtitleMode: .serverAndLastOpened,
+                                unavailableReason: unavailableReason
                             )
                             .accessibilityIdentifier("library.session.resume")
                         }
                         .buttonStyle(.plain)
+                        .disabled(unavailableReason != nil)
                         .swipeActions(edge: .trailing) {
                             Button("Edit") {
                                 onEditWorkspace(server.id, workspace.id)
@@ -1180,6 +1190,9 @@ private struct ConnectionLibraryView: View {
             ForEach(snapshot.servers) { server in
                 let workspaces = visibleWorkspaces(for: server.id)
                 let latest = workspaces.first
+                let latestUnavailableReason = latest.flatMap {
+                    discoveries[server.id]?.unavailableReason(of: $0.locator)
+                }
 
                 NavigationLink {
                     serverDetail(
@@ -1212,6 +1225,7 @@ private struct ConnectionLibraryView: View {
                         } label: {
                             Label("Resume Latest", systemImage: "play.fill")
                         }
+                        .disabled(latestUnavailableReason != nil)
                     }
 
                     Button {
@@ -1232,7 +1246,8 @@ private struct ConnectionLibraryView: View {
                     }
                     .tint(.red)
 
-                    if let latest {
+                    // A swipe action can't be disabled, so it isn't offered for a session that can't open.
+                    if let latest, latestUnavailableReason == nil {
                         Button("Resume") {
                             onConnect(latest.id)
                         }
@@ -1449,6 +1464,7 @@ private struct ServerDetailView: View {
 
                 ForEach(visibleWorkspaces) { workspace in
                     let problem = notices.backendProblems[workspace.backend]
+                    let unavailableReason = discovery.unavailableReason(of: workspace.locator)
                     Button {
                         if problem?.isFixedByPath == true {
                             onEditServer(server.id)
@@ -1461,11 +1477,13 @@ private struct ServerDetailView: View {
                             workspace: workspace,
                             runtimeState: activeSession(for: workspace.id)?.runtimeState,
                             subtitleMode: .lastOpenedOnly,
-                            problem: problem
+                            problem: problem,
+                            unavailableReason: unavailableReason
                         )
                         .accessibilityIdentifier("library.session.resume")
                     }
                     .buttonStyle(.plain)
+                    .disabled(unavailableReason != nil)
                     .swipeActions(edge: .trailing) {
                         Button("Edit") {
                             onEditWorkspace(server.id, workspace.id)
@@ -1500,6 +1518,7 @@ private struct ServerDetailView: View {
                         AvailableServerSessionRow(session: session)
                     }
                     .buttonStyle(.plain)
+                    .disabled(session.unavailableReason != nil)
                     .accessibilityIdentifier("library.server.available.session")
                 }
 
@@ -1654,9 +1673,11 @@ private struct AvailableServerSessionRow: View {
         session.id.locator.name
     }
 
-    /// The logo tells tmux from Herdr; a Herdr session can be listed while stopped.
+    /// The logo tells tmux from Herdr; a Herdr session can be listed while stopped, or unavailable with
+    /// Herdr's reason.
     private var detail: String {
-        session.isRunning ? "On the server" : "Stopped"
+        if let reason = session.unavailableReason { return "Unavailable: \(reason)" }
+        return session.isRunning ? "On the server" : "Stopped"
     }
 
     var body: some View {
@@ -1671,21 +1692,24 @@ private struct AvailableServerSessionRow: View {
                 Text(detail)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
 
             Spacer(minLength: 8)
 
-            Image(systemName: "chevron.right")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.tertiary)
+            if session.unavailableReason == nil {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
         }
         .padding(.vertical, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(sessionName), \(session.id.locator.backend.displayName), \(detail)")
-        .accessibilityHint("Add this session to Remux")
-        .accessibilityAddTraits(.isButton)
+        .accessibilityHint(session.unavailableReason == nil ? "Add this session to Remux" : "")
+        .accessibilityAddTraits(session.unavailableReason == nil ? .isButton : [])
     }
 }
 
@@ -1705,6 +1729,7 @@ private struct ServerAvailableSessionsView: View {
                         AvailableServerSessionRow(session: session)
                     }
                     .buttonStyle(.plain)
+                    .disabled(session.unavailableReason != nil)
                     .accessibilityIdentifier("library.server.available.result")
                 }
 
@@ -1831,6 +1856,8 @@ private struct SessionLibraryRow: View {
     let subtitleMode: SubtitleMode
     /// What the server's last check found wrong with this session's backend.
     var problem: BackendProblem?
+    /// Why the session can't be opened, as the server's newest list says.
+    var unavailableReason: String?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -1850,9 +1877,11 @@ private struct SessionLibraryRow: View {
                 TerminalRuntimeStateIndicator(state: runtimeState)
             }
 
-            Image(systemName: "chevron.right")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.tertiary)
+            if unavailableReason == nil {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
         }
         .padding(.vertical, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1862,7 +1891,12 @@ private struct SessionLibraryRow: View {
 
     @ViewBuilder
     private var subtitle: some View {
-        if let problem {
+        if let unavailableReason {
+            Text("Unavailable: \(unavailableReason)")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        } else if let problem {
             // Wraps rather than truncates: beside a session's state, "Set path" would be cut off.
             Text(problem.sessionRowLine(for: workspace.backend))
                 .font(.footnote)
@@ -2017,8 +2051,9 @@ private struct TerminalSettingsView: View {
                 Text("Windows & Panes")
             } footer: {
                 Text(
-                    "You can override this per window from Panes. Remux normally clears zooms "
-                        + "it applied when closing. If one remains on the server, use prefix + z."
+                    "tmux windows and Herdr tabs with more than one pane show one pane at a time. "
+                        + "To see all of a window's or tab's panes, turn Zoom off in Panes. Other devices see "
+                        + "the zoom while you're in a Herdr session, and until you end a tmux session."
                 )
             }
             .libraryHomeListRowSurface()

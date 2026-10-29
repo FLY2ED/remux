@@ -43,12 +43,14 @@ final class HerdrPipelineTests: XCTestCase {
     func testASessionShownAfterConnectingHiddenIsPaintedAsHerdrSentIt() async throws {
         let recording = "herdr-08-connect-inactive-A"
         let frames = try HerdrConnectionTests.frames(HerdrConnectionTests.recording(recording))
+        let last = try Self.herdrsLastFrame(recording)
+        let screen = try HerdrModelHarness.screenSize(columns: last.frame.width, rows: last.frame.height)
         let harness = await makeHarness()
         let bridge = try await harness.bridge()
         // Up to the snapshot and the server's state for this client; the recorded show reply answers
         // another client's request id, so the model's own is answered instead.
         await bridge.serve(frames[0...4].flatMap(HerdrWire.frame))
-        harness.setScreenSize()
+        harness.setScreenSize(screen)
         harness.model.setSelected(true)
 
         var index = 0
@@ -61,15 +63,18 @@ final class HerdrPipelineTests: XCTestCase {
         try await assertPanesShowHerdrsCells(harness, recording: recording)
     }
 
-    /// A hide sent while a show is being answered wins, and surfaces that arrive while hidden still go
-    /// through the decoder and the engine, so the deltas after them apply.
+    /// A hide sent while a show is being answered wins. Surfaces that arrive after it aren't drawn, so the
+    /// panes keep what they showed, but they still go through the decoder and the presentation: shown
+    /// again, the deltas built on them apply.
     func testAHideDuringAShowWinsAndHiddenSurfacesStillDecode() async throws {
         let recording = "herdr-04-patch-and-delta-A"
         let frames = try HerdrConnectionTests.frames(HerdrConnectionTests.recording(recording))
+        let last = try Self.herdrsLastFrame(recording)
+        let screen = try HerdrModelHarness.screenSize(columns: last.frame.width, rows: last.frame.height)
         let harness = await makeHarness()
         let bridge = try await harness.bridge()
         await bridge.serve(frames[0...3].flatMap(HerdrWire.frame))
-        harness.setScreenSize()
+        harness.setScreenSize(screen)
         harness.model.setSelected(true)
 
         var index = 0
@@ -79,7 +84,16 @@ final class HerdrPipelineTests: XCTestCase {
         XCTAssertEqual([show.active, hide.active], [true, false])
         await bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
         await bridge.serve(HerdrServerScript.surfaceSetReply(id: hide.id, active: false))
-        await bridge.serve(frames[4...].flatMap(HerdrWire.frame))
+        // The full surface, a patch, and a delta on them, all while hidden.
+        await bridge.serve(frames[4...11].flatMap(HerdrWire.frame))
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertNil(harness.model.layout, "a surface that came after the hide was drawn")
+
+        harness.model.setSelected(true)
+        let again = try await harness.nextSurfaceSet(bridge, from: &index)
+        await bridge.serve(HerdrServerScript.surfaceSetReply(id: again.id, active: true))
+        // A delta built on the hidden one, and a patch.
+        await bridge.serve(frames[12...].flatMap(HerdrWire.frame))
         await bridge.finishServing()
 
         try await assertPanesShowHerdrsCells(harness, recording: recording)
@@ -124,17 +138,12 @@ final class HerdrPipelineTests: XCTestCase {
 
     // MARK: - Checking
 
-    /// Each pane with a text area shows the cells of the last frame Herdr drew: the frame a reference
-    /// decoder and presentation reach from the recording, which matches Herdr's own decoder's cells.
-    private func assertPanesShowHerdrsCells(
-        _ harness: HerdrModelHarness,
-        recording: String,
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) async throws {
+    /// The last frame Herdr drew in the recording: the frame a reference decoder and presentation reach
+    /// from it, which matches Herdr's own decoder's cells.
+    private static func herdrsLastFrame(_ recording: String) throws -> HerdrPaneSurfaceFrame {
         let fixtures = try HerdrWireTests.goldenFixtures()
-        let fixture = try XCTUnwrap(fixtures.first { $0.name == recording }, file: file, line: line)
-        let negotiated = try XCTUnwrap(fixture.golden.negotiated, file: file, line: line)
+        let fixture = try XCTUnwrap(fixtures.first { $0.name == recording })
+        let negotiated = try XCTUnwrap(fixture.golden.negotiated)
         var decoder = HerdrSurfaceDecoder(deltaNegotiated: negotiated.delta, scrollNegotiated: negotiated.scroll)
         var reference = HerdrPresentation()
         var splitter = HerdrFrameSplitter()
@@ -152,14 +161,23 @@ final class HerdrPipelineTests: XCTestCase {
             case .patch(let patch): _ = reference.receive(patch)
             }
         }
-        let surface = try XCTUnwrap(reference.presented?.surface, file: file, line: line)
+        let surface = try XCTUnwrap(reference.presented?.surface)
         XCTAssertEqual(
             HerdrSurfaceDecoderTests.digest(surface.frame.cells),
             fixture.golden.final?.cells,
-            "the reference isn't Herdr's own frame",
-            file: file,
-            line: line
+            "the reference isn't Herdr's own frame"
         )
+        return surface
+    }
+
+    /// Each pane with a text area shows the cells of the last frame Herdr drew.
+    private func assertPanesShowHerdrsCells(
+        _ harness: HerdrModelHarness,
+        recording: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let surface = try Self.herdrsLastFrame(recording)
 
         var expected: [String: [String]] = [:]
         for pane in surface.panes where pane.innerRect.width > 0 && pane.innerRect.height > 0 {

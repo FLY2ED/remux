@@ -43,6 +43,50 @@ final class SessionSwitcherProjectionTests: XCTestCase {
         XCTAssertEqual(projection.availableSessions.map(\.isRunning), [false, true, true, true])
     }
 
+    /// A Herdr session Herdr can't reach is listed with its reason, so the sheet shows it unavailable.
+    func testAnUnreachableHerdrSessionIsListedWithItsReason() {
+        let server = makeServer(name: "Mini")
+        let projection = SessionSwitcherProjection(
+            snapshot: snapshot(servers: [server], workspaces: []),
+            activeSessions: [],
+            discoveries: [
+                server.id: loadedDiscovery([], herdr: [
+                    DiscoveredSession(name: "locked", isRunning: false, unavailableReason: "Permission denied"),
+                    DiscoveredSession(name: "open", isRunning: true),
+                ]),
+            ],
+            selectedSessionID: nil
+        )
+        XCTAssertEqual(projection.availableSessions.map(\.unavailableReason), ["Permission denied", nil])
+    }
+
+    /// A saved session that its server's newest list marks unavailable shows so under Recent, with Herdr's
+    /// reason, as it does under Available: the reason has one owner, the server's discovery, keyed by the
+    /// session's backend and name. A tmux session of the same name, or another Herdr session, stays offered.
+    func testASavedSessionHerdrCannotReachIsUnavailableUnderRecent() {
+        let server = makeServer(name: "Mini")
+        let locked = SavedWorkspace(serverID: server.id, backend: .herdr, sessionName: "locked")
+        let lockedTmux = SavedWorkspace(serverID: server.id, backend: .tmux, sessionName: "locked")
+        let open = SavedWorkspace(serverID: server.id, backend: .herdr, sessionName: "open")
+        let discovery = loadedDiscovery(["locked"], herdr: [
+            DiscoveredSession(name: "locked", isRunning: false, unavailableReason: "Permission denied"),
+            DiscoveredSession(name: "open", isRunning: true),
+        ])
+        let projection = SessionSwitcherProjection(
+            snapshot: snapshot(servers: [server], workspaces: [locked, lockedTmux, open]),
+            activeSessions: [],
+            discoveries: [server.id: discovery],
+            selectedSessionID: nil
+        )
+
+        let recent = Dictionary(uniqueKeysWithValues: projection.recentSessions.map { ($0.id, $0.unavailableReason) })
+        XCTAssertEqual(recent[locked.id], .some("Permission denied"))
+        XCTAssertEqual(recent[lockedTmux.id], .some(nil))
+        XCTAssertEqual(recent[open.id], .some(nil))
+        XCTAssertEqual(discovery.unavailableReason(of: locked.locator), "Permission denied")
+        XCTAssertNil(discovery.unavailableReason(of: lockedTmux.locator))
+    }
+
     /// The switcher names a server only when none of its sessions could be listed. A missing Herdr, even
     /// where a Herdr session is saved, leaves the server's tmux sessions listed.
     func testOnlyAServerNoneOfWhoseSessionsCouldBeListedIsUnchecked() {
@@ -372,6 +416,102 @@ final class SessionSwitcherProjectionTests: XCTestCase {
             ),
             runtimeState: .connected
         )
+    }
+
+    /// The session the user is in is marked on its row, as a list marks its current choice, unless the row
+    /// is open over its workspaces, which mark the one the user is in.
+    func testTheSessionYoureInIsMarkedOnItsRowUnlessItListsItsWorkspaces() {
+        let current = item(.herdr, "default", on: "devbox", selected: true)
+        let other = item(.herdr, "train", on: "gpu-box")
+        XCTAssertTrue(current.showsCheckmark(disclosure: nil), "a session without workspaces listed")
+        XCTAssertTrue(current.showsCheckmark(disclosure: false), "a collapsed session")
+        XCTAssertFalse(current.showsCheckmark(disclosure: true), "an expanded session")
+        XCTAssertFalse([nil, false, true].contains { other.showsCheckmark(disclosure: $0) })
+    }
+
+    // MARK: - Agents
+
+    private func item(
+        _ backend: SessionBackend,
+        _ sessionName: String,
+        on serverName: String,
+        _ runtimeState: TerminalRuntimeState = .connected,
+        selected: Bool = false
+    ) -> ActiveSessionSwitcherItem {
+        ActiveSessionSwitcherItem(
+            id: UUID(),
+            backend: backend,
+            sessionName: sessionName,
+            serverName: serverName,
+            runtimeState: runtimeState,
+            isSelected: selected
+        )
+    }
+
+    private func agents(_ statuses: [(pane: String, status: HerdrAgentStatus)]) throws -> HerdrAgentPresentation {
+        try HerdrSnapshotJSON.presentation(statuses)
+    }
+
+    /// The Agents list has the open Herdr sessions with agents, in the Sessions list's order, each named by
+    /// its server and, unless it is Herdr's default session, its name, with its agents in Herdr's order.
+    func testTheAgentsListHasEachHerdrSessionsAgentsInTheSessionsListsOrder() throws {
+        let tmux = item(.tmux, "main", on: "mac-mini")
+        let devbox = item(.herdr, "default", on: "devbox")
+        let quiet = item(.herdr, "notes", on: "devbox")
+        let training = item(.herdr, "train", on: "gpu-box", .reconnecting(.transportLoss))
+        let unreported = item(.herdr, "fresh", on: "gpu-box")
+        let agents = [
+            devbox.id: try agents([("w1:p2", .blocked), ("w1:p1", .working)]),
+            quiet.id: try agents([]),
+            training.id: try agents([("w1:p1", .done)]),
+        ]
+        let projection = SessionAgentsProjection(
+            activeSessions: [tmux, devbox, quiet, training, unreported],
+            agents: { agents[$0] }
+        )
+        XCTAssertEqual(projection.sessions.map(\.id), [devbox.id, training.id])
+        XCTAssertEqual(projection.sessions.map(\.title), ["devbox", "gpu-box · train"])
+        XCTAssertEqual(projection.sessions.first?.agents.map(\.paneID), ["w1:p2", "w1:p1"])
+        XCTAssertEqual(projection.sessions.first?.bootID, "boot")
+        XCTAssertEqual(projection.sessions.map(\.isStale), [false, true])
+    }
+
+    /// Blocked and Done show only those agents, and only the sessions that have them; each filter counts its
+    /// agents.
+    func testTheAgentsFiltersShowAndCountWaitingAndDoneAgents() throws {
+        let devbox = item(.herdr, "default", on: "devbox")
+        let training = item(.herdr, "train", on: "gpu-box")
+        let agents = [
+            devbox.id: try agents([("w1:p1", .blocked), ("w1:p2", .working), ("w1:p3", .idle)]),
+            training.id: try agents([("w1:p1", .done), ("w1:p2", .blocked)]),
+        ]
+        let projection = SessionAgentsProjection(activeSessions: [devbox, training], agents: { agents[$0] })
+        XCTAssertEqual(projection.count(.all), 5)
+        XCTAssertEqual(projection.count(.blocked), 2)
+        XCTAssertEqual(projection.count(.done), 1)
+        XCTAssertEqual(projection.sessions(.blocked).map { $0.agents.map(\.paneID) }, [["w1:p1"], ["w1:p2"]])
+        XCTAssertEqual(projection.sessions(.done).map(\.id), [training.id])
+        XCTAssertEqual(projection.sessions(.done).first?.agents.map(\.paneID), ["w1:p1"])
+        XCTAssertEqual(projection.sessions(.all), projection.sessions)
+    }
+
+    /// The filters are Herdr's, in its order (`client/shell/overlays.rs`): All, Blocked, Working, Idle and
+    /// Done. Working and Idle show and count only those agents; Idle has the agents whose state isn't known
+    /// yet too, as they read as idle.
+    func testWorkingAndIdleShowAndCountTheirAgentsInHerdrsFilterOrder() throws {
+        XCTAssertEqual(SessionAgentsFilter.allCases.map(\.title), ["All", "Blocked", "Working", "Idle", "Done"])
+        let devbox = item(.herdr, "default", on: "devbox")
+        let training = item(.herdr, "train", on: "gpu-box")
+        let agents = [
+            devbox.id: try agents([("w1:p1", .working), ("w1:p2", .idle), ("w1:p3", .unknown)]),
+            training.id: try agents([("w1:p1", .working), ("w1:p2", .blocked)]),
+        ]
+        let projection = SessionAgentsProjection(activeSessions: [devbox, training], agents: { agents[$0] })
+        XCTAssertEqual(projection.count(.working), 2)
+        XCTAssertEqual(projection.count(.idle), 2)
+        XCTAssertEqual(projection.sessions(.working).map { $0.agents.map(\.paneID) }, [["w1:p1"], ["w1:p1"]])
+        XCTAssertEqual(projection.sessions(.idle).map(\.id), [devbox.id])
+        XCTAssertEqual(projection.sessions(.idle).first?.agents.map(\.paneID), ["w1:p2", "w1:p3"])
     }
 
     private func loadedDiscovery(
