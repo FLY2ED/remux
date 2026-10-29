@@ -201,6 +201,10 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
             if case .ended(let reason) = event { ending = reason }
         }
         guard case .failed = ending else { return XCTFail("ended \(String(describing: ending))") }
+        // The bridge closes as the attach ends; a second close would come within moments of the first.
+        let closed = await bridge.closed()
+        XCTAssertTrue(closed, "the bridge stayed open")
+        try await Task.sleep(for: .milliseconds(100))
         let closes = await bridge.closes
         XCTAssertEqual(closes, [.unresponsive])
     }
