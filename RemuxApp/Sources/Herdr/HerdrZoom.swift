@@ -65,9 +65,10 @@ struct HerdrPaneZoomResult: Equatable, Sendable {
 /// The phone keeps them (`HerdrOwnedZoomStore`), so an attachment after the app ended without ending the
 /// session takes them over, also across a restart of Herdr's server: Herdr restores a tab's zoom with the
 /// session (`persist/restore.rs`, `zoomed: snap.zoomed`), while each server process has a boot of its own
-/// (`server/headless.rs`, the process id and its start time). Tab ids can name another tab after a restart,
-/// so a record holds the tab's panes too, and a tab is Remux's only while it is zoomed and still has one of
-/// them; the record follows the tab's panes as they change.
+/// (`server/headless.rs`, the process id and its start time). Herdr 0.9.5 keeps tab and pane ids through a
+/// restart and doesn't reuse them after a close. As a guard, a record holds the tab's panes too, and a tab
+/// is Remux's only while it is zoomed and still has one of them; the record follows the tab's panes as they
+/// change.
 struct HerdrOwnedZooms: Equatable, Codable, Sendable {
     /// The panes of each tab Remux zoomed, by tab id.
     private(set) var panesByTab: [String: Set<String>] = [:]
