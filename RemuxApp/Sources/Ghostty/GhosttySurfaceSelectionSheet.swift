@@ -1,7 +1,8 @@
 import SwiftUI
 
 enum GhosttySurfaceSelectionSheet: Identifiable {
-    case windows(GhosttyPanePreviewSession)
+    /// The window sheet, with its previews; nil for a backend whose sheet lists its windows as rows.
+    case windows(GhosttyPanePreviewSession?)
     case panes(topLevelID: UUID)
 
     var id: String {
@@ -25,10 +26,10 @@ enum GhosttySurfaceSelectionSheet: Identifiable {
 
 struct GhosttyWindowSelectionSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.ghosttyTerminalChromeStyle) private var chromeStyle
-    @ObservedObject var session: GhosttyPanePreviewSession
     @State private var removal = GhosttyTileRemoval<GhosttyWindowSelectionSheetRenderProjection.Window>()
 
+    /// The windows' previews; nil lists the windows as rows.
+    let session: GhosttyPanePreviewSession?
     let projection: GhosttyWindowSelectionSheetRenderProjection
     let topLevelNoun: GhosttyTopLevelNoun
     let sessionName: String
@@ -55,19 +56,35 @@ struct GhosttyWindowSelectionSheet: View {
                     )
                 }
             } content: {
-                ScrollView(showsIndicators: false) {
-                    windowGrid(
-                        windows: projection.windows,
-                        layout: layout
-                    )
+                Group {
+                    if let session {
+                        ScrollView(showsIndicators: false) {
+                            GhosttyWindowPreviewGrid(
+                                session: session,
+                                projection: projection,
+                                topLevelNoun: topLevelNoun,
+                                layout: layout,
+                                removal: $removal,
+                                onSelect: select,
+                                onRemoveWindow: onRemoveWindow
+                            )
+                        }
+                        .contentMargins(
+                            .horizontal,
+                            TerminalSelectionSheetLayout.horizontalContentPadding,
+                            for: .scrollContent
+                        )
+                    } else {
+                        GhosttyWindowRowList(
+                            windows: projection.windows,
+                            topLevelNoun: topLevelNoun,
+                            onSelect: select,
+                            onClose: close
+                        )
+                    }
                 }
                 .frame(height: contentHeight)
                 .accessibilityIdentifier("terminal.windows.scroll")
-                .contentMargins(
-                    .horizontal,
-                    TerminalSelectionSheetLayout.horizontalContentPadding,
-                    for: .scrollContent
-                )
             } actions: {
                 TerminalSelectionSheetActionButton(
                     title: "New \(topLevelNoun.singular)",
@@ -91,13 +108,6 @@ struct GhosttyWindowSelectionSheet: View {
                 }
             }
         }
-        .onAppear {
-            session.reconcile(leafIDs: projection.previewLeafIDs)
-            GhosttyRuntimeTrace.perf("panePreview.presentation activate kind=windows")
-        }
-        .onChange(of: projection.previewLeafIDs) { _, newValue in
-            session.reconcile(leafIDs: newValue)
-        }
         .onChange(of: projection.windows.map(\.id)) { _, newValue in
             removal.keep(among: newValue)
         }
@@ -115,78 +125,18 @@ struct GhosttyWindowSelectionSheet: View {
         .accessibilityIdentifier("terminal.windows.sheet")
     }
 
-    private func windowGrid(
-        windows: [GhosttyWindowSelectionSheetRenderProjection.Window],
-        layout: PanePreviewLayout.Metrics
-    ) -> some View {
-        LazyVGrid(
-            columns: Array(
-                repeating: GridItem(.fixed(layout.tilePointSize.width), spacing: layout.gridSpacing),
-                count: layout.columnCount
-            ),
-            alignment: .center,
-            spacing: layout.gridSpacing
-        ) {
-            ForEach(windows) { window in
-                ZStack(alignment: .topTrailing) {
-                    Button {
-                        removal.end()
-                        Haptic.selection()
-                        onSelect(window.id)
-                    } label: {
-                        GhosttyWindowSelectionTile(
-                            topLevelNoun: topLevelNoun,
-                            displayIndex: window.displayIndex,
-                            displayName: window.displayName,
-                            totalCount: window.totalCount,
-                            paneCount: window.paneCount,
-                            isSelected: window.isSelected,
-                            agentStatus: window.agentStatus,
-                            previewState: window.focusedPreviewPaneID.flatMap { pane in
-                                // A pane the sheet doesn't capture has no preview coming.
-                                projection.previewLeafIDs.contains(pane) ? session.imagesByPaneID[pane] : .failed
-                            },
-                            chromeStyle: chromeStyle,
-                            layout: layout
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("terminal.window.tile.\(window.displayIndex)")
-                    .highPriorityGesture(
-                        LongPressGesture(minimumDuration: 0.42, maximumDistance: 18)
-                            .onEnded { _ in
-                                Haptic.warning()
-                                removal.showBubble(on: window)
-                            }
-                    )
-                    .allowsHitTesting(removal.bubbleTileID != window.id)
+    private func select(_ window: GhosttyWindowSelectionSheetRenderProjection.Window) {
+        removal.end()
+        Haptic.selection()
+        onSelect(window.id)
+    }
 
-                    if removal.bubbleTileID == window.id {
-                        GhosttySelectionContextActionButton(
-                            title: "Remove \(topLevelNoun.singular) \(window.displayIndex)",
-                            accessibilityIdentifier: "terminal.window.remove.\(window.displayIndex)"
-                        ) {
-                            if let window = removal.bubbleTapped(among: projection.windows) {
-                                onRemoveWindow(window.id)
-                            }
-                        }
-                        .padding(4)
-                        .transition(.scale(scale: 0.92).combined(with: .opacity))
-                        .zIndex(1)
-                    }
-                }
-                .frame(width: layout.tilePointSize.width, height: layout.tilePointSize.height)
-                .animation(.spring(response: 0.24, dampingFraction: 0.82), value: removal.bubbleTileID)
-                .accessibilityAction(named: Text("Remove \(topLevelNoun.singular) \(window.displayIndex)")) {
-                    Haptic.warning()
-                    if let window = removal.remove(window) {
-                        onRemoveWindow(window.id)
-                    }
-                }
-            }
-
+    /// Closes the window, after the question its backend asks first, if any.
+    private func close(_ window: GhosttyWindowSelectionSheetRenderProjection.Window) {
+        Haptic.warning()
+        if let window = removal.remove(window) {
+            onRemoveWindow(window.id)
         }
-        .frame(maxWidth: .infinity, alignment: .top)
     }
 
     /// The window's removal asked about, else the close the backend's server asked about.
@@ -326,6 +276,95 @@ struct GhosttyPaneSelectionSheet: View {
         return GhosttyCloseQuestion(confirmation: confirmation, confirmIdentifier: "terminal.pane.remove.confirm") { agreed in
             if agreed { onRemovePane(pane.id) }
             removal.end()
+        }
+    }
+}
+
+/// The windows as a grid of previews of their focused panes. A long press on a tile offers its removal.
+private struct GhosttyWindowPreviewGrid: View {
+    @Environment(\.ghosttyTerminalChromeStyle) private var chromeStyle
+    @ObservedObject var session: GhosttyPanePreviewSession
+
+    let projection: GhosttyWindowSelectionSheetRenderProjection
+    let topLevelNoun: GhosttyTopLevelNoun
+    let layout: PanePreviewLayout.Metrics
+    @Binding var removal: GhosttyTileRemoval<GhosttyWindowSelectionSheetRenderProjection.Window>
+    let onSelect: (GhosttyWindowSelectionSheetRenderProjection.Window) -> Void
+    let onRemoveWindow: (UUID) -> Void
+
+    var body: some View {
+        LazyVGrid(
+            columns: Array(
+                repeating: GridItem(.fixed(layout.tilePointSize.width), spacing: layout.gridSpacing),
+                count: layout.columnCount
+            ),
+            alignment: .center,
+            spacing: layout.gridSpacing
+        ) {
+            ForEach(projection.windows) { window in
+                ZStack(alignment: .topTrailing) {
+                    Button {
+                        onSelect(window)
+                    } label: {
+                        GhosttyWindowSelectionTile(
+                            topLevelNoun: topLevelNoun,
+                            displayIndex: window.displayIndex,
+                            displayName: window.displayName,
+                            totalCount: window.totalCount,
+                            paneCount: window.paneCount,
+                            isSelected: window.isSelected,
+                            agentStatus: window.agentStatus,
+                            previewState: window.focusedPreviewPaneID.flatMap { pane in
+                                // A pane the sheet doesn't capture has no preview coming.
+                                projection.previewLeafIDs.contains(pane) ? session.imagesByPaneID[pane] : .failed
+                            },
+                            chromeStyle: chromeStyle,
+                            layout: layout
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("terminal.window.tile.\(window.displayIndex)")
+                    .highPriorityGesture(
+                        LongPressGesture(minimumDuration: 0.42, maximumDistance: 18)
+                            .onEnded { _ in
+                                Haptic.warning()
+                                removal.showBubble(on: window)
+                            }
+                    )
+                    .allowsHitTesting(removal.bubbleTileID != window.id)
+
+                    if removal.bubbleTileID == window.id {
+                        GhosttySelectionContextActionButton(
+                            title: "Remove \(topLevelNoun.singular) \(window.displayIndex)",
+                            accessibilityIdentifier: "terminal.window.remove.\(window.displayIndex)"
+                        ) {
+                            if let window = removal.bubbleTapped(among: projection.windows) {
+                                onRemoveWindow(window.id)
+                            }
+                        }
+                        .padding(4)
+                        .transition(.scale(scale: 0.92).combined(with: .opacity))
+                        .zIndex(1)
+                    }
+                }
+                .frame(width: layout.tilePointSize.width, height: layout.tilePointSize.height)
+                .animation(.spring(response: 0.24, dampingFraction: 0.82), value: removal.bubbleTileID)
+                .accessibilityAction(named: Text("Remove \(topLevelNoun.singular) \(window.displayIndex)")) {
+                    Haptic.warning()
+                    if let window = removal.remove(window) {
+                        onRemoveWindow(window.id)
+                    }
+                }
+            }
+
+        }
+        .frame(maxWidth: .infinity, alignment: .top)
+        .onAppear {
+            session.reconcile(leafIDs: projection.previewLeafIDs)
+            GhosttyRuntimeTrace.perf("panePreview.presentation activate kind=windows")
+        }
+        .onChange(of: projection.previewLeafIDs) { _, newValue in
+            session.reconcile(leafIDs: newValue)
         }
     }
 }

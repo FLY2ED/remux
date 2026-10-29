@@ -570,46 +570,20 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         .none
     }
 
-    // MARK: Selection sheets and previews
+    // MARK: Selection sheets
 
     var topLevelNoun: GhosttyTopLevelNoun { .tab }
 
+    /// Herdr's Tabs sheet lists its tabs as rows, with no previews.
     func makePanePreviewSession(
         leafIDs: [UUID],
         pixelBudget: GhosttyPanePreviewSession.PixelBudget
-    ) -> GhosttyPanePreviewSession {
-        GhosttyPanePreviewSession(
-            leafIDs: leafIDs,
-            pixelBudget: pixelBudget,
-            client: GhosttyPanePreviewSession.PreviewClient(
-                capture: { [weak self] leafID, budget in
-                    guard let self,
-                          let paneID = self.paneID(for: leafID),
-                          let surface = self.model?.paneSurface(paneID),
-                          let area = self.model?.layout?.panes.first(where: { $0.paneID == paneID })?.innerRect,
-                          !surface.renderer.isClosing
-                    else { return nil }
-                    return await surface.renderer.capturePickerPreview(
-                        columns: UInt32(area.width),
-                        rows: UInt32(area.height),
-                        budget: budget
-                    )
-                },
-                cancelCapture: { [weak self] leafID in
-                    guard let self, let paneID = self.paneID(for: leafID) else { return }
-                    self.model?.paneSurface(paneID)?.renderer.cancelPickerCaptureForPresentation()
-                }
-            )
-        )
+    ) -> GhosttyPanePreviewSession? {
+        nil
     }
 
     func windowSheetPresentationProjection() -> GhosttyWindowSheetPresentationProjection? {
-        guard let projection = GhosttyTerminalPresentationProjector.windowSheetPresentationProjection(
-            snapshot: topologySnapshot
-        ) else { return nil }
-        return GhosttyWindowSheetPresentationProjection(
-            previewLeafIDs: capturablePreviewLeafIDs(projection.previewLeafIDs)
-        )
+        GhosttyTerminalPresentationProjector.windowSheetPresentationProjection(snapshot: topologySnapshot)
     }
 
     func selectedPaneSheetPresentationProjection() -> GhosttyPaneSheetPresentationProjection? {
@@ -628,17 +602,15 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     /// The tabs of the workspace `group` names, or of the workspace on screen, with the workspaces most
-    /// recent first, each with its most urgent agent. Only the tab on screen has a preview: the frame Remux
-    /// already has.
+    /// recent first, each with its most urgent agent. Each tab is a row saying what it holds.
     func windowSelectionSheetRenderProjection(group: UUID?) -> GhosttyWindowSelectionSheetRenderProjection {
         let topology = topologySnapshot
         let onScreen = GhosttyTerminalPresentationProjector.windowSelectionSheetRenderProjection(snapshot: topology)
-        let previewLeafIDs = capturablePreviewLeafIDs(onScreen.previewLeafIDs)
         guard let outline = model?.places.outline, let workspaceOnScreen, let shown = shownWorkspace(for: group) else {
             return GhosttyWindowSelectionSheetRenderProjection(
                 windows: onScreen.windows,
                 selectedWindowID: onScreen.selectedWindowID,
-                previewLeafIDs: previewLeafIDs
+                previewLeafIDs: []
             )
         }
         let windows = shown.id == workspaceOnScreen.id
@@ -652,11 +624,13 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         return GhosttyWindowSelectionSheetRenderProjection(
             windows: windows.map { window in
                 var window = window
-                window.closeConfirmation = tabIDsBySurfaceID[window.id].flatMap { closeConfirmation(before: .tab($0)) }
+                let tab = tabIDsBySurfaceID[window.id].flatMap { id in shown.tabs.first { $0.id == id } }
+                window.closeConfirmation = tab.flatMap { closeConfirmation(before: .tab($0.id)) }
+                window.contents = tab.map(contents(of:))
                 return window
             },
             selectedWindowID: onScreen.selectedWindowID,
-            previewLeafIDs: previewLeafIDs,
+            previewLeafIDs: [],
             grouping: GhosttyWindowSelectionSheetRenderProjection.Grouping(
                 noun: .workspace,
                 groups: outline.workspacesByRecency.map { workspace in
@@ -669,6 +643,28 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
                 shownGroupID: groupID(forWorkspace: shown.id),
                 largestWindowCount: outline.workspaces.map(\.tabs.count).max() ?? 0
             )
+        )
+    }
+
+    /// What every tab's row says, across the session's workspaces, so the model can tell the views when a
+    /// snapshot changes it.
+    var tabRowContents: [GhosttyWindowSelectionSheetRenderProjection.Contents] {
+        model?.places.outline?.workspaces.flatMap(\.tabs).map(contents(of:)) ?? []
+    }
+
+    /// A tab's row: its name if the user gave it one, what its focused pane runs in front of what up to two
+    /// of its other panes run, and what its focused pane is doing. Herdr names the focused pane only of the
+    /// tab this phone is on, so another tab's row shows its most urgent agent's pane, else its first pane.
+    private func contents(of tab: HerdrSessionOutline.Tab) -> GhosttyWindowSelectionSheetRenderProjection.Contents {
+        let urgent = tab.paneIDs.lazy
+            .compactMap { pane in self.model?.agents.state(ofPane: pane).map { (pane, $0.status) } }
+            .max { $0.1 < $1.1 }?.0
+        let focused = tab.paneIDs.first { $0 == model?.focusedPaneID } ?? urgent ?? tab.paneIDs.first
+        let shown = [focused].compactMap { $0 } + tab.paneIDs.filter { $0 != focused }.prefix(2)
+        return GhosttyWindowSelectionSheetRenderProjection.Contents(
+            name: tab.hasCustomLabel ? tab.label : nil,
+            programs: shown.map { model?.program(ofPane: $0) ?? .terminal },
+            activity: focused.flatMap { model?.activity(ofPane: $0) } ?? ""
         )
     }
 
@@ -694,13 +690,6 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     /// does.
     private func closeConfirmation(before place: HerdrPlace) -> GhosttyCloseConfirmation? {
         drawnOutline?.closeConfirmation(before: place)?.dialog
-    }
-
-    private func capturablePreviewLeafIDs(_ prioritizedLeafIDs: [UUID]) -> [UUID] {
-        prioritizedLeafIDs.filter { leafID in
-            guard let paneID = paneID(for: leafID) else { return false }
-            return model?.paneSurface(paneID) != nil
-        }
     }
 }
 

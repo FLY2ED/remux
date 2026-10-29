@@ -1464,13 +1464,13 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
         )
         shownWindowGroupID = nil
         applySelectionSheetPresentation(.windows(session))
-        session.startRefreshing()
+        session?.startRefreshing()
     }
 
     private func makeWindowPreviewSession(
         leafIDs: [UUID],
         layout: PanePreviewLayout.Metrics
-    ) -> GhosttyPanePreviewSession {
+    ) -> GhosttyPanePreviewSession? {
         let dimensions = PanePreviewLayout.windowPhysicalPixelBudget(
             metrics: layout,
             scale: displayScale
@@ -1496,7 +1496,7 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
     private func cancelSelectionSheetPreviewSession(_ sheet: GhosttySurfaceSelectionSheet?) {
         switch sheet {
         case .windows(let session):
-            session.cancelAll()
+            session?.cancelAll()
         case .panes, .none:
             break
         }
@@ -2162,9 +2162,13 @@ struct GhosttySurfaceScreen<Model: GhosttyTerminalScreenModeling>: View {
         maximumContentHeight: CGFloat
     ) -> CGFloat {
         switch sheet {
-        case .windows:
+        case .windows(let session):
+            let count = windowProjection.map { $0.grouping?.largestWindowCount ?? $0.windows.count } ?? 0
+            guard session != nil else {
+                return GhosttyWindowRowList.idealHeight(rowCount: count, maximumContentHeight: maximumContentHeight)
+            }
             return PanePreviewLayout.gridIdealHeight(
-                itemCount: windowProjection.map { $0.grouping?.largestWindowCount ?? $0.windows.count } ?? 0,
+                itemCount: count,
                 metrics: windowLayout,
                 maximumContentHeight: maximumContentHeight
             )

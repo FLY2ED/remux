@@ -1802,7 +1802,7 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertTrue(capsule(1).isSelected)
         XCTAssertEqual([capsule(2).label, capsule(3).label], ["Workspace api", "Workspace web"])
         XCTAssertTrue(tile(2).exists && !tile(3).exists, "The sheet should list remux's two tabs.")
-        XCTAssertEqual(tile(2).value as? String, "Preview unavailable", "A tab not on screen waits for a preview it won't get.")
+        XCTAssertEqual(tile(2).value as? String, "remux", "The build tab's row doesn't say its shell is in remux.")
         captureLiveHerdrStep("w1-tabs-sheet", in: configuration)
 
         capsule(2).tap()
@@ -1947,7 +1947,7 @@ final class RemuxAppUITests: XCTestCase {
         func remove(tile index: Int) {
             XCTAssertTrue(tile(index).waitForExistence(timeout: 5), "Missing tab tile \(index)")
             tile(index).press(forDuration: 1.0)
-            tapPickerButton(identifier: "terminal.window.remove.\(index)", fallbackLabel: "Remove Tab \(index)")
+            tapPickerButton(identifier: "terminal.window.remove.\(index)", fallbackLabel: "Close Tab")
         }
 
         openFirstSavedSession()
@@ -1961,17 +1961,15 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertFalse(app.buttons["terminal.window.remove.confirm.2"].exists, "A tab beside another asked first.")
         XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 1", timeout: 10))
 
-        // The tab on screen has a preview, which fills its tile and is drawn past its sides. The tile to its
-        // left still takes the touches on its own right edge and on its own Remove.
-        func openTabsShowingPreview(of index: Int) {
+        // The row beside the tab on screen takes the touches on its own right edge and its own Close.
+        func openTabs() {
             tabs.tap()
             XCTAssertTrue(tabsSheet.waitForExistence(timeout: 5))
-            XCTAssertTrue(waitForValue("Preview ready", of: tile(index), timeout: 10), "Tab \(index) had no preview.")
         }
         app.buttons["terminal.window.new"].tap()
         XCTAssertTrue(tabsSheet.waitForNonExistence(timeout: 5), "New Tab didn't close the sheet.")
         XCTAssertTrue(waitForLabel(of: tabs, "Tab 2 of 2", timeout: 10), "New Tab didn't go to the new tab.")
-        openTabsShowingPreview(of: 2)
+        openTabs()
         tile(1).coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
         XCTAssertTrue(tabsSheet.waitForNonExistence(timeout: 5))
         XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 2", timeout: 10), "A tap on tab 1's right edge didn't go to tab 1.")
@@ -1979,7 +1977,7 @@ final class RemuxAppUITests: XCTestCase {
         XCTAssertTrue(tabsSheet.waitForExistence(timeout: 5))
         tile(2).tap()
         XCTAssertTrue(waitForLabel(of: tabs, "Tab 2 of 2", timeout: 10))
-        openTabsShowingPreview(of: 2)
+        openTabs()
         // The tiles are numbered by position, so the tab left is told by its panes: remux's three-pane tab
         // and the new tab's one.
         func panes(ofTile index: Int) -> String? {
@@ -1987,14 +1985,11 @@ final class RemuxAppUITests: XCTestCase {
         }
         let newTabPanes = panes(ofTile: 2)
         XCTAssertNotEqual(panes(ofTile: 1), newTabPanes, "Tabs 1 and 2 can't be told apart.")
-        tile(1).press(forDuration: 1.0)
-        let removeFirst = app.buttons["terminal.window.remove.1"]
-        XCTAssertTrue(removeFirst.waitForExistence(timeout: 5), "Tab 1's long press didn't offer Remove.")
-        removeFirst.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        XCTAssertTrue(tile(2).waitForNonExistence(timeout: 10), "Tab 1's Remove didn't close a tab.")
-        XCTAssertTrue(tabsSheet.exists, "Tab 1's Remove closed the sheet.")
+        remove(tile: 1)
+        XCTAssertTrue(tile(2).waitForNonExistence(timeout: 10), "Tab 1's Close didn't close a tab.")
+        XCTAssertTrue(tabsSheet.exists, "Tab 1's Close closed the sheet.")
         XCTAssertTrue(waitForLabel(of: tabs, "Tab 1 of 1", timeout: 10))
-        XCTAssertEqual(panes(ofTile: 1), newTabPanes, "Tab 1's Remove closed tab 2.")
+        XCTAssertEqual(panes(ofTile: 1), newTabPanes, "Tab 1's Close closed tab 2.")
         captureLiveHerdrStep("d0-remove-beside-tab-on-screen", in: configuration)
 
         XCTAssertEqual(capsule(3).label, "Workspace web")
@@ -2980,6 +2975,18 @@ final class RemuxAppUITests: XCTestCase {
         tapPickerButton(identifier: "terminal.window.tile.1", fallbackLabel: "Window 1 of 2")
         waitForLiveTerminalReady(timeout: 30)
 
+        openWindowsSheet()
+        tapPickerButton(identifier: "terminal.window.tile.2", fallbackLabel: "Window 2 of 2")
+        waitForLiveTerminalReady(timeout: 30)
+
+        // A preview fills its tile and is drawn past its sides; the tile beside the window on screen still
+        // takes the touches on its own right edge.
+        let windows = app.buttons.matching(identifier: "terminal.windows").firstMatch
+        openWindowsSheet()
+        XCTAssertTrue(waitForValue("Preview ready", of: app.buttons["terminal.window.tile.2"], timeout: 10))
+        app.buttons["terminal.window.tile.1"].coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        XCTAssertTrue(waitForLabel(of: windows, "Window 1 of 2", timeout: 10), "A tap on tile 1's right edge didn't go to window 1.")
+        waitForLiveTerminalReady(timeout: 30)
         openWindowsSheet()
         tapPickerButton(identifier: "terminal.window.tile.2", fallbackLabel: "Window 2 of 2")
         waitForLiveTerminalReady(timeout: 30)
