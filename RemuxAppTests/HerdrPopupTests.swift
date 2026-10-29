@@ -505,6 +505,55 @@ final class HerdrPopupTests: XCTestCase {
         XCTAssertEqual(press, popupInput([.mouse(HerdrMouseEvent(kind: .down(.left), column: 2, row: 1))]))
     }
 
+    /// A popup Herdr leaves out that can't be attached, as another device holds it, has nothing to draw it
+    /// from: the panes show, as in Herdr's client on a surface too small for a popup. The popup stays known,
+    /// and once the surface can box it, it shows from Herdr's frames.
+    func testAPopupLeftOutThatCantBeAttachedShowsThePanesUntilItsFrameComes() async throws {
+        let tiny = try HerdrModelHarness.screenSize(columns: 5, rows: 2)
+        let harness = await makeHarness()
+        let (session, attach, _) = try await attachedPopup(harness)
+        try await leaveOut(harness, session, screen: tiny, columns: 5, rows: 2)
+        let again = try await leaveAndComeBack(harness, session, attach, columns: 5, rows: 2)
+
+        await again.serve(DirectServer.welcome() + DirectServer.shutdown(
+            "terminal attach failed: terminal \(Self.popupID) already has an attached client; retry with --takeover"
+        ))
+        try await harness.waitUntil("the empty popup covered the panes") { self.popup(harness) == nil }
+        try await harness.waitUntil("the pane wasn't drawn") {
+            harness.model.paneSurface("w1:p1")?.renderer.managedSurface?.isVisible == true
+        }
+
+        harness.setScreenSize()
+        await session.bridge.serve(try harness.shownSurface(projection: 1, revision: 60, lines: ["one two"], panes: Self.panes, popup: Self.popupID))
+        try await harness.waitUntil("the popup didn't show from Herdr's frames") {
+            self.popup(harness) != nil && harness.model.popup.surface.map { !$0.isAttached } == true
+        }
+    }
+
+    /// Drawn from Herdr's frames, a popup clicks as the frame says its program reads the mouse, whatever an
+    /// attach that went said before.
+    func testAPopupDrawnFromItsFramesClicksAsTheFrameSays() async throws {
+        let harness = await makeHarness()
+        let (session, attach, cell) = try await attachedPopup(harness, mouseReporting: true)
+        let adapter = harness.model.terminalScreenAdapter
+        let target = try XCTUnwrap(popup(harness)?.id)
+        await attach.serve(DirectServer.mouseCapture(false))
+        try await harness.waitUntil("the attach's mouse capture wasn't taken") { !adapter.isMouseCaptured(for: target) }
+
+        await attach.serve(DirectServer.shutdown("terminal attach taken over"))
+        await session.bridge.serve(popupSurface(revision: 10, lines: ["ef", "gh"], mouseReporting: true))
+        try await harness.waitUntil("the popup wasn't drawn from Herdr's frames") {
+            harness.model.popup.surface.map { !$0.isAttached } == true
+        }
+        let shown = try XCTUnwrap(popup(harness)?.id)
+        XCTAssertTrue(adapter.isMouseCaptured(for: shown), "a tap wouldn't click though Herdr's frame says the program reads the mouse")
+        var index = await session.bridge.writtenCount
+        _ = adapter.sendMousePosition(to: shown, CGPoint(x: 0.5 * cell.pointWidth, y: 0.5 * cell.pointHeight), mods: [])
+        XCTAssertEqual(adapter.sendMouseButton(to: shown, GhosttySurfaceMouseButtonEvent(state: .press, button: .left)), .sent)
+        let press = try await nextInput(session.bridge, from: &index)
+        XCTAssertEqual(press, popupInput([.mouse(HerdrMouseEvent(kind: .down(.left), column: 0, row: 0))]))
+    }
+
     /// The panes a popup Herdr leaves out covered are drawn again once it exits, though the layout, which
     /// leaves the popup out already, doesn't change.
     func testThePanesAreDrawnAgainWhenAPopupLeftOutExits() async throws {
@@ -1157,7 +1206,8 @@ final class HerdrPopupTests: XCTestCase {
         try await harness.waitUntil("the popup wasn't laid out") { harness.model.layout?.popup != nil }
         let cell = try XCTUnwrap(harness.model.measurement?.cellMetrics)
         let attach = try await harness.bridge(1)
-        await attach.serve(DirectServer.welcome() + DirectServer.frame(1, try Self.grid(harness), "$ "))
+        // Herdr sends the program's mouse capture as the attach begins.
+        await attach.serve(DirectServer.welcome() + DirectServer.frame(1, try Self.grid(harness), "$ ") + DirectServer.mouseCapture(mouseReporting))
         try await harness.waitUntil("the popup's renderer wasn't made") { harness.model.popup.surface?.renderer.managedSurface != nil }
         show(try XCTUnwrap(harness.model.popup.surface?.renderer.view))
         // The renderer takes input once it has drawn.

@@ -144,9 +144,9 @@ final class HerdrPopupController {
     private var onItsTab = false
     /// Whether the layout on screen shows the known popup; otherwise only an attach shows it.
     private var inFrame = false
-    /// Whether the known popup's program reads the mouse, by the newest word on it: the attach's mouse
-    /// capture, or a change a frame that shows the popup brings.
-    private var readsMouse = false
+    /// Whether the attach's program reads the mouse, as Herdr sends it to the attach as it changes
+    /// (`server/headless/render.rs` `stream_host_mouse_capture_mode`).
+    private var attachReadsMouse = false
     private var held = false
     private var activity = RendererActivity()
     private var cell: GhosttyTerminalCellDisplayMetrics?
@@ -213,12 +213,7 @@ final class HerdrPopupController {
             forget()
         }
         if let next = layout.popup {
-            if next.terminalID != known?.popup.terminalID {
-                forget()
-                readsMouse = next.mouseReporting
-            } else if next.mouseReporting != known?.popup.mouseReporting {
-                readsMouse = next.mouseReporting
-            }
+            if next.terminalID != known?.popup.terminalID { forget() }
             known = (next, layout.tab?.tabID, layout.bootID)
         }
         onItsTab = known.map { layout.tab?.tabID == $0.tabID } ?? false
@@ -289,14 +284,20 @@ final class HerdrPopupController {
     // MARK: - What the screen reads
 
     /// The popup over the tab on screen, which takes the tab's input: the known popup, while the screen shows
-    /// its tab.
+    /// its tab and there is something to draw it from, Herdr's frame of it or an attach to it. With neither,
+    /// as when Herdr leaves out of its surface a popup that couldn't be attached, the panes show, as in
+    /// Herdr's client on a surface too small for the popup; the popup stays known, and shows again once
+    /// either comes.
     var popup: HerdrPaneLayout.Popup? {
-        onItsTab ? known?.popup : nil
+        guard onItsTab, let known, inFrame || !framed.contains(known.popup.terminalID) else { return nil }
+        return known.popup
     }
 
-    /// Whether the popup's program reads the mouse.
+    /// Whether the popup's program reads the mouse, as what it is drawn from says: its attach while attached,
+    /// else Herdr's frame of it.
     var reportsMouse: Bool {
-        popup != nil && readsMouse
+        guard let popup else { return false }
+        return attached != nil ? attachReadsMouse : popup.mouseReporting
     }
 
     /// Whether the popup takes the tab's input: it is on screen and the phone holds it.
@@ -407,6 +408,8 @@ final class HerdrPopupController {
     private func attach(_ terminalID: String, grid: HerdrPopupGrid, cell: GhosttyTerminalCellDisplayMetrics) {
         generation += 1
         let generation = generation
+        // Herdr sends the program's mouse capture as the attach begins.
+        attachReadsMouse = false
         let attachment = makeAttachment(terminalID, Self.geometry(grid, cell: cell))
         var next = Attached(generation: generation, attachment: attachment)
         next.listening = Task { [weak self] in
@@ -439,7 +442,7 @@ final class HerdrPopupController {
             }
             onChange()
         case .mouseCapture(let enabled):
-            readsMouse = enabled
+            attachReadsMouse = enabled
         case .ended(let ending):
             ended(ending)
         }
@@ -681,7 +684,6 @@ final class HerdrPopupController {
         known = nil
         onItsTab = false
         inFrame = false
-        readsMouse = false
         framed.removeAll()
         retried = nil
         failure = nil
