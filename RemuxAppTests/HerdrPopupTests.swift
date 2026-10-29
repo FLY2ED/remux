@@ -675,10 +675,8 @@ final class HerdrPopupTests: XCTestCase {
 
     /// The popup takes the cells inside Herdr's frame on the panes' grid, whose lines take the outer cells.
     func testThePopupTakesTheCellsInsideHerdrsFrame() {
-        XCTAssertEqual(HerdrPopupGrid(framedIn: 50, rows: 41), HerdrPopupGrid(columns: 48, rows: 39))
-        XCTAssertEqual(HerdrPopupGrid(framedIn: 50, rows: 25), HerdrPopupGrid(columns: 48, rows: 23))
-        XCTAssertNil(HerdrPopupGrid(framedIn: 2, rows: 41))
-        XCTAssertNil(HerdrPopupGrid(framedIn: 50, rows: 2))
+        XCTAssertEqual(HerdrPopupGrid(in: 50, rows: 41), HerdrPopupGrid(columns: 48, rows: 39))
+        XCTAssertEqual(HerdrPopupGrid(in: 50, rows: 25), HerdrPopupGrid(columns: 48, rows: 23))
         let cell = GhosttyTerminalCellDisplayMetrics(pixelWidth: 24, pixelHeight: 53, contentScale: 3)
         let drawable = HerdrPopupGrid(columns: 48, rows: 39).displayMetrics(cell: cell)
         XCTAssertEqual([drawable.pixelWidth, drawable.pixelHeight], [1152, 2067])
@@ -688,6 +686,37 @@ final class HerdrPopupTests: XCTestCase {
     /// The popup's frame is Herdr's box on the outer cells of the panes' grid, its lines drawn as the panes'
     /// lines are: through the middle of the outer cells, as thin, in the ink of a line in Herdr's accent. Its
     /// terminal takes the cells inside, and its labels are in the panes' cells.
+    /// A frame takes the grid's outer cells, so it needs 3 x 3; on a smaller grid, as a large font in
+    /// landscape with the keyboard up can leave, the popup's terminal takes the whole grid unframed, rather
+    /// than none of it, and no frame is drawn.
+    func testAGridTooSmallForAFrameShowsThePopupUnframed() {
+        typealias Popup = GhosttyTerminalViewportPresentationProjection.Popup
+        let cases: [(columns: UInt16, rows: UInt16, content: GhosttyTerminalGridRect)] = [
+            (1, 1, GhosttyTerminalGridRect(x: 0, y: 0, columns: 1, rows: 1)),
+            (2, 2, GhosttyTerminalGridRect(x: 0, y: 0, columns: 2, rows: 2)),
+            (3, 3, GhosttyTerminalGridRect(x: 1, y: 1, columns: 1, rows: 1)),
+            (91, 2, GhosttyTerminalGridRect(x: 0, y: 0, columns: 91, rows: 2)),
+            (2, 41, GhosttyTerminalGridRect(x: 0, y: 0, columns: 2, rows: 41)),
+        ]
+        for (columns, rows, content) in cases {
+            let name = "\(columns)x\(rows)"
+            let grid = GhosttyTerminalGridSize(columns: UInt32(columns), rows: UInt32(rows))
+            let framed = columns >= 3 && rows >= 3
+            XCTAssertEqual(Popup.isFramed(grid), framed, name)
+            XCTAssertEqual(Popup.content(in: grid), content, name)
+            XCTAssertEqual(
+                HerdrPopupGrid(in: columns, rows: rows),
+                HerdrPopupGrid(columns: UInt16(content.columns), rows: UInt16(content.rows)),
+                name
+            )
+            let border = HerdrTerminalScreenAdapter.popupBorder(columns: columns, rows: rows, accent: HerdrPopupAccent.herdrDefault, colors: nil)
+            XCTAssertEqual(border.count, framed ? 4 : 0, name)
+        }
+        XCTAssertNil(Popup.content(in: GhosttyTerminalGridSize(columns: 0, rows: 5)))
+        XCTAssertNil(HerdrPopupGrid(in: 5, rows: 0))
+        XCTAssertEqual(HerdrTerminalScreenAdapter.popupBorder(columns: 0, rows: 0, accent: HerdrPopupAccent.herdrDefault, colors: nil), [])
+    }
+
     func testTheFrameIsHerdrsBoxOnThePanesGrid() async throws {
         let harness = await makeHarness()
         let (session, _, _) = try await attachedPopup(harness)
@@ -849,7 +878,7 @@ final class HerdrPopupTests: XCTestCase {
     /// The grid inside the popup's frame on the screen's grid.
     private static func grid(_ harness: HerdrModelHarness) throws -> HerdrPopupGrid {
         let viewport = try XCTUnwrap(harness.model.measurement?.controlViewport)
-        return try XCTUnwrap(HerdrPopupGrid(framedIn: viewport.columns, rows: viewport.rows))
+        return try XCTUnwrap(HerdrPopupGrid(in: viewport.columns, rows: viewport.rows))
     }
 
     private func popup(_ harness: HerdrModelHarness) -> GhosttyTerminalViewportPresentationProjection.Popup? {

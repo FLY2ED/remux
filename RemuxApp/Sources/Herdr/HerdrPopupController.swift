@@ -2,16 +2,18 @@ import Foundation
 import GhosttyKit
 
 /// The grid a popup gets: the panes' grid inside Herdr's frame, whose lines take its outer cells, as Herdr's
-/// client blits a popup's terminal inside its box. Cells of the panes' font, never scaled, so the popup's
-/// text is the panes' size and the keyboard takes rows, not size.
+/// client blits a popup's terminal inside its box, or the whole grid when it is too small for a frame
+/// (`GhosttyTerminalViewportPresentationProjection.Popup.content(in:)`). Cells of the panes' font, never
+/// scaled, so the popup's text is the panes' size and the keyboard takes rows, not size.
 struct HerdrPopupGrid: Equatable, Sendable, CustomStringConvertible {
     let columns: UInt16
     let rows: UInt16
 
-    /// The cells inside the frame on a grid of `columns` × `rows`; nil when there are none.
-    init?(framedIn columns: UInt16, rows: UInt16) {
-        guard columns > 2, rows > 2 else { return nil }
-        self.init(columns: columns - 2, rows: rows - 2)
+    /// The popup's cells on the panes' grid of `columns` x `rows`; nil for an empty grid.
+    init?(in columns: UInt16, rows: UInt16) {
+        let grid = GhosttyTerminalGridSize(columns: UInt32(columns), rows: UInt32(rows))
+        guard let content = GhosttyTerminalViewportPresentationProjection.Popup.content(in: grid) else { return nil }
+        self.init(columns: UInt16(content.columns), rows: UInt16(content.rows))
     }
 
     init(columns: UInt16, rows: UInt16) {
@@ -339,7 +341,7 @@ final class HerdrPopupController {
 
     private func planGrid() {
         guard let viewport, cell != nil,
-              let next = HerdrPopupGrid(framedIn: viewport.columns, rows: viewport.rows),
+              let next = HerdrPopupGrid(in: viewport.columns, rows: viewport.rows),
               next != requested
         else { return }
         requested = next

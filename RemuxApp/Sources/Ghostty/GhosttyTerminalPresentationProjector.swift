@@ -531,10 +531,19 @@ struct GhosttyTerminalViewportPresentationProjection: Equatable {
         let grid: GhosttyTerminalGridSize?
         let cell: GhosttyTerminalCellDisplayMetrics?
 
-        /// The cells inside the frame on a grid of `frame`, which the popup's terminal takes.
-        static func content(in frame: GhosttyTerminalGridSize) -> GhosttyTerminalGridRect? {
-            guard frame.columns > 2, frame.rows > 2 else { return nil }
-            return GhosttyTerminalGridRect(x: 1, y: 1, columns: frame.columns - 2, rows: frame.rows - 2)
+        /// A frame takes the grid's outer cells, so it needs a cell inside: 3 x 3 at least.
+        static func isFramed(_ grid: GhosttyTerminalGridSize) -> Bool {
+            grid.columns >= 3 && grid.rows >= 3
+        }
+
+        /// The cells the popup's terminal takes on `grid`: those inside the frame, or all of them on a grid
+        /// too small for one, so the popup still shows. Nil for an empty grid.
+        static func content(in grid: GhosttyTerminalGridSize) -> GhosttyTerminalGridRect? {
+            guard grid.columns > 0, grid.rows > 0 else { return nil }
+            guard isFramed(grid) else {
+                return GhosttyTerminalGridRect(x: 0, y: 0, columns: grid.columns, rows: grid.rows)
+            }
+            return GhosttyTerminalGridRect(x: 1, y: 1, columns: grid.columns - 2, rows: grid.rows - 2)
         }
     }
 

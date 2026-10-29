@@ -233,7 +233,8 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
     /// (`client/shell/composition.rs`, ratatui's `Block`); the phone's popup takes the whole tab, so its box
     /// is on the outer cells of the panes' grid, drawn as their lines are.
     static func popupBorder(columns: UInt16, rows: UInt16, accent: HerdrColor, colors: GhosttyTerminalColors?) -> [GhosttyPaneLine] {
-        guard columns >= 2, rows >= 2 else { return [] }
+        let grid = GhosttyTerminalGridSize(columns: UInt32(columns), rows: UInt32(rows))
+        guard GhosttyTerminalViewportPresentationProjection.Popup.isFramed(grid) else { return [] }
         let across = 2 * UInt32(columns) - 1
         let down = 2 * UInt32(rows) - 1
         return [

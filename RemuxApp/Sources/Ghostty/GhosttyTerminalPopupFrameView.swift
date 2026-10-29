@@ -49,7 +49,9 @@ struct GhosttyTerminalPopupFrameView: View {
                     .accessibilityElement()
                     .accessibilityLabel("Terminal")
                     .accessibilityIdentifier("terminal.popup.content")
-                    labels(layout: layout, columns: windowGrid.columns)
+                    if GhosttyTerminalViewportPresentationProjection.Popup.isFramed(windowGrid) {
+                        labels(layout: layout, columns: windowGrid.columns)
+                    }
                 }
             }
         }
