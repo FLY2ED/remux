@@ -426,6 +426,30 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    /// A frame of another tab says nothing of the popup, since Herdr shows a popup only on its tab, though it
+    /// is big enough to show one: back on the popup's tab, input for it goes again.
+    func testAFrameOfAnotherTabSaysNothingOfThePopup() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shown(feed, updates, outbox, panes: Self.atP)
+        func goes() async -> Bool {
+            if case .sent = await feed.send([.paste("fix it")], to: .popup("pop")) { true } else { false }
+        }
+        await feed.receive(.surface(try Self.surface(revision: 2, lines: ["one ", "two "], panes: Self.atP, popup: "pop")))
+        let atR = [Self.pane("R", x: 0, width: 3, height: 4, focused: true), Self.pane("S", x: 3, width: 3, height: 4)]
+        await feed.receive(try Self.places(revision: 2, focusedPane: "R"))
+        let otherTab = try Self.surface(projection: 2, revision: 3, lines: ["one   ", "two   ", "      ", "      "], panes: atR)
+        await feed.receive(.surface(otherTab))
+        let goesElsewhere = await goes()
+        XCTAssertFalse(goesElsewhere, "the popup's input went while this client was on another tab")
+        await feed.receive(try Self.places(revision: 3))
+        await feed.receive(.surface(try Self.surface(projection: 3, revision: 4, lines: ["one ", "two "], panes: Self.atP)))
+        let goesBack = await goes()
+        XCTAssertTrue(goesBack, "a frame of another tab ended the popup's input")
+        await engine.stop()
+    }
+
     /// As in Herdr's client, a move completes once its focus is answered on a frame showing its pane, also
     /// one that came before the answer: Herdr can send the snapshot and frame first, and sends nothing
     /// more for a move it has already made.

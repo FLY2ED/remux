@@ -108,6 +108,7 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
                 switch event {
                 case .terminal(_, let columns, let rows): events.append("terminal \(columns)x\(rows)")
                 case .grid(let columns, let rows): events.append("grid \(columns)x\(rows)")
+                case .mouseCapture: break
                 case .ended(let ending): events.append("ended \(ending)")
                 }
             }
@@ -118,14 +119,14 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
         }
     }
 
-    /// A terminal another client holds ends the attach held; one that isn't there, refused.
-    func testAHeldOrMissingTerminalEndsTheAttachHeldOrRefused() async throws {
+    /// A terminal another client holds ends the attach held; one that isn't there, missing.
+    func testAHeldOrMissingTerminalEndsTheAttachHeldOrMissing() async throws {
         for version in Self.versions {
             for scenario in ["02-refused", "03-missing"] {
                 let fixture = try DirectTerminalFixture(version: version, scenario: scenario)
                 let reason = try XCTUnwrap(fixture.expected.server.compactMap(\.ServerShutdown).first?.reason)
                 let ending = try await Self.ending(of: fixture.server, fixture)
-                XCTAssertEqual(ending, scenario == "02-refused" ? .held(reason) : .refused(reason), fixture.name)
+                XCTAssertEqual(ending, scenario == "02-refused" ? .held(reason) : .missing(reason), fixture.name)
                 XCTAssertTrue(reason.hasPrefix("terminal attach failed"), fixture.name)
             }
         }

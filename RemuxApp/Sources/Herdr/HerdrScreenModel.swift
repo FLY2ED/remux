@@ -1038,9 +1038,9 @@ final class HerdrScreenModel {
         return popup.scroll(rows: Int(steps), column: at.column, row: at.row)
     }
 
-    /// Whether the popup's program reads the mouse, as Herdr's surface says.
+    /// Whether the popup's program reads the mouse, as its attach and Herdr's surface say.
     var popupReportsMouse: Bool {
-        popup.popup?.mouseReporting == true
+        popup.reportsMouse
     }
 
     /// A button pressed or released at the pointer over the popup, as Herdr's client sends one to a popup

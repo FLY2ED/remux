@@ -50,10 +50,13 @@ struct HerdrPaneLayout: Equatable, Sendable {
     /// tab's input meanwhile: Herdr drops pane input from a client on that tab.
     let popup: Popup?
 
-    /// Whether Herdr could box a popup on this surface: it leaves an open popup out of a surface under
-    /// 6 x 4 cells (`popup_size.rs` `resolve_popup_geometry`), so only a surface this size or more that
-    /// comes without the popup says it closed.
-    var couldShowPopup: Bool { columns >= 6 && rows >= 4 }
+    /// Whether this frame says the popup of terminal `terminalID`, open over tab `tabID`, closed: it is a frame
+    /// of that tab, big enough to box a popup in, that doesn't show it. Herdr shows a popup only on the tab it
+    /// was opened on (`server/headless/render.rs`), and leaves an open one out of a surface under 6 x 4 cells
+    /// (`popup_size.rs` `resolve_popup_geometry`), so no other frame says anything of it.
+    func showsClosed(popup terminalID: String, openedOn tabID: String?) -> Bool {
+        tab?.tabID == tabID && columns >= 6 && rows >= 4 && popup?.terminalID != terminalID
+    }
 }
 
 /// A terminal of the tab's, which the engine paints from Herdr's frame and Remux sends input to: a pane's
@@ -749,7 +752,8 @@ actor HerdrTerminalEngine {
     private var paintsPopupRevision: UInt64 = 0
     /// The popup open as the frames drawn last tell, and the tab of the frame that showed it: Herdr sends a
     /// popup only to a client on the tab it was opened on (`server/headless/render.rs`), and takes its input
-    /// only from one there (`takesInput`). It is forgotten on a frame that could show it but doesn't.
+    /// only from one there (`takesInput`). Only a frame that says it closed forgets it
+    /// (`HerdrPaneLayout.showsClosed`).
     private var popupTab: (terminalID: String, tabID: String?)?
     private var cellWidthPx: UInt32
     private var cellHeightPx: UInt32
@@ -1935,8 +1939,8 @@ actor HerdrTerminalEngine {
         let next = layout(of: surface, snapshot: snapshot)
         if let popup = next.popup {
             popupTab = (popup.terminalID, next.tab?.tabID)
-        } else if next.couldShowPopup {
-            popupTab = nil
+        } else if let popupTab, next.showsClosed(popup: popupTab.terminalID, openedOn: popupTab.tabID) {
+            self.popupTab = nil
         }
         if madeTerminal || next != layout || frame != presentedFrame {
             layout = next

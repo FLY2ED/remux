@@ -133,13 +133,20 @@ final class HerdrPopupController {
 
     private var runtime: GhosttyKitRuntime?
     private var theme: TerminalTheme
-    /// The popup open over the tab, which takes the tab's input.
-    private(set) var popup: HerdrPaneLayout.Popup?
-    /// The tab of the layout that showed the popup.
-    private var popupTabID: String?
-    /// Herdr leaves the popup out of its surface, which is too small to box it: only an attach shows it, and
-    /// the phone keeps it while it lets the attach go, to attach again when it holds the popup.
-    private var omitted = false
+    /// The popup open as far as the phone can tell, with the tab it is open over and the server boot of its
+    /// id: what the frames last showed of it. Herdr shows a popup only on the tab it was opened on, and leaves
+    /// it out of a surface too small to box it, so it stays known until there is word it closed: an attach to
+    /// it ends as its terminal is gone (`ended`), or a frame of its tab that could show it doesn't
+    /// (`HerdrPaneLayout.showsClosed`). Nothing else forgets it: not the phone letting it go, nor a visit to
+    /// another tab, nor a refusal to try again.
+    private var known: (popup: HerdrPaneLayout.Popup, tabID: String?, bootID: String)?
+    /// Whether the layout on screen is of the known popup's tab.
+    private var onItsTab = false
+    /// Whether the layout on screen shows the known popup; otherwise only an attach shows it.
+    private var inFrame = false
+    /// Whether the known popup's program reads the mouse, by the newest word on it: the attach's mouse
+    /// capture, or a change a frame that shows the popup brings.
+    private var readsMouse = false
     private var held = false
     private var activity = RendererActivity()
     private var cell: GhosttyTerminalCellDisplayMetrics?
@@ -198,29 +205,25 @@ final class HerdrPopupController {
         reconcile()
     }
 
-    /// The layout's popup. Another terminal id is another popup. Herdr leaves a popup out of a surface too
-    /// small to box it, though the popup is still open and takes the tab's input
-    /// (`HerdrPaneLayout.couldShowPopup`): an attached popup stays then, on its tab, also while the phone lets
-    /// it go, until an attach to it ends or a surface Herdr could box it in comes without it.
+    /// The layout on screen. A popup it shows is the known one; another terminal id is another popup, as Herdr
+    /// has one at a time.
     func update(from layout: HerdrPaneLayout) {
-        let next = layout.popup
-        if next == nil, popup != nil, attached != nil || omitted, layout.tab?.tabID == popupTabID, !layout.couldShowPopup {
-            omitted = true
-            return
+        if let known,
+           known.bootID != layout.bootID || layout.showsClosed(popup: known.popup.terminalID, openedOn: known.tabID) {
+            forget()
         }
-        omitted = false
-        popupTabID = next == nil ? nil : layout.tab?.tabID
-        guard next != popup else { return }
-        let replaced = next?.terminalID != popup?.terminalID
-        popup = next
-        if replaced {
-            release()
-            framed = framed.filter { $0 == next?.terminalID }
-            retried = nil
-            failure = nil
-        } else {
-            followFrameGrid()
+        if let next = layout.popup {
+            if next.terminalID != known?.popup.terminalID {
+                forget()
+                readsMouse = next.mouseReporting
+            } else if next.mouseReporting != known?.popup.mouseReporting {
+                readsMouse = next.mouseReporting
+            }
+            known = (next, layout.tab?.tabID, layout.bootID)
         }
+        onItsTab = known.map { layout.tab?.tabID == $0.tabID } ?? false
+        inFrame = layout.popup != nil
+        followFrameGrid()
         reconcile()
     }
 
@@ -280,13 +283,21 @@ final class HerdrPopupController {
 
     func stop() {
         held = false
-        popup = nil
-        popupTabID = nil
-        omitted = false
-        release()
+        forget()
     }
 
     // MARK: - What the screen reads
+
+    /// The popup over the tab on screen, which takes the tab's input: the known popup, while the screen shows
+    /// its tab.
+    var popup: HerdrPaneLayout.Popup? {
+        onItsTab ? known?.popup : nil
+    }
+
+    /// Whether the popup's program reads the mouse.
+    var reportsMouse: Bool {
+        popup != nil && readsMouse
+    }
 
     /// Whether the popup takes the tab's input: it is on screen and the phone holds it.
     var takesInput: Bool { popup != nil && held }
@@ -427,6 +438,8 @@ final class HerdrPopupController {
                 logLayout()
             }
             onChange()
+        case .mouseCapture(let enabled):
+            readsMouse = enabled
         case .ended(let ending):
             ended(ending)
         }
@@ -441,23 +454,19 @@ final class HerdrPopupController {
         // A renderer still being made for the attach closes once made.
         creating = nil
         let terminalID = popup.terminalID
-        if omitted {
-            // Nothing else shows a popup Herdr leaves out of its surface: it closed, or can't be had.
-            GhosttyRuntimeTrace.diagnostics("popup attach ended while left out terminal=\(terminalID) ending=\(ending)")
-            omitted = false
-            self.popup = nil
-            popupTabID = nil
-            release()
-            onChange()
-            return
-        }
         switch ending {
         case .detached:
             return
         case .closed(let reason):
-            // The popup is gone; the layout without it follows.
+            // Word the popup closed; frames that still show it were drawn before it did.
             GhosttyRuntimeTrace.diagnostics("popup attach ended terminal=\(terminalID) reason=\(reason)")
-            closeSurface()
+            forget()
+            onChange()
+            return
+        case .missing(let reason) where !inFrame:
+            // Herdr has no such terminal, and no frame says the popup is open: it closed out of sight.
+            GhosttyRuntimeTrace.diagnostics("popup attach missing terminal=\(terminalID) reason=\(reason)")
+            forget()
             onChange()
             return
         case .held(let reason):
@@ -475,7 +484,8 @@ final class HerdrPopupController {
                 self.reconcile()
             }
             return
-        case .busy(let reason), .refused(let reason):
+        case .busy(let reason), .refused(let reason), .missing(let reason):
+            // A frame that shows the popup says it is open, which outweighs a refusal for a missing terminal.
             GhosttyRuntimeTrace.diagnostics("popup attach refused terminal=\(terminalID) reason=\(reason)")
         case .failed(let reason):
             GhosttyRuntimeTrace.diagnostics("popup attach failed terminal=\(terminalID) reason=\(reason)")
@@ -664,6 +674,18 @@ final class HerdrPopupController {
         settle?.cancel()
         asked = nil
         Task { await attached.attachment.detach() }
+    }
+
+    /// Word came that the known popup closed.
+    private func forget() {
+        known = nil
+        onItsTab = false
+        inFrame = false
+        readsMouse = false
+        framed.removeAll()
+        retried = nil
+        failure = nil
+        release()
     }
 
     /// The phone lets the popup go: Herdr gives its size back, and its renderer closes.

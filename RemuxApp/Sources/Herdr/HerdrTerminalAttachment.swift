@@ -16,6 +16,9 @@ actor HerdrTerminalAttachment {
         /// The first frame's terminal; later frames of another size come as `grid`.
         case terminal(HerdrRetainedTerminal, columns: UInt16, rows: UInt16)
         case grid(columns: UInt16, rows: UInt16)
+        /// Whether the program reads the mouse, which Herdr sends as it changes, from the attach on
+        /// (`server/headless/render.rs` `stream_host_mouse_capture_mode`).
+        case mouseCapture(Bool)
         /// Nothing follows.
         case ended(Ending)
     }
@@ -27,8 +30,10 @@ actor HerdrTerminalAttachment {
         case held(String)
         /// Herdr asks to try again, as while an agent reads the terminal.
         case busy(String)
-        /// Herdr refused the attach for another reason, as when the terminal is gone.
+        /// Herdr refused the attach for another reason.
         case refused(String)
+        /// Herdr refused the attach because it has no terminal of that id.
+        case missing(String)
         /// The terminal is gone, as when its program exits.
         case closed(String)
         /// The bridge or the stream failed, or Herdr ended the connection for another reason.
@@ -197,9 +202,10 @@ actor HerdrTerminalAttachment {
             show(frame)
         case .shutdown(let reason):
             // Herdr's reasons: "detached" after a detach and "terminal attach failed: …" for a refused attach,
-            // "… already has an attached client …" when another client holds the terminal and "… has a read
-            // in progress; retry" while an agent reads it (`server/headless.rs`), "terminal attach ended: …"
-            // once the terminal is gone (`server/headless/render.rs`).
+            // "… already has an attached client …" when another client holds the terminal, "… has a read in
+            // progress; retry" while an agent reads it and "… not found" when there is no such terminal
+            // (`server/headless.rs`), "terminal attach ended: …" once the terminal is gone
+            // (`server/headless/render.rs`).
             if reason == Self.detachedReason {
                 end(.detached)
             } else if let reason, reason.hasPrefix(Self.endedPrefix) {
@@ -208,12 +214,16 @@ actor HerdrTerminalAttachment {
                 end(.held(reason))
             } else if terminal == nil, let reason, reason.hasSuffix(Self.retrySuffix) {
                 end(.busy(reason))
+            } else if terminal == nil, let reason, reason.hasSuffix(Self.missingSuffix) {
+                end(.missing(reason))
             } else if terminal == nil {
                 end(.refused(reason ?? "Herdr refused the attach."))
             } else {
                 end(.failed(reason ?? "Herdr ended the attach."))
             }
-        case .mouseCapture, .keyboardProtocol, .skipped:
+        case .mouseCapture(let enabled):
+            continuation.yield(.mouseCapture(enabled))
+        case .keyboardProtocol, .skipped:
             break
         }
     }
@@ -324,6 +334,7 @@ actor HerdrTerminalAttachment {
     private static let endedPrefix = "terminal attach ended"
     private static let heldReason = "already has an attached client"
     private static let retrySuffix = "; retry"
+    private static let missingSuffix = " not found"
 
     private static func describe(_ error: Error) -> String {
         (error as? LocalizedError)?.errorDescription ?? String(describing: error)

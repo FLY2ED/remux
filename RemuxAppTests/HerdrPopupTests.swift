@@ -422,6 +422,89 @@ final class HerdrPopupTests: XCTestCase {
         }
     }
 
+    /// A visit to another tab says nothing of a popup Herdr leaves out, since Herdr shows a popup only on its
+    /// tab: it isn't shown there, and back on its tab, still too small to box it, the phone attaches to it
+    /// again and typing goes to it.
+    func testAPopupLeftOutIsAttachedAgainBackFromAnotherTab() async throws {
+        let tiny = try HerdrModelHarness.screenSize(columns: 5, rows: 2)
+        let harness = await makeHarness()
+        let (session, attach, _) = try await attachedPopup(harness, otherTab: true)
+        try await leaveOut(harness, session, screen: tiny, columns: 5, rows: 2)
+        let before = await attach.writtenCount
+
+        await session.bridge.serve(Self.twoTabs(revision: 5, focused: "t2"))
+        await session.bridge.serve(try harness.shownSurface(
+            projection: 5,
+            revision: 50,
+            lines: ["cd"],
+            panes: [.init(id: "w1:p3", x: 0, width: 5, height: 2, focused: true)]
+        ))
+        try await harness.waitUntil("tab t2 wasn't shown") { harness.model.layout?.tab?.tabID == "t2" }
+        XCTAssertNil(popup(harness), "the popup showed over another tab")
+        try await harness.waitUntil("the popup wasn't let go on another tab") {
+            var messages: [DirectClient] = []
+            for write in before..<(await attach.writtenCount) {
+                messages += (try? await DirectClient.messages(attach, at: write)) ?? []
+            }
+            return messages.contains(.detach)
+        }
+
+        await session.bridge.serve(Self.twoTabs(revision: 6, focused: "t1"))
+        await session.bridge.serve(try harness.shownSurface(
+            projection: 6,
+            revision: 51,
+            lines: ["ab"],
+            panes: [.init(id: "w1:p1", x: 0, width: 5, height: 2, focused: true)]
+        ))
+        let again = try await harness.bridge(2)
+        let opening = try await DirectClient.messages(again, at: 0)
+        XCTAssertEqual(opening.last, .attach(Self.popupID))
+        await again.serve(DirectServer.welcome() + DirectServer.frame(1, try Self.grid(harness), "$ "))
+        var index = await session.bridge.writtenCount
+        XCTAssertTrue(harness.model.terminalScreenAdapter.sendInputToFocusedSurface("k").isAccepted)
+        let typed = try await nextInput(session.bridge, from: &index)
+        XCTAssertEqual(typed, popupInput(HerdrInputTranslator.events(forText: "k", reportsAllKeys: false)))
+    }
+
+    /// Herdr asking to try again says nothing of a popup Herdr leaves out: the phone attaches once more after
+    /// the wait, as for any popup, and keeps the popup.
+    func testAPopupLeftOutIsTriedAgainWhenHerdrAsksTo() async throws {
+        let tiny = try HerdrModelHarness.screenSize(columns: 5, rows: 2)
+        let harness = await makeHarness()
+        let (session, attach, _) = try await attachedPopup(harness)
+        try await leaveOut(harness, session, screen: tiny, columns: 5, rows: 2)
+        let again = try await leaveAndComeBack(harness, session, attach, columns: 5, rows: 2)
+
+        await again.serve(DirectServer.welcome() + DirectServer.shutdown(
+            "terminal attach failed: terminal \(Self.popupID) has a read in progress; retry"
+        ))
+        let retried = try await harness.bridge(3)
+        let opening = try await DirectClient.messages(retried, at: 0)
+        XCTAssertEqual(opening.last, .attach(Self.popupID))
+        XCTAssertNotNil(harness.model.popup.popup, "the popup was forgotten while Herdr asked to try again")
+    }
+
+    /// While Herdr leaves the popup out, its attach says whether its program reads the mouse: a program that
+    /// starts reading it there gets a tap as a click.
+    func testAPopupLeftOutClicksOnceItsProgramReadsTheMouse() async throws {
+        let tiny = try HerdrModelHarness.screenSize(columns: 5, rows: 2)
+        let harness = await makeHarness()
+        let (session, attach, cell) = try await attachedPopup(harness)
+        try await leaveOut(harness, session, screen: tiny, columns: 5, rows: 2)
+        let adapter = harness.model.terminalScreenAdapter
+        let target = try XCTUnwrap(popup(harness)?.id)
+        XCTAssertFalse(adapter.isMouseCaptured(for: target))
+
+        await attach.serve(DirectServer.mouseCapture(true))
+        try await harness.waitUntil("the attach's mouse capture wasn't taken") { adapter.isMouseCaptured(for: target) }
+        var index = await session.bridge.writtenCount
+        _ = adapter.sendMousePosition(to: target, CGPoint(x: 2.5 * cell.pointWidth, y: 1.5 * cell.pointHeight), mods: [])
+        XCTAssertEqual(adapter.sendMouseButton(to: target, GhosttySurfaceMouseButtonEvent(state: .press, button: .left)), .sent)
+        XCTAssertEqual(adapter.sendMouseButton(to: target, GhosttySurfaceMouseButtonEvent(state: .release, button: .left)), .sent)
+        let press = try await nextInput(session.bridge, from: &index)
+        XCTAssertEqual(press, popupInput([.mouse(HerdrMouseEvent(kind: .down(.left), column: 2, row: 1))]))
+    }
+
     /// The panes a popup Herdr leaves out covered are drawn again once it exits, though the layout, which
     /// leaves the popup out already, doesn't change.
     func testThePanesAreDrawnAgainWhenAPopupLeftOutExits() async throws {
@@ -1198,6 +1281,19 @@ final class HerdrPopupTests: XCTestCase {
         try await harness.waitUntil("the small surface wasn't laid out") { harness.model.layout?.columns == columns }
     }
 
+    /// The snapshot of tabs `t1`, of panes `w1:p1` and `w1:p2`, and `t2`, of pane `w1:p3`, with `focused`'s
+    /// first pane focused.
+    private static func twoTabs(revision: UInt64, focused: String) -> [UInt8] {
+        HerdrServerScript.snapshot(
+            revision: revision,
+            focusedTab: focused,
+            otherTabs: [focused == "t1" ? "t2" : "t1"],
+            focusedPane: focused == "t1" ? "w1:p1" : "w1:p3",
+            panes: ["w1:p1", "w1:p2"].map { HerdrServerScript.snapshotPane($0) }
+                + [HerdrServerScript.snapshotPane("w1:p3", tab: "t2")]
+        )
+    }
+
     /// The session leaves the screen, which lets the popup's attach go, and comes back on a surface of
     /// `columns` x `rows` that leaves the popup out; returns the bridge of the attach that follows.
     private func leaveAndComeBack(
@@ -1346,6 +1442,15 @@ enum DirectServer {
         var writer = HerdrWireWriter()
         writer.variant(3)
         writer.optional(reason) { $0.string($1) }
+        return HerdrWire.frame(writer.bytes)
+    }
+
+    /// Whether the program reads the mouse, as Herdr sends it to an attach when it changes.
+    static func mouseCapture(_ enabled: Bool) -> [UInt8] {
+        var writer = HerdrWireWriter()
+        writer.variant(8)
+        writer.bool(enabled)
+        writer.bool(false)
         return HerdrWire.frame(writer.bytes)
     }
 }
