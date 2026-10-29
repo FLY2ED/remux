@@ -2945,8 +2945,8 @@ final class HerdrScreenModelTests: XCTestCase {
     }
 
     /// A notification tapped as the session comes back takes the session to its pane's tab: the move takes
-    /// the show over, its zoom goes at once, and the show's frame of the tab left isn't drawn; only the tab
-    /// reached, zoomed, is.
+    /// the show over, its zoom goes at once, and the show's frame of the tab left isn't drawn, though another
+    /// client unzoomed that tab meanwhile and Herdr draws it split; only the tab reached, zoomed, is.
     func testAMoveDuringAReturnShowsOnlyTheTabReached() async throws {
         let harness = await makeHarness(settings: Self.zooming)
         let session = try await shownTab(harness, zoomingOnShow: true, secondTab: Self.secondTab)
@@ -2962,18 +2962,52 @@ final class HerdrScreenModelTests: XCTestCase {
         let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
         XCTAssertEqual([zoom.paneID, zoom.mode], ["w1:p3", "on"])
 
-        // Herdr takes the show: the tab left, still zoomed, is on screen.
-        await session.bridge.serve(HerdrServerScript.snapshot(revision: 3, zoomed: true, otherTabs: ["t2"], panes: Self.bothTabsPanes))
+        // Herdr takes the show: the tab left is on screen, split, as another client unzoomed it meanwhile.
+        await session.bridge.serve(Self.firstTabOnScreen(revision: 3))
         await session.bridge.serve(HerdrServerScript.surfaceSetReply(id: show.id, active: true))
-        await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 3, lines: ["new"], panes: [Self.zoomedPane]))
+        await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 3, lines: ["one two"], panes: Self.twoPanes))
         try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(drawnPanes(harness), ["w1:p1"], "the tab left was drawn split")
         XCTAssertFalse(harness.model.isInputAvailable, "the show's frame of the tab left completed the move")
 
         await session.bridge.serve(
             HerdrServerScript.zoomReply(id: zoom.id, changed: true, zoomed: true, tab: "t2", panes: Self.secondTabPlaces)
         )
-        await session.bridge.serve(Self.secondTabOnScreen(revision: 4, zoomed: true, firstTabZoomed: true))
+        await session.bridge.serve(Self.secondTabOnScreen(revision: 4, zoomed: true))
         await session.bridge.serve(try harness.shownSurface(projection: 4, revision: 4, lines: ["thr"], panes: [Self.secondTabZoomed]))
+        let focus = try await nextWrite(session.bridge, from: &index, paneFocus)
+        XCTAssertEqual(focus.paneID, "w1:p3")
+        await session.bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
+        try await harness.waitUntil("the tab reached wasn't drawn zoomed") { self.drawnPanes(harness) == ["w1:p3"] }
+        try await harness.waitUntil("the move didn't complete") { harness.model.stateTraceLabel == "shown" }
+    }
+
+    /// A move asked while the newest snapshot's frame is still on its way holds the frames all the same: the
+    /// tab left isn't drawn split as another client unzooms it, and only the tab reached, zoomed, is drawn.
+    func testAMoveHoldsTheFramesWhileTheNewestSnapshotsFrameIsOnItsWay() async throws {
+        let harness = await makeHarness(settings: Self.zooming)
+        let session = try await shownTab(harness, zoomingOnShow: true, secondTab: Self.secondTab)
+        var index = session.next
+
+        await session.bridge.serve(
+            HerdrServerScript.snapshot(revision: 3, zoomed: true, otherTabs: ["t2"], panes: Self.bothTabsPanes)
+        )
+        try await Task.sleep(for: .milliseconds(100))
+        harness.model.reveal(.pane("w1:p3"), bootID: "boot")
+        let zoom = try await nextWrite(session.bridge, from: &index, paneZoom)
+        XCTAssertEqual([zoom.paneID, zoom.mode], ["w1:p3", "on"])
+        await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 3, lines: ["one"], panes: [Self.zoomedPane]))
+        // Another client unzooms the tab left before Herdr answers the zoom.
+        await session.bridge.serve(Self.firstTabOnScreen(revision: 4))
+        await session.bridge.serve(try harness.shownSurface(projection: 4, revision: 4, lines: ["one two"], panes: Self.twoPanes))
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(drawnPanes(harness), ["w1:p1"], "the tab left was drawn split")
+
+        await session.bridge.serve(
+            HerdrServerScript.zoomReply(id: zoom.id, changed: true, zoomed: true, tab: "t2", panes: Self.secondTabPlaces)
+        )
+        await session.bridge.serve(Self.secondTabOnScreen(revision: 5, zoomed: true))
+        await session.bridge.serve(try harness.shownSurface(projection: 5, revision: 5, lines: ["thr"], panes: [Self.secondTabZoomed]))
         let focus = try await nextWrite(session.bridge, from: &index, paneFocus)
         XCTAssertEqual(focus.paneID, "w1:p3")
         await session.bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))

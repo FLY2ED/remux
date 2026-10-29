@@ -389,6 +389,17 @@ final class HerdrLiveConnectionTests: XCTestCase {
             return model.places.outline?.workspace(containingTab: tab)?.id != first.id
         }
         try await zoomState(session, pane: panes.focused, is: true)
+        let made = try XCTUnwrap(onScreen().flatMap { model.places.outline?.workspace(containingTab: $0) })
+        model.reveal(.workspace(first.id), bootID: try XCTUnwrap(model.places.outline).bootID)
+        try await waitUntil("the workspace didn't go back to the tab this phone had there", timeout: .seconds(15)) {
+            onScreen() == firstTab && model.stateTraceLabel == "shown"
+        }
+        try await zoomState(session, pane: panes.focused, is: true)
+        model.reveal(.workspace(made.id), bootID: try XCTUnwrap(model.places.outline).bootID)
+        try await waitUntil("the workspace made didn't come back", timeout: .seconds(15)) {
+            guard let tab = onScreen() else { return false }
+            return model.places.outline?.workspace(containingTab: tab)?.id == made.id && model.stateTraceLabel == "shown"
+        }
         await model.stop()
         try await zoomState(session, pane: panes.focused, is: false)
     }
