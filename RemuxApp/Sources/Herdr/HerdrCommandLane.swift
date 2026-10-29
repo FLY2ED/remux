@@ -60,12 +60,22 @@ struct HerdrCommandLane {
             /// the tab is still zoomed, since another client may have unzoomed it meanwhile and the question
             /// would zoom it again for everyone.
             case layout(pane: String)
-            /// A step of Remux's zooms coming off as the session ends: the focus of the tab `tabID`, or the
-            /// unzoom of the pane Herdr has focused there (`HerdrTerminalEngine.releaseZooms`). It goes with the lane free, and
-            /// nothing else goes from the release's start.
-            case release(tabID: String)
+            /// A step of Remux's zooms coming off as the session ends (`HerdrTerminalEngine.releaseZooms`). It
+            /// goes with the lane free, and nothing else goes from the release's start.
+            case release(ReleaseStep)
             /// Anything else, whose caller gets its answer; it goes only while the session is shown.
             case other(answered: @Sendable (Result<HerdrCommandReply, HerdrCommandError>) -> Void)
+        }
+
+        /// A step of Remux's zooms coming off as the session ends.
+        enum ReleaseStep: Equatable {
+            /// The focus of the tab `tabID`, off screen, for its unzoom.
+            case focus(tabID: String)
+            /// The unzoom of the pane Herdr has focused on the tab this client views, meant for the tab `tabID`.
+            case unzoom(tabID: String)
+            /// A zoom put back on the tab an unzoom reached in place of the tab it was meant for: another
+            /// client's, which isn't Remux's.
+            case restore
         }
 
         let method: String
