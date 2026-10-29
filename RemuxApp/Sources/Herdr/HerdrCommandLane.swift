@@ -71,7 +71,7 @@ struct HerdrCommandLane {
         enum ReleaseStep: Equatable {
             /// The focus of the tab `tabID`, off screen, for its unzoom.
             case focus(tabID: String)
-            /// The unzoom of the pane Herdr has focused on the tab this client views, meant for the tab `tabID`.
+            /// The unzoom of the tab `tabID`, on the pane the snapshot shows focused there.
             case unzoom(tabID: String)
         }
 
