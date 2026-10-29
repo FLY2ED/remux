@@ -37,6 +37,8 @@ struct GhosttyTerminalPopupFrameView: View {
                         layout: layout,
                         separatorColor: terminalTheme.terminalCompositeSeparatorUIColor
                     )
+                    .frame(width: layout.canvasSize.width, height: layout.canvasSize.height)
+                    .offset(x: layout.origin.x, y: layout.origin.y)
                     .accessibilityHidden(true)
                     GhosttyTerminalPopupHost(
                         popup: popup,
@@ -124,7 +126,8 @@ struct GhosttyTerminalPopupFrameView: View {
     }
 }
 
-/// Lines drawn as the panes' lines are (`GhosttyPaneLine.draw`), over a clear background.
+/// The frame's lines, drawn as the panes' lines are (`GhosttyPaneLinesUIView`), on the canvas. A popup's
+/// frame draws the focus ink as the separator.
 private struct GhosttyPaneLinesView: UIViewRepresentable {
     let lines: [GhosttyPaneLine]
     let layout: GhosttyCompositeViewportLayout
@@ -135,52 +138,7 @@ private struct GhosttyPaneLinesView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: GhosttyPaneLinesUIView, context: Context) {
-        view.update(lines: lines, layout: layout, separatorColor: separatorColor)
-    }
-}
-
-private final class GhosttyPaneLinesUIView: UIView {
-    private var lines: [GhosttyPaneLine] = []
-    private var layout: GhosttyCompositeViewportLayout?
-    private var separatorColor = UIColor.clear
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        isOpaque = false
-        backgroundColor = .clear
-        isUserInteractionEnabled = false
-        contentMode = .redraw
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    func update(lines: [GhosttyPaneLine], layout: GhosttyCompositeViewportLayout, separatorColor: UIColor) {
-        guard lines != self.lines || layout != self.layout || !separatorColor.isEqual(self.separatorColor) else { return }
-        self.lines = lines
-        self.layout = layout
-        self.separatorColor = separatorColor
-        setNeedsDisplay()
-    }
-
-    override func draw(_ rect: CGRect) {
-        guard let layout, let context = UIGraphicsGetCurrentContext() else { return }
-        let separator = separatorColor.cgColor
-        GhosttyPaneLine.draw(
-            lines,
-            in: context,
-            layout: layout,
-            scale: max(window?.screen.scale ?? traitCollection.displayScale, 1)
-        ) { ink in
-            switch ink {
-            case .separator, .focus:
-                separator
-            case .color(let red, let green, let blue):
-                UIColor(red: CGFloat(red) / 255, green: CGFloat(green) / 255, blue: CGFloat(blue) / 255, alpha: 1).cgColor
-            }
-        }
+        view.update(lines: lines, layout: layout, inks: .init(separator: separatorColor, focus: separatorColor))
     }
 }
 

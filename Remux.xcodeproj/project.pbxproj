@@ -215,6 +215,7 @@
 		87A3C40BA75A75592A482867 /* GhosttyComposerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65F7D40090293C627F8A1800 /* GhosttyComposerModel.swift */; };
 		887D13BFCFC9A3616924D45B /* direct-terminal-0.9.5-03-missing.c2s.bin in Resources */ = {isa = PBXBuildFile; fileRef = E008F30DFD7B78390EB254CC /* direct-terminal-0.9.5-03-missing.c2s.bin */; };
 		890ADA9AC6BC01F9D619CAD8 /* PanePreviewLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 603A62637F1E7C43FD9A1370 /* PanePreviewLayoutTests.swift */; };
+		894D7E491F922716720F1E99 /* GhosttyPaneLinesViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90BFC28E36860F02E40D95F9 /* GhosttyPaneLinesViewTests.swift */; };
 		8979E49587E4949F5F3B8582 /* HerdrPlacesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE5167DFBE5586055B87A524 /* HerdrPlacesTests.swift */; };
 		89C1F4911661B92184C2F0D0 /* herdr-04-patch-and-delta-A.expected.json in Resources */ = {isa = PBXBuildFile; fileRef = 8CEAEBA5A9D7ADB16537FB03 /* herdr-04-patch-and-delta-A.expected.json */; };
 		89F684C2EF32AE28C300550C /* herdr-03-handshake-rejections-zerosize.s2c.bin in Resources */ = {isa = PBXBuildFile; fileRef = D0F40F9AB60AAE689848E606 /* herdr-03-handshake-rejections-zerosize.s2c.bin */; };
@@ -659,6 +660,7 @@
 		8ECDF46DC2F389505455C283 /* GhosttySingleViewportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttySingleViewportView.swift; sourceTree = "<group>"; };
 		90179C96FDCDCE2F5E010153 /* herdr-wide-cells-patch-A.expected.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "herdr-wide-cells-patch-A.expected.json"; sourceTree = "<group>"; };
 		902AC3DF91A828A0CCB5FCB2 /* TerminalSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSettings.swift; sourceTree = "<group>"; };
+		90BFC28E36860F02E40D95F9 /* GhosttyPaneLinesViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttyPaneLinesViewTests.swift; sourceTree = "<group>"; };
 		919EA0422BBF01061F6B4946 /* herdr-09-resize-A.s2c.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = "herdr-09-resize-A.s2c.bin"; sourceTree = "<group>"; };
 		92798C2D703016631285E219 /* herdr-01-handshake-all-caps-A.c2s.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = "herdr-01-handshake-all-caps-A.c2s.bin"; sourceTree = "<group>"; };
 		947084E6DA45D9EFB946CF51 /* RemuxApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemuxApp.swift; sourceTree = "<group>"; };
@@ -927,6 +929,7 @@
 				EF4BB00F78EE94D58937F98A /* GhosttyKitControlSurfaceTests.swift */,
 				8BA8119EA500195F1FF488FF /* GhosttyKitRuntimeTests.swift */,
 				ED11F0B6BF0469948945A509 /* GhosttyModifierStateTests.swift */,
+				90BFC28E36860F02E40D95F9 /* GhosttyPaneLinesViewTests.swift */,
 				07301EEDA55AAD40D17C26DA /* GhosttyPanePreviewSessionTests.swift */,
 				71B734F55FC22090646AD0D2 /* GhosttyPendingAttachmentTests.swift */,
 				A9BEEA4655420D5DCEDE5C23 /* GhosttyPhoneChromeLayoutTests.swift */,
@@ -1856,6 +1859,7 @@
 				DBC5F67F490AAC96F4918650 /* GhosttyKitControlSurfaceTests.swift in Sources */,
 				1FCDFBD088BC311CDCBA7C7B /* GhosttyKitRuntimeTests.swift in Sources */,
 				F4CB602D5DC2C8F2BA4FFF12 /* GhosttyModifierStateTests.swift in Sources */,
+				894D7E491F922716720F1E99 /* GhosttyPaneLinesViewTests.swift in Sources */,
 				14BCD2766E4ED765F45BA3AD /* GhosttyPanePreviewSessionTests.swift in Sources */,
 				756630E292FD6FE5DA82F830 /* GhosttyPendingAttachmentTests.swift in Sources */,
 				557B4DE97A72EE7ED2097407 /* GhosttyPhoneChromeLayoutTests.swift in Sources */,

@@ -114,7 +114,9 @@ private final class GhosttyCompositeViewportContainerView: UIView,
     private var surfaceLookup = GhosttyManagedSurfaceLookup.empty
     private var projection = GhosttyTerminalViewportPresentationProjection.empty
     private var containersBySurfaceID: [UUID: GhosttyPaneScrollContainerView] = [:]
-    private var focusedSeparatorColor = UIColor.clear.cgColor
+    /// The panes' lines, behind the panes.
+    private let linesView = GhosttyPaneLinesUIView()
+    private var focusedSeparatorColor = UIColor.clear
     private var separatorColor = UIColor.clear
     private var trackpadDriver: GhosttyKeyboardCursorTrackpadDriver?
 
@@ -180,7 +182,7 @@ private final class GhosttyCompositeViewportContainerView: UIView,
     override init(frame: CGRect) {
         super.init(frame: frame)
         clipsToBounds = true
-        contentMode = .redraw
+        addSubview(linesView)
         panRecognizer.delegate = self
         surfaceTapRecognizer.require(toFail: selectionLongPressRecognizer)
         addGestureRecognizer(panRecognizer)
@@ -218,17 +220,17 @@ private final class GhosttyCompositeViewportContainerView: UIView,
     ) {
         let fillColor = UIColor(style.accent)
         let borderColor = UIColor(style.accentForeground).cgColor
-        let styleChanged = focusedSeparatorColor != fillColor.cgColor
+        let styleChanged = !focusedSeparatorColor.isEqual(fillColor)
             || !self.separatorColor.isEqual(separatorColor)
             || startSelectionHandle.layer.borderColor != borderColor
         guard styleChanged else { return }
-        focusedSeparatorColor = fillColor.cgColor
+        focusedSeparatorColor = fillColor
         self.separatorColor = separatorColor
         startSelectionHandle.backgroundColor = fillColor
         endSelectionHandle.backgroundColor = fillColor
         startSelectionHandle.layer.borderColor = borderColor
         endSelectionHandle.layer.borderColor = borderColor
-        setNeedsDisplay()
+        flushLayoutIfPossible()
     }
 
     func update(
@@ -246,7 +248,6 @@ private final class GhosttyCompositeViewportContainerView: UIView,
         submitMouseScroll: ((UUID, GhosttySurfaceMouseScrollEvent) -> GhosttyMouseInputSubmissionOutcome)?,
         selectionSource: GhosttyTerminalSelectionSource?
     ) {
-        let topologyChanged = self.projection != projection
         self.projection = projection
         self.surfaceLookup = surfaceLookup
         self.trackpadDriver = trackpadDriver
@@ -260,10 +261,6 @@ private final class GhosttyCompositeViewportContainerView: UIView,
         self.submitMousePosition = submitMousePosition
         self.submitMouseScroll = submitMouseScroll
         self.selectionSource = selectionSource
-
-        if topologyChanged {
-            setNeedsDisplay()
-        }
 
         if activePanAxis == .horizontal, !projection.canNavigateWindows {
             resetActivePanState()
@@ -315,41 +312,6 @@ private final class GhosttyCompositeViewportContainerView: UIView,
         layoutSelectionHandles()
     }
 
-    override func draw(_ rect: CGRect) {
-        super.draw(rect)
-
-        let lines = projection.paneLines
-        guard !lines.isEmpty,
-              let grid = projection.windowGrid,
-              let cell = projection.cellMetrics,
-              let layout = GhosttyCompositeViewportLayout(
-                  bounds: bounds,
-                  grid: grid,
-                  cellMetrics: cell
-              ),
-              let context = UIGraphicsGetCurrentContext()
-        else { return }
-
-        GhosttyPaneLine.draw(lines, in: context, layout: layout, scale: effectiveScale, color: color(of:))
-    }
-
-    private func color(of ink: GhosttyPaneLine.Ink) -> CGColor {
-        switch ink {
-        case .separator:
-            separatorColor.cgColor
-        case .focus:
-            focusedSeparatorColor
-        case .color(let red, let green, let blue):
-            UIColor(
-                red: CGFloat(red) / 255,
-                green: CGFloat(green) / 255,
-                blue: CGFloat(blue) / 255,
-                alpha: 1
-            ).cgColor
-        }
-    }
-
-
     private func syncVisibleSurfaces() {
         let startedAt = GhosttyRuntimeTrace.perfEnabled
             ? GhosttyRuntimeTrace.nowNanos()
@@ -386,7 +348,7 @@ private final class GhosttyCompositeViewportContainerView: UIView,
             container.backgroundColor = .clear
             _ = container.update(
                 surface: surface,
-                displayScale: effectiveScale,
+                displayScale: paneDisplayScale,
                 submitRouteForwardedMouseScroll: submitMouseScroll,
                 submitRouteForwardedMousePosition: submitMousePosition
             )
@@ -408,6 +370,7 @@ private final class GhosttyCompositeViewportContainerView: UIView,
         let startedAt = GhosttyRuntimeTrace.perfEnabled
             ? GhosttyRuntimeTrace.nowNanos()
             : nil
+        let inks = GhosttyPaneLinesUIView.Inks(separator: separatorColor, focus: focusedSeparatorColor)
         guard let grid = projection.windowGrid,
               let cell = projection.cellMetrics,
               let layout = GhosttyCompositeViewportLayout(
@@ -415,13 +378,19 @@ private final class GhosttyCompositeViewportContainerView: UIView,
                   grid: grid,
                   cellMetrics: cell
               )
-        else { return }
+        else {
+            linesView.update(lines: [], layout: nil, inks: inks)
+            return
+        }
         var changed = false
         // Pane frames are exact cell geometry. A layout pass can run inside another animation,
         // such as the system keyboard's; animating a pane there leaves a position animation
         // running that adds its offset to the next authoritative layout. Each moved pane also
         // lays itself out here, so its own frames stay out of that animation too.
         UIView.performWithoutAnimation {
+            // Behind the panes, their lines take the grid's canvas the same way (`GhosttyPaneLinesUIView`).
+            linesView.frame = CGRect(origin: layout.origin, size: layout.canvasSize)
+            linesView.update(lines: projection.paneLines, layout: layout, inks: inks)
             for pane in projection.panes {
                 guard let visibleFrame = pane.visibleFrame,
                       let container = containersBySurfaceID[pane.id]
@@ -871,10 +840,6 @@ private final class GhosttyCompositeViewportContainerView: UIView,
         )
     }
 
-    private var effectiveScale: CGFloat {
-        max(window?.screen.scale ?? UIScreen.main.scale, 1)
-    }
-
     private func visibleSurface(
         at point: CGPoint
     ) -> (UUID, GhosttyManagedSurface, GhosttyPaneScrollContainerView)? {
@@ -987,6 +952,77 @@ private extension GhosttySurfacePanGesture.WindowNavigationDirection {
         case .previous: .previous
         case .next: .next
         }
+    }
+}
+
+/// Lines on a grid's canvas (`GhosttyPaneLine.draw`), in a view of their own that its host places at the canvas
+/// of `GhosttyCompositeViewportLayout`, which the grid alone sizes. The terminal area's size animates as the
+/// keyboard comes up or goes down, and Core Animation scales a layer's drawing to its bounds through such an
+/// animation, so lines drawn into the area's own layer would stretch over the panes, which are laid out without
+/// animation. The canvas keeps its place through the animation, and this view's geometry never animates.
+final class GhosttyPaneLinesUIView: UIView {
+    /// The colours of the inks the backend leaves to the theme.
+    struct Inks: Equatable {
+        var separator: UIColor
+        var focus: UIColor
+    }
+
+    private var lines: [GhosttyPaneLine] = []
+    private var layout: GhosttyCompositeViewportLayout?
+    private var inks = Inks(separator: .clear, focus: .clear)
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isOpaque = false
+        backgroundColor = .clear
+        isUserInteractionEnabled = false
+        contentMode = .redraw
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func update(lines: [GhosttyPaneLine], layout: GhosttyCompositeViewportLayout?, inks: Inks) {
+        guard lines != self.lines || layout != self.layout || inks != self.inks else { return }
+        self.lines = lines
+        self.layout = layout
+        self.inks = inks
+        setNeedsDisplay()
+    }
+
+    override func action(for layer: CALayer, forKey event: String) -> (any CAAction)? {
+        switch event {
+        case "bounds", "position":
+            NSNull()
+        default:
+            super.action(for: layer, forKey: event)
+        }
+    }
+
+    override func draw(_ rect: CGRect) {
+        guard let layout, let context = UIGraphicsGetCurrentContext() else { return }
+        // The lines are laid out from the area's origin; the view sits at the canvas's.
+        context.translateBy(x: -layout.origin.x, y: -layout.origin.y)
+        GhosttyPaneLine.draw(lines, in: context, layout: layout, scale: paneDisplayScale) { ink in
+            switch ink {
+            case .separator:
+                inks.separator.cgColor
+            case .focus:
+                inks.focus.cgColor
+            case .color(let red, let green, let blue):
+                UIColor(red: CGFloat(red) / 255, green: CGFloat(green) / 255, blue: CGFloat(blue) / 255, alpha: 1).cgColor
+            }
+        }
+    }
+}
+
+private extension UIView {
+    /// The scale the panes' cells and lines are laid out on, so the two meet on the same pixels: the window's
+    /// screen's, or the main screen's before the view is in a window.
+    var paneDisplayScale: CGFloat {
+        max(window?.screen.scale ?? UIScreen.main.scale, 1)
     }
 }
 
