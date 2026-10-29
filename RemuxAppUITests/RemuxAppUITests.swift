@@ -2555,6 +2555,8 @@ final class RemuxAppUITests: XCTestCase {
     func testLiveHerdrPopupFrameWhenConfigured() throws {
         app.launchEnvironment["REMUX_TRACE_GHOSTTY_DIAGNOSTICS"] = "1"
         let configuration = try launchLiveHerdrApp(requiringSteps: true)
+        // A failure in a landscape phase ends the test there; the tests after it start in portrait.
+        addTeardownBlock { XCUIDevice.shared.orientation = .portrait }
         let popup = app.descendants(matching: .any)["terminal.popup"].firstMatch
         let content = app.descendants(matching: .any)["terminal.popup.content"].firstMatch
         let title = app.staticTexts["terminal.popup.title"].firstMatch

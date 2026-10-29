@@ -286,12 +286,9 @@ final class HerdrTerminalScreenAdapter: ObservableObject {
         _ = surface.screenSurface(id: surfaceID(forPane: surface.paneID))
     }
 
-    /// The popup's renderer gets its screen surface as it is made. Its history is Herdr's, so a swipe goes to
-    /// Herdr's wheel handling, as a pane's does; Herdr doesn't say how far back an attached popup is.
+    /// The popup's renderer gets its screen surface as it is made.
     func makeScreenSurface(forPopup surface: HerdrPopupTerminalSurface) {
-        let managed = surface.screenSurface(id: surfaceID(forPopup: surface.terminalID))
-        let rows = UInt64(surface.grid.rows)
-        managed.setRemoteScroll(GhosttySurfaceScrollState(total: rows, offset: 0, len: rows, cellOffset: 0), route: .remoteHistory)
+        _ = surface.screenSurface(id: surfaceID(forPopup: surface.terminalID))
     }
 
     private func managedSurface(for id: UUID) -> GhosttyManagedSurface? {
@@ -463,7 +460,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     ) -> GhosttyMouseInputSubmissionOutcome {
         guard let model else { return .missingTarget(surfaceID) }
         if popupTerminalID(for: surfaceID) != nil {
-            model.movePopupPointer(to: position)
+            model.movePopupPointer(to: position, mods: mods)
             return .sent
         }
         guard let paneID = paneID(for: surfaceID) else { return .missingTarget(surfaceID) }

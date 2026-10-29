@@ -202,7 +202,37 @@ final class HerdrTerminalAttachmentTests: XCTestCase {
         }
         guard case .failed = ending else { return XCTFail("ended \(String(describing: ending))") }
         let closes = await bridge.closes
-        XCTAssertEqual(closes.first, .unresponsive)
+        XCTAssertEqual(closes, [.unresponsive])
+    }
+
+    /// A detach on a path that takes no writes doesn't wait on it past the attach's answer deadline: the
+    /// bridge closes unresponsive, which fails the write.
+    func testADetachOnAStalledPathClosesTheBridgeUnresponsive() async throws {
+        let bridge = FakeBridgeTransport()
+        let attachment = HerdrTerminalAttachment(
+            terminalID: "term",
+            geometry: .init(columns: 10, rows: 4, cellWidthPx: 0, cellHeightPx: 0),
+            openBridge: { bridge },
+            welcomeDeadline: .milliseconds(200)
+        )
+        Task { await attachment.run() }
+        _ = try await bridge.written(0)
+        await bridge.serve(DirectServer.welcome())
+        _ = await bridge.waitForReads(2)
+        await bridge.stallWrites()
+
+        let detached = AnswerBox()
+        Task {
+            await attachment.detach()
+            await detached.set(true)
+        }
+        for _ in 0..<200 where await detached.value == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let returned = await detached.value
+        XCTAssertEqual(returned, true, "the detach waited on a write the path never took")
+        let closes = await bridge.closes
+        XCTAssertEqual(closes, [.unresponsive])
     }
 
     /// A stream that ends without Herdr saying why is a failure, not a terminal that is gone.

@@ -324,8 +324,9 @@ final class HerdrPopupTests: XCTestCase {
         try await assertNoInput(session.bridge, from: typedFrom)
     }
 
-    /// A tap on a popup whose program reads the mouse is a click there, as on a pane: a press and its release
-    /// at the cell tapped, as popup input. On a program that doesn't, a tap only brings the keyboard up.
+    /// A tap on a popup whose program reads the mouse is a click there, as on a pane: the pointer moves to the
+    /// cell tapped, then a press and its release there, all as popup input. On a program that doesn't, a tap
+    /// only brings the keyboard up.
     func testATapOnThePopupClicksForAProgramThatReadsTheMouse() async throws {
         for reads in [true, false] {
             let harness = await makeHarness()
@@ -340,11 +341,39 @@ final class HerdrPopupTests: XCTestCase {
             _ = adapter.sendMousePosition(to: target, point, mods: [])
             XCTAssertEqual(adapter.sendMouseButton(to: target, GhosttySurfaceMouseButtonEvent(state: .press, button: .left)), .sent)
             XCTAssertEqual(adapter.sendMouseButton(to: target, GhosttySurfaceMouseButtonEvent(state: .release, button: .left)), .sent)
+            let moved = try await nextInput(session.bridge, from: &index)
             let press = try await nextInput(session.bridge, from: &index)
             let release = try await nextInput(session.bridge, from: &index)
+            XCTAssertEqual(moved, popupInput([.mouse(HerdrMouseEvent(kind: .moved, column: 2, row: 1))]))
             XCTAssertEqual(press, popupInput([.mouse(HerdrMouseEvent(kind: .down(.left), column: 2, row: 1))]))
             XCTAssertEqual(release, popupInput([.mouse(HerdrMouseEvent(kind: .up(.left), column: 2, row: 1))]))
         }
+    }
+
+    /// The popup's scroll range is its grid's, as Herdr says nothing of an attached popup's history: a grid
+    /// that changes, as when the keyboard comes up, leaves no range of the grid before.
+    func testThePopupsScrollRangeFollowsItsGrid() async throws {
+        let shorter = try HerdrModelHarness.screenSize(columns: 50, rows: 25)
+        let harness = await makeHarness()
+        let (_, attach, _) = try await attachedPopup(harness)
+        let managed = try XCTUnwrap(harness.model.popup.surface?.renderer.managedSurface)
+        let full = try Self.grid(harness)
+        XCTAssertEqual(managed.scrollState.len, UInt64(full.rows))
+
+        let before = await attach.writtenCount
+        harness.model.prepareViewport(size: shorter, scale: 3)
+        let grid = try Self.grid(harness)
+        try await harness.waitUntil("the popup wasn't resized") {
+            var messages: [DirectClient] = []
+            for write in before..<(await attach.writtenCount) {
+                messages += (try? await DirectClient.messages(attach, at: write)) ?? []
+            }
+            return messages.contains(.resize(columns: grid.columns, rows: grid.rows))
+        }
+        await attach.serve(DirectServer.frame(2, grid, "$ "))
+        try await harness.waitUntil("the popup didn't take its new grid") { harness.model.popup.surface?.grid == grid }
+        XCTAssertEqual(managed.scrollState.total, UInt64(grid.rows))
+        XCTAssertEqual(managed.scrollState.len, UInt64(grid.rows))
     }
 
     // MARK: - A surface too small for Herdr to box the popup
@@ -501,6 +530,8 @@ final class HerdrPopupTests: XCTestCase {
         _ = adapter.sendMousePosition(to: target, CGPoint(x: 2.5 * cell.pointWidth, y: 1.5 * cell.pointHeight), mods: [])
         XCTAssertEqual(adapter.sendMouseButton(to: target, GhosttySurfaceMouseButtonEvent(state: .press, button: .left)), .sent)
         XCTAssertEqual(adapter.sendMouseButton(to: target, GhosttySurfaceMouseButtonEvent(state: .release, button: .left)), .sent)
+        let moved = try await nextInput(session.bridge, from: &index)
+        XCTAssertEqual(moved, popupInput([.mouse(HerdrMouseEvent(kind: .moved, column: 2, row: 1))]))
         let press = try await nextInput(session.bridge, from: &index)
         XCTAssertEqual(press, popupInput([.mouse(HerdrMouseEvent(kind: .down(.left), column: 2, row: 1))]))
     }
@@ -550,6 +581,8 @@ final class HerdrPopupTests: XCTestCase {
         var index = await session.bridge.writtenCount
         _ = adapter.sendMousePosition(to: shown, CGPoint(x: 0.5 * cell.pointWidth, y: 0.5 * cell.pointHeight), mods: [])
         XCTAssertEqual(adapter.sendMouseButton(to: shown, GhosttySurfaceMouseButtonEvent(state: .press, button: .left)), .sent)
+        let moved = try await nextInput(session.bridge, from: &index)
+        XCTAssertEqual(moved, popupInput([.mouse(HerdrMouseEvent(kind: .moved, column: 0, row: 0))]))
         let press = try await nextInput(session.bridge, from: &index)
         XCTAssertEqual(press, popupInput([.mouse(HerdrMouseEvent(kind: .down(.left), column: 0, row: 0))]))
     }

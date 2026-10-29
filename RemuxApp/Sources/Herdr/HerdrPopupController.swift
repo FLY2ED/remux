@@ -44,8 +44,10 @@ final class HerdrPopupTerminalSurface: TerminalPaneInputSink {
     let isAttached: Bool
     /// The composer's input for this popup's terminal, which learns whether Herdr has it.
     private let deliver: ([HerdrInputEvent]) async -> Bool
-    /// The grid the renderer draws.
-    fileprivate(set) var grid: HerdrPopupGrid
+    /// The grid the renderer draws, which is also its scroll range (`applyScrollRange`).
+    fileprivate(set) var grid: HerdrPopupGrid {
+        didSet { applyScrollRange() }
+    }
 
     fileprivate init(
         terminalID: String,
@@ -64,7 +66,19 @@ final class HerdrPopupTerminalSurface: TerminalPaneInputSink {
     }
 
     func screenSurface(id: UUID) -> GhosttyManagedSurface {
-        renderer.screenSurface(id: id, inputSink: self)
+        let managed = renderer.screenSurface(id: id, inputSink: self)
+        applyScrollRange()
+        return managed
+    }
+
+    /// Herdr doesn't say how far back a popup's history goes, so its scroll range is its grid, and a swipe goes
+    /// to Herdr's wheel handling, as a pane's does.
+    private func applyScrollRange() {
+        let rows = UInt64(grid.rows)
+        renderer.managedSurface?.setRemoteScroll(
+            GhosttySurfaceScrollState(total: rows, offset: 0, len: rows, cellOffset: 0),
+            route: .remoteHistory
+        )
     }
 
     func sendPasteAwaitingCommandCompletion(_ text: String) async -> Bool {

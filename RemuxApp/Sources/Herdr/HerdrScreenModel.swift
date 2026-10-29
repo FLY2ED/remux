@@ -371,8 +371,6 @@ final class HerdrScreenModel {
     private var popupPointer: CGPoint?
     /// The scroll travel over the popup not yet a whole row.
     private var popupWheelRemainder: Double?
-    /// The button held over the popup, until its release.
-    private var popupPress: HerdrMouseEvent.Button?
     private var notices = HerdrNoticePolicy(visibleFor: GhosttyTerminalNotice.failureDuration)
     private var creatingTerminals: Set<ObjectIdentifier> = []
     /// Ghostty gives a terminal one renderer at a time, so a replacement waits for these to close.
@@ -1013,9 +1011,15 @@ final class HerdrScreenModel {
         popup.presentation
     }
 
-    /// Where the pointer is over the popup, in its terminal's points: the place of a scroll gesture.
-    func movePopupPointer(to point: CGPoint) {
+    /// The pointer moved over the popup, in its terminal's points, as over a pane (`motion`): the cell a tap
+    /// clicks and a scroll gesture's steps are reported at.
+    func movePopupPointer(to point: CGPoint, mods: GhosttySurfaceKeyEvent.Mods) {
+        let previous = popupPointer.flatMap(popupCell(at:))
         popupPointer = point
+        guard let terminalID = popup.popup?.terminalID, let cell = popupCell(at: point),
+              let kind = motion(to: cell, from: previous, over: .popup(terminalID), readsMouse: popupReportsMouse)
+        else { return }
+        _ = popup.sendMouse(kind, column: cell.column, row: cell.row, modifiers: HerdrInputTranslator.modifiers(for: mods))
     }
 
     /// A swipe over the popup, as the pane's: its travel in whole rows of the panes' font.
@@ -1044,24 +1048,21 @@ final class HerdrScreenModel {
     }
 
     /// A button pressed or released at the pointer over the popup, as Herdr's client sends one to a popup
-    /// whose program reads the mouse (`client/shell/mouse.rs`): the press, and then its release. Herdr writes
-    /// either to the program only while it reads the mouse (`server/pane_input.rs`). Returns false when the
-    /// event doesn't go.
+    /// whose program reads the mouse (`client/shell/mouse.rs`): the press, and then its release
+    /// (`releaseHeldButton`). Herdr writes either to the program only while it reads the mouse
+    /// (`server/pane_input.rs`). Returns false when the event doesn't go.
     func sendPopupMouseButton(_ event: GhosttySurfaceMouseButtonEvent) -> Bool {
         guard let button = HerdrInputTranslator.mouseButton(event.button) else { return false }
-        let modifiers = HerdrInputTranslator.modifiers(for: event.mods)
         switch event.state {
         case .press:
-            guard popupPress == nil, popupReportsMouse, let cell = popupCell(at: popupPointer ?? .zero),
-                  popup.sendMouse(.down(button), column: cell.column, row: cell.row, modifiers: modifiers)
+            guard mouseGesture == nil, popupReportsMouse, let terminalID = popup.popup?.terminalID,
+                  let cell = popupCell(at: popupPointer ?? .zero),
+                  popup.sendMouse(.down(button), column: cell.column, row: cell.row, modifiers: HerdrInputTranslator.modifiers(for: event.mods))
             else { return false }
-            popupPress = button
+            mouseGesture = MouseGesture(target: .popup(terminalID), button: button, cell: cell)
             return true
         case .release:
-            guard popupPress == button else { return false }
-            popupPress = nil
-            guard let cell = popupCell(at: popupPointer ?? .zero) else { return false }
-            return popup.sendMouse(.up(button), column: cell.column, row: cell.row, modifiers: modifiers)
+            return releaseHeldButton(button, mods: event.mods)
         }
     }
 
@@ -1435,9 +1436,10 @@ final class HerdrScreenModel {
         let row: UInt16
     }
 
-    /// A mouse button held down in a pane, and the cell last reported with it.
+    /// A mouse button held down in a pane or the popup, and the cell last reported with it. One at a time, as
+    /// in Herdr's client.
     private struct MouseGesture {
-        let paneID: String
+        let target: HerdrTerminalTarget
         let button: HerdrMouseEvent.Button
         var cell: PaneCell
     }
@@ -1447,30 +1449,40 @@ final class HerdrScreenModel {
         paneScrolls[paneID]?.mouseReporting == true
     }
 
-    /// The pointer moved over a pane. As Herdr's client passes on the host terminal's motion
-    /// (`client/shell/mouse.rs`), a program that reads the mouse gets a move each time the pointer reaches
-    /// another cell, which Herdr reports only to a program asking for every motion, and while a button is
-    /// held in the pane, a drag. The wheel's steps are reported at this cell too.
+    /// The pointer moved over a pane (`motion`). The wheel's steps are reported at this cell too.
     func movePointer(to point: CGPoint, inPane paneID: String, mods: GhosttySurfaceKeyEvent.Mods) {
         let previous = pointers[paneID].flatMap { paneCell(at: $0, inPane: paneID) }
         pointers[paneID] = point
-        guard let target = inputTarget(forPane: paneID), let cell = paneCell(at: point, inPane: paneID) else { return }
-        let kind: HerdrMouseEvent.Kind
-        if let gesture = mouseGesture {
-            guard gesture.paneID == paneID, cell != gesture.cell else { return }
-            mouseGesture?.cell = cell
-            kind = .drag(gesture.button)
-        } else {
-            guard reportsMouse(inPane: paneID), cell != previous else { return }
-            kind = .moved
-        }
+        guard let target = inputTarget(forPane: paneID), let cell = paneCell(at: point, inPane: paneID),
+              let kind = motion(to: cell, from: previous, over: .pane(paneID), readsMouse: reportsMouse(inPane: paneID))
+        else { return }
         _ = send([mouseEvent(kind, at: cell, mods: mods)], to: target)
+    }
+
+    /// What the pointer reaching `cell` over `target` reports, as Herdr's client passes on the host
+    /// terminal's motion to a pane or the popup (`client/shell/mouse.rs`): while a button pressed there is
+    /// held, a drag each time it reaches another cell; with none held, to a program that reads the mouse, a
+    /// move each time it reaches another cell, which Herdr reports only to a program asking for every motion.
+    /// Nil when nothing goes.
+    private func motion(
+        to cell: PaneCell,
+        from previous: PaneCell?,
+        over target: HerdrTerminalTarget,
+        readsMouse: Bool
+    ) -> HerdrMouseEvent.Kind? {
+        if let gesture = mouseGesture {
+            guard gesture.target == target, cell != gesture.cell else { return nil }
+            mouseGesture?.cell = cell
+            return .drag(gesture.button)
+        }
+        return readsMouse && cell != previous ? .moved : nil
     }
 
     /// A button pressed or released at the pointer, as Herdr's client sends one to a pane: a press goes
     /// only to a program that reads the mouse, and a right press only to a pane set to take right-clicks
     /// (`pane.input.set`) with no modifier held, since Herdr's own menu takes them otherwise. Until its
-    /// release, which goes to the same pane, the press takes the pointer's moves and no other press goes.
+    /// release, which goes where the press went (`releaseHeldButton`), the press takes the pointer's moves and
+    /// no other press goes.
     /// The tap that makes the press focuses the pane, as a tap does on any pane. Returns false when the
     /// event doesn't go.
     func sendMouseButton(_ event: GhosttySurfaceMouseButtonEvent, inPane paneID: String) -> Bool {
@@ -1482,17 +1494,28 @@ final class HerdrScreenModel {
                   let cell = pointers[paneID].flatMap({ paneCell(at: $0, inPane: paneID) }),
                   send([mouseEvent(.down(button), at: cell, mods: event.mods)], to: target) == .accepted
             else { return false }
-            mouseGesture = MouseGesture(paneID: paneID, button: button, cell: cell)
+            mouseGesture = MouseGesture(target: .pane(paneID), button: button, cell: cell)
             return true
         case .release:
-            guard let gesture = mouseGesture, gesture.button == button else { return false }
-            mouseGesture = nil
-            // Herdr takes the release of a press it took whatever tab it shows the phone
-            // (`server/headless.rs` `client_pane_input_releases_press`), so it goes to the press's pane while the
-            // session is shown, also once a move leaves that pane: the program never keeps the button down.
+            return releaseHeldButton(button, mods: event.mods)
+        }
+    }
+
+    /// The release of the button held, wherever it is reported, goes where its press went. Herdr takes the
+    /// release of a press it took whatever tab it shows the phone (`server/headless.rs`
+    /// `client_pane_input_releases_press`, `ClientShellPopupInput`), so it goes while the session is shown,
+    /// also once a move leaves the pane: the program never keeps the button down.
+    private func releaseHeldButton(_ button: HerdrMouseEvent.Button, mods: GhosttySurfaceKeyEvent.Mods) -> Bool {
+        guard let gesture = mouseGesture, gesture.button == button else { return false }
+        mouseGesture = nil
+        switch gesture.target {
+        case .pane(let paneID):
             guard let attempt = shownAttempt else { return false }
-            let cell = pointers[gesture.paneID].flatMap { paneCell(at: $0, inPane: gesture.paneID) } ?? gesture.cell
-            return send([mouseEvent(.up(button), at: cell, mods: event.mods)], to: (attempt, gesture.paneID)) == .accepted
+            let cell = pointers[paneID].flatMap { paneCell(at: $0, inPane: paneID) } ?? gesture.cell
+            return send([mouseEvent(.up(button), at: cell, mods: mods)], to: (attempt, paneID)) == .accepted
+        case .popup:
+            let cell = popupCell(at: popupPointer ?? .zero) ?? gesture.cell
+            return popup.sendMouse(.up(button), column: cell.column, row: cell.row, modifiers: HerdrInputTranslator.modifiers(for: mods))
         }
     }
 
@@ -2305,10 +2328,10 @@ final class HerdrScreenModel {
         // send the touch's end to it: Herdr takes a release whatever tab it shows (`server/headless.rs`
         // `client_pane_input_releases_press`), as Herdr's client releases what it holds once its input
         // context is gone (`client/shell/input.rs` `release_input_leases`). A later release finds no press.
-        if let gesture = mouseGesture, !shown.contains(gesture.paneID) {
+        if let gesture = mouseGesture, case .pane(let paneID) = gesture.target, !shown.contains(paneID) {
             mouseGesture = nil
             if let attempt = shownAttempt {
-                _ = send([mouseEvent(.up(gesture.button), at: gesture.cell, mods: [])], to: (attempt, gesture.paneID))
+                _ = send([mouseEvent(.up(gesture.button), at: gesture.cell, mods: [])], to: (attempt, paneID))
             }
         }
         for (paneID, staged) in stagedSurfaces {

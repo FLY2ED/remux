@@ -155,14 +155,22 @@ actor HerdrTerminalAttachment {
         }
     }
 
-    /// Leaves the terminal; Herdr gives its size back to the client that had it.
+    /// Leaves the terminal; Herdr gives its size back to the client that had it, as it also does once the
+    /// bridge closes. A path that takes no write doesn't hold the bridge open: past the deadline Herdr has to
+    /// answer, it closes as unresponsive, which fails the write.
     func detach() async {
         guard ending == nil else { return }
         let transport = transport
         end(.detached)
         guard let transport else { return }
+        let overdue = Task { [welcomeDeadline] () -> Bool in
+            guard (try? await Task.sleep(for: welcomeDeadline)) != nil else { return false }
+            await transport.close(.unresponsive)
+            return true
+        }
         try? await transport.write(HerdrDirectTerminalClientMessage.detach.frame)
-        await transport.close(.finished)
+        overdue.cancel()
+        if await !overdue.value { await transport.close(.finished) }
     }
 
     // MARK: - Renderer registration
@@ -297,11 +305,9 @@ actor HerdrTerminalAttachment {
         }
     }
 
-    private func welcomeOverdue() async {
+    private func welcomeOverdue() {
         guard !welcomed, ending == nil else { return }
-        let transport = transport
-        end(.failed("Herdr didn't answer the attach."))
-        await transport?.close(.unresponsive)
+        end(.failed("Herdr didn't answer the attach."), closing: .unresponsive)
     }
 
     // MARK: - Writing and ending
@@ -317,8 +323,9 @@ actor HerdrTerminalAttachment {
         }
     }
 
-    /// The first ending wins; the producer goes, and a renderer over its terminal keeps the last frame.
-    private func end(_ reason: Ending) {
+    /// The first ending wins; the producer goes, and a renderer over its terminal keeps the last frame. The
+    /// bridge closes once, for `closing`, except on a detach, which closes it itself.
+    private func end(_ reason: Ending, closing: HerdrBridgeCloseCause = .finished) {
         guard ending == nil else { return }
         ending = reason
         producer = nil
@@ -326,7 +333,7 @@ actor HerdrTerminalAttachment {
         continuation.yield(.ended(reason))
         continuation.finish()
         if reason != .detached, let transport {
-            Task { await transport.close(.finished) }
+            Task { await transport.close(closing) }
         }
     }
 
