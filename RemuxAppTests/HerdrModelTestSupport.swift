@@ -292,8 +292,9 @@ enum HerdrServerScript {
         value.map { #""\#($0)""# } ?? "null"
     }
 
-    /// A full surface of the given lines, all of one width, and a one-cell popup for the terminal
-    /// `popup` names, if any. A cell whose symbol `foreground` lists has that colour.
+    /// A full surface of the given lines, all of one width, and a popup for the terminal `popup` names, if
+    /// any: titled `popupTitle`, of `popupLines` (one cell unless given). A cell whose symbol `foreground`
+    /// lists has that colour.
     static func surface(
         boot: String = "boot",
         projection: UInt64,
@@ -301,6 +302,8 @@ enum HerdrServerScript {
         lines: [String],
         panes: [Pane],
         popup: String? = nil,
+        popupTitle: String = "popup",
+        popupLines: [String] = ["p"],
         foreground: [Character: UInt32] = [:]
     ) -> [UInt8] {
         var writer = HerdrWireWriter()
@@ -338,10 +341,10 @@ enum HerdrServerScript {
         writer.array([UInt8]()) { $0.u8($1) }
         writer.optional(popup) { writer, terminalID in
             writer.string(terminalID)
-            writer.string("popup")
+            writer.string(popupTitle)
             writer.optional(nil as UInt8?) { $0.u8($1) }
             writer.optional(nil as UInt8?) { $0.u8($1) }
-            frame(["p"], to: &writer)
+            frame(popupLines, to: &writer)
             writer.bool(false)
             writer.bool(false)
             writer.u32(0)
@@ -750,13 +753,14 @@ final class HerdrModelHarness {
         projection: UInt64,
         revision: UInt64,
         lines: [String],
-        panes: [HerdrServerScript.Pane]
+        panes: [HerdrServerScript.Pane],
+        popup: String? = nil
     ) throws -> [UInt8] {
         let viewport = try XCTUnwrap(model.measurement).controlViewport
         let columns = Int(viewport.columns)
         let padded = lines.map { $0.padding(toLength: columns, withPad: " ", startingAt: 0) }
             + Array(repeating: String(repeating: " ", count: columns), count: max(Int(viewport.rows) - lines.count, 0))
-        return HerdrServerScript.surface(boot: boot, projection: projection, revision: revision, lines: padded, panes: panes)
+        return HerdrServerScript.surface(boot: boot, projection: projection, revision: revision, lines: padded, panes: panes, popup: popup)
     }
 
     /// The bridge's writes from `index` on, decoded, once there are `count` of them.

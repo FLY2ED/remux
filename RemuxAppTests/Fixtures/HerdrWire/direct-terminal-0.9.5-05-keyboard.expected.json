@@ -1,0 +1,113 @@
+{
+  "client": [
+    {
+      "TerminalHello": {
+        "cell_height_px": 0,
+        "cell_width_px": 0,
+        "cols": 40,
+        "pixel_mouse": false,
+        "rows": 12,
+        "version": 22
+      },
+      "hex": "0016280c000000",
+      "tag": 0
+    },
+    {
+      "AttachTerminal": {
+        "takeover": false,
+        "terminal_id": "term_65ef71f07078b3"
+      },
+      "hex": "05137465726d5f363565663731663037303738623300",
+      "tag": 5
+    },
+    {
+      "Input": {
+        "data": "typed\r"
+      },
+      "hex": "010674797065640d",
+      "tag": 1
+    },
+    {
+      "Detach": null,
+      "hex": "04",
+      "tag": 4
+    }
+  ],
+  "server": [
+    {
+      "Welcome": {
+        "encoding": "TerminalAnsi",
+        "error": null,
+        "version": 22
+      },
+      "length": 4,
+      "offset": 0,
+      "tag": 0
+    },
+    {
+      "MouseCapture": {
+        "enabled": false,
+        "sgr_pixels": false
+      },
+      "length": 3,
+      "offset": 8,
+      "tag": 8
+    },
+    {
+      "DirectTerminalKeyboardProtocol": {
+        "flags": 1,
+        "modify_other_keys_level": 0
+      },
+      "length": 3,
+      "offset": 15,
+      "tag": 16
+    },
+    {
+      "Terminal": {
+        "bytes": 626,
+        "full": true,
+        "height": 12,
+        "seq": 1,
+        "sha256": "4c26e0f7fdaab2ce4f0ca634805c30a5680088caaabd04bc5c9a20b2d7c7d403",
+        "width": 40
+      },
+      "length": 634,
+      "offset": 22,
+      "tag": 1
+    },
+    {
+      "Terminal": {
+        "bytes": 53,
+        "full": false,
+        "height": 12,
+        "seq": 2,
+        "sha256": "99a61565647f47a12df15c6e5f7ae546d3aff5a33b77bbed9a61343a50c783c0",
+        "width": 40
+      },
+      "length": 59,
+      "offset": 660,
+      "tag": 1
+    },
+    {
+      "Terminal": {
+        "bytes": 89,
+        "full": false,
+        "height": 12,
+        "seq": 3,
+        "sha256": "fd538ca7d23f09ef4b32c1b63f877f8f1406d0d9b172bf9731653ff3b0d1bd4f",
+        "width": 40
+      },
+      "length": 95,
+      "offset": 723,
+      "tag": 1
+    },
+    {
+      "ServerShutdown": {
+        "reason": "detached"
+      },
+      "length": 11,
+      "offset": 822,
+      "tag": 3
+    }
+  ]
+}

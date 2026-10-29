@@ -1,0 +1,174 @@
+{
+  "client": [
+    {
+      "TerminalHello": {
+        "cell_height_px": 0,
+        "cell_width_px": 0,
+        "cols": 40,
+        "pixel_mouse": false,
+        "rows": 12,
+        "version": 22
+      },
+      "hex": "0016280c000000",
+      "tag": 0
+    },
+    {
+      "AttachTerminal": {
+        "takeover": false,
+        "terminal_id": "term_65ef71d468e3b2"
+      },
+      "hex": "05137465726d5f363565663731643436386533623200",
+      "tag": 5
+    },
+    {
+      "Input": {
+        "data": "echo wire\r"
+      },
+      "hex": "010a6563686f20776972650d",
+      "tag": 1
+    },
+    {
+      "Resize": {
+        "cell_height_px": 0,
+        "cell_width_px": 0,
+        "cols": 44,
+        "pixel_mouse": false,
+        "rows": 14
+      },
+      "hex": "032c0e000000",
+      "tag": 3
+    },
+    {
+      "AttachScroll": {
+        "column": null,
+        "direction": "Up",
+        "lines": 3,
+        "modifiers": 0,
+        "row": null,
+        "source": "Wheel"
+      },
+      "hex": "06000003000000",
+      "tag": 6
+    },
+    {
+      "AttachScroll": {
+        "column": null,
+        "direction": "Down",
+        "lines": 3,
+        "modifiers": 0,
+        "row": null,
+        "source": "Wheel"
+      },
+      "hex": "06000103000000",
+      "tag": 6
+    },
+    {
+      "Detach": null,
+      "hex": "04",
+      "tag": 4
+    }
+  ],
+  "server": [
+    {
+      "Welcome": {
+        "encoding": "TerminalAnsi",
+        "error": null,
+        "version": 22
+      },
+      "length": 4,
+      "offset": 0,
+      "tag": 0
+    },
+    {
+      "MouseCapture": {
+        "enabled": false,
+        "sgr_pixels": false
+      },
+      "length": 3,
+      "offset": 8,
+      "tag": 8
+    },
+    {
+      "DirectTerminalKeyboardProtocol": {
+        "flags": 0,
+        "modify_other_keys_level": 0
+      },
+      "length": 3,
+      "offset": 15,
+      "tag": 16
+    },
+    {
+      "Terminal": {
+        "bytes": 628,
+        "full": true,
+        "height": 12,
+        "seq": 1,
+        "sha256": "d49719f385b8a42d3c1fc0e4e10fc40a9af47153ba181f8ee0cd32306ffd542f",
+        "width": 40
+      },
+      "length": 636,
+      "offset": 22,
+      "tag": 1
+    },
+    {
+      "Terminal": {
+        "bytes": 181,
+        "full": false,
+        "height": 12,
+        "seq": 2,
+        "sha256": "2d672db264c3b919a7ad647197fe1dbf7ccef02258cd7d72f70b7c9ba22a4f02",
+        "width": 40
+      },
+      "length": 187,
+      "offset": 662,
+      "tag": 1
+    },
+    {
+      "Terminal": {
+        "bytes": 774,
+        "full": true,
+        "height": 14,
+        "seq": 3,
+        "sha256": "28d804a297141be192ef48250181326419a42309dcce5172a2aad179d87ab7e4",
+        "width": 44
+      },
+      "length": 782,
+      "offset": 853,
+      "tag": 1
+    },
+    {
+      "Terminal": {
+        "bytes": 214,
+        "full": false,
+        "height": 14,
+        "seq": 4,
+        "sha256": "c67882445a787def2cc8091b20bf342ce7380096b95c72a43279554a366ef96d",
+        "width": 44
+      },
+      "length": 220,
+      "offset": 1639,
+      "tag": 1
+    },
+    {
+      "Terminal": {
+        "bytes": 214,
+        "full": false,
+        "height": 14,
+        "seq": 5,
+        "sha256": "0d82f73e84d452679c3d587d6b4e426363904d6f1bba6aa271010acdb1af8256",
+        "width": 44
+      },
+      "length": 220,
+      "offset": 1863,
+      "tag": 1
+    },
+    {
+      "ServerShutdown": {
+        "reason": "detached"
+      },
+      "length": 11,
+      "offset": 2087,
+      "tag": 3
+    }
+  ]
+}

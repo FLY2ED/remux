@@ -107,9 +107,15 @@ protocol GhosttyTerminalRenderingModeling: ObservableObject {
     /// changing the layout. Engines use it to decide which reported
     /// viewport is safe to carry into a reconnect.
     func setViewportStabilityHint(stable: Bool)
+
+    /// The whole pixels the screen has for the viewport's popup's terminal, whenever they change while one
+    /// is shown.
+    func preparePopupArea(widthPx: UInt32, heightPx: UInt32)
 }
 
 extension GhosttyTerminalRenderingModeling {
+    func preparePopupArea(widthPx: UInt32, heightPx: UInt32) {}
+
     func prepareInitialViewport(size: CGSize, scale: CGFloat) {
         prepareInitialViewport(
             size: size,

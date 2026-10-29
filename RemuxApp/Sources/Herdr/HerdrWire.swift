@@ -33,7 +33,8 @@ enum HerdrWireError: Error, Equatable, LocalizedError {
     /// Message type 12, a binary snapshot, which only a connection without the JSON snapshot codec
     /// gets. Herdr's client fails on it the same way.
     case unnegotiatedSnapshot
-    /// A tag outside generation 1's frozen message set.
+    /// A tag outside the connection's message set: generation 1's frozen one, or the direct terminal
+    /// connection's.
     case unknownMessage(tag: UInt32)
     case invalidControl(kind: String)
     /// A screen update Remux can't apply: it doesn't fit the decoder's baseline, or its grid can't be

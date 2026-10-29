@@ -1,0 +1,44 @@
+{
+  "client": [
+    {
+      "TerminalHello": {
+        "cell_height_px": 0,
+        "cell_width_px": 0,
+        "cols": 40,
+        "pixel_mouse": false,
+        "rows": 12,
+        "version": 22
+      },
+      "hex": "0016280c000000",
+      "tag": 0
+    },
+    {
+      "AttachTerminal": {
+        "takeover": false,
+        "terminal_id": "term_missing"
+      },
+      "hex": "050c7465726d5f6d697373696e6700",
+      "tag": 5
+    }
+  ],
+  "server": [
+    {
+      "Welcome": {
+        "encoding": "TerminalAnsi",
+        "error": null,
+        "version": 22
+      },
+      "length": 4,
+      "offset": 0,
+      "tag": 0
+    },
+    {
+      "ServerShutdown": {
+        "reason": "terminal attach failed: terminal term_missing not found"
+      },
+      "length": 58,
+      "offset": 8,
+      "tag": 3
+    }
+  ]
+}
