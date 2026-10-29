@@ -431,8 +431,9 @@ enum ClientWrite: Equatable {
     /// A pane input message, as framed.
     case paneInput([UInt8])
     case paneFocus(id: String, paneID: String)
-    /// A `pane.zoom`, with its mode: "on" or "off".
-    case paneZoom(id: String, paneID: String, mode: String)
+    /// A `pane.zoom`, with its mode: "on" or "off". `paneID` is nil for one that names no pane, which Herdr
+    /// takes as the pane focused on the tab this client views.
+    case paneZoom(id: String, paneID: String?, mode: String)
     /// Any other command, with its parameters as text.
     case command(id: String, method: String, params: [String: String])
     case ping(data: String)
@@ -474,9 +475,10 @@ enum ClientWrite: Equatable {
                     JSONSerialization.jsonObject(with: Data(try reader.string().utf8)) as? [String: Any]
                 )
                 let params = try XCTUnwrap(json["params"] as? [String: String])
-                let paneID = try XCTUnwrap(params["pane_id"])
-                guard request.method == "pane.zoom" else { return .paneFocus(id: request.id, paneID: paneID) }
-                return .paneZoom(id: request.id, paneID: paneID, mode: try XCTUnwrap(params["mode"]))
+                guard request.method == "pane.zoom" else {
+                    return .paneFocus(id: request.id, paneID: try XCTUnwrap(params["pane_id"]))
+                }
+                return .paneZoom(id: request.id, paneID: params["pane_id"], mode: try XCTUnwrap(params["mode"]))
             }
             guard request.method == HerdrConnection.surfaceSetMethod else {
                 _ = try reader.string()
@@ -658,12 +660,13 @@ final class HerdrModelHarness {
         bridgeOpeningTakes: Duration = .zero,
         producerFailure: ProducerFailure? = nil,
         rendererFenceGate: RendererFenceGate? = nil,
-        switchingCueDelay: Duration = HerdrScreenModel.switchingCueDelay
+        switchingCueDelay: Duration = HerdrScreenModel.switchingCueDelay,
+        zoomKeepers: HerdrZoomKeepers = HerdrZoomKeepers(store: InMemoryHerdrOwnedZoomStore()),
+        server: SavedServer = SavedServer(displayName: "Herdr Host", host: "herdr.example.test", username: "builder")
     ) async {
         let bridges = Bridges(openingTakes: bridgeOpeningTakes)
         let stateLog = StateLog()
         if let openError { await bridges.failNextOpen(with: openError) }
-        let server = SavedServer(displayName: "Herdr Host", host: "herdr.example.test", username: "builder")
         let workspace = SavedWorkspace(serverID: server.id, sessionName: "main")
         let target = SessionTarget(
             server: server,
@@ -692,6 +695,7 @@ final class HerdrModelHarness {
             engine: producerFailure.map {
                 HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1, makeProducer: SwitchableProducer.factory($0))
             } ?? HerdrTerminalEngine(cellWidthPx: 1, cellHeightPx: 1),
+            zoomKeepers: zoomKeepers,
             makeRendererFence: rendererFenceGate?.factory ?? Self.herdrRendererFence,
             clipboard: TerminalClipboard(pasteboard: pasteboard)
         )

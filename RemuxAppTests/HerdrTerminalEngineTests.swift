@@ -262,8 +262,9 @@ final class HerdrTerminalEngineTests: XCTestCase {
 
     /// A show the setting zooms sends the zoom of the pane Herdr has focused, and completes once Herdr has
     /// answered it, on a frame showing it: Herdr's frame for the show from before the zoom isn't drawn,
-    /// whether the answer comes before the zoomed frame or after it. A hide takes Remux's zoom off first,
-    /// and a zoom that fails holds nothing.
+    /// whether the answer comes before the zoomed frame or after it. A hide leaves Remux's zoom, and a show
+    /// of a tab still zoomed sends none; one another client unzoomed meanwhile is zoomed again. A zoom that
+    /// fails holds nothing.
     func testAShowCarryingAZoomCompletesOnAFrameFromAfterTheZoom() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
@@ -287,49 +288,59 @@ final class HerdrTerminalEngineTests: XCTestCase {
         guard case .activated(first, _) = try await updates.next() else { return XCTFail("the show didn't complete") }
 
         _ = try await start(feed, updates, .hidden)
-        XCTAssertEqual(try outbox.commands().last, "zoom P off", "the hide left Remux's zoom")
-        try await answerZoom(feed, outbox, zoomed: false)
-        await feed.receive(try Self.places(revision: 3))
+        XCTAssertEqual(try outbox.commands(), ["zoom P on"], "the hide took Remux's zoom off")
+        let back = try await start(feed, updates, Self.show(zoom: Self.zooming))
+        try await acknowledgeShow(feed, outbox, floor: 3)
+        await feed.receive(try Self.places(revision: 3, zoomed: ["t1"]))
+        await feed.receive(.surface(try Self.surface(projection: 3, revision: 3, lines: ["one ", "two "], panes: one)))
+        try await activation(back, updates)
+        XCTAssertEqual(try outbox.commands(), ["zoom P on"], "the show zoomed a tab still zoomed")
+
+        _ = try await start(feed, updates, .hidden)
+        // Another client unzooms the tab while the session is off screen.
+        await feed.receive(try Self.places(revision: 4))
         let second = try await start(feed, updates, Self.show(zoom: Self.zooming))
-        try await acknowledgeShow(feed, outbox, floor: 4)
-        await feed.receive(try Self.places(revision: 4, zoomed: ["t1"]))
-        await feed.receive(.surface(try Self.surface(projection: 4, revision: 4, lines: ["one ", "two "], panes: one)))
+        try await acknowledgeShow(feed, outbox, floor: 5)
+        await feed.receive(try Self.places(revision: 5, zoomed: ["t1"]))
+        await feed.receive(.surface(try Self.surface(projection: 5, revision: 5, lines: ["one ", "two "], panes: one)))
         try await answerZoom(feed, outbox, zoomed: true)
         guard case .activated(second, _) = try await updates.next() else {
             return XCTFail("an answer after the zoomed frame didn't complete the show")
         }
 
         _ = try await start(feed, updates, .hidden)
-        try await answerZoom(feed, outbox, zoomed: false)
-        await feed.receive(try Self.places(revision: 5))
-        let third = try await start(feed, updates, Self.show(zoom: Self.zooming))
-        try await acknowledgeShow(feed, outbox, floor: 6)
         await feed.receive(try Self.places(revision: 6))
-        await feed.receive(.surface(try Self.surface(projection: 6, revision: 6, lines: ["o t ", "w o "], panes: two)))
+        let third = try await start(feed, updates, Self.show(zoom: Self.zooming))
+        try await acknowledgeShow(feed, outbox, floor: 7)
+        await feed.receive(try Self.places(revision: 7))
+        await feed.receive(.surface(try Self.surface(projection: 7, revision: 7, lines: ["o t ", "w o "], panes: two)))
         try await answer(feed, outbox, error: ("pane_not_found", "pane not found"))
         try await activation(third, updates)
         await engine.stop()
     }
 
-    /// A move to another tab sends its steps in order: Remux's zoom off the tab left, the setting's zoom
-    /// of the pane, which takes the session there, and the pane's focus. It holds the frames until one
-    /// showing where its last step took the session: the tab left as its zoom comes off isn't drawn, only
-    /// the tab reached. A move whose focus fails stays where Herdr has the session, and shows the newest
+    /// A move to another tab sends its steps in order: the setting's zoom of the pane, which takes the
+    /// session there, and the pane's focus; the tab left keeps Remux's zoom. It holds the frames until one
+    /// showing where its last step took the session: the tab reached drawn before its focus is answered
+    /// isn't drawn then. A move whose focus fails stays where Herdr has the session, and shows the newest
     /// frame once it ends there.
     func testAMoveToAnotherTabShowsOnlyTheTabItReaches() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
         let (feed, outbox) = await connect(engine)
-        let two = [Self.pane("P", x: 0, width: 2, height: 2, focused: true), Self.pane("Q", x: 2, width: 2, height: 2)]
         try await shownZoomed(feed, updates, outbox)
 
         let move = try await start(feed, updates, Self.move("R", fromAnotherTab: true, zoom: Self.zooming))
-        XCTAssertEqual(try outbox.commands().last, "zoom P off")
-        try await answerZoom(feed, outbox, zoomed: false)
-        await feed.receive(try Self.places(revision: 3))
-        await feed.receive(.surface(try Self.surface(projection: 3, revision: 3, lines: ["o t ", "w o "], panes: two)))
+        XCTAssertEqual(try outbox.commands().last, "zoom R on")
         try await answerZoom(feed, outbox, zoomed: true, tab: "t2", panes: ["R", "S"])
-        await feed.receive(try Self.places(revision: 4, focusedPane: "R", zoomed: ["t2"]))
+        await feed.receive(try Self.places(revision: 3, focusedPane: "R", zoomed: ["t1", "t2"]))
+        await feed.receive(.surface(try Self.surface(
+            projection: 3,
+            revision: 3,
+            lines: ["new ", "tab "],
+            panes: [Self.pane("R", x: 0, width: 4, height: 2, focused: true)]
+        )))
+        await feed.receive(try Self.places(revision: 4, focusedPane: "R", zoomed: ["t1", "t2"]))
         await feed.receive(.surface(try Self.surface(
             projection: 4,
             revision: 4,
@@ -345,7 +356,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         guard case .activated(move, _) = try await updates.next() else {
             return XCTFail("the move didn't complete on the tab it reached")
         }
-        XCTAssertEqual(try outbox.commands().suffix(3), ["zoom P off", "zoom R on", "focus R"])
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "zoom R on", "focus R"])
 
         let failing = try await start(feed, updates, Self.move("S"))
         await feed.receive(try Self.places(revision: 5, focusedPane: "R"))
@@ -390,7 +401,8 @@ final class HerdrTerminalEngineTests: XCTestCase {
 
     /// A request is current from its start, which holds the frames in the same turn, also when the newest
     /// snapshot's frame hasn't come yet. A move that replaces another drops the steps that one hadn't sent
-    /// and carries on its zoom; the answer to the one it sent completes nothing.
+    /// and carries on its zoom; the answer to the one it sent completes nothing. The zoom that went takes
+    /// the session to its tab, and the newer move comes back to a tab still zoomed, which it only focuses.
     func testARequestHoldsFromItsStartAndAReplacedOneCompletesNothing() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
@@ -401,37 +413,37 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await feed.receive(try Self.places(revision: 3, zoomed: ["t1"]))
         _ = try await start(feed, updates, Self.move("R", fromAnotherTab: true, zoom: Self.zooming))
         let newer = try await start(feed, updates, Self.move("Q", zoom: Self.zooming))
-        try await answerZoom(feed, outbox, zoomed: false)
         await feed.receive(.surface(try Self.surface(
             projection: 3,
             revision: 3,
             lines: ["one ", "two "],
             panes: [Self.pane("P", x: 0, width: 4, height: 2, focused: true)]
         )))
-        try await answerZoom(feed, outbox, zoomed: true, panes: ["Q", "P"])
-        await feed.receive(try Self.places(revision: 4, focusedPane: "Q", zoomed: ["t1"]))
+        try await answerZoom(feed, outbox, zoomed: true, tab: "t2", panes: ["R", "S"])
+        await feed.receive(try Self.places(revision: 4, focusedPane: "R", zoomed: ["t1", "t2"]))
+        try await answer(feed, outbox)
+        await feed.receive(try Self.places(revision: 5, focusedPane: "Q", zoomed: ["t1", "t2"]))
         await feed.receive(.surface(try Self.surface(
-            projection: 4,
-            revision: 4,
+            projection: 5,
+            revision: 5,
             lines: ["thr ", "fou "],
             panes: [Self.pane("Q", x: 0, width: 4, height: 2, focused: true)]
         )))
-        try await answer(feed, outbox)
         guard case .paneTerminal("Q", _) = try await updates.next(),
               case .drawn(let shown, _, _) = try await updates.next()
         else { return XCTFail("a frame was drawn before the newer request completed") }
         XCTAssertEqual(shown.panes.filter { $0.innerRect != nil }.map(\.paneID), ["Q"])
         _ = try await updates.nextPaneScroll()
         guard case .activated(newer, _) = try await updates.next() else { return XCTFail("the newer request didn't complete") }
-        XCTAssertEqual(try outbox.commands().suffix(3), ["zoom P off", "zoom Q on", "focus Q"], "a replaced step went")
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "zoom R on", "focus Q"], "a replaced step went")
         XCTAssertEqual(updates.focusAnswers.map(\.request), [newer])
         await engine.stop()
     }
 
-    /// A move that replaces another takes off the zoom that one made as it leaves the tab, though Herdr
-    /// answered that zoom after the replacement: its leave waits for the snapshot showing the zoom, which
-    /// has the session on that tab.
-    func testAMoveTakesOffTheZoomOfTheMoveItReplacedAsItLeaves() async throws {
+    /// A move that replaces another leaves the zoom that one made, as the session leaves its tab, though Herdr
+    /// answered that zoom after the replacement: the newer move's zoom waits for the snapshot showing that
+    /// zoom, which has the session on that tab, then goes from there.
+    func testAMoveLeavesTheZoomOfTheMoveItReplaced() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
         let (feed, outbox) = await connect(engine)
@@ -440,11 +452,9 @@ final class HerdrTerminalEngineTests: XCTestCase {
         _ = try await start(feed, updates, Self.move("R", fromAnotherTab: true, zoom: Self.zooming))
         _ = try await start(feed, updates, Self.move("Q", zoom: Self.zooming))
         try await answerZoom(feed, outbox, zoomed: true, tab: "t2", panes: ["R", "S"])
-        XCTAssertEqual(try outbox.commands(), ["zoom R on"], "the leave went before Herdr showed the zoom")
+        XCTAssertEqual(try outbox.commands(), ["zoom R on"], "the next step went before Herdr showed the zoom")
         await feed.receive(try Self.places(revision: 2, focusedPane: "R", zoomed: ["t2"]))
-        XCTAssertEqual(try outbox.commands(), ["zoom R on", "zoom R off"])
-        try await answerZoom(feed, outbox, zoomed: false, tab: "t2", panes: ["R", "S"])
-        XCTAssertEqual(try outbox.commands().last, "zoom Q on")
+        XCTAssertEqual(try outbox.commands(), ["zoom R on", "zoom Q on"])
         await engine.stop()
     }
 
@@ -465,7 +475,6 @@ final class HerdrTerminalEngineTests: XCTestCase {
         try await answer(feed, outbox)
 
         let back = try await start(feed, updates, Self.move("P", fromAnotherTab: true, zoom: Self.zooming))
-        try await answerZoom(feed, outbox, zoomed: false, tab: "t2", panes: ["R", "S"])
         try await answerZoom(feed, outbox, zoomed: true)
         // Another client takes the session to S before Herdr's snapshot of the move back.
         await feed.receive(try Self.places(revision: 3, focusedPane: "S"))
@@ -476,7 +485,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
             panes: [Self.pane("S", x: 0, width: 4, height: 2, focused: true)]
         )))
         try await activation(back, updates)
-        XCTAssertEqual(try outbox.commands(), ["zoom R on", "focus R", "zoom R off", "zoom P on"], "the overtaken move's focus went")
+        XCTAssertEqual(try outbox.commands(), ["zoom R on", "focus R", "zoom P on"], "the overtaken move's focus went")
         await engine.stop()
     }
 
@@ -510,8 +519,8 @@ final class HerdrTerminalEngineTests: XCTestCase {
         }
     }
 
-    /// A move waiting behind a command whose pane another client closes before it can go sends nothing,
-    /// not even Remux's zoom off the tab on screen, and ends as Herdr shows the session.
+    /// A move waiting behind a command whose pane another client closes before it can go sends nothing, and
+    /// ends as Herdr shows the session.
     func testAMoveWaitingBehindACommandWhosePaneClosesSendsNothing() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
@@ -572,41 +581,57 @@ final class HerdrTerminalEngineTests: XCTestCase {
         }
     }
 
-    /// Leaving takes Remux's zoom off only the tab Herdr shows: an unzoom focuses its target, so one of a
-    /// tab another client has since left would take the session back there. A zoom answered after another
-    /// client took the session to the other tab stays.
-    func testLeavingDoesNotUnzoomATabAnotherClientLeft() async throws {
+    /// The session's end takes Remux's zoom off a tab off screen too, as when another client took the session
+    /// elsewhere after the zoom: it focuses the tab first, since the snapshot names only the focused tab's
+    /// focused pane, then unzooms the pane the snapshot shows focused there, also one another client focused
+    /// meanwhile, then focuses the tab the session was on again, where it ends.
+    func testTheSessionsEndUnzoomsATabOffScreenFromThatTab() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
         let (feed, outbox) = await connect(engine)
         try await shown(feed, updates, outbox, panes: Self.atP)
+        let closed = Closed()
 
         _ = try await start(feed, updates, Self.move("R", fromAnotherTab: true, zoom: Self.zooming))
         await feed.receive(try Self.places(revision: 2, focusedPane: "R", zoomed: ["t2"]))
         // Another client takes the session back to the first tab before Herdr's answer to the zoom.
         await feed.receive(try Self.places(revision: 3, focusedPane: "Q", zoomed: ["t2"]))
         try await answerZoom(feed, outbox, zoomed: true, tab: "t2", panes: ["R", "S"])
-        _ = try await start(feed, updates, .hidden)
-        XCTAssertEqual(try outbox.commands(), ["zoom R on"], "leaving unzoomed a tab off screen")
-        guard case .surfaceSet(_, false)? = try outbox.writes().last else { return XCTFail("the hide didn't go") }
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        XCTAssertEqual(try outbox.commands().last, "tab.focus")
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t2"])
+        try await answer(feed, outbox)
+        XCTAssertEqual(try outbox.commands().last, "tab.focus", "the unzoom went before Herdr showed the tab")
+        // Another client focused S in the zoomed tab meanwhile.
+        await feed.receive(try Self.places(revision: 4, focusedPane: "S", zoomed: ["t2"]))
+        XCTAssertEqual(try outbox.commands().last, "zoom S off")
+        XCTAssertFalse(closed.isClosed, "done before Herdr answered the unzoom")
+        try await answerZoom(feed, outbox, zoomed: false, tab: "t2", panes: ["S", "R"])
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t1"], "the end didn't go back to the tab it started on")
+        XCTAssertFalse(closed.isClosed, "done before Herdr answered the focus back")
+        try await answer(feed, outbox)
+        XCTAssertTrue(closed.isClosed)
+        XCTAssertEqual(try outbox.commands(), ["zoom R on", "tab.focus", "zoom S off", "tab.focus"])
         await engine.stop()
     }
 
     /// A zoom another client undid after Herdr showed it isn't Remux's to undo, though Herdr's answer to it
-    /// comes after: ownership agrees with the snapshots already seen.
+    /// comes after: ownership agrees with the snapshots already seen, and the session's end sends nothing.
     func testAZoomAnotherClientUndidBeforeItsAnswerIsNotRemuxs() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
         let (feed, outbox) = await connect(engine)
         try await shown(feed, updates, outbox, panes: Self.atP)
+        let closed = Closed()
 
         _ = try await start(feed, updates, Self.move("R", fromAnotherTab: true, zoom: Self.zooming))
         await feed.receive(try Self.places(revision: 2, focusedPane: "R", zoomed: ["t2"]))
         // Another client unzooms the tab before Herdr's answer to the zoom.
         await feed.receive(try Self.places(revision: 3, focusedPane: "R"))
         try await answerZoom(feed, outbox, zoomed: true, tab: "t2", panes: ["R", "S"])
-        _ = try await start(feed, updates, .hidden)
-        XCTAssertEqual(try outbox.commands(), ["zoom R on"], "leaving undid a zoom another client had undone")
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        XCTAssertTrue(closed.isClosed)
+        XCTAssertEqual(try outbox.commands(), ["zoom R on"], "the end undid a zoom another client had undone")
         await engine.stop()
     }
 
@@ -634,9 +659,9 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
-    /// A hide on an idle lane, with Herdr's snapshot showing the tab Remux zoomed, takes the zoom off first,
-    /// then focus and the hide go at once.
-    func testAHideOnAnIdleLaneTakesRemuxsZoomOffFirst() async throws {
+    /// A hide on an idle lane, with Herdr's snapshot showing the tab Remux zoomed, leaves the zoom, as tmux's
+    /// stays while the session is off screen: focus and the hide go at once, with nothing before them.
+    func testAHideOnAnIdleLaneLeavesRemuxsZoom() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
         let (feed, outbox) = await connect(engine)
@@ -645,15 +670,15 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let before = try outbox.writes().count
         _ = try await start(feed, updates, .hidden)
         let leave = Array(try outbox.writes().dropFirst(before))
-        XCTAssertEqual(leave.count, 3, "\(leave)")
-        guard case .paneZoom(_, "P", "off")? = leave.first, leave.dropFirst().first == .focus(false),
-              case .surfaceSet(_, false)? = leave.last
-        else { return XCTFail("the hide didn't take Remux's zoom off first: \(leave)") }
+        XCTAssertEqual(leave.count, 2, "\(leave)")
+        guard leave.first == .focus(false), case .surfaceSet(_, false)? = leave.last
+        else { return XCTFail("the hide didn't go at once on its own: \(leave)") }
         await engine.stop()
     }
 
-    /// A close with a command in flight goes at once and leaves Remux's zoom, as a hide does.
-    func testACloseWithACommandInFlightGoesAtOnceAndLeavesTheZoom() async throws {
+    /// The session's end with a command in flight takes Remux's zoom off once Herdr has answered it, since
+    /// Herdr takes one command at a time; a command asked meanwhile doesn't go.
+    func testTheSessionsEndWithACommandInFlightTakesTheZoomOffAfterIt() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
         let (feed, outbox) = await connect(engine)
@@ -662,16 +687,44 @@ final class HerdrTerminalEngineTests: XCTestCase {
         let closed = Closed()
 
         await feed.command("worktree.list", params: [String: String](), answered: answers.record)
-        await feed.unzoomBeforeClosing(done: closed.close)
-        XCTAssertTrue(closed.isClosed, "the close waited for the command in flight")
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        await feed.command("worktree.list", params: [String: String](), answered: answers.record)
+        XCTAssertFalse(closed.isClosed, "the end gave up on the zoom behind the command in flight")
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "worktree.list"], "the unzoom went with the lane busy")
         try await answer(feed, outbox)
-        _ = try await answers.next().get()
-        XCTAssertEqual(try outbox.commands(), ["zoom P on", "worktree.list"], "an unzoom went after the close")
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "worktree.list", "zoom P off"])
+        try await answerZoom(feed, outbox, zoomed: false)
+        XCTAssertTrue(closed.isClosed)
+        let answered = [try await answers.next(), try await answers.next()]
+        XCTAssertEqual(answered.compactMap(\.failure), [.notSent], "a command asked during the end went")
         await engine.stop()
     }
 
-    /// A close on an idle lane, with Herdr's snapshot showing the tab Remux zoomed, takes the zoom off first
-    /// and closes once Herdr has answered it.
+    /// The session's end waits for a command in flight only for Herdr's time for a step: one Herdr doesn't
+    /// answer in time ends it, leaving Remux's zoom and the phone's record of it.
+    func testTheSessionsEndBehindACommandHerdrDoesNotAnswerInTimeLeavesTheZoom() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        let store = InMemoryHerdrOwnedZoomStore()
+        let session = Self.herdrSession
+        await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
+        try await shownZoomed(feed, updates, outbox)
+        let closed = Closed()
+        let stepTime: Duration = .milliseconds(200)
+
+        await feed.command("worktree.list", params: [String: String](), answered: { _ in })
+        let started = ContinuousClock.now
+        await feed.releaseZooms(within: stepTime, done: closed.close)
+        try await waitUntil("the end waited past its step's time") { closed.isClosed }
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now - started, stepTime)
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "worktree.list"])
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t1"], "the phone forgot a zoom still on the server")
+        await engine.stop()
+    }
+
+    /// The session's end on an idle lane, with Herdr's snapshot showing the tab Remux zoomed, takes the zoom
+    /// off and is done once Herdr has answered it.
     func testACloseOnAnIdleLaneTakesRemuxsZoomOffFirst() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
@@ -679,7 +732,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         try await shownZoomed(feed, updates, outbox)
         let closed = Closed()
 
-        await feed.unzoomBeforeClosing(done: closed.close)
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
         XCTAssertEqual(try outbox.commands().last, "zoom P off")
         XCTAssertFalse(closed.isClosed, "closed before Herdr answered the unzoom")
         try await answerZoom(feed, outbox, zoomed: false)
@@ -687,9 +740,9 @@ final class HerdrTerminalEngineTests: XCTestCase {
         await engine.stop()
     }
 
-    /// A close before the snapshot showing a move's answered zoom goes at once and leaves that zoom: which
-    /// tab is on screen isn't known yet, and an unzoom of another tab would take the session there.
-    func testACloseBeforeTheSnapshotShowingAMovesZoomLeavesIt() async throws {
+    /// The session's end before the snapshot showing a move's answered zoom waits for it, since the end goes
+    /// from where Herdr has the session, then takes that zoom off; the move's focus doesn't go.
+    func testTheSessionsEndBeforeTheSnapshotShowingAMovesZoomTakesItOffOnceShown() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
         let (feed, outbox) = await connect(engine)
@@ -698,10 +751,602 @@ final class HerdrTerminalEngineTests: XCTestCase {
 
         _ = try await start(feed, updates, Self.move("R", fromAnotherTab: true, zoom: Self.zooming))
         try await answerZoom(feed, outbox, zoomed: true, tab: "t2", panes: ["R", "S"])
-        await feed.unzoomBeforeClosing(done: closed.close)
-        XCTAssertTrue(closed.isClosed, "the close waited for the snapshot")
-        XCTAssertEqual(try outbox.commands(), ["zoom R on"], "the close's unzoom went before Herdr showed the zoom")
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        XCTAssertFalse(closed.isClosed, "the end gave up on the zoom whose snapshot was on its way")
+        XCTAssertEqual(try outbox.commands(), ["zoom R on"], "the end's unzoom went before Herdr showed the zoom")
+        await feed.receive(try Self.places(revision: 2, focusedPane: "R", zoomed: ["t2"]))
+        XCTAssertEqual(try outbox.commands(), ["zoom R on", "zoom R off"])
+        try await answerZoom(feed, outbox, zoomed: false, tab: "t2", panes: ["R", "S"])
+        XCTAssertTrue(closed.isClosed)
         await engine.stop()
+    }
+
+    /// Each step of the session's end has Herdr's time for a show from Herdr's answer before it, so ending a
+    /// session with many tabs Remux zoomed takes them all off over a slow link, however long that takes in all.
+    func testEachStepOfTheSessionsEndHasHerdrsTimeForAShow() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await zoomedOnBothTabs(feed, updates, outbox)
+        let closed = Closed()
+        let stepTime: Duration = .milliseconds(500)
+        let slowAnswer: Duration = .milliseconds(250)
+
+        let started = ContinuousClock.now
+        await feed.releaseZooms(within: stepTime, done: closed.close)
+        try await Task.sleep(for: slowAnswer)
+        try await answer(feed, outbox)
+        await feed.receive(try Self.places(revision: 4, focusedPane: "P", zoomed: ["t1", "t2"]))
+        try await Task.sleep(for: slowAnswer)
+        try await answerZoom(feed, outbox, zoomed: false)
+        await feed.receive(try Self.places(revision: 5, focusedPane: "P", zoomed: ["t2"]))
+        try await Task.sleep(for: slowAnswer)
+        try await answer(feed, outbox)
+        await feed.receive(try Self.places(revision: 6, focusedPane: "R", zoomed: ["t2"]))
+        try await Task.sleep(for: slowAnswer)
+        XCTAssertFalse(closed.isClosed, "the end gave up with each step in time")
+        try await answerZoom(feed, outbox, zoomed: false, tab: "t2", panes: ["R", "S"])
+        XCTAssertTrue(closed.isClosed)
+        XCTAssertGreaterThan(ContinuousClock.now - started, stepTime * 2)
+        XCTAssertEqual(
+            try outbox.commands(),
+            ["zoom P on", "zoom R on", "focus R", "tab.focus", "zoom P off", "tab.focus", "zoom R off"]
+        )
+        await engine.stop()
+    }
+
+    /// A step of the session's end that Herdr doesn't answer within its time ends it, leaving the rest of
+    /// Remux's zooms and the phone's record of them.
+    func testAStepOfTheSessionsEndThatHerdrDoesNotAnswerInTimeEndsIt() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        let store = InMemoryHerdrOwnedZoomStore()
+        let session = Self.herdrSession
+        await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
+        try await shownZoomed(feed, updates, outbox)
+        let closed = Closed()
+        let stepTime: Duration = .milliseconds(200)
+
+        let started = ContinuousClock.now
+        await feed.releaseZooms(within: stepTime, done: closed.close)
+        XCTAssertEqual(try outbox.commands().last, "zoom P off")
+        try await waitUntil("the end waited past its step's time") { closed.isClosed }
+        XCTAssertGreaterThanOrEqual(ContinuousClock.now - started, stepTime)
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t1"], "the phone forgot a zoom still on the server")
+        await engine.stop()
+    }
+
+    /// A move to a tab already zoomed only focuses it, also a move to one of its panes: a zoom shows the pane
+    /// Herdr has focused, so the zoom stays as it is. A tab the setting would zoom isn't zoomed again once it is.
+    func testAMoveToATabAlreadyZoomedOnlyFocusesIt() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shownZoomed(feed, updates, outbox)
+        await feed.receive(try Self.places(revision: 3, zoomed: ["t1", "t2"]))
+
+        let toTab = try await start(feed, updates, .moved(.place(.tab("t2")), fromAnotherTab: true, columns: 4, rows: 2, zoom: Self.zooming))
+        XCTAssertEqual(try outbox.commands().last, "tab.focus")
+        try await answer(feed, outbox)
+        await feed.receive(try Self.places(revision: 4, focusedPane: "R", zoomed: ["t1", "t2"]))
+        await feed.receive(.surface(try Self.surface(
+            projection: 4,
+            revision: 4,
+            lines: ["new ", "tab "],
+            panes: [Self.pane("R", x: 0, width: 4, height: 2, focused: true)]
+        )))
+        try await activation(toTab, updates)
+
+        let toPane = try await start(feed, updates, Self.move("Q", fromAnotherTab: true, zoom: Self.zooming))
+        try await answer(feed, outbox)
+        await feed.receive(try Self.places(revision: 5, focusedPane: "Q", zoomed: ["t1", "t2"]))
+        await feed.receive(.surface(try Self.surface(
+            projection: 5,
+            revision: 5,
+            lines: ["thr ", "fou "],
+            panes: [Self.pane("Q", x: 0, width: 4, height: 2, focused: true)]
+        )))
+        try await activation(toPane, updates)
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "tab.focus", "focus Q"], "a zoomed tab was zoomed again")
+        await engine.stop()
+    }
+
+    /// The session's end with the session off screen makes its surface active first, without focus, since
+    /// Herdr takes commands only from an active one, then takes Remux's zoom off.
+    func testTheSessionsEndOffScreenMakesTheSurfaceActiveFirst() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shownZoomed(feed, updates, outbox)
+        let closed = Closed()
+
+        _ = try await start(feed, updates, .hidden)
+        let before = try outbox.writes().count
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        let end = Array(try outbox.writes().dropFirst(before))
+        guard end.count == 2, case .surfaceSet(_, true)? = end.first, case .paneZoom(_, "P", "off")? = end.last else {
+            return XCTFail("the end didn't make the surface active, then unzoom: \(end)")
+        }
+        XCTAssertTrue(outbox.isSurfaceActive)
+        try await answerZoom(feed, outbox, zoomed: false)
+        XCTAssertTrue(closed.isClosed)
+        await engine.stop()
+    }
+
+    /// The session's end goes over every tab Remux zoomed, the tab on screen last: a tab whose focus fails
+    /// keeps its zoom, and the phone its record of it.
+    func testTheSessionsEndUnzoomsEveryTabRemuxZoomedTheTabOnScreenLast() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        let store = InMemoryHerdrOwnedZoomStore()
+        let session = Self.herdrSession
+        await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
+        try await shownZoomed(feed, updates, outbox)
+        let closed = Closed()
+
+        let toR = try await start(feed, updates, Self.move("R", fromAnotherTab: true, zoom: Self.zooming))
+        try await answerZoom(feed, outbox, zoomed: true, tab: "t2", panes: ["R", "S"])
+        await feed.receive(try Self.places(revision: 3, focusedPane: "R", zoomed: ["t1", "t2"]))
+        try await answer(feed, outbox)
+        await feed.receive(.surface(try Self.surface(
+            projection: 3,
+            revision: 3,
+            lines: ["new ", "tab "],
+            panes: [Self.pane("R", x: 0, width: 4, height: 2, focused: true)]
+        )))
+        try await activation(toR, updates)
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t1", "t2"])
+
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        XCTAssertEqual(try outbox.commands().last, "tab.focus")
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t1"])
+        try await answer(feed, outbox, error: ("tab_not_found", "tab not found"))
+        XCTAssertEqual(try outbox.commands().last, "zoom R off", "the tab whose focus failed stopped the end")
+        try await answerZoom(feed, outbox, zoomed: false, tab: "t2", panes: ["R", "S"])
+        XCTAssertTrue(closed.isClosed)
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t1"], "the phone forgot a zoom still on the server")
+        await engine.stop()
+    }
+
+    /// The session's end skips a tab closed while the end focuses it: Herdr's snapshot never shows the session
+    /// there, so the end goes on to the next tab instead of waiting for it.
+    func testTheSessionsEndSkipsATabClosedWhileItIsFocused() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await zoomedOnBothTabs(feed, updates, outbox)
+        let closed = Closed()
+
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        XCTAssertEqual(try outbox.commands().last, "tab.focus")
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t1"])
+        // Another client closes the tab before Herdr's answer to the focus comes.
+        await feed.receive(try Self.places(revision: 4, focusedPane: "R", zoomed: ["t2"], gone: ["t1"]))
+        try await answer(feed, outbox)
+        XCTAssertEqual(try outbox.commands().last, "zoom R off", "the end waited for the closed tab")
+        try await answerZoom(feed, outbox, zoomed: false, tab: "t2", panes: ["R", "S"])
+        XCTAssertTrue(closed.isClosed)
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "zoom R on", "focus R", "tab.focus", "zoom R off"])
+        await engine.stop()
+    }
+
+    /// A tab whose zoom stops being Remux's while the end goes over the tabs keeps it: another client unzoomed
+    /// it and zoomed it again, so the zoom it has is that client's.
+    func testTheSessionsEndLeavesAZoomThatStoppedBeingRemuxsDuringIt() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await zoomedOnBothTabs(feed, updates, outbox)
+        let closed = Closed()
+
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t1"])
+        // Another client unzooms the tab the session was on, then zooms it again.
+        await feed.receive(try Self.places(revision: 4, focusedPane: "P", zoomed: ["t1"]))
+        await feed.receive(try Self.places(revision: 5, focusedPane: "P", zoomed: ["t1", "t2"]))
+        try await answer(feed, outbox)
+        XCTAssertEqual(try outbox.commands().last, "zoom P off")
+        try await answerZoom(feed, outbox, zoomed: false)
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t2"], "the end went on to a zoom that isn't Remux's")
+        try await answer(feed, outbox)
+        XCTAssertTrue(closed.isClosed)
+        XCTAssertEqual(
+            try outbox.commands(),
+            ["zoom P on", "zoom R on", "focus R", "tab.focus", "zoom P off", "tab.focus"]
+        )
+        await engine.stop()
+    }
+
+    /// The session's end with the zoom button's zoom answered but not shown yet waits for the snapshot showing
+    /// it, since the release goes over the tabs Herdr's snapshot shows zoomed, then takes that zoom off too.
+    func testTheSessionsEndTakesOffAZoomButtonsZoomAnsweredButNotShownYet() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shown(feed, updates, outbox, panes: Self.atP)
+        let closed = Closed()
+
+        await feed.setZoom(true, ofPane: "P")
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        try await answerZoom(feed, outbox, zoomed: true)
+        XCTAssertFalse(closed.isClosed, "the end missed the zoom Herdr answered")
+        XCTAssertEqual(try outbox.commands(), ["zoom P on"], "the end went before Herdr showed the zoom")
+        await feed.receive(try Self.places(revision: 2, zoomed: ["t1"]))
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "zoom P off"])
+        try await answerZoom(feed, outbox, zoomed: false)
+        XCTAssertTrue(closed.isClosed)
+        await engine.stop()
+    }
+
+    /// The session attached again while its end still takes Remux's zooms off: the new attachment takes the
+    /// zooms over once Herdr answers the end's step in flight, after which the end sends nothing more and saves
+    /// nothing more, so no tab is unzoomed under the new attachment, which keeps the zooms not taken off yet.
+    func testAttachingAgainDuringTheSessionsEndTakesItsZoomsOver() async throws {
+        let store = InMemoryHerdrOwnedZoomStore()
+        let keepers = HerdrZoomKeepers(store: store)
+        let session = Self.herdrSession
+        let old = makeEngine()
+        let updates = UpdateLog(old)
+        let (feed, outbox) = await connect(old)
+        await old.keepOwnedZooms(of: session, from: keepers)
+        try await zoomedOnBothTabs(feed, updates, outbox)
+        let closed = Closed()
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t1"])
+
+        let new = makeEngine()
+        let takingOver = Task { await new.keepOwnedZooms(of: session, from: keepers) }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(closed.isClosed, "the end stopped with its step in flight")
+        try await answer(feed, outbox)
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t2"], "the end didn't go back to the tab it started on")
+        try await answer(feed, outbox)
+        await takingOver.value
+        XCTAssertTrue(closed.isClosed, "the end went on after the session was attached again")
+        await feed.receive(try Self.places(revision: 4, focusedPane: "P", zoomed: ["t1", "t2"]))
+        // Another client unzooms the second tab; the old engine saves nothing of it.
+        await feed.receive(try Self.places(revision: 5, focusedPane: "P", zoomed: ["t1"]))
+        XCTAssertEqual(
+            try outbox.commands(),
+            ["zoom P on", "zoom R on", "focus R", "tab.focus", "tab.focus"],
+            "a tab was unzoomed under the new attachment"
+        )
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t1", "t2"], "the old engine saved after the new attachment took over")
+
+        let (newFeed, newOutbox) = await connect(new)
+        await newFeed.receive(try Self.places(revision: 1, focusedPane: "P", zoomed: ["t1", "t2"]))
+        let newClosed = Closed()
+        await newFeed.releaseZooms(within: Self.releaseStepTime, done: newClosed.close)
+        XCTAssertEqual(try newOutbox.commands(), ["tab.focus"], "the new attachment didn't take the zooms over")
+        await old.stop()
+        await new.stop()
+    }
+
+    /// Two attachments to the session, one after the other, while its end still takes Remux's zooms off: both
+    /// wait for that end, and only the newer keeps the zooms and saves them. The older, superseded before it got
+    /// them, keeps none, and neither it nor the engine that ended saves again.
+    func testOnlyTheNewestOfTwoAttachmentsDuringTheSessionsEndKeepsItsZooms() async throws {
+        let store = InMemoryHerdrOwnedZoomStore()
+        let keepers = HerdrZoomKeepers(store: store)
+        let session = Self.herdrSession
+        let old = makeEngine()
+        let updates = UpdateLog(old)
+        let (feed, outbox) = await connect(old)
+        await old.keepOwnedZooms(of: session, from: keepers)
+        try await zoomedOnBothTabs(feed, updates, outbox)
+        let closed = Closed()
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t1"])
+
+        let second = makeEngine()
+        let third = makeEngine()
+        let secondKept = Closed()
+        let thirdKept = Closed()
+        Task {
+            await second.keepOwnedZooms(of: session, from: keepers)
+            secondKept.close()
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        Task {
+            await third.keepOwnedZooms(of: session, from: keepers)
+            thirdKept.close()
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(secondKept.isClosed, "the second attachment went ahead of the end")
+        XCTAssertFalse(thirdKept.isClosed, "the third attachment went ahead of the end")
+        try await answer(feed, outbox)
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t2"])
+        try await answer(feed, outbox)
+        try await waitUntil("the attachments didn't go on once the end was over") {
+            secondKept.isClosed && thirdKept.isClosed
+        }
+        XCTAssertTrue(closed.isClosed)
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "zoom R on", "focus R", "tab.focus", "tab.focus"])
+
+        // Another client unzooms the first tab: the engine that ended saves nothing of it.
+        await feed.receive(try Self.places(revision: 4, focusedPane: "R", zoomed: ["t2"]))
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t1", "t2"], "the engine that ended saved again")
+        // The second attachment zooms the first tab with the zoom button: superseded, it saves nothing.
+        let (secondFeed, secondOutbox) = await connect(second)
+        try await shown(secondFeed, UpdateLog(second), secondOutbox, panes: Self.atP)
+        await secondFeed.setZoom(true, ofPane: "P")
+        XCTAssertEqual(try secondOutbox.commands(), ["zoom P on"])
+        try await answerZoom(secondFeed, secondOutbox, zoomed: true)
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t1", "t2"], "the superseded attachment saved")
+        // The third keeps the zooms and saves what Herdr shows of them.
+        let (thirdFeed, _) = await connect(third)
+        await thirdFeed.receive(try Self.places(revision: 1, focusedPane: "R", zoomed: ["t2"]))
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t2"], "the newest attachment didn't keep the zooms")
+        await old.stop()
+        await second.stop()
+        await third.stop()
+    }
+
+    /// The session opened again while a zoom Remux asked for is still in flight as the session ends: the engine
+    /// that ended keeps saving until its release has stopped, so Herdr's answer to that zoom makes it Remux's,
+    /// the new attachment takes it over, and the new attachment's own end takes it off.
+    func testAZoomAnsweredAsTheSessionIsOpenedAgainIsTakenOverAndTakenOff() async throws {
+        let store = InMemoryHerdrOwnedZoomStore()
+        let keepers = HerdrZoomKeepers(store: store)
+        let session = Self.herdrSession
+        let old = makeEngine()
+        let updates = UpdateLog(old)
+        let (feed, outbox) = await connect(old)
+        await old.keepOwnedZooms(of: session, from: keepers)
+        try await shown(feed, updates, outbox, panes: Self.atP)
+        await feed.setZoom(true, ofPane: "P")
+        let closed = Closed()
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+
+        let new = makeEngine()
+        let kept = Closed()
+        Task {
+            await new.keepOwnedZooms(of: session, from: keepers)
+            kept.close()
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(kept.isClosed, "the new attachment went ahead of the end")
+        try await answerZoom(feed, outbox, zoomed: true)
+        try await waitUntil("the new attachment didn't go on once the end stopped") { kept.isClosed }
+        XCTAssertTrue(closed.isClosed)
+        XCTAssertEqual(try outbox.commands(), ["zoom P on"], "the end unzoomed after the session was opened again")
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t1"], "the zoom Herdr answered wasn't saved")
+
+        let (newFeed, newOutbox) = await connect(new)
+        await newFeed.receive(try Self.places(revision: 1, zoomed: ["t1"]))
+        let newClosed = Closed()
+        await newFeed.releaseZooms(within: Self.releaseStepTime, done: newClosed.close)
+        XCTAssertEqual(try newOutbox.commands(), ["zoom P off"], "the new attachment didn't take the zoom over")
+        try await answerZoom(newFeed, newOutbox, zoomed: false)
+        XCTAssertTrue(newClosed.isClosed)
+        await old.stop()
+        await new.stop()
+    }
+
+    /// The session's end unzooms the pane the snapshot shows focused on the tab, by name, so the unzoom reaches
+    /// only that tab. When the pane is gone by the time Herdr handles it, as when another client closed the tab,
+    /// Herdr refuses it: no other tab is touched, and Remux's record stays until a snapshot shows the tab gone.
+    func testTheSessionsEndUnzoomOfAPaneClosedMeanwhileTouchesNoOtherTab() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        let store = InMemoryHerdrOwnedZoomStore()
+        let session = Self.herdrSession
+        await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
+        try await shownZoomed(feed, updates, outbox)
+        // Another client zooms the second tab.
+        await feed.receive(try Self.places(revision: 3, zoomed: ["t1", "t2"]))
+        let closed = Closed()
+
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        XCTAssertEqual(try outbox.commands().last, "zoom P off", "the unzoom didn't name the pane it was for")
+        // Another client closes the first tab before Herdr handles the unzoom.
+        try await answer(feed, outbox, error: ("pane_not_found", "pane not found"))
+        XCTAssertTrue(closed.isClosed)
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "zoom P off"], "the end went on to another tab")
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t1"], "a refused unzoom dropped Remux's record")
+        await engine.stop()
+    }
+
+    /// The session's end cut short by a step Herdr doesn't answer in time still ends where it started: the
+    /// focus back to the tab the session was on goes, with a time of its own, since Herdr's next client starts
+    /// on the tab this one leaves its view on.
+    func testTheSessionsEndCutShortGoesBackToTheTabItStartedOn() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shownZoomed(feed, updates, outbox)
+        // Another client takes the session to the second tab.
+        await feed.receive(try Self.places(revision: 3, focusedPane: "R", zoomed: ["t1"]))
+        let closed = Closed()
+
+        await feed.releaseZooms(within: .milliseconds(200), done: closed.close)
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t1"])
+        try await answer(feed, outbox)
+        await feed.receive(try Self.places(revision: 4, focusedPane: "P", zoomed: ["t1"]))
+        XCTAssertEqual(try outbox.commands().last, "zoom P off")
+        // Herdr doesn't answer the unzoom in time.
+        try await waitUntil("the end didn't go back once its step's time ran out") {
+            (try? outbox.commands().count) == 4
+        }
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t2"])
+        XCTAssertFalse(closed.isClosed, "done before Herdr answered the focus back")
+        try await answer(feed, outbox)
+        XCTAssertTrue(closed.isClosed)
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "tab.focus", "zoom P off", "tab.focus"])
+        await engine.stop()
+    }
+
+    /// A newer claim stopping the release near the end of a step's time still gives the focus back a whole
+    /// step's time of its own, so the release ends on the tab it started on.
+    func testTheFocusBackOfAStoppedReleaseHasAStepsTimeOfItsOwn() async throws {
+        let keepers = HerdrZoomKeepers(store: InMemoryHerdrOwnedZoomStore())
+        let session = Self.herdrSession
+        let old = makeEngine()
+        let updates = UpdateLog(old)
+        let (feed, outbox) = await connect(old)
+        await old.keepOwnedZooms(of: session, from: keepers)
+        try await zoomedOnBothTabs(feed, updates, outbox)
+        let closed = Closed()
+
+        await feed.releaseZooms(within: .seconds(1), done: closed.close)
+        // Herdr answers the focus of the first tab; its snapshot is slow to come.
+        try await answer(feed, outbox)
+        try await Task.sleep(for: .milliseconds(700))
+        let new = makeEngine()
+        Task { await new.keepOwnedZooms(of: session, from: keepers) }
+        try await waitUntil("the stopped release didn't go back") { (try? outbox.lastParams()) == ["tab_id": "t2"] }
+        // Past the end of the step the stop came in.
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertFalse(closed.isClosed, "the focus back had only what was left of the step before")
+        try await answer(feed, outbox)
+        XCTAssertTrue(closed.isClosed)
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "zoom R on", "focus R", "tab.focus", "tab.focus"])
+        await old.stop()
+        await new.stop()
+    }
+
+    /// A focus back Herdr refuses as busy, still handling the step the release gave up on, goes again once
+    /// Herdr's answer to that step shows it free, so the release ends on the tab it started on.
+    func testAFocusBackHerdrRefusesAsBusyGoesAgainOnceHerdrIsFree() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        try await shownZoomed(feed, updates, outbox)
+        // Another client takes the session to the second tab.
+        await feed.receive(try Self.places(revision: 3, focusedPane: "R", zoomed: ["t1"]))
+        let closed = Closed()
+
+        await feed.releaseZooms(within: .milliseconds(200), done: closed.close)
+        try await answer(feed, outbox)
+        await feed.receive(try Self.places(revision: 4, focusedPane: "P", zoomed: ["t1"]))
+        XCTAssertEqual(try outbox.commands().last, "zoom P off")
+        let unzoom = try outbox.lastCommand().id
+        // Herdr doesn't answer the unzoom in time, so the release goes back.
+        try await waitUntil("the end didn't go back once its step's time ran out") {
+            (try? outbox.commands().count) == 4
+        }
+        try await answer(feed, outbox, error: ("endpoint_busy", "this endpoint is still processing another command"))
+        XCTAssertFalse(closed.isClosed, "the end took a focus back Herdr refused as busy for done")
+        XCTAssertEqual(try outbox.commands().count, 4, "the focus back went again while Herdr was busy")
+        // Herdr answers the unzoom it was still handling, which frees it.
+        await feed.receive(try Self.chunk(HerdrServerScript.zoomReply(
+            id: unzoom,
+            changed: true,
+            zoomed: false,
+            panes: [(id: "P", x: 0, y: 0, width: 2, height: 2), (id: "Q", x: 2, y: 0, width: 2, height: 2)]
+        )))
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "tab.focus", "zoom P off", "tab.focus", "tab.focus"])
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t2"])
+        try await answer(feed, outbox)
+        XCTAssertTrue(closed.isClosed)
+        await engine.stop()
+    }
+
+    /// The connection's end during the session's end, as when the phone suspends the app and the link drops,
+    /// ends the release at once, leaving the zooms not yet taken off and the phone's record of them for a later
+    /// attachment.
+    func testTheConnectionsEndDuringTheSessionsEndLeavesTheRestWithThePhone() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        let store = InMemoryHerdrOwnedZoomStore()
+        let session = Self.herdrSession
+        await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
+        try await zoomedOnBothTabs(feed, updates, outbox)
+        let closed = Closed()
+
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        try await answer(feed, outbox)
+        await feed.receive(try Self.places(revision: 4, focusedPane: "P", zoomed: ["t1", "t2"]))
+        try await answerZoom(feed, outbox, zoomed: false)
+        await feed.receive(try Self.places(revision: 5, focusedPane: "P", zoomed: ["t2"]))
+        XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t2"])
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t2"])
+        XCTAssertFalse(closed.isClosed)
+
+        await feed.ended()
+        XCTAssertTrue(closed.isClosed, "the end waited on a connection that ended")
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t2"], "the phone forgot a zoom still on the server")
+        await engine.stop()
+    }
+
+    /// The setting's zoom waiting behind a command doesn't go once another client zoomed its tab meanwhile:
+    /// the tab shows its pane zoomed already, and the move's focus still takes the session there. That zoom
+    /// isn't Remux's.
+    func testAQueuedZoomOfTheSettingDoesNotGoOnceItsTabIsZoomed() async throws {
+        let engine = makeEngine()
+        let updates = UpdateLog(engine)
+        let (feed, outbox) = await connect(engine)
+        let store = InMemoryHerdrOwnedZoomStore()
+        let session = Self.herdrSession
+        await engine.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
+        try await shown(feed, updates, outbox, panes: Self.atP)
+        let answers = Answers()
+
+        await feed.command("worktree.list", params: [String: String](), answered: answers.record)
+        let toR = try await start(feed, updates, Self.move("R", fromAnotherTab: true, zoom: Self.zooming))
+        // Another client zooms the tab while the command holds the lane.
+        await feed.receive(try Self.places(revision: 2, zoomed: ["t2"]))
+        try await answer(feed, outbox)
+        _ = try await answers.next().get()
+        XCTAssertEqual(try outbox.commands(), ["worktree.list", "focus R"], "the zoom went on a zoomed tab")
+        try await answer(feed, outbox)
+        await feed.receive(try Self.places(revision: 3, focusedPane: "R", zoomed: ["t2"]))
+        await feed.receive(.surface(try Self.surface(
+            projection: 3,
+            revision: 2,
+            lines: ["new ", "tab "],
+            panes: [Self.pane("R", x: 0, width: 4, height: 2, focused: true)]
+        )))
+        try await activation(toR, updates)
+        XCTAssertEqual(store.zooms(of: session).tabIDs, [], "another client's zoom was recorded as Remux's")
+        await engine.stop()
+    }
+
+    /// The phone keeps Remux's zooms, so a new engine for the session, as after the app ended, takes them over
+    /// and the session's end takes them off, also after Herdr's server restarted with a boot of its own. A tab
+    /// is taken over only while it is zoomed and still has one of the panes it had: one whose id names a tab
+    /// with other panes now isn't Remux's.
+    func testAZoomKeptOnThePhoneIsTakenOverOnlyWhileItsTabHasItsPanes() async throws {
+        let store = InMemoryHerdrOwnedZoomStore()
+        let session = Self.herdrSession
+        let first = makeEngine()
+        await first.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
+        let firstUpdates = UpdateLog(first)
+        let (firstFeed, firstOutbox) = await connect(first)
+        try await shownZoomed(firstFeed, firstUpdates, firstOutbox)
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t1"])
+        // The app ends without ending the session; Herdr's server restarts.
+        await first.stop()
+
+        let second = makeEngine()
+        await second.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: store))
+        let (feed, outbox) = await connect(second)
+        await feed.receive(try Self.places(revision: 1, boot: "boot2", zoomed: ["t1"]))
+        XCTAssertEqual(store.zooms(of: session).tabIDs, ["t1"])
+        let closed = Closed()
+        await feed.releaseZooms(within: Self.releaseStepTime, done: closed.close)
+        XCTAssertEqual(try outbox.commands(), ["zoom P off"])
+        try await answerZoom(feed, outbox, zoomed: false)
+        XCTAssertTrue(closed.isClosed)
+        XCTAssertEqual(store.zooms(of: session).tabIDs, [])
+        await second.stop()
+
+        // A record of tab t1 with panes the server no longer has: the tab of that id now is another one.
+        let stale = try StaleZoomStore(tabID: "t1", panes: ["X", "Y"])
+        let third = makeEngine()
+        await third.keepOwnedZooms(of: session, from: HerdrZoomKeepers(store: stale))
+        let (thirdFeed, thirdOutbox) = await connect(third)
+        await thirdFeed.receive(try Self.places(revision: 1, boot: "boot3", zoomed: ["t1"]))
+        XCTAssertEqual(stale.zooms(of: session).tabIDs, [], "the phone kept a record of another tab")
+        let thirdClosed = Closed()
+        await thirdFeed.releaseZooms(within: Self.releaseStepTime, done: thirdClosed.close)
+        XCTAssertTrue(thirdClosed.isClosed)
+        XCTAssertEqual(try thirdOutbox.writes(), [], "a tab whose id Remux once zoomed was unzoomed")
+        await third.stop()
     }
 
     /// A move that takes over a show keeps the show's time, as Herdr's client keeps an activation's deadline
@@ -1138,12 +1783,10 @@ final class HerdrTerminalEngineTests: XCTestCase {
         XCTAssertEqual(try outbox.commands(), ["zoom R on"])
         try await answerZoom(feed, outbox, zoomed: true, tab: "t2", panes: ["R", "S"])
         await feed.receive(try Self.places(revision: 2, focusedPane: "R", zoomed: ["t2"]))
-        XCTAssertEqual(try outbox.commands(), ["zoom R on", "zoom S on"])
-        try await answerZoom(feed, outbox, zoomed: true, changed: false, tab: "t2", panes: ["S", "R"])
-        await feed.receive(try Self.places(revision: 3, focusedPane: "S", zoomed: ["t2"]))
-        XCTAssertEqual(try outbox.commands(), ["zoom R on", "zoom S on", "focus S"])
+        // The tab is zoomed now, so the new move's zoom doesn't go; its focus does.
+        XCTAssertEqual(try outbox.commands(), ["zoom R on", "focus S"])
         try await answer(feed, outbox)
-        XCTAssertEqual(try outbox.commands(), ["zoom R on", "zoom S on", "focus S", "worktree.list"])
+        XCTAssertEqual(try outbox.commands(), ["zoom R on", "focus S", "worktree.list"])
         try await answer(feed, outbox)
         _ = try await answers.next().get()
         await engine.stop()
@@ -1863,6 +2506,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
     /// `closed` names isn't listed.
     static func places(
         revision: UInt64,
+        boot: String = "boot",
         focusedPane: String = "P",
         zoomed: Set<String> = [],
         gone: Set<String> = [],
@@ -1882,7 +2526,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
             tab.panes.map { HerdrServerScript.snapshotPane($0, tab: tab.id) }
         }
         let json = """
-        {"boot_id":"boot","revision":\(revision),"focused_workspace_id":"w1","focused_tab_id":"\(focusedTab)",
+        {"boot_id":"\(boot)","revision":\(revision),"focused_workspace_id":"w1","focused_tab_id":"\(focusedTab)",
          "focused_pane_id":"\(focusedPane)","workspaces":[],"tabs":[\(tabEntries.joined(separator: ","))],
          "panes":[\(paneEntries.joined(separator: ","))],"agents":[]}
         """
@@ -1896,6 +2540,14 @@ final class HerdrTerminalEngineTests: XCTestCase {
     static let zooming = HerdrZoomPolicy(zoomsMultipaneTabs: true, unzoomedByUser: [])
     static let notZooming = HerdrZoomPolicy(zoomsMultipaneTabs: false, unzoomedByUser: [])
 
+    /// Herdr's time for each step of taking Remux's zooms off, as for a show.
+    static let releaseStepTime: Duration = .seconds(5)
+
+    /// The Herdr session whose zooms a test keeps.
+    static let herdrSession = HerdrSessionAddress(
+        host: "herdr.example.test", port: 22, username: "builder", herdrExecutablePath: nil, session: "s"
+    )
+
     /// The session on screen at 4 × 2, taken to `pane` when given.
     static func show(_ pane: String? = nil, zoom: HerdrZoomPolicy = notZooming) -> HerdrView {
         .shown(HerdrSurfaceGeometry(cellWidthPx: 9, cellHeightPx: 18, cols: 4, rows: 2), to: pane.map { .place(.pane($0)) }, zoom: zoom)
@@ -1905,9 +2557,9 @@ final class HerdrTerminalEngineTests: XCTestCase {
         .moved(.place(.pane(pane)), fromAnotherTab: fromAnotherTab, columns: 4, rows: 2, zoom: zoom)
     }
 
-    /// A move to another tab focuses the tab with Herdr's client's `tab.focus` after Remux's zoom comes off
-    /// the tab left; the pane the tab shows is known only once the session is there, so the setting's zoom
-    /// of the tab follows on it. Only the tab reached, zoomed, is drawn.
+    /// A move to another tab focuses the tab with Herdr's client's `tab.focus`, leaving Remux's zoom on the tab
+    /// left; the pane the tab shows is known only once the session is there, so the setting's zoom of the
+    /// tab follows on it. Only the tab reached, zoomed, is drawn.
     func testATabMoveFocusesTheTabThenZoomsThePaneItShows() async throws {
         let engine = makeEngine()
         let updates = UpdateLog(engine)
@@ -1915,16 +2567,14 @@ final class HerdrTerminalEngineTests: XCTestCase {
         try await shownZoomed(feed, updates, outbox)
 
         let move = try await start(feed, updates, .moved(.place(.tab("t2")), fromAnotherTab: true, columns: 4, rows: 2, zoom: Self.zooming))
-        XCTAssertEqual(try outbox.commands().last, "zoom P off")
-        try await answerZoom(feed, outbox, zoomed: false)
         XCTAssertEqual(try outbox.commands().last, "tab.focus")
         XCTAssertEqual(try outbox.lastParams(), ["tab_id": "t2"])
         try await answer(feed, outbox)
         XCTAssertEqual(try outbox.commands().last, "tab.focus", "the zoom went before the tab was on screen")
-        await feed.receive(try Self.places(revision: 4, focusedPane: "S"))
+        await feed.receive(try Self.places(revision: 4, focusedPane: "S", zoomed: ["t1"]))
         XCTAssertEqual(try outbox.commands().last, "zoom S on")
         try await answerZoom(feed, outbox, zoomed: true, tab: "t2", panes: ["S", "R"])
-        await feed.receive(try Self.places(revision: 5, focusedPane: "S", zoomed: ["t2"]))
+        await feed.receive(try Self.places(revision: 5, focusedPane: "S", zoomed: ["t1", "t2"]))
         await feed.receive(.surface(try Self.surface(
             projection: 5,
             revision: 5,
@@ -1939,6 +2589,7 @@ final class HerdrTerminalEngineTests: XCTestCase {
         _ = try await updates.nextPaneScroll()
         try await activation(move, updates)
         XCTAssertEqual(updates.focusAnswers.map(\.request), [move])
+        XCTAssertEqual(try outbox.commands(), ["zoom P on", "tab.focus", "zoom S on"])
         await engine.stop()
     }
 
@@ -2124,6 +2775,23 @@ final class HerdrTerminalEngineTests: XCTestCase {
             panes: [Self.pane("P", x: 0, width: 4, height: 2, focused: true)]
         )))
         try await activation(show, updates)
+    }
+
+    /// The session shown zoomed at P on tab `t1`, then moved to R on tab `t2`, which the setting zoomed too:
+    /// both zooms are Remux's, and the newest snapshot is revision 3.
+    private func zoomedOnBothTabs(_ feed: HerdrEngineFeed, _ updates: UpdateLog, _ outbox: RecordingOutbox) async throws {
+        try await shownZoomed(feed, updates, outbox)
+        let toR = try await start(feed, updates, Self.move("R", fromAnotherTab: true, zoom: Self.zooming))
+        try await answerZoom(feed, outbox, zoomed: true, tab: "t2", panes: ["R", "S"])
+        await feed.receive(try Self.places(revision: 3, focusedPane: "R", zoomed: ["t1", "t2"]))
+        try await answer(feed, outbox)
+        await feed.receive(.surface(try Self.surface(
+            projection: 3,
+            revision: 3,
+            lines: ["new ", "tab "],
+            panes: [Self.pane("R", x: 0, width: 4, height: 2, focused: true)]
+        )))
+        try await activation(toR, updates)
     }
 
     /// Herdr's answer to the newest show, with the floor its frame must reach.
@@ -2449,13 +3117,13 @@ private final class RecordingOutbox: HerdrOutbound, @unchecked Sendable {
         try lock.withLock { frames }.map(ClientWrite.decode)
     }
 
-    /// The commands sent, shows and hides left out: a zoom or focus by its pane, anything else by its
-    /// method.
+    /// The commands sent, shows and hides left out: a zoom or focus by its pane, if it names one, anything else
+    /// by its method.
     @MainActor
     func commands() throws -> [String] {
         try writes().compactMap { write in
             switch write {
-            case .paneZoom(_, let pane, let mode): "zoom \(pane) \(mode)"
+            case .paneZoom(_, let pane, let mode): (["zoom"] + [pane, mode].compactMap { $0 }).joined(separator: " ")
             case .paneFocus(_, let pane): "focus \(pane)"
             case .command(_, let method, _): method
             default: nil
@@ -2489,6 +3157,27 @@ private final class RecordingOutbox: HerdrOutbound, @unchecked Sendable {
     private static func isRequest(_ frame: [UInt8]) -> Bool {
         var reader = HerdrWireReader(Array(frame.dropFirst(4)))
         return (try? reader.variant()) == 15
+    }
+}
+
+/// A phone's record of a zoom Remux made on tab `tabID` when it had `panes`.
+private final class StaleZoomStore: HerdrOwnedZoomStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var zooms: HerdrOwnedZooms
+
+    init(tabID: String, panes: [String]) throws {
+        zooms = try JSONDecoder().decode(
+            HerdrOwnedZooms.self,
+            from: JSONEncoder().encode(["panesByTab": [tabID: panes]])
+        )
+    }
+
+    func zooms(of session: HerdrSessionAddress) -> HerdrOwnedZooms {
+        lock.withLock { zooms }
+    }
+
+    func save(_ zooms: HerdrOwnedZooms, of session: HerdrSessionAddress) {
+        lock.withLock { self.zooms = zooms }
     }
 }
 

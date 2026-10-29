@@ -152,8 +152,8 @@ final class HerdrLiveConnectionTests: XCTestCase {
     // MARK: - Zoom
 
     /// With "Zoom multipane windows" on, Herdr zooms the two-pane tab on screen as the session is shown,
-    /// the pane sheet maps both panes from Herdr's answer, and leaving the screen, or ending the session,
-    /// unzooms it, as Herdr itself reports.
+    /// the pane sheet maps both panes from Herdr's answer, leaving the screen keeps the zoom, and ending the
+    /// session unzooms it, as Herdr itself reports.
     @MainActor
     func testATabIsZoomedWhileShownOnHerdr093() async throws {
         try await checkTabIsZoomedWhileShown(version: "0.9.3")
@@ -196,13 +196,43 @@ final class HerdrLiveConnectionTests: XCTestCase {
         }
 
         session.model.setSelected(false)
-        try await zoomState(session, pane: panes.focused, is: false)
+        try await Task.sleep(for: .seconds(1))
+        try await zoomState(session, pane: panes.focused, is: true)
 
         session.model.setSelected(true)
         try await zoomState(session, pane: panes.focused, is: true)
         try await waitUntil("the session wasn't shown again", timeout: .seconds(10)) { session.model.isInputAvailable }
         await session.model.stop()
         try await zoomState(session, pane: panes.focused, is: false)
+    }
+
+    /// The zoom Remux made outlives the app: the phone's record of it lets a later attachment, also after
+    /// Herdr's server restarted with a boot of its own, take it over without zooming it again, and undo it as
+    /// the session ends, as Herdr itself reports.
+    @MainActor
+    func testAZoomOutlivingTheAppIsUndoneAfterAServerRestartOnHerdr095() async throws {
+        let keepers = HerdrZoomKeepers(store: InMemoryHerdrOwnedZoomStore())
+        let first = try await openShownSession(version: "0.9.5", settings: Self.zooming, zoomKeepers: keepers, through: { $0 })
+        let panes = try await split(first)
+        first.model.setSelected(false)
+        first.model.setSelected(true)
+        try await zoomState(first, pane: panes.focused, is: true)
+        try await waitUntil("the session wasn't shown again", timeout: .seconds(10)) { first.model.isInputAvailable }
+        let boot = try XCTUnwrap(first.model.places.outline?.bootID)
+
+        // The app ends without ending the session, and Herdr's server restarts.
+        await first.model.stop(.replacedByNewAttempt)
+        try await zoomState(first, pane: panes.focused, is: true)
+        let stop = try await first.fixture.herdr(["server", "stop"], trace: RemuxTransportStartupTrace(flowID: "herdr-live-zoom"))
+        XCTAssertEqual(stop.exitStatus, 0, String(decoding: stop.stderr, as: UTF8.self))
+
+        let second = try await openShownSession(
+            version: "0.9.5", settings: Self.zooming, zoomKeepers: keepers, after: first, through: { $0 }
+        )
+        XCTAssertNotEqual(second.model.places.outline?.bootID, boot, "Herdr's server didn't restart")
+        try await zoomState(second, pane: panes.focused, is: true)
+        await second.model.stop()
+        try await zoomState(second, pane: panes.focused, is: false)
     }
 
     private static var zooming: TerminalSettings {
@@ -316,20 +346,21 @@ final class HerdrLiveConnectionTests: XCTestCase {
         }
     }
 
-    /// With "Zoom multipane windows" on, a move to another tab or workspace takes Remux's zoom along: the
-    /// two-pane tab left is unzoomed, and going back zooms it again, as Herdr itself reports.
+    /// With "Zoom multipane windows" on, the two-pane tab Remux zoomed keeps its zoom through moves to
+    /// another tab or workspace and back, and ending the session, on another tab, unzooms it, as Herdr itself
+    /// reports.
     @MainActor
-    func testRemuxsZoomFollowsTabAndWorkspaceMovesOnHerdr093() async throws {
-        try await checkZoomFollowsMoves(version: "0.9.3")
+    func testRemuxsZoomStaysThroughTabAndWorkspaceMovesOnHerdr093() async throws {
+        try await checkZoomStaysThroughMoves(version: "0.9.3")
     }
 
     @MainActor
-    func testRemuxsZoomFollowsTabAndWorkspaceMovesOnHerdr095() async throws {
-        try await checkZoomFollowsMoves(version: "0.9.5")
+    func testRemuxsZoomStaysThroughTabAndWorkspaceMovesOnHerdr095() async throws {
+        try await checkZoomStaysThroughMoves(version: "0.9.5")
     }
 
     @MainActor
-    private func checkZoomFollowsMoves(version: String) async throws {
+    private func checkZoomStaysThroughMoves(version: String) async throws {
         let session = try await openShownSession(version: version, settings: Self.zooming, through: { $0 })
         let model = session.model
         let adapter = model.terminalScreenAdapter
@@ -343,23 +374,34 @@ final class HerdrLiveConnectionTests: XCTestCase {
         func onScreen() -> String? { model.layout?.tab?.tabID }
 
         XCTAssertEqual(adapter.createTopLevel(inGroup: nil), .queued)
-        try await zoomState(session, pane: panes.focused, is: false)
         try await waitUntil("New Tab didn't go to its tab", timeout: .seconds(15)) {
             onScreen() != firstTab && model.stateTraceLabel == "shown"
         }
+        try await zoomState(session, pane: panes.focused, is: true)
         let tile = try XCTUnwrap(adapter.windowSelectionSheetRenderProjection(group: nil).windows.first)
         XCTAssertEqual(adapter.focusTopLevel(tile.id), .queued)
-        try await zoomState(session, pane: panes.focused, is: true)
 
         try await waitUntil("the tab wasn't on screen again", timeout: .seconds(15)) { onScreen() == firstTab }
+        try await zoomState(session, pane: panes.focused, is: true)
         XCTAssertEqual(adapter.createTopLevelGroup(from: nil), .queued)
-        try await zoomState(session, pane: panes.focused, is: false)
         try await waitUntil("New Workspace didn't go to its workspace", timeout: .seconds(15)) {
             guard let tab = onScreen() else { return false }
             return model.places.outline?.workspace(containingTab: tab)?.id != first.id
         }
-        model.reveal(.workspace(first.id), bootID: try XCTUnwrap(model.places.outline).bootID)
         try await zoomState(session, pane: panes.focused, is: true)
+        let made = try XCTUnwrap(onScreen().flatMap { model.places.outline?.workspace(containingTab: $0) })
+        model.reveal(.workspace(first.id), bootID: try XCTUnwrap(model.places.outline).bootID)
+        try await waitUntil("the workspace didn't go back to the tab this phone had there", timeout: .seconds(15)) {
+            onScreen() == firstTab && model.stateTraceLabel == "shown"
+        }
+        try await zoomState(session, pane: panes.focused, is: true)
+        model.reveal(.workspace(made.id), bootID: try XCTUnwrap(model.places.outline).bootID)
+        try await waitUntil("the workspace made didn't come back", timeout: .seconds(15)) {
+            guard let tab = onScreen() else { return false }
+            return model.places.outline?.workspace(containingTab: tab)?.id == made.id && model.stateTraceLabel == "shown"
+        }
+        await model.stop()
+        try await zoomState(session, pane: panes.focused, is: false)
     }
 
     /// The Panes sheet's Split → and Split ↓ make the pane Herdr's client makes and go to it, as the frame
@@ -1563,26 +1605,35 @@ final class HerdrLiveConnectionTests: XCTestCase {
     private struct ShownSession {
         let fixture: HerdrLiveFixture
         let model: HerdrScreenModel
+        let server: SavedServer
     }
 
     /// A Herdr session model with Remux's terminal `settings`, on a fresh isolated server for Herdr
-    /// `version` with the `ui` settings, shown, with its first pane drawn in a window as on the screen.
+    /// `version` with the `ui` settings, or on an earlier session's fixture and saved server, shown, with its
+    /// first pane drawn in a window as on the screen. The phone keeps Remux's zooms through `zoomKeepers`.
     /// `through` can put a transport between the model's connection and the bridge.
     @MainActor
     private func openShownSession(
         version: String,
         settings: TerminalSettings = .default,
         ui: [String] = [],
+        zoomKeepers: HerdrZoomKeepers = HerdrZoomKeepers(store: InMemoryHerdrOwnedZoomStore()),
+        after earlier: ShownSession? = nil,
         through wrap: @escaping @Sendable (any HerdrBridgeTransport) -> any HerdrBridgeTransport
     ) async throws -> ShownSession {
-        let fixture = try await HerdrLiveFixture.start(try HerdrLiveConfiguration.load(), version: version, ui: ui)
-        addTeardownBlock {
-            for problem in await fixture.tearDown() {
-                XCTFail(problem)
+        let fixture: HerdrLiveFixture
+        if let earlier {
+            fixture = earlier.fixture
+        } else {
+            fixture = try await HerdrLiveFixture.start(try HerdrLiveConfiguration.load(), version: version, ui: ui)
+            addTeardownBlock {
+                for problem in await fixture.tearDown() {
+                    XCTFail(problem)
+                }
             }
         }
         let trace = RemuxTransportStartupTrace(flowID: "herdr-live-composer")
-        let server = SavedServer(
+        let server = earlier?.server ?? SavedServer(
             displayName: "herdr-live",
             host: fixture.configuration.host,
             port: fixture.configuration.port,
@@ -1610,7 +1661,8 @@ final class HerdrLiveConnectionTests: XCTestCase {
                 ))
             },
             onRuntimeStateChange: { _ in },
-            onNotification: { _ in }
+            onNotification: { _ in },
+            zoomKeepers: zoomKeepers
         )
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 600))
         window.rootViewController = UIViewController()
@@ -1631,7 +1683,7 @@ final class HerdrLiveConnectionTests: XCTestCase {
         }
         window.isHidden = false
         try await waitUntil("the session didn't take input", timeout: .seconds(20)) { model.isInputAvailable }
-        return ShownSession(fixture: fixture, model: model)
+        return ShownSession(fixture: fixture, model: model, server: server)
     }
 
     @MainActor

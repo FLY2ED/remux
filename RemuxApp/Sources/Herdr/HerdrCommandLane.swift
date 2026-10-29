@@ -14,11 +14,6 @@ import Foundation
 struct HerdrCommandLane {
     /// A step of the current view request. The engine decides what each sends, if anything, as it goes.
     enum Step: Equatable, Sendable {
-        /// Remux's zoom off the tab it zoomed, when the session leaves that tab for the tab `place` is on,
-        /// or for a tab a creation makes (nil): an unzoom of the tab's focused pane, which Herdr's unzoom
-        /// focuses. Decided as it goes, since the answer to a request this one replaced can change what
-        /// Remux zoomed.
-        case leave(to: HerdrPlace?)
         /// The setting's zoom of the pane's tab. `navigates` for a move's, which takes the session to the
         /// pane: Herdr's zoom focuses its target (`actions.rs` `apply_pane_zoom`). A show's zooms the pane
         /// already focused.
@@ -36,18 +31,17 @@ struct HerdrCommandLane {
         /// session where it is then. `group` closes a worktree group's root with its linked worktrees.
         case close(HerdrPlace, group: Bool)
 
-        /// Whether the step is a `pane.zoom`: Remux's zoom off a tab, the setting's zoom, or the zoom of a tab
-        /// reached.
+        /// Whether the step is a `pane.zoom`: the setting's zoom, or the zoom of a tab reached.
         var isZoom: Bool {
             switch self {
-            case .leave, .zoom, .zoomReached: true
+            case .zoom, .zoomReached: true
             case .focus, .create, .close: false
             }
         }
 
         var method: String {
             switch self {
-            case .leave, .zoom, .zoomReached: HerdrScreenModel.paneZoomMethod
+            case .zoom, .zoomReached: HerdrScreenModel.paneZoomMethod
             case .focus(let place): place.focusMethod
             case .create(let creation): creation.method
             case .close(let place, _): place.closeMethod
@@ -66,11 +60,21 @@ struct HerdrCommandLane {
             /// the tab is still zoomed, since another client may have unzoomed it meanwhile and the question
             /// would zoom it again for everyone.
             case layout(pane: String)
-            /// Remux's zoom off the tab on screen, as the session leaves the screen or closes; `closed` once
-            /// it is answered or fails.
-            case unzoom(pane: String, closed: (@Sendable () -> Void)?)
+            /// A step of Remux's zooms coming off as the session ends (`HerdrTerminalEngine.releaseZooms`). It
+            /// goes with the lane free, and nothing else goes from the release's start.
+            case release(ReleaseStep)
             /// Anything else, whose caller gets its answer; it goes only while the session is shown.
             case other(answered: @Sendable (Result<HerdrCommandReply, HerdrCommandError>) -> Void)
+        }
+
+        /// A step of Remux's zooms coming off as the session ends.
+        enum ReleaseStep: Equatable {
+            /// The focus of the tab `tabID`, off screen, for its unzoom.
+            case focus(tabID: String)
+            /// The unzoom of the tab `tabID`, on the pane the snapshot shows focused there.
+            case unzoom(tabID: String)
+            /// The focus back to the tab `tabID` the session was on as the release started, its last step.
+            case back(tabID: String)
         }
 
         let method: String

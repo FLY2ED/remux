@@ -177,6 +177,29 @@ struct SessionLocator: Hashable, Sendable {
     let name: String
 }
 
+/// A Herdr session as Remux's bridge reaches it: the server's address, the account and the Herdr it runs, and
+/// the session's name. Saved servers that reach the same one reach the same session, whatever their names, and
+/// one edited to reach another machine reaches another session.
+struct HerdrSessionAddress: Hashable, Codable, Sendable {
+    let host: String
+    let port: Int
+    let username: String
+    let herdrExecutablePath: String?
+    let session: String
+}
+
+extension HerdrSessionAddress {
+    init(_ target: SessionTarget) {
+        self.init(
+            host: target.server.host,
+            port: target.server.port,
+            username: target.sshAuth.username,
+            herdrExecutablePath: target.server.herdrExecutablePath,
+            session: target.workspace.sessionName
+        )
+    }
+}
+
 /// A session a backend's discovery listed on a server.
 struct DiscoveredSession: Equatable, Sendable {
     let name: String

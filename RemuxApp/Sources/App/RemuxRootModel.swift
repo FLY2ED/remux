@@ -84,7 +84,8 @@ struct TerminalRuntimeAttemptKey: Hashable, Sendable {
 
 /// Why a runtime attempt stops. Ending the session undoes what Remux left on
 /// the server (its zooms); a replacement leaves it for the new attempt, which
-/// adopts it from the server.
+/// adopts it: from tmux's marks on the server, or from the phone's record of
+/// Herdr's.
 enum TerminalRuntimeStopReason: Equatable, Sendable {
     case sessionEnded
     case replacedByNewAttempt
@@ -144,12 +145,10 @@ enum TerminalRuntime {
         }
     }
 
-    /// A Herdr stop undoes Remux's zoom for either reason: Herdr's zoom has no owner, so a new attempt
-    /// can't take it over.
     func stop(_ reason: TerminalRuntimeStopReason) async {
         switch self {
         case .tmux(let model): await model.stop(reason)
-        case .herdr(let model): await model.stop()
+        case .herdr(let model): await model.stop(reason)
         }
     }
 }
@@ -1805,11 +1804,8 @@ final class RemuxRootModel: ObservableObject {
     /// Whether two targets reach the same Herdr session the same way. Terminal settings don't count:
     /// a running model takes them live.
     private static func opensTheSameHerdrBridge(_ lhs: SessionTarget, _ rhs: SessionTarget) -> Bool {
-        lhs.server.host == rhs.server.host
-            && lhs.server.port == rhs.server.port
-            && lhs.server.herdrExecutablePath == rhs.server.herdrExecutablePath
-            && lhs.workspace.locator == rhs.workspace.locator
-            && lhs.sshAuth.username == rhs.sshAuth.username
+        HerdrSessionAddress(lhs) == HerdrSessionAddress(rhs)
+            && lhs.workspace.backend == rhs.workspace.backend
             && lhs.sshAuth.authFingerprint == rhs.sshAuth.authFingerprint
     }
 
@@ -2538,7 +2534,8 @@ final class RemuxRootModel: ObservableObject {
                 onRuntimeStateChange: onRuntimeStateChange,
                 onNotification: { [weak self] event in
                     self?.handleHerdrNotification(event, from: key)
-                }
+                },
+                zoomKeepers: dependencies.herdrZoomKeepers
             ))
         }
         terminalRuntimes[key] = runtime
