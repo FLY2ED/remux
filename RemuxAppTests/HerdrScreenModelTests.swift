@@ -3185,14 +3185,7 @@ final class HerdrScreenModelTests: XCTestCase {
         let left = try XCTUnwrap(adapter.terminalScreenPresentationProjection.viewport.focusedSurfaceID)
         let leftTab = adapter.windowSelectionSheetRenderProjection(group: nil).selectedWindowID
 
-        gate.holdsRegistrations = true
-        harness.model.reveal(.pane("w1:p3"), bootID: "boot")
-        let focus = try await nextWrite(session.bridge, from: &index, paneFocus)
-        await session.bridge.serve(Self.secondTabOnScreen(revision: 3))
-        await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 2, lines: ["thr fou"], panes: Self.secondTabDrawn()))
-        await session.bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
-        try await harness.waitUntil("the tab reached's panes weren't drawing off screen") { gate.heldRegistrationCount == 2 }
-        try await harness.waitUntil("the move didn't complete") { harness.model.stateTraceLabel == "shown" }
+        try await moveToSecondTabHeldOffScreen(harness, session.bridge, gate: gate, from: &index)
 
         let held = adapter.terminalScreenPresentationProjection
         XCTAssertEqual(drawnPanes(harness), ["w1:p1", "w1:p2"], "the tab left went before the tab reached drew")
@@ -3352,14 +3345,7 @@ final class HerdrScreenModelTests: XCTestCase {
         }
         defer { watch.cancel() }
 
-        gate.holdsRegistrations = true
-        harness.model.reveal(.pane("w1:p3"), bootID: "boot")
-        let focus = try await nextWrite(session.bridge, from: &index, paneFocus)
-        await session.bridge.serve(Self.secondTabOnScreen(revision: 3))
-        await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 2, lines: ["thr fou"], panes: Self.secondTabDrawn()))
-        await session.bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
-        try await harness.waitUntil("the move didn't complete") { harness.model.stateTraceLabel == "shown" }
-        try await harness.waitUntil("the tab reached's panes weren't drawing off screen") { gate.heldRegistrationCount == 2 }
+        try await moveToSecondTabHeldOffScreen(harness, session.bridge, gate: gate, from: &index)
 
         // The screen narrows, and the panes finish drawing before Herdr's frame at the new grid arrives.
         harness.setScreenSize(CGSize(width: 300, height: 844))
@@ -3367,11 +3353,95 @@ final class HerdrScreenModelTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(300))
         XCTAssertEqual(drawnPanes(harness), ["w1:p1", "w1:p2"], "the tab reached came on screen at the grid before")
 
-        let narrower: [HerdrServerScript.Pane] = [
-            .init(id: "w1:p3", x: 0, width: 2, height: 1, focused: true),
-            .init(id: "w1:p4", x: 3, width: 2, height: 1),
-        ]
-        await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 3, lines: ["th fo"], panes: narrower))
+        await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 3, lines: ["th fo"], panes: Self.secondTabNarrowed))
+        try await harness.waitUntil("the tab reached wasn't drawn at the new grid") { self.drawnPanes(harness) == Self.secondTab }
+        let grid = try XCTUnwrap(harness.model.measurement?.controlViewport.columns)
+        XCTAssertEqual(Set(shownColumns), [grid], "the tab reached came on screen at another grid: \(shownColumns)")
+    }
+
+    /// A resize away and back while a tab waits off screen leaves it drawn at the grid the screen asks for: it
+    /// waits while the grid is another, and comes on screen as it is once the grid is back, with no new frame
+    /// from Herdr.
+    func testAResizeAwayAndBackWhileATabWaitsShowsItAsItIs() async throws {
+        let gate = RendererFenceGate()
+        let harness = await makeHarness(rendererFenceGate: gate)
+        let session = try await shownTab(harness, secondTab: Self.secondTab)
+        var index = session.next
+
+        try await moveToSecondTabHeldOffScreen(harness, session.bridge, gate: gate, from: &index)
+
+        harness.setScreenSize(CGSize(width: 300, height: 844))
+        gate.releaseRegistrations()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(drawnPanes(harness), ["w1:p1", "w1:p2"], "the tab reached came on screen at another grid")
+
+        harness.setScreenSize()
+        try await harness.waitUntil("the tab reached didn't come on screen at the grid asked for again") {
+            self.drawnPanes(harness) == Self.secondTab
+        }
+    }
+
+    /// Two resizes in a row while a tab waits off screen: Herdr's frame answering the first, arriving after
+    /// the second, leaves the tab waiting, and its frame at the last grid brings it on screen.
+    func testAFrameDrawnForAnEarlierResizeLeavesTheTabWaiting() async throws {
+        let gate = RendererFenceGate()
+        let harness = await makeHarness(rendererFenceGate: gate)
+        let session = try await shownTab(harness, secondTab: Self.secondTab)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        var shownColumns: [UInt16] = []
+        let watch = adapter.objectWillChange.sink { [harness] in
+            if harness.model.layout?.tab?.tabID == "t2", let columns = harness.model.layout?.columns { shownColumns.append(columns) }
+        }
+        defer { watch.cancel() }
+
+        try await moveToSecondTabHeldOffScreen(harness, session.bridge, gate: gate, from: &index)
+        let first = try XCTUnwrap(harness.model.measurement?.controlViewport.columns)
+
+        // The panes finish drawing between the two resizes, and Herdr's frame answering the first arrives after
+        // the second.
+        harness.setScreenSize(CGSize(width: 300, height: 844))
+        let between = try XCTUnwrap(harness.model.measurement?.controlViewport.columns)
+        let answeringBetween = try harness.shownSurface(projection: 3, revision: 3, lines: ["th fo"], panes: Self.secondTabNarrowed)
+        gate.releaseRegistrations()
+        try await Task.sleep(for: .milliseconds(300))
+        harness.setScreenSize(CGSize(width: 345, height: 844))
+        let last = try XCTUnwrap(harness.model.measurement?.controlViewport.columns)
+        XCTAssertEqual(Set([first, between, last]).count, 3, "the screen sizes give the same grid: \([first, between, last])")
+        await session.bridge.serve(answeringBetween)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(drawnPanes(harness), ["w1:p1", "w1:p2"], "the tab reached came on screen at the grid in between")
+
+        await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 4, lines: ["th fo"], panes: Self.secondTabNarrowed))
+        try await harness.waitUntil("the tab reached wasn't drawn at the last grid") { self.drawnPanes(harness) == Self.secondTab }
+        XCTAssertEqual(Set(shownColumns), [last], "the tab reached came on screen at another grid: \(shownColumns)")
+    }
+
+    /// A frame Herdr drew before a resize reached it, for a newer snapshot such as an agent's update on its
+    /// way, leaves a tab waiting off screen; Herdr's next frame, at the new grid, brings it on screen.
+    func testANewerFrameAtTheGridBeforeAResizeLeavesTheTabWaiting() async throws {
+        let gate = RendererFenceGate()
+        let harness = await makeHarness(rendererFenceGate: gate)
+        let session = try await shownTab(harness, secondTab: Self.secondTab)
+        var index = session.next
+        let adapter = harness.model.terminalScreenAdapter
+        var shownColumns: [UInt16] = []
+        let watch = adapter.objectWillChange.sink { [harness] in
+            if harness.model.layout?.tab?.tabID == "t2", let columns = harness.model.layout?.columns { shownColumns.append(columns) }
+        }
+        defer { watch.cancel() }
+
+        try await moveToSecondTabHeldOffScreen(harness, session.bridge, gate: gate, from: &index)
+        let atGridBefore = try harness.shownSurface(projection: 4, revision: 3, lines: ["thr fou"], panes: Self.secondTabDrawn())
+
+        harness.setScreenSize(CGSize(width: 300, height: 844))
+        gate.releaseRegistrations()
+        await session.bridge.serve(Self.secondTabOnScreen(revision: 4))
+        await session.bridge.serve(atGridBefore)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(drawnPanes(harness), ["w1:p1", "w1:p2"], "the tab reached came on screen at the grid before")
+
+        await session.bridge.serve(try harness.shownSurface(projection: 4, revision: 4, lines: ["th fo"], panes: Self.secondTabNarrowed))
         try await harness.waitUntil("the tab reached wasn't drawn at the new grid") { self.drawnPanes(harness) == Self.secondTab }
         let grid = try XCTUnwrap(harness.model.measurement?.controlViewport.columns)
         XCTAssertEqual(Set(shownColumns), [grid], "the tab reached came on screen at another grid: \(shownColumns)")
@@ -3387,14 +3457,7 @@ final class HerdrScreenModelTests: XCTestCase {
         var index = session.next
         let adapter = harness.model.terminalScreenAdapter
 
-        gate.holdsRegistrations = true
-        harness.model.reveal(.pane("w1:p3"), bootID: "boot")
-        let focus = try await nextWrite(session.bridge, from: &index, paneFocus)
-        await session.bridge.serve(Self.secondTabOnScreen(revision: 3))
-        await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 2, lines: ["thr fou"], panes: Self.secondTabDrawn()))
-        await session.bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
-        try await harness.waitUntil("the move didn't complete") { harness.model.stateTraceLabel == "shown" }
-        try await harness.waitUntil("the tab reached's panes weren't drawing off screen") { gate.heldRegistrationCount == 2 }
+        try await moveToSecondTabHeldOffScreen(harness, session.bridge, gate: gate, from: &index)
 
         XCTAssertEqual(adapter.setFocusedPaneZoomed(true), .missingTarget(.focusedPane), "the zoom went while the tab before was on screen")
         try await Task.sleep(for: .milliseconds(100))
@@ -3557,11 +3620,7 @@ final class HerdrScreenModelTests: XCTestCase {
 
         // The screen narrows; Herdr draws the tab reached at the new size, its first pane narrower.
         harness.setScreenSize(CGSize(width: 300, height: 844))
-        let narrower: [HerdrServerScript.Pane] = [
-            .init(id: "w1:p3", x: 0, width: 2, height: 1, focused: true),
-            .init(id: "w1:p4", x: 3, width: 2, height: 1),
-        ]
-        await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 3, lines: ["th fo"], panes: narrower))
+        await session.bridge.serve(try harness.shownSurface(projection: 3, revision: 3, lines: ["th fo"], panes: Self.secondTabNarrowed))
         gate.releaseRegistrations()
         try await harness.waitUntil("the tab reached wasn't drawn") { self.drawnPanes(harness) == Self.secondTab }
 
@@ -3764,6 +3823,12 @@ final class HerdrScreenModelTests: XCTestCase {
     private static func secondTabDrawn(focused: String = "w1:p3") -> [HerdrServerScript.Pane] {
         secondTab.enumerated().map { .init(id: $1, x: UInt16($0 * 4), width: 3, height: 1, focused: $1 == focused) }
     }
+
+    /// Tab `t2`'s panes drawn on a narrower screen, `w1:p3` focused.
+    private static let secondTabNarrowed: [HerdrServerScript.Pane] = [
+        .init(id: "w1:p3", x: 0, width: 2, height: 1, focused: true),
+        .init(id: "w1:p4", x: 3, width: 2, height: 1),
+    ]
 
     /// `w1:p3` drawn alone across tab `t2`, zoomed.
     private static let secondTabZoomed = HerdrServerScript.Pane(id: "w1:p3", x: 0, width: 7, height: 1, focused: true)
@@ -3978,6 +4043,25 @@ final class HerdrScreenModelTests: XCTestCase {
         await bridge.serve(try harness.shownSurface(projection: 2, revision: 2, lines: ["one"], panes: [Self.zoomedPane]))
         await bridge.serve(HerdrServerScript.zoomReply(id: id, changed: true, zoomed: true, panes: Self.places(2)))
         try await waitForMap(harness)
+    }
+
+    /// Moves a `shownTab(harness, secondTab: Self.secondTab)` session to tab `t2` while `gate` holds the
+    /// renderers' first pictures: the move completes, Herdr's frame for `t2` is drawn at the screen's grid,
+    /// and its panes are drawing off screen while the screen still shows `t1`. `index` moves past the move.
+    private func moveToSecondTabHeldOffScreen(
+        _ harness: HerdrModelHarness,
+        _ bridge: FakeBridgeTransport,
+        gate: RendererFenceGate,
+        from index: inout Int
+    ) async throws {
+        gate.holdsRegistrations = true
+        harness.model.reveal(.pane("w1:p3"), bootID: "boot")
+        let focus = try await nextWrite(bridge, from: &index, paneFocus)
+        await bridge.serve(Self.secondTabOnScreen(revision: 3))
+        await bridge.serve(try harness.shownSurface(projection: 3, revision: 2, lines: ["thr fou"], panes: Self.secondTabDrawn()))
+        await bridge.serve(HerdrConnectionTests.reply(id: focus.id, json: #"{"type":"ok"}"#))
+        try await harness.waitUntil("the move didn't complete") { harness.model.stateTraceLabel == "shown" }
+        try await harness.waitUntil("the tab reached's panes weren't drawing off screen") { gate.heldRegistrationCount == 2 }
     }
 
     /// Waits until the pane sheet maps `panes` panes of the zoomed tab.
@@ -5011,7 +5095,7 @@ final class HerdrScreenModelTests: XCTestCase {
         harness.model.reconnect()
         let second = try await harness.bridge(1)
         await second.serve(try HerdrServerScript.welcome() + HerdrServerScript.snapshot(revision: 1, boot: "boot-2"))
-        await second.serve(HerdrServerScript.surface(
+        await second.serve(try harness.shownSurface(
             boot: "boot-2", projection: 1, revision: 1, lines: ["two"], panes: panes
         ))
         try await harness.waitUntil("the new boot's renderer wasn't waiting on its registration") {

@@ -306,8 +306,6 @@ final class HerdrScreenModel {
         let layout: HerdrPaneLayout
         let projectionRevision: UInt64
         let connection: UInt64
-        /// The screen's grid changed after Herdr drew it, while it waited off screen.
-        var isFromBeforeResize = false
 
         /// What the frame shows once on screen, whose agents the user then sees (`presentedFrame`).
         var presented: (connection: UInt64, bootID: String, projectionRevision: UInt64, paneIDs: Set<String>) {
@@ -692,14 +690,9 @@ final class HerdrScreenModel {
         }
         guard let measured, measured != measurement else { return }
         if measurement == nil { sizeKnownSince = .now }
-        let previousGrid = measurement.map { ($0.controlViewport.columns, $0.controlViewport.rows) }
         measurement = measured
         if let geometry { attempt?.ask(.resize(geometry)) }
         resumeSizeWaiter()
-        // A frame held off screen was drawn for the grid before; Herdr draws the next at the new one.
-        if let previousGrid, previousGrid != (measured.controlViewport.columns, measured.controlViewport.rows) {
-            pendingFrame?.isFromBeforeResize = true
-        }
         // The panes of a frame held off screen take a new cell size there, and the frame on screen keeps its
         // picture until they have drawn at it.
         for (paneID, surface) in pendingFrame == nil ? surfaces : stagedSurfaces {
@@ -709,6 +702,8 @@ final class HerdrScreenModel {
         for paneID in Array(terminals.keys) {
             createRendererIfPossible(paneID)
         }
+        // A frame held off screen at the grid asked for again is shown as it is.
+        showPreparedFrameIfReady()
         didChange()
     }
 
@@ -2003,6 +1998,21 @@ final class HerdrScreenModel {
         return true
     }
 
+    /// Whether Herdr drew the frame at the grid the screen asks for now. Herdr's client presents a pending
+    /// surface only at the current geometry, checking each surface as it arrives and again before it presents
+    /// (`endpoint/activation.rs` `receive_surface`, `activation/model.rs` `coherent_surface`). A frame at
+    /// another grid waits: Herdr answers each resize of the phone's surface with a whole frame at the new
+    /// size, also for a tab another client sizes or where nothing runs, since the resize has Herdr repaint the
+    /// phone's surface from scratch and its next render sends that surface in full (`server/headless.rs`
+    /// `ClientShellResize`, `clients.rs` `request_repaint`, `headless/render.rs` `render_and_stream`). Unlike
+    /// Herdr's client, which drops the surface it holds on a resize, the frame is kept: after a resize away
+    /// and back, Herdr's repaint at the grid asked for again can be the very frame held, which the engine
+    /// passes on only once.
+    private func isDrawnAtScreenGrid(_ layout: HerdrPaneLayout) -> Bool {
+        guard let geometry else { return true }
+        return layout.columns == max(geometry.cols, 1) && layout.rows == max(geometry.rows, 1)
+    }
+
     /// Whether Remux's move under way goes to another tab than `frame`'s, or to one Herdr hasn't made yet, or
     /// wherever a close takes the session.
     private func isPassedOver(_ frame: DrawnFrame) -> Bool {
@@ -2047,12 +2057,11 @@ final class HerdrScreenModel {
     }
 
     /// Shows the frame held off screen once every pane it draws has its first picture, or failed: one pane
-    /// for a zoomed tab, each of a split one. The newest intent wins: while Remux's move goes elsewhere, the
-    /// frame waits for the move's own, or for the move's end. A frame drawn before a resize waits for Herdr's
-    /// next, as Herdr's client drops the surface it holds when the screen's size changes
-    /// (`endpoint/activation.rs` `update_resize`).
+    /// for a zoomed tab, each of a split one, and only while it is drawn at the screen's grid
+    /// (`isDrawnAtScreenGrid`). The newest intent wins: while Remux's move goes elsewhere, the frame waits for
+    /// the move's own, or for the move's end.
     private func showPreparedFrameIfReady() {
-        guard let frame = pendingFrame, !frame.isFromBeforeResize, !isPassedOver(frame) else { return }
+        guard let frame = pendingFrame, isDrawnAtScreenGrid(frame.layout), !isPassedOver(frame) else { return }
         for paneID in frame.layout.textPaneIDs where presentationFailures[paneID] == nil && terminals[paneID] != nil {
             guard let surface = stagedSurfaces[paneID], surface.terminal === terminals[paneID] else { return }
             switch surface.renderer.presentation {
