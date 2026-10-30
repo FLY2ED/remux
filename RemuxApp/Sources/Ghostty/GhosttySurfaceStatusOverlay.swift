@@ -25,11 +25,14 @@ struct GhosttySurfaceStatusOverlay: View {
     }
 
     private var overlayAlignment: Alignment {
-        if case .failed = projection {
+        switch projection {
+        case .failed:
             return .bottom
+        case .switching:
+            return .center
+        default:
+            return .topLeading
         }
-
-        return .topLeading
     }
 
     private var allowsHitTesting: Bool {
@@ -88,9 +91,13 @@ struct GhosttySurfaceStatusOverlay: View {
             ProgressView()
                 .controlSize(.mini)
                 .tint(Color.white.opacity(0.88))
-            Text("Switching to \(tab)")
-                .lineLimit(1)
-                .truncationMode(.middle)
+            HStack(spacing: 0) {
+                Text("Switching to ")
+                    .fixedSize()
+                Text(tab)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
         }
         .font(.system(size: 12, weight: .semibold, design: .rounded))
         .foregroundStyle(Color.white.opacity(0.88))
@@ -98,8 +105,10 @@ struct GhosttySurfaceStatusOverlay: View {
         .padding(.vertical, 7)
         .background(Color.black.opacity(0.62))
         .clipShape(Capsule())
+        .frame(maxWidth: 280)
         .padding(10)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Switching to \(tab)")
         .accessibilityIdentifier("terminal.status.switching")
     }
 
