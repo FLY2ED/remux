@@ -172,15 +172,23 @@ protocol GhosttyTerminalInputModeling: ObservableObject {
 
     /// The text the pane's selection copies, from wherever the backend keeps the pane's history; nil
     /// when there is none to copy.
-    func selectedText(in surfaceID: UUID) async -> String?
+    /// Optional menu inspection is quiet; an explicit Copy keeps its normal failure notice.
+    func selectedText(in surfaceID: UUID, reportResult: Bool) async -> String?
 
     /// Grows what a long-press at `point` selected to the whole link there, when the backend knows more
-    /// of the link than the pane's terminal shows; true once it has.
+    /// of the link than the pane's terminal shows. True means the selection is complete enough to read,
+    /// including when no expansion was needed; false means completion failed or became stale.
     func completeLinkSelection(
         in surfaceID: UUID,
         at point: CGPoint,
         selected: GhosttyLongPressSelection
     ) async -> Bool
+}
+
+extension GhosttyTerminalInputModeling {
+    func selectedText(in surfaceID: UUID) async -> String? {
+        await selectedText(in: surfaceID, reportResult: true)
+    }
 }
 
 /// What a long-press selected from a pane's terminal.

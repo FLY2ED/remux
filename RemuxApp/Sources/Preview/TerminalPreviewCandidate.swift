@@ -230,7 +230,8 @@ struct TerminalPreviewSelectionContext: Equatable {
         )
     }
 
-    private func explicitTarget(for selection: String) -> String? {
+    /// Match the renderer's visible label, even when authoritative selection text joins wrapped rows.
+    func explicitTarget(for selection: String) -> String? {
         automaticVisibleText == selection ? automaticExplicitTarget : nil
     }
 }

@@ -484,14 +484,14 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     /// read a popup's, as its API knows only a workspace's panes (`app/ids.rs` `find_pane`), so a popup's is
     /// read from the phone's terminal, which shows the popup's screen. Herdr paints a popup's rows one by one
     /// (`protocol/render_ansi.rs`), so a line longer than the popup copies as its rows.
-    func selectedText(in surfaceID: UUID) async -> String? {
+    func selectedText(in surfaceID: UUID, reportResult: Bool) async -> String? {
         if popupTerminalID(for: surfaceID) != nil {
             return managedSurface(for: surfaceID)?.controlSurface.readSelection()
         }
         guard let model, let paneID = paneID(for: surfaceID),
               let selection = managedSurface(for: surfaceID)?.historySelection
         else { return nil }
-        return await model.readSelection(selection, inPane: paneID)
+        return await model.readSelection(selection, inPane: paneID, reportResult: reportResult)
     }
 
     /// Herdr's frames don't say where lines wrap, so the pane's terminal cuts a link the pane wraps at the
@@ -502,17 +502,32 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
         at point: CGPoint,
         selected: GhosttyLongPressSelection
     ) async -> Bool {
-        guard selected != .explicitLink, let model, let paneID = paneID(for: surfaceID),
-              let surface = managedSurface(for: surfaceID),
-              let selection = surface.historySelection,
-              selection.reachesRowEdge(columns: surface.controlSurface.viewportSize.columns),
-              let pressed = surface.historyCell(at: point)
+        guard !Task.isCancelled, let model, let surface = managedSurface(for: surfaceID) else { return false }
+        if selected == .explicitLink { return true }
+        // An attached popup is a real terminal, with wrap metadata, like tmux's terminal.
+        if popupTerminalID(for: surfaceID) != nil {
+            if model.popup.surface?.isAttached == true { return true }
+            // A framed fallback has no wrap metadata or server link resolver. Contained matches are
+            // complete locally; a row-edge fragment must not become an external destination.
+            guard case .snapshot(let snapshot) = surface.selectionSnapshot(),
+                  let start = snapshot.start, let end = snapshot.end,
+                  let first = surface.controlSurface.viewportCell(of: start),
+                  let last = surface.controlSurface.viewportCell(of: end)
+            else { return false }
+            return first.column > 0 && last.column + 1 < surface.controlSurface.viewportSize.columns
+        }
+        guard let paneID = paneID(for: surfaceID), let selection = surface.historySelection else { return false }
+        guard selection.reachesRowEdge(columns: surface.controlSurface.viewportSize.columns) else { return true }
+        let control = surface.controlSurface
+        guard let pressed = surface.historyCell(at: point)
         else { return false }
-        guard let link = await model.resolveLink(at: pressed, inPane: paneID), link != selection,
+        guard let link = await model.resolveLink(at: pressed, inPane: paneID), !Task.isCancelled,
+              managedSurface(for: surfaceID) === surface, surface.controlSurface === control,
               // A selection changed meanwhile is the user's.
-              surface.historySelection == selection,
-              case .snapshot(let snapshot) = surface.select(link)
+              surface.historySelection == selection
         else { return false }
+        if link == selection { return true }
+        guard case .snapshot(let snapshot) = surface.select(link) else { return false }
         return snapshot.isActive
     }
 

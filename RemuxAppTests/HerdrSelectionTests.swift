@@ -230,6 +230,31 @@ final class HerdrSelectionTests: XCTestCase {
         XCTAssertEqual(session.adapter.commandFailureEvent?.message, "Herdr: copy failed")
     }
 
+    func testOptionalSelectionInspectionDoesNotReportACopyFailure() async throws {
+        var session = try await shownSession(scroll: (0, 40, 3))
+        let surface = try session.surface()
+        XCTAssertTrue(isActive(surface.selectWord(at: session.point(row: 1, column: 1))))
+
+        let inspection = Task { await session.adapter.selectedText(in: session.surfaceID, reportResult: false) }
+        let first = try await session.nextSelectionRead()
+        await session.bridge.serve(HerdrConnectionTests.reply(
+            id: first.id, error: ("selection_unavailable", "selection text is unavailable")
+        ))
+        let inspected = await inspection.value
+        XCTAssertNil(inspected)
+        XCTAssertNil(session.adapter.commandFailureEvent)
+
+        // Optional inspection must not consume the failure notice intended for an explicit Copy.
+        let copy = Task { await session.adapter.selectedText(in: session.surfaceID) }
+        let second = try await session.nextSelectionRead()
+        await session.bridge.serve(HerdrConnectionTests.reply(
+            id: second.id, error: ("selection_unavailable", "selection text is unavailable")
+        ))
+        let copied = await copy.value
+        XCTAssertNil(copied)
+        XCTAssertEqual(session.adapter.commandFailureEvent?.message, "Herdr: copy failed")
+    }
+
     /// Typing ends the pane's selection, as on a tmux pane; a key's release, which Herdr doesn't get,
     /// doesn't.
     func testTypingEndsTheSelection() async throws {
@@ -376,13 +401,13 @@ final class HerdrSelectionTests: XCTestCase {
         let inside = session.point(row: 2, column: 6)
         XCTAssertEqual(session.longPress(at: inside), .link)
         XCTAssertEqual(surface.historySelection, GhosttyHistorySelection(start: cell(41, 2), end: cell(41, 13)))
-        let insideGrew = await session.adapter.completeLinkSelection(in: session.surfaceID, at: inside, selected: .link)
-        XCTAssertFalse(insideGrew)
+        let insideReady = await session.adapter.completeLinkSelection(in: session.surfaceID, at: inside, selected: .link)
+        XCTAssertTrue(insideReady)
 
         let edge = session.point(row: 0, column: 8)
         XCTAssertEqual(session.longPress(at: edge), .link)
-        let explicitGrew = await session.adapter.completeLinkSelection(in: session.surfaceID, at: edge, selected: .explicitLink)
-        XCTAssertFalse(explicitGrew)
+        let explicitReady = await session.adapter.completeLinkSelection(in: session.surfaceID, at: edge, selected: .explicitLink)
+        XCTAssertTrue(explicitReady)
 
         let copy = Task { await session.adapter.selectedText(in: session.surfaceID) }
         let read = try await session.nextCommand()
@@ -392,6 +417,41 @@ final class HerdrSelectionTests: XCTestCase {
             json: #"{"type":"pane_selection","pane_id":"w1:p1","text":"x"}"#
         ))
         _ = await copy.value
+    }
+
+    func testAResolvedLinkEqualToTheSelectionIsComplete() async throws {
+        var session = try await shownSession(scroll: (1, 40, 3), lines: Self.linkLines, width: 20)
+        let surface = try session.surface()
+        let press = session.point(row: 0, column: 8)
+        XCTAssertEqual(session.longPress(at: press), .link)
+        let selection = surface.historySelection
+        let completion = Task { await session.adapter.completeLinkSelection(in: session.surfaceID, at: press, selected: .link) }
+        let request = try await session.nextRequest(HerdrScreenModel.paneLinkResolveMethod, as: SentResolve.self)
+        await session.bridge.serve(HerdrConnectionTests.reply(
+            id: request.id,
+            json: #"{"type":"pane_link_resolved","regions":[{"row":0,"start_col":4,"end_col":19}]}"#
+        ))
+        let ready = await completion.value
+        XCTAssertTrue(ready)
+        XCTAssertEqual(surface.historySelection, selection)
+    }
+
+    func testCancelledLinkCompletionDoesNotReplaceTheSelection() async throws {
+        var session = try await shownSession(scroll: (1, 40, 3), lines: Self.linkLines, width: 20)
+        let surface = try session.surface()
+        let press = session.point(row: 0, column: 8)
+        XCTAssertEqual(session.longPress(at: press), .link)
+        let selection = surface.historySelection
+        let completion = Task { await session.adapter.completeLinkSelection(in: session.surfaceID, at: press, selected: .link) }
+        let request = try await session.nextRequest(HerdrScreenModel.paneLinkResolveMethod, as: SentResolve.self)
+        completion.cancel()
+        await session.bridge.serve(HerdrConnectionTests.reply(
+            id: request.id,
+            json: #"{"type":"pane_link_resolved","regions":[{"row":0,"start_col":4,"end_col":19},{"row":1,"start_col":0,"end_col":6}]}"#
+        ))
+        let ready = await completion.value
+        XCTAssertFalse(ready)
+        XCTAssertEqual(surface.historySelection, selection)
     }
 
     /// A selection the user changes while Herdr looks for the link stays as the user left it; Herdr finding

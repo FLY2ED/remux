@@ -1557,12 +1557,16 @@ final class HerdrScreenModel {
 
     /// The text of a selection in `paneID`, read by Herdr, which keeps the pane's history and joins its
     /// wrapped lines. The read waits in line behind the commands asked before it and for Herdr's answer as
-    /// long as Herdr's client waits for a command. A read that can't go or fails says so, as Herdr's client
-    /// does, and returns nil.
-    func readSelection(_ selection: GhosttyHistorySelection, inPane paneID: String) async -> String? {
+    /// long as Herdr's client waits for a command. Explicit Copy reports a failed read; optional menu
+    /// inspection returns nil without changing notices.
+    func readSelection(
+        _ selection: GhosttyHistorySelection, inPane paneID: String, reportResult: Bool = true
+    ) async -> String? {
         guard let attempt = shownAttempt else {
-            notices.replaced()
-            terminalScreenAdapter.presentFailure(Self.copyFailureLabel)
+            if reportResult {
+                notices.replaced()
+                terminalScreenAdapter.presentFailure(Self.copyFailureLabel)
+            }
             return nil
         }
         do {
@@ -1572,10 +1576,10 @@ final class HerdrScreenModel {
                 on: attempt
             ).get()
             let text = try HerdrSelectionRead.text(fromReply: reply.json)
-            notices.succeeded(Self.paneSelectionReadMethod, bootID: layout?.bootID)
+            if reportResult { notices.succeeded(Self.paneSelectionReadMethod, bootID: layout?.bootID) }
             return text
         } catch {
-            if isCurrent(attempt) {
+            if reportResult, isCurrent(attempt) {
                 presentFailure(of: Self.paneSelectionReadMethod, label: Self.copyFailureLabel, error)
             }
             return nil
