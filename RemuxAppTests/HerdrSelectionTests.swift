@@ -62,7 +62,8 @@ final class HerdrSelectionTests: XCTestCase {
     func testASelectionReachesARowEdgeAtItsFirstOrLastColumn() {
         XCTAssertTrue(GhosttyHistorySelection(start: cell(40, 0), end: cell(40, 4)).reachesRowEdge(columns: 10))
         XCTAssertTrue(GhosttyHistorySelection(start: cell(40, 9), end: cell(40, 3)).reachesRowEdge(columns: 10))
-        XCTAssertFalse(GhosttyHistorySelection(start: cell(40, 2), end: cell(41, 8)).reachesRowEdge(columns: 10))
+        XCTAssertTrue(GhosttyHistorySelection(start: cell(40, 2), end: cell(41, 8)).reachesRowEdge(columns: 10))
+        XCTAssertFalse(GhosttyHistorySelection(start: cell(40, 2), end: cell(41, 7)).reachesRowEdge(columns: 10))
         XCTAssertFalse(GhosttyHistorySelection(start: cell(40, 2), end: cell(40, 8)).reachesRowEdge(columns: 0))
     }
 
@@ -80,6 +81,45 @@ final class HerdrSelectionTests: XCTestCase {
             try HerdrSelectionRead.text(fromReply: Data(#"{"id":"c1","result":{"type":"pane_selection","pane_id":"w1:p1","text":"a\nb"}}"#.utf8)),
             "a\nb"
         )
+    }
+
+    /// Server highlighting may be clipped, including one missing wide-wrap padding column.
+    /// History extents distinguish a viewport edge from the actual start/end of terminal content.
+    func testResolvedRegionsMustEstablishCompleteLinkBoundaries() throws {
+        func request(top: UInt64, fromBottom: UInt64?) throws -> HerdrLinkResolve {
+            let scroll: Any
+            if let fromBottom {
+                scroll = ["offset_from_bottom": fromBottom, "max_offset_from_bottom": top + fromBottom, "viewport_rows": UInt64(3)]
+            } else {
+                scroll = NSNull()
+            }
+            let rect: [String: Any] = ["x": 0, "y": 0, "width": 20, "height": 3]
+            let json: [String: Any] = [
+                "pane_id": "w1:p1", "content_revision": 2,
+                "rect": rect, "inner_rect": rect, "scroll": scroll,
+                "focused": true, "mouse_reporting": false, "sgr_pixel_mouse": false,
+                "alternate_screen_active": false, "pixel_width": 160, "pixel_height": 48,
+            ]
+            let pane = try JSONDecoder().decode(HerdrSurfacePane.self, from: JSONSerialization.data(withJSONObject: json))
+            let content = HerdrPaneContent(of: pane)
+            return try XCTUnwrap(HerdrLinkResolve(paneID: "w1:p1", cell: cell(content.top, 8), content: content))
+        }
+        func reply(first: Int, row: Int, last: Int) throws -> Data {
+            let regions = (0...row).map {
+                ["row": $0, "start_col": $0 == 0 ? first : 0, "end_col": $0 == row ? last : 19]
+            }
+            return try JSONSerialization.data(withJSONObject: ["result": ["regions": regions]])
+        }
+        let history = try request(top: 39, fromBottom: 1)
+        XCTAssertNil(try history.link(fromReply: reply(first: 0, row: 1, last: 6)), "start may be above the viewport")
+        XCTAssertNil(try history.link(fromReply: reply(first: 4, row: 2, last: 19)), "end may be below the viewport")
+        XCTAssertNil(try history.link(fromReply: reply(first: 4, row: 2, last: 18)), "wide-wrap padding is not a URL delimiter")
+        XCTAssertNotNil(try history.link(fromReply: reply(first: 4, row: 1, last: 6)), "fully visible wrapped link")
+        XCTAssertNotNil(try request(top: 0, fromBottom: 40).link(fromReply: reply(first: 0, row: 1, last: 6)), "actual history beginning")
+        XCTAssertNotNil(try request(top: 40, fromBottom: 0).link(fromReply: reply(first: 4, row: 2, last: 19)), "actual terminal end")
+        let unknown = try request(top: 0, fromBottom: nil)
+        XCTAssertNil(try unknown.link(fromReply: reply(first: 0, row: 1, last: 6)), "missing metrics do not prove a beginning")
+        XCTAssertNil(try unknown.link(fromReply: reply(first: 4, row: 2, last: 19)), "missing metrics do not prove an end")
     }
 
     // MARK: - On a shown session
