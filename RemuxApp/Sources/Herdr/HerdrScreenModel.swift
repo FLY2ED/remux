@@ -1586,8 +1586,8 @@ final class HerdrScreenModel {
         }
     }
 
-    /// The whole of the plain-text link at `cell`, a history cell of `paneID`, which Herdr finds across the
-    /// pane's wrapped rows; nil when there is none. It is asked about the frame the pane's terminal shows,
+    /// A complete plain-text link at `cell`, a history cell of `paneID`, which Herdr finds across the
+    /// pane's wrapped rows; nil when absent or possibly clipped. It is asked about the frame on screen,
     /// and its regions, rows of that frame's viewport, come back as history rows. The answer holds only
     /// while the terminal still shows that frame: as Herdr's client does, one found in content or a viewport
     /// that has changed since is dropped. As for Herdr's client the question is optional, so a failure says

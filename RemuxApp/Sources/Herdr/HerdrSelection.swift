@@ -76,8 +76,9 @@ struct HerdrLinkResolve: Encodable, Sendable {
     }
 
     /// The link from the reply `{"id", "result": {"type": "pane_link_resolved", "regions"}}`, in history
-    /// rows; nil when Herdr found none. Regions are taken as Herdr's client takes them: inside the
-    /// viewport and covering the cell asked about.
+    /// rows; nil when Herdr found none or the visible regions cannot establish a complete link.
+    /// `pane.link.resolve` clips its highlighting to the viewport; those regions alone must not turn
+    /// a URL prefix into a browser destination.
     func link(fromReply reply: Data) throws -> GhosttyHistorySelection? {
         struct Reply: Decodable {
             struct Result: Decodable {
@@ -103,6 +104,13 @@ struct HerdrLinkResolve: Encodable, Sendable {
               regions.contains(where: { $0.row == viewportRow && ($0.startCol...$0.endCol).contains(col) }),
               let first = regions.min(by: { ($0.row, $0.startCol) < ($1.row, $1.startCol) }),
               let last = regions.max(by: { ($0.row, $0.endCol) < ($1.row, $1.endCol) })
+        else { return nil }
+        // At the actual history/screen ends there is no hidden continuation. Otherwise an endpoint
+        // at the viewport boundary is ambiguous. Herdr omits wide-wrap padding from its regions,
+        // so the bottom endpoint may be one column short even though the URL continues below.
+        guard !(content.top > 0 && first.row == 0 && first.startCol == 0),
+              !(content.offsetFromBottom != 0 && last.row + 1 == content.rows
+                && Int(last.endCol) + 2 >= Int(content.columns))
         else { return nil }
         return GhosttyHistorySelection(
             start: GhosttyTerminalCell(row: content.top + UInt64(first.row), column: first.startCol),

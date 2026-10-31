@@ -495,8 +495,8 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
     }
 
     /// Herdr's frames don't say where lines wrap, so the pane's terminal cuts a link the pane wraps at the
-    /// row's edge. A link or word reaching a row's edge may be part of one, and Herdr finds the whole link,
-    /// as its client asks it for a plain-text link's cells; an OSC 8 link, or one inside a row, is whole.
+    /// row's edge. A link or word reaching that edge needs backend completion. Only a result whose
+    /// boundaries are known is eligible for Open; an OSC 8 destination is already complete.
     func completeLinkSelection(
         in surfaceID: UUID,
         at point: CGPoint,
@@ -514,7 +514,7 @@ extension HerdrTerminalScreenAdapter: GhosttyTerminalScreenModeling {
                   let first = surface.controlSurface.viewportCell(of: start),
                   let last = surface.controlSurface.viewportCell(of: end)
             else { return false }
-            return first.column > 0 && last.column + 1 < surface.controlSurface.viewportSize.columns
+            return first.column > 0 && Int(last.column) + 2 < Int(surface.controlSurface.viewportSize.columns)
         }
         guard let paneID = paneID(for: surfaceID), let selection = surface.historySelection else { return false }
         guard selection.reachesRowEdge(columns: surface.controlSurface.viewportSize.columns) else { return true }
