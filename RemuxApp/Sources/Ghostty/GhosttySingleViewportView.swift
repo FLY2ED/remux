@@ -596,8 +596,6 @@ private final class GhosttyCompositeViewportContainerView: UIView,
 
     private func menuSelectionText(for context: SelectionMenuContext) async -> String? {
         guard !Task.isCancelled, isCurrent(context) else { return nil }
-        // An OSC 8 URI already supplies the complete destination, independently of its visible label.
-        if context.explicitTarget != nil { return context.visibleText }
         guard let source = selectionSource,
               let text = await source.readText(context.surface.id, false), !text.isEmpty,
               !Task.isCancelled, isCurrent(context)
@@ -623,8 +621,12 @@ private final class GhosttyCompositeViewportContainerView: UIView,
                   currentSurface === surface, currentControl === control
             else { return }
             self.applySelectionOutcome(surface.selectionSnapshot(), presentMenu: false)
-            guard let context = self.selectionMenuContext(),
-                  let text = await self.menuSelectionText(for: context)
+            guard let context = self.selectionMenuContext() else { return }
+            // Compare Copy Link with the backend's actual Copy text, including unwrapped rows.
+            // A failed optional read must not discard an already known embedded destination.
+            let copiedText = await self.menuSelectionText(for: context)
+            guard !Task.isCancelled, self.isCurrent(context),
+                  let text = copiedText ?? (context.explicitTarget != nil ? context.visibleText : nil)
             else { return }
             self.preparedSelection = (context, text)
             self.selectionEditMenuInteraction.reloadVisibleMenu()
@@ -998,6 +1000,13 @@ private final class GhosttyCompositeViewportContainerView: UIView,
               selectionMenuAnchorHandle != nil
         else { return nil }
 
+        // Embedded destinations are usable immediately; canonical Copy inspection only determines
+        // whether Copy Link would add anything. Plain URLs still require completed backend text.
+        let linkSelection = preparedSelection.flatMap { isCurrent($0.context) ? $0 : nil }
+            ?? selectionMenuContext().flatMap { context -> (context: SelectionMenuContext, text: String)? in
+                guard context.explicitTarget != nil else { return nil }
+                return (context, context.visibleText)
+            }
         var actions: [UIMenuElement] = []
         // Preview is currently a local-terminal feature. Preserve its existing synchronous path.
         if onPreviewSelection != nil, let selectedText = exactLocalSelectionSurface()?.1.readSelection(),
@@ -1009,22 +1018,27 @@ private final class GhosttyCompositeViewportContainerView: UIView,
                 else { return }
                 self.onPreviewSelection?(surface.id, candidate)
             })
-        } else if let prepared = preparedSelection, isCurrent(prepared.context),
+        } else if let prepared = linkSelection,
                   let url = TerminalExternalLink.url(selection: prepared.text, explicitTarget: prepared.context.explicitTarget),
                   let host = url.host {
             let context = prepared.context
             // Keep the destination advertised by this action, including its path, query and fragment.
             actions.append(UIAction(title: "Open \(host)", image: UIImage(systemName: "safari")) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    guard let self, let text = await self.menuSelectionText(for: context),
+                    guard let self, self.isCurrent(context) else { return }
+                    let currentText = context.explicitTarget != nil
+                        ? context.visibleText : await self.menuSelectionText(for: context)
+                    guard let text = currentText, self.isCurrent(context),
                           TerminalExternalLink.url(selection: text, explicitTarget: context.explicitTarget) == url
                     else { return }
                     _ = await UIApplication.shared.open(url)
                 }
             })
         }
-        if let context = selectionMenuContext(), let target = context.explicitTarget,
-           target != context.visibleText.trimmingCharacters(in: .whitespacesAndNewlines) {
+        if let prepared = preparedSelection, isCurrent(prepared.context),
+           let target = prepared.context.explicitTarget,
+           target != prepared.text.trimmingCharacters(in: .whitespacesAndNewlines) {
+            let context = prepared.context
             actions.append(UIAction(title: "Copy Link", image: UIImage(systemName: "link")) { [weak self] _ in
                 guard let self, self.isCurrent(context) else { return }
                 UIPasteboard.general.string = target
