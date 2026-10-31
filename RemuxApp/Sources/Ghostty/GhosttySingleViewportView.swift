@@ -1023,6 +1023,13 @@ private final class GhosttyCompositeViewportContainerView: UIView,
                 }
             })
         }
+        if let context = selectionMenuContext(), let target = context.explicitTarget,
+           target != context.visibleText.trimmingCharacters(in: .whitespacesAndNewlines) {
+            actions.append(UIAction(title: "Copy Link", image: UIImage(systemName: "link")) { [weak self] _ in
+                guard let self, self.isCurrent(context) else { return }
+                UIPasteboard.general.string = target
+            })
+        }
         actions.append(
             UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in
                 guard let (surface, _) = self?.exactLocalSelectionSurface(),
