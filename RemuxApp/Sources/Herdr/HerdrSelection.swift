@@ -108,7 +108,7 @@ struct HerdrLinkResolve: Encodable, Sendable {
         // At the actual history/screen ends there is no hidden continuation. Otherwise an endpoint
         // at the viewport boundary is ambiguous. Herdr omits wide-wrap padding from its regions,
         // so the bottom endpoint may be one column short even though the URL continues below.
-        guard !(content.top > 0 && first.row == 0 && first.startCol == 0),
+        guard !((content.top > 0 || content.offsetFromBottom == nil) && first.row == 0 && first.startCol == 0),
               !(content.offsetFromBottom != 0 && last.row + 1 == content.rows
                 && Int(last.endCol) + 2 >= Int(content.columns))
         else { return nil }
